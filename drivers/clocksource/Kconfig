@@ -592,7 +592,7 @@ config H8300_TPU
 
 config CLKSRC_IMX_GPT
 	bool "Clocksource using i.MX GPT" if COMPILE_TEST
-	depends on ARM && CLKDEV_LOOKUP
+	depends on (ARM || ARM64) && CLKDEV_LOOKUP
 	select CLKSRC_MMIO
 
 config CLKSRC_IMX_TPM
@@ -602,6 +602,10 @@ config CLKSRC_IMX_TPM
 	help
 	  Enable this option to use IMX Timer/PWM Module (TPM) timer as
 	  clocksource.
+
+config CLKSRC_IMX_SYS_CNT
+	bool "Clocksource using i.MX system counter timer"
+	depends on ARM_ARCH_TIMER
 
 config CLKSRC_ST_LPC
 	bool "Low power clocksource found in the LPC" if COMPILE_TEST

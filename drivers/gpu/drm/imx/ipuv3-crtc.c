@@ -28,6 +28,7 @@
 
 #include <video/imx-ipu-v3.h>
 #include "imx-drm.h"
+#include "ipuv3-kms.h"
 #include "ipuv3-plane.h"
 
 #define DRIVER_DESC		"i.MX IPUv3 Graphics"
@@ -428,6 +429,12 @@ static int ipu_drm_bind(struct device *dev, struct device *master, void *data)
 	if (ret)
 		return ret;
 
+	if (!drm->mode_config.funcs)
+		drm->mode_config.funcs = &ipuv3_drm_mode_config_funcs;
+	if (!drm->mode_config.helper_private)
+		drm->mode_config.helper_private =
+					&ipuv3_drm_mode_config_helpers;
+
 	dev_set_drvdata(dev, ipu_crtc);
 
 	return 0;
@@ -470,10 +477,16 @@ static int ipu_drm_remove(struct platform_device *pdev)
 	return 0;
 }
 
-struct platform_driver ipu_drm_driver = {
+static struct platform_driver ipu_drm_driver = {
 	.driver = {
 		.name = "imx-ipuv3-crtc",
 	},
 	.probe = ipu_drm_probe,
 	.remove = ipu_drm_remove,
 };
+module_platform_driver(ipu_drm_driver);
+
+MODULE_AUTHOR("Sascha Hauer <s.hauer@pengutronix.de>");
+MODULE_DESCRIPTION(DRIVER_DESC);
+MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:imx-ipuv3-crtc");

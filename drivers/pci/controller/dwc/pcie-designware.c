@@ -145,6 +145,9 @@ void dw_pcie_prog_outbound_atu(struct dw_pcie *pci, int index, int type,
 {
 	u32 retries, val;
 
+	if (cpu_addr >= pci->pp.mem_base)
+		cpu_addr = cpu_addr + pci->pp.cpu_addr_offset;
+
 	if (pci->ops->cpu_addr_fixup)
 		cpu_addr = pci->ops->cpu_addr_fixup(pci, cpu_addr);
 
@@ -178,7 +181,7 @@ void dw_pcie_prog_outbound_atu(struct dw_pcie *pci, int index, int type,
 		if (val & PCIE_ATU_ENABLE)
 			return;
 
-		mdelay(LINK_WAIT_IATU);
+		mdelay(LINK_WAIT_IATU_MAX/1000);
 	}
 	dev_err(pci->dev, "Outbound iATU is not being enabled\n");
 }

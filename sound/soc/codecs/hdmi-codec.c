@@ -289,6 +289,7 @@ struct hdmi_codec_priv {
 
 static const struct snd_soc_dapm_widget hdmi_widgets[] = {
 	SND_SOC_DAPM_OUTPUT("TX"),
+	SND_SOC_DAPM_OUTPUT("RX"),
 };
 
 enum {
@@ -414,6 +415,7 @@ static int hdmi_codec_startup(struct snd_pcm_substream *substream,
 			      struct snd_soc_dai *dai)
 {
 	struct hdmi_codec_priv *hcp = snd_soc_dai_get_drvdata(dai);
+	bool tx = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
 	int ret = 0;
 
 	dev_dbg(dai->dev, "%s()\n", __func__);
@@ -432,7 +434,7 @@ static int hdmi_codec_startup(struct snd_pcm_substream *substream,
 		}
 	}
 
-	if (hcp->hcd.ops->get_eld) {
+	if (tx && hcp->hcd.ops->get_eld) {
 		ret = hcp->hcd.ops->get_eld(dai->dev->parent, hcp->hcd.data,
 					    hcp->eld, sizeof(hcp->eld));
 
@@ -512,13 +514,11 @@ static int hdmi_codec_hw_params(struct snd_pcm_substream *substream,
 	/* Select a channel allocation that matches with ELD and pcm channels */
 	idx = hdmi_codec_get_ch_alloc_table_idx(hcp, hp.cea.channels);
 	if (idx < 0) {
-		dev_err(dai->dev, "Not able to map channels to speakers (%d)\n",
-			idx);
 		hcp->chmap_idx = HDMI_CODEC_CHMAP_IDX_UNKNOWN;
-		return idx;
+	} else {
+		hp.cea.channel_allocation = hdmi_codec_channel_alloc[idx].ca_id;
+		hcp->chmap_idx = hdmi_codec_channel_alloc[idx].ca_id;
 	}
-	hp.cea.channel_allocation = hdmi_codec_channel_alloc[idx].ca_id;
-	hcp->chmap_idx = hdmi_codec_channel_alloc[idx].ca_id;
 
 	hp.sample_width = params_width(params);
 	hp.sample_rate = params_rate(params);
@@ -690,14 +690,20 @@ static int hdmi_codec_pcm_new(struct snd_soc_pcm_runtime *rtd,
 static int hdmi_dai_probe(struct snd_soc_dai *dai)
 {
 	struct snd_soc_dapm_context *dapm;
-	struct snd_soc_dapm_route route = {
-		.sink = "TX",
-		.source = dai->driver->playback.stream_name,
+	struct snd_soc_dapm_route route[] = {
+		{
+			.sink = "TX",
+			.source = dai->driver->playback.stream_name,
+		},
+		{
+			.sink = "Capture",
+			.source = "RX",
+		},
 	};
 
 	dapm = snd_soc_component_get_dapm(dai->component);
 
-	return snd_soc_dapm_add_routes(dapm, &route, 1);
+	return snd_soc_dapm_add_routes(dapm, route, ARRAY_SIZE(route));
 }
 
 static const struct snd_soc_dai_driver hdmi_i2s_dai = {
@@ -706,6 +712,14 @@ static const struct snd_soc_dai_driver hdmi_i2s_dai = {
 	.probe = hdmi_dai_probe,
 	.playback = {
 		.stream_name = "I2S Playback",
+		.channels_min = 2,
+		.channels_max = 8,
+		.rates = HDMI_RATES,
+		.formats = I2S_FORMATS,
+		.sig_bits = 24,
+	},
+	.capture = {
+		.stream_name = "Capture",
 		.channels_min = 2,
 		.channels_max = 8,
 		.rates = HDMI_RATES,
@@ -722,6 +736,13 @@ static const struct snd_soc_dai_driver hdmi_spdif_dai = {
 	.probe = hdmi_dai_probe,
 	.playback = {
 		.stream_name = "SPDIF Playback",
+		.channels_min = 2,
+		.channels_max = 2,
+		.rates = HDMI_RATES,
+		.formats = SPDIF_FORMATS,
+	},
+	.capture = {
+		.stream_name = "Capture",
 		.channels_min = 2,
 		.channels_max = 2,
 		.rates = HDMI_RATES,

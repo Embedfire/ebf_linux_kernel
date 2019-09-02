@@ -2,6 +2,8 @@
 #ifndef _IMX_DRM_H_
 #define _IMX_DRM_H_
 
+#define MAX_CRTC	4
+
 struct device_node;
 struct drm_crtc;
 struct drm_connector;
@@ -11,6 +13,20 @@ struct drm_encoder;
 struct drm_framebuffer;
 struct drm_plane;
 struct platform_device;
+
+struct imx_drm_device {
+	struct drm_device			*drm;
+	unsigned int				pipes;
+	struct drm_fbdev_cma			*fbhelper;
+	struct drm_atomic_state			*state;
+
+	struct workqueue_struct			*dpu_nonblock_commit_wq;
+	struct workqueue_struct			*dcss_nonblock_commit_wq;
+	struct {
+		wait_queue_head_t wait;
+		bool pending;
+	} commit;
+};
 
 struct imx_crtc_state {
 	struct drm_crtc_state			base;
@@ -27,8 +43,6 @@ static inline struct imx_crtc_state *to_imx_crtc_state(struct drm_crtc_state *s)
 int imx_drm_init_drm(struct platform_device *pdev,
 		int preferred_bpp);
 int imx_drm_exit_drm(void);
-
-extern struct platform_driver ipu_drm_driver;
 
 void imx_drm_mode_config_init(struct drm_device *drm);
 

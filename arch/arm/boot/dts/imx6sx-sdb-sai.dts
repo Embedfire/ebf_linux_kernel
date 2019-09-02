@@ -43,7 +43,7 @@
 
 / {
 	sound {
-		audio-cpu = <&sai1>;
+		cpu-dai = <&sai1>;
 	};
 };
 
@@ -53,6 +53,8 @@
 };
 
 &sai1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_sai1>;
 	status = "okay";
 };
 

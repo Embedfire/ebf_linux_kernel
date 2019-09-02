@@ -7,6 +7,8 @@ Required properties:
 	* "fsl,imx6sl-usbphy" for imx6sl
 	* "fsl,vf610-usbphy" for Vybrid vf610
 	* "fsl,imx6sx-usbphy" for imx6sx
+	* "fsl,imx6ul-usbphy" for imx6ul
+	* "fsl,imx7ulp-usbphy" for imx7ulp
   "fsl,imx23-usbphy" is still a fallback for other strings
 - reg: Should contain registers location and length
 - interrupts: Should contain phy interrupt
@@ -21,6 +23,9 @@ Optional properties:
   that terminates the DP output signal. Default: 45
 - fsl,tx-d-cal: Integer [79-119]. Current trimming value (as a percentage) of
   the 17.78mA TX reference current. Default: 100
+- tx-d-cal: Try to adjust this value to improve signal quality, and pass
+  USB Certification, the value is from 0x0 to 0xf, and the register offset
+  is 0x10 (USBPHY_TX).
 
 Example:
 usbphy1: usbphy@20c9000 {
@@ -28,4 +33,5 @@ usbphy1: usbphy@20c9000 {
 	reg = <0x020c9000 0x1000>;
 	interrupts = <0 44 0x04>;
 	fsl,anatop = <&anatop>;
+	fsl,tx-d-cal = <106>;
 };

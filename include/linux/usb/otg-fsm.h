@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0+
-/* Copyright (C) 2007,2008 Freescale Semiconductor, Inc.
+/* Copyright (C) 2007-2015 Freescale Semiconductor, Inc.
  *
  * This program is free software; you can redistribute  it and/or modify it
  * under  the terms of  the GNU General  Public License as published by the
@@ -54,6 +54,10 @@ enum otg_fsm_timer {
 	A_WAIT_ENUM,
 	B_DATA_PLS,
 	B_SSEND_SRP,
+	A_DP_END,
+	A_TST_MAINT,
+	B_SRP_REQD,
+	B_TST_SUSP,
 
 	NUM_OTG_FSM_TIMERS,
 };
@@ -171,6 +175,13 @@ struct otg_fsm {
 	int b_srp_done;
 	int b_hnp_enable;
 	int a_clr_err;
+	int hnp_polling;
+
+	/* OTG test device */
+	int tst_maint;
+	int otg_vbus_off;
+	int otg_srp_reqd;
+	int otg_hnp_reqd;
 
 	/* Informative variables. All unused as of now */
 	int a_bus_drop_inf;

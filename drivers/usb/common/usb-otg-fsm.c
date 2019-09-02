@@ -62,6 +62,7 @@ static void otg_leave_state(struct otg_fsm *fsm, enum usb_otg_state old_state)
 	switch (old_state) {
 	case OTG_STATE_B_IDLE:
 		otg_del_timer(fsm, B_SE0_SRP);
+		otg_del_timer(fsm, B_SRP_FAIL);
 		fsm->b_se0_srp = 0;
 		fsm->adp_sns = 0;
 		fsm->adp_prb = 0;
@@ -79,6 +80,11 @@ static void otg_leave_state(struct otg_fsm *fsm, enum usb_otg_state old_state)
 		fsm->b_ase0_brst_tmout = 0;
 		break;
 	case OTG_STATE_B_HOST:
+		if (fsm->otg_hnp_reqd) {
+			fsm->otg_hnp_reqd = 0;
+			fsm->b_bus_req = 0;
+		}
+		fsm->a_conn = 0;
 		break;
 	case OTG_STATE_A_IDLE:
 		fsm->adp_prb = 0;
@@ -125,8 +131,10 @@ static void otg_hnp_polling_work(struct work_struct *work)
 	enum usb_otg_state state = fsm->otg->state;
 	u8 flag;
 	int retval;
+	struct usb_otg_descriptor *desc = NULL;
 
-	if (state != OTG_STATE_A_HOST && state != OTG_STATE_B_HOST)
+	if ((state != OTG_STATE_A_HOST || !fsm->b_hnp_enable) &&
+	    state != OTG_STATE_B_HOST)
 		return;
 
 	udev = usb_hub_find_child(fsm->otg->host->root_hub, 1);
@@ -134,6 +142,31 @@ static void otg_hnp_polling_work(struct work_struct *work)
 		dev_err(fsm->otg->host->controller,
 			"no usb dev connected, can't start HNP polling\n");
 		return;
+	}
+
+	if (udev->state != USB_STATE_CONFIGURED) {
+		dev_dbg(&udev->dev, "the B dev is not resumed!\n");
+		schedule_delayed_work(&fsm->hnp_polling_work,
+				      msecs_to_jiffies(T_HOST_REQ_POLL));
+		return;
+	}
+
+	/*
+	 * Legacy otg test device does not support HNP polling,
+	 * start HNP directly for legacy otg test device.
+	 */
+	if (fsm->tst_maint &&
+		(__usb_get_extra_descriptor(udev->rawdescriptors[0],
+		le16_to_cpu(udev->config[0].desc.wTotalLength),
+				USB_DT_OTG, (void **) &desc) == 0)) {
+		/* shorter bLength of OTG 1.3 or earlier */
+		if (desc->bLength < 5) {
+			fsm->a_bus_req = 0;
+			fsm->tst_maint = 0;
+			otg_del_timer(fsm, A_TST_MAINT);
+			*fsm->host_req_flag = HOST_REQUEST_FLAG;
+			return;
+		}
 	}
 
 	*fsm->host_req_flag = 0;
@@ -177,6 +210,11 @@ static void otg_hnp_polling_work(struct work_struct *work)
 				fsm->otg->host->b_hnp_enable = 1;
 		}
 		fsm->a_bus_req = 0;
+		if (fsm->tst_maint) {
+			fsm->tst_maint = 0;
+			fsm->otg_vbus_off = 0;
+			otg_del_timer(fsm, A_TST_MAINT);
+		}
 	} else if (state == OTG_STATE_B_HOST) {
 		fsm->b_bus_req = 0;
 	}
@@ -218,6 +256,10 @@ static int otg_set_state(struct otg_fsm *fsm, enum usb_otg_state new_state)
 		otg_start_adp_sns(fsm);
 		otg_set_protocol(fsm, PROTO_UNDEF);
 		otg_add_timer(fsm, B_SE0_SRP);
+		if (fsm->otg_hnp_reqd) {
+			fsm->otg_hnp_reqd = 0;
+			fsm->b_bus_req = 0;
+		}
 		break;
 	case OTG_STATE_B_SRP_INIT:
 		otg_start_pulse(fsm);
@@ -230,6 +272,7 @@ static int otg_set_state(struct otg_fsm *fsm, enum usb_otg_state new_state)
 		otg_loc_sof(fsm, 0);
 		otg_set_protocol(fsm, PROTO_GADGET);
 		otg_loc_conn(fsm, 1);
+		fsm->b_bus_req = 0;
 		break;
 	case OTG_STATE_B_WAIT_ACON:
 		otg_chrg_vbus(fsm, 0);
@@ -244,8 +287,6 @@ static int otg_set_state(struct otg_fsm *fsm, enum usb_otg_state new_state)
 		otg_loc_conn(fsm, 0);
 		otg_loc_sof(fsm, 1);
 		otg_set_protocol(fsm, PROTO_HOST);
-		usb_bus_start_enum(fsm->otg->host,
-				fsm->otg->host->otg_port);
 		otg_start_hnp_polling(fsm);
 		break;
 	case OTG_STATE_A_IDLE:
@@ -400,8 +441,7 @@ int otg_statemachine(struct otg_fsm *fsm)
 	case OTG_STATE_A_HOST:
 		if (fsm->id || fsm->a_bus_drop)
 			otg_set_state(fsm, OTG_STATE_A_WAIT_VFALL);
-		else if ((!fsm->a_bus_req || fsm->a_suspend_req_inf) &&
-				fsm->otg->host->b_hnp_enable)
+		else if (!fsm->a_bus_req || fsm->a_suspend_req_inf)
 			otg_set_state(fsm, OTG_STATE_A_SUSPEND);
 		else if (!fsm->b_conn)
 			otg_set_state(fsm, OTG_STATE_A_WAIT_BCON);
@@ -409,9 +449,9 @@ int otg_statemachine(struct otg_fsm *fsm)
 			otg_set_state(fsm, OTG_STATE_A_VBUS_ERR);
 		break;
 	case OTG_STATE_A_SUSPEND:
-		if (!fsm->b_conn && fsm->otg->host->b_hnp_enable)
+		if (!fsm->b_conn && fsm->a_set_b_hnp_en)
 			otg_set_state(fsm, OTG_STATE_A_PERIPHERAL);
-		else if (!fsm->b_conn && !fsm->otg->host->b_hnp_enable)
+		else if (!fsm->b_conn && !fsm->a_set_b_hnp_en)
 			otg_set_state(fsm, OTG_STATE_A_WAIT_BCON);
 		else if (fsm->a_bus_req || fsm->b_bus_resume)
 			otg_set_state(fsm, OTG_STATE_A_HOST);

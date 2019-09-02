@@ -30,6 +30,7 @@
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
 		gpio = <&gpio1 9 GPIO_ACTIVE_HIGH>;
+		off-on-delay = <20000>;
 		enable-active-high;
 	};
 
@@ -141,7 +142,7 @@
 
 	mag3110@e {
 		compatible = "fsl,mag3110";
-		reg = <0x0e>;
+		reg = <0xe>;
 	};
 };
 

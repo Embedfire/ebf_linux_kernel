@@ -2,6 +2,7 @@
  * caam - Freescale FSL CAAM support for hw_random
  *
  * Copyright 2011 Freescale Semiconductor, Inc.
+ * Copyright 2018 NXP
  *
  * Based on caamalg.c crypto API driver.
  *
@@ -252,6 +253,49 @@ static void caam_cleanup(struct hwrng *rng)
 	rng_unmap_ctx(rng_ctx);
 }
 
+#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_RNG_TEST
+static inline void test_len(struct hwrng *rng, size_t len, bool wait)
+{
+	u8 *buf;
+	int real_len;
+
+	buf = kzalloc(sizeof(u8) * len, GFP_KERNEL);
+	real_len = rng->read(rng, buf, len, wait);
+	if (real_len == 0 && wait)
+		pr_err("WAITING FAILED\n");
+	pr_info("wanted %d bytes, got %d\n", len, real_len);
+	print_hex_dump(KERN_INFO, "random bytes@: ", DUMP_PREFIX_ADDRESS,
+		       16, 4, buf, real_len, 1);
+	kfree(buf);
+}
+
+static inline void test_mode_once(struct hwrng *rng, bool wait)
+{
+#define TEST_CHUNK (RN_BUF_SIZE / 4)
+
+	test_len(rng, TEST_CHUNK, wait);
+	test_len(rng, RN_BUF_SIZE * 2, wait);
+	test_len(rng, RN_BUF_SIZE * 2 - TEST_CHUNK, wait);
+}
+
+static inline void test_mode(struct hwrng *rng, bool wait)
+{
+#define TEST_PASS 1
+	int i;
+
+	for (i = 0; i < TEST_PASS; i++)
+		test_mode_once(rng, wait);
+}
+
+static void self_test(struct hwrng *rng)
+{
+	pr_info("testing without waiting\n");
+	test_mode(rng, false);
+	pr_info("testing with waiting\n");
+	test_mode(rng, true);
+}
+#endif
+
 static int caam_init_buf(struct caam_rng_ctx *ctx, int buf_id)
 {
 	struct buf_data *bd = &ctx->bufs[buf_id];
@@ -309,6 +353,7 @@ static int __init caam_rng_init(void)
 	struct device *ctrldev;
 	struct caam_drv_private *priv;
 	int err;
+	u32 cha_inst;
 
 	dev_node = of_find_compatible_node(NULL, NULL, "fsl,sec-v4.0");
 	if (!dev_node) {
@@ -335,7 +380,12 @@ static int __init caam_rng_init(void)
 		return -ENODEV;
 
 	/* Check for an instantiated RNG before registration */
-	if (!(rd_reg32(&priv->ctrl->perfmon.cha_num_ls) & CHA_ID_LS_RNG_MASK))
+	if (priv->has_seco)
+		cha_inst = rd_reg32(&priv->jr[0]->perfmon.cha_num_ls);
+	else
+		cha_inst = rd_reg32(&priv->ctrl->perfmon.cha_num_ls);
+
+	if (!(cha_inst & CHA_ID_LS_RNG_MASK))
 		return -ENODEV;
 
 	dev = caam_jr_alloc();
@@ -351,6 +401,10 @@ static int __init caam_rng_init(void)
 	err = caam_init_rng(rng_ctx, dev);
 	if (err)
 		goto free_rng_ctx;
+
+#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_RNG_TEST
+	self_test(&caam_rng);
+#endif
 
 	dev_info(dev, "registering rng-caam\n");
 	return hwrng_register(&caam_rng);

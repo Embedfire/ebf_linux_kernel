@@ -3,12 +3,14 @@
  * CAAM Protocol Data Block (PDB) definition header file
  *
  * Copyright 2008-2016 Freescale Semiconductor, Inc.
+ * Copyright 2018 NXP
  *
  */
 
 #ifndef CAAM_PDB_H
 #define CAAM_PDB_H
 #include "compat.h"
+#include "regs.h"
 
 /*
  * PDB- IPSec ESP Header Modification Options
@@ -507,10 +509,10 @@ struct dsa_verify_pdb {
  */
 struct rsa_pub_pdb {
 	u32		sgf;
-	dma_addr_t	f_dma;
-	dma_addr_t	g_dma;
-	dma_addr_t	n_dma;
-	dma_addr_t	e_dma;
+	caam_dma_addr_t	f_dma;
+	caam_dma_addr_t	g_dma;
+	caam_dma_addr_t	n_dma;
+	caam_dma_addr_t	e_dma;
 	u32		f_len;
 } __packed;
 
@@ -524,10 +526,10 @@ struct rsa_pub_pdb {
  */
 struct rsa_priv_f1_pdb {
 	u32		sgf;
-	dma_addr_t	g_dma;
-	dma_addr_t	f_dma;
-	dma_addr_t	n_dma;
-	dma_addr_t	d_dma;
+	caam_dma_addr_t	g_dma;
+	caam_dma_addr_t	f_dma;
+	caam_dma_addr_t	n_dma;
+	caam_dma_addr_t	d_dma;
 } __packed;
 
 /**
@@ -546,13 +548,13 @@ struct rsa_priv_f1_pdb {
  */
 struct rsa_priv_f2_pdb {
 	u32		sgf;
-	dma_addr_t	g_dma;
-	dma_addr_t	f_dma;
-	dma_addr_t	d_dma;
-	dma_addr_t	p_dma;
-	dma_addr_t	q_dma;
-	dma_addr_t	tmp1_dma;
-	dma_addr_t	tmp2_dma;
+	caam_dma_addr_t	g_dma;
+	caam_dma_addr_t	f_dma;
+	caam_dma_addr_t	d_dma;
+	caam_dma_addr_t	p_dma;
+	caam_dma_addr_t	q_dma;
+	caam_dma_addr_t	tmp1_dma;
+	caam_dma_addr_t	tmp2_dma;
 	u32		p_q_len;
 } __packed;
 
@@ -576,15 +578,15 @@ struct rsa_priv_f2_pdb {
  */
 struct rsa_priv_f3_pdb {
 	u32		sgf;
-	dma_addr_t	g_dma;
-	dma_addr_t	f_dma;
-	dma_addr_t	c_dma;
-	dma_addr_t	p_dma;
-	dma_addr_t	q_dma;
-	dma_addr_t	dp_dma;
-	dma_addr_t	dq_dma;
-	dma_addr_t	tmp1_dma;
-	dma_addr_t	tmp2_dma;
+	caam_dma_addr_t	g_dma;
+	caam_dma_addr_t	f_dma;
+	caam_dma_addr_t	c_dma;
+	caam_dma_addr_t	p_dma;
+	caam_dma_addr_t	q_dma;
+	caam_dma_addr_t	dp_dma;
+	caam_dma_addr_t	dq_dma;
+	caam_dma_addr_t	tmp1_dma;
+	caam_dma_addr_t	tmp2_dma;
 	u32		p_q_len;
 } __packed;
 
