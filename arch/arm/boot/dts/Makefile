@@ -642,6 +642,7 @@ dtb-$(CONFIG_SOC_IMX6UL) += \
 	imx6ul-tx6ul-0011.dtb \
 	imx6ul-tx6ul-mainboard.dtb \
 	imx6ull-14x14-evk.dtb \
+	imx6ull-seeed-npi.dtb \
 	imx6ull-colibri-eval-v3.dtb \
 	imx6ull-colibri-wifi-eval-v3.dtb \
 	imx6ul-14x14-ddr3-arm2.dtb \
@@ -1395,6 +1396,11 @@ targets += dtbs dtbs_install
 targets += $(dtb-y)
 
 subdir-y	:= overlays
+
+# Enable fixups to support overlays on imx6ull platforms
+ifeq ($(CONFIG_SOC_IMX6UL),y)
+	DTC_FLAGS ?= -@
+endif
 
 # Enable fixups to support overlays on BCM2835 platforms
 ifeq ($(CONFIG_ARCH_BCM2835),y)
