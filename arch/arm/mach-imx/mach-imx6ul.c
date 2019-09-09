@@ -17,6 +17,7 @@
 
 #include "common.h"
 #include "cpuidle.h"
+#include "hardware.h"
 
 static void __init imx6ul_enet_clk_init(void)
 {
@@ -46,15 +47,31 @@ static int ksz8081_phy_fixup(struct phy_device *dev)
 
 static void __init imx6ul_enet_phy_init(void)
 {
-	if (IS_BUILTIN(CONFIG_PHYLIB))
-		phy_register_fixup_for_uid(PHY_ID_KSZ8081, MICREL_PHY_ID_MASK,
-					   ksz8081_phy_fixup);
+	if (IS_BUILTIN(CONFIG_PHYLIB)) {
+		/*
+		 * i.MX6UL EVK board RevA, RevB, RevC all use KSZ8081
+		 * Silicon revision 00, the PHY ID is 0x00221560, pass our
+		 * test with the phy fixup.
+		 */
+		phy_register_fixup(PHY_ANY_ID, PHY_ID_KSZ8081, 0xffffffff,
+				   ksz8081_phy_fixup);
+
+		/*
+		 * i.MX6UL EVK board RevC1 board use KSZ8081
+		 * Silicon revision 01, the PHY ID is 0x00221561.
+		 * This silicon revision still need the phy fixup setting.
+		 */
+		#define PHY_ID_KSZ8081_MNRN61	0x00221561
+		phy_register_fixup(PHY_ANY_ID, PHY_ID_KSZ8081_MNRN61,
+				   0xffffffff, ksz8081_phy_fixup);
+	}
 }
 
 static inline void imx6ul_enet_init(void)
 {
 	imx6ul_enet_clk_init();
 	imx6ul_enet_phy_init();
+	imx6_enet_mac_init("fsl,imx6ul-fec", "fsl,imx6ul-ocotp");
 }
 
 static void __init imx6ul_init_machine(void)
@@ -73,6 +90,7 @@ static void __init imx6ul_init_machine(void)
 
 static void __init imx6ul_init_irq(void)
 {
+	imx_gpc_check_dt();
 	imx_init_revision_from_anatop();
 	imx_src_init();
 	irqchip_init();
@@ -81,19 +99,28 @@ static void __init imx6ul_init_irq(void)
 
 static void __init imx6ul_init_late(void)
 {
-	imx6sx_cpuidle_init();
-
 	if (IS_ENABLED(CONFIG_ARM_IMX6Q_CPUFREQ))
 		platform_device_register_simple("imx6q-cpufreq", -1, NULL, 0);
+
+	imx6ul_cpuidle_init();
+}
+
+static void __init imx6ul_map_io(void)
+{
+	debug_ll_io_init();
+	imx6_pm_map_io();
+	imx_busfreq_map_io();
 }
 
 static const char * const imx6ul_dt_compat[] __initconst = {
 	"fsl,imx6ul",
 	"fsl,imx6ull",
+	"fsl,imx6ulz",
 	NULL,
 };
 
-DT_MACHINE_START(IMX6UL, "Freescale i.MX6 Ultralite (Device Tree)")
+DT_MACHINE_START(IMX6UL, "Freescale i.MX6 UltraLite (Device Tree)")
+	.map_io		= imx6ul_map_io,
 	.init_irq	= imx6ul_init_irq,
 	.init_machine	= imx6ul_init_machine,
 	.init_late	= imx6ul_init_late,

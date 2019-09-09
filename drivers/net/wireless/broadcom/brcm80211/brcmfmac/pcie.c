@@ -39,6 +39,7 @@
 #include "chip.h"
 #include "core.h"
 #include "common.h"
+#include "cfg80211.h"
 
 
 enum brcmf_pcie_state {
@@ -79,7 +80,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 	BRCMF_FW_ENTRY(BRCM_CC_4371_CHIP_ID, 0xFFFFFFFF, 4371),
 };
 
-#define BRCMF_PCIE_FW_UP_TIMEOUT		2000 /* msec */
+#define BRCMF_PCIE_FW_UP_TIMEOUT		5000 /* msec */
 
 #define BRCMF_PCIE_REG_MAP_SIZE			(32 * 1024)
 
@@ -189,7 +190,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 #define BRCMF_H2D_HOST_D0_INFORM_IN_USE		0x00000008
 #define BRCMF_H2D_HOST_D0_INFORM		0x00000010
 
-#define BRCMF_PCIE_MBDATA_TIMEOUT		msecs_to_jiffies(2000)
+#define BRCMF_PCIE_MBDATA_TIMEOUT		msecs_to_jiffies(5000)
 
 #define BRCMF_PCIE_CFGREG_STATUS_CMD		0x4
 #define BRCMF_PCIE_CFGREG_PM_CSR		0x4C
@@ -683,7 +684,6 @@ brcmf_pcie_send_mb_data(struct brcmf_pciedev_info *devinfo, u32 htod_mb_data)
 	}
 
 	brcmf_pcie_write_tcm32(devinfo, addr, htod_mb_data);
-	pci_write_config_dword(devinfo->pdev, BRCMF_PCIE_REG_SBMBX, 1);
 	pci_write_config_dword(devinfo->pdev, BRCMF_PCIE_REG_SBMBX, 1);
 
 	return 0;
@@ -1924,6 +1924,11 @@ brcmf_pcie_remove(struct pci_dev *pdev)
 	dev_set_drvdata(&pdev->dev, NULL);
 }
 
+static void brcmf_pcie_shutdown(struct pci_dev *pdev)
+{
+	brcmf_pcie_remove(pdev);
+	return;
+}
 
 #ifdef CONFIG_PM
 
@@ -1932,11 +1937,22 @@ static int brcmf_pcie_pm_enter_D3(struct device *dev)
 {
 	struct brcmf_pciedev_info *devinfo;
 	struct brcmf_bus *bus;
+	struct brcmf_cfg80211_info *config;
+	int retry = BRCMF_PM_WAIT_MAXRETRY;
 
 	brcmf_dbg(PCIE, "Enter\n");
 
 	bus = dev_get_drvdata(dev);
 	devinfo = bus->bus_priv.pcie->devinfo;
+	config = bus->drvr->config;
+
+	while (retry &&
+	       config->pm_state == BRCMF_CFG80211_PM_STATE_SUSPENDING) {
+		usleep_range(10000, 20000);
+		retry--;
+	}
+	if (!retry && config->pm_state == BRCMF_CFG80211_PM_STATE_SUSPENDING)
+		brcmf_err("timed out wait for cfg80211 suspended\n");
 
 	brcmf_bus_change_state(bus, BRCMF_BUS_DOWN);
 
@@ -1976,6 +1992,7 @@ static int brcmf_pcie_pm_leave_D3(struct device *dev)
 		if (brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_D0_INFORM))
 			goto cleanup;
 		brcmf_dbg(PCIE, "Hot resume, continue....\n");
+		msleep(10);
 		devinfo->state = BRCMFMAC_PCIE_STATE_UP;
 		brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
 		brcmf_bus_change_state(bus, BRCMF_BUS_UP);
@@ -2017,6 +2034,7 @@ static const struct dev_pm_ops brcmf_pciedrvr_pm = {
 
 static const struct pci_device_id brcmf_pcie_devid_table[] = {
 	BRCMF_PCIE_DEVICE(BRCM_PCIE_4350_DEVICE_ID),
+	BRCMF_PCIE_DEVICE_SUB(BRCM_PCIE_4355_DEVICE_ID, BRCM_PCIE_VENDOR_ID_BROADCOM, BRCM_PCIE_4355_DEVICE_ID),
 	BRCMF_PCIE_DEVICE(BRCM_PCIE_4356_DEVICE_ID),
 	BRCMF_PCIE_DEVICE(BRCM_PCIE_43567_DEVICE_ID),
 	BRCMF_PCIE_DEVICE(BRCM_PCIE_43570_DEVICE_ID),
@@ -2047,6 +2065,7 @@ static struct pci_driver brcmf_pciedrvr = {
 	.id_table = brcmf_pcie_devid_table,
 	.probe = brcmf_pcie_probe,
 	.remove = brcmf_pcie_remove,
+	.shutdown = brcmf_pcie_shutdown,
 #ifdef CONFIG_PM
 	.driver.pm = &brcmf_pciedrvr_pm,
 #endif

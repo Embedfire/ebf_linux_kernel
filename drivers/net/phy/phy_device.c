@@ -85,13 +85,23 @@ static bool mdio_bus_phy_may_suspend(struct phy_device *phydev)
 	if (!drv || !phydrv->suspend)
 		return false;
 
-	/* PHY not attached? May suspend if the PHY has not already been
-	 * suspended as part of a prior call to phy_disconnect() ->
-	 * phy_detach() -> phy_suspend() because the parent netdev might be the
-	 * MDIO bus driver and clock gated at this point.
+	/* netdev is NULL has three cases:
+	 * - phy is not found
+	 * - phy is found, match to general phy driver
+	 * - phy is found, match to specifical phy driver
+	 *
+	 * Case 1: phy is not found, cannot communicate by MDIO bus.
+	 * Case 2: phy is found:
+	 *         if phy dev driver probe/bind err, netdev is not __open__
+	 *            status, mdio bus is unregistered.
+	 *         if phy is detached, phy had entered suspended status.
+	 * Case 3: phy is found, phy is detached, phy had entered suspended
+	 *         status.
+	 *
+	 * So, in here, it shouldn't set phy to suspend by calling mdio bus.
 	 */
 	if (!netdev)
-		return !phydev->suspended;
+		return false;
 
 	if (netdev->wol_enabled)
 		return false;
@@ -1435,15 +1445,7 @@ int genphy_restart_aneg(struct phy_device *phydev)
 }
 EXPORT_SYMBOL(genphy_restart_aneg);
 
-/**
- * genphy_config_aneg - restart auto-negotiation or write BMCR
- * @phydev: target phy_device struct
- *
- * Description: If auto-negotiation is enabled, we configure the
- *   advertising, and then restart auto-negotiation.  If it is not
- *   enabled, then we write the BMCR.
- */
-int genphy_config_aneg(struct phy_device *phydev)
+int genphy_config_aneg_check(struct phy_device *phydev)
 {
 	int err, changed;
 
@@ -1471,11 +1473,28 @@ int genphy_config_aneg(struct phy_device *phydev)
 			changed = 1; /* do restart aneg */
 	}
 
+	return changed;
+}
+EXPORT_SYMBOL(genphy_config_aneg_check);
+
+/**
+ * genphy_config_aneg - restart auto-negotiation or write BMCR
+ * @phydev: target phy_device struct
+ *
+ * Description: If auto-negotiation is enabled, we configure the
+ *   advertising, and then restart auto-negotiation.  If it is not
+ *   enabled, then we write the BMCR.
+ */
+int genphy_config_aneg(struct phy_device *phydev)
+{
+	int result;
+
 	/* Only restart aneg if we are advertising something different
 	 * than we were before.
 	 */
-	if (changed > 0)
-		return genphy_restart_aneg(phydev);
+	result = genphy_config_aneg_check(phydev);
+	if (result > 0)
+		result = genphy_restart_aneg(phydev);
 
 	return 0;
 }

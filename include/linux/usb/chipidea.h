@@ -60,9 +60,20 @@ struct ci_hdrc_platform_data {
 #define CI_HDRC_OVERRIDE_RX_BURST	BIT(11)
 #define CI_HDRC_OVERRIDE_PHY_CONTROL	BIT(12) /* Glue layer manages phy */
 #define CI_HDRC_REQUIRES_ALIGNED_DMA	BIT(13)
+#define CI_HDRC_IMX_EHCI_QUIRK		BIT(14)
+#define CI_HDRC_IMX_IS_HSIC		BIT(15)
+/* need request pmqos during low power */
+#define CI_HDRC_PMQOS			BIT(16)
+/* Using PHY's charger detection */
+#define CI_HDRC_PHY_CHARGER_DETECTION	BIT(17)
 	enum usb_dr_mode	dr_mode;
 #define CI_HDRC_CONTROLLER_RESET_EVENT		0
 #define CI_HDRC_CONTROLLER_STOPPED_EVENT	1
+#define CI_HDRC_CONTROLLER_VBUS_EVENT		2
+#define CI_HDRC_IMX_HSIC_ACTIVE_EVENT		5
+#define CI_HDRC_IMX_HSIC_SUSPEND_EVENT		6
+#define CI_HDRC_IMX_TERM_SELECT_OVERRIDE_FS	7
+#define CI_HDRC_IMX_TERM_SELECT_OVERRIDE_OFF	8
 	int	(*notify_event) (struct ci_hdrc *ci, unsigned event);
 	struct regulator	*reg_vbus;
 	struct usb_otg_caps	ci_otg_caps;
@@ -89,4 +100,6 @@ struct platform_device *ci_hdrc_add_device(struct device *dev,
 /* Remove ci hdrc device */
 void ci_hdrc_remove_device(struct platform_device *pdev);
 
+/* Get current available role */
+enum usb_dr_mode ci_hdrc_query_available_role(struct platform_device *pdev);
 #endif

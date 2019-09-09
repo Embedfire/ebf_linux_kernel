@@ -12,6 +12,7 @@
 #include <linux/regmap.h>
 
 /* Settings */
+#define AK4458_ACKS_USE_MANUAL_MODE
 
 #define AK4458_00_CONTROL1			0x00
 #define AK4458_01_CONTROL2			0x01
@@ -82,5 +83,10 @@
  * */
 #define AK4458_ATS_SHIFT	6
 #define AK4458_ATS_MASK		GENMASK(7, 6)
+
+#define AK4458_DSDSEL_MASK		(0x1 << 0)
+#define AK4458_DP_MASK			(0x1 << 7)
+
+#define AK4458_DCHAIN_MASK		(0x1 << 1)
 
 #endif /* _AK4458_H */

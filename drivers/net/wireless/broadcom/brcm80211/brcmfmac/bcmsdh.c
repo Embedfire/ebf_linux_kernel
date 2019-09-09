@@ -33,6 +33,7 @@
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/acpi.h>
+#include <linux/of.h>
 #include <net/cfg80211.h>
 
 #include <defs.h>
@@ -47,6 +48,7 @@
 #include "sdio.h"
 #include "core.h"
 #include "common.h"
+#include "cfg80211.h"
 
 #define SDIOH_API_ACCESS_RETRY_LIMIT	2
 
@@ -54,6 +56,7 @@
 
 #define SDIO_FUNC1_BLOCKSIZE		64
 #define SDIO_FUNC2_BLOCKSIZE		512
+#define SDIO_4373_FUNC2_BLOCKSIZE	256
 /* Maximum milliseconds to wait for F2 to come up */
 #define SDIO_WAIT_F2RDY	3000
 
@@ -905,6 +908,7 @@ static void brcmf_sdiod_host_fixup(struct mmc_host *host)
 static int brcmf_sdiod_probe(struct brcmf_sdio_dev *sdiodev)
 {
 	int ret = 0;
+	unsigned int f2_blksz = SDIO_FUNC2_BLOCKSIZE;
 
 	sdio_claim_host(sdiodev->func1);
 
@@ -914,11 +918,18 @@ static int brcmf_sdiod_probe(struct brcmf_sdio_dev *sdiodev)
 		sdio_release_host(sdiodev->func1);
 		goto out;
 	}
-	ret = sdio_set_block_size(sdiodev->func2, SDIO_FUNC2_BLOCKSIZE);
+
+	if (sdiodev->func1->device == SDIO_DEVICE_ID_CYPRESS_4373) {
+		f2_blksz = SDIO_4373_FUNC2_BLOCKSIZE;
+	}
+
+	ret = sdio_set_block_size(sdiodev->func2, f2_blksz);
 	if (ret) {
 		brcmf_err("Failed to set F2 blocksize\n");
 		sdio_release_host(sdiodev->func1);
 		goto out;
+	} else {
+		brcmf_dbg(SDIO, "set F2 blocksize to %d\n", f2_blksz);
 	}
 
 	/* increase F2 timeout */
@@ -966,12 +977,14 @@ static const struct sdio_device_id brcmf_sdmmc_ids[] = {
  	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_43364),
 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_4335_4339),
 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_4339),
+	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_43428),
 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_43430),
 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_4345),
 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_43455),
 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_4354),
 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_BROADCOM_4356),
 	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_CYPRESS_4373),
+	BRCMF_SDIO_DEVICE(SDIO_DEVICE_ID_CYPRESS_43012),
 	{ /* end: all zeroes */ }
 };
 MODULE_DEVICE_TABLE(sdio, brcmf_sdmmc_ids);
@@ -996,6 +1009,7 @@ static int brcmf_ops_sdio_probe(struct sdio_func *func,
 	struct brcmf_sdio_dev *sdiodev;
 	struct brcmf_bus *bus_if;
 	struct device *dev;
+	struct device *func_dev;
 
 	brcmf_dbg(SDIO, "Enter\n");
 	brcmf_dbg(SDIO, "Class=%x\n", func->class);
@@ -1010,6 +1024,11 @@ static int brcmf_ops_sdio_probe(struct sdio_func *func,
 
 	/* prohibit ACPI power management for this device */
 	brcmf_sdiod_acpi_set_power_manageable(dev, 0);
+
+	func_dev = &func->card->sdio_func[0]->dev;
+	if (!func_dev->of_node ||
+	    !of_device_is_compatible(func_dev->of_node, "brcm,bcm4329-fmac"))
+		return -ENODEV;
 
 	/* Consume func num 1 but dont do anything with it. */
 	if (func->num == 1)
@@ -1040,6 +1059,7 @@ static int brcmf_ops_sdio_probe(struct sdio_func *func,
 	dev_set_drvdata(&func->dev, bus_if);
 	dev_set_drvdata(&sdiodev->func1->dev, bus_if);
 	sdiodev->dev = &sdiodev->func1->dev;
+	dev_set_drvdata(&sdiodev->func2->dev, bus_if);
 
 	brcmf_sdiod_change_state(sdiodev, BRCMF_SDIOD_DOWN);
 
@@ -1056,6 +1076,7 @@ static int brcmf_ops_sdio_probe(struct sdio_func *func,
 fail:
 	dev_set_drvdata(&func->dev, NULL);
 	dev_set_drvdata(&sdiodev->func1->dev, NULL);
+	dev_set_drvdata(&sdiodev->func2->dev, NULL);
 	kfree(sdiodev);
 	kfree(bus_if);
 	return err;
@@ -1094,6 +1115,14 @@ static void brcmf_ops_sdio_remove(struct sdio_func *func)
 	brcmf_dbg(SDIO, "Exit\n");
 }
 
+static void brcmf_ops_sdio_shutdown(struct device *dev)
+{
+	struct sdio_func *func = container_of(dev, struct sdio_func, dev);
+
+	brcmf_ops_sdio_remove(func);
+	return;
+}
+
 void brcmf_sdio_wowl_config(struct device *dev, bool enabled)
 {
 	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
@@ -1110,14 +1139,26 @@ static int brcmf_ops_sdio_suspend(struct device *dev)
 	struct brcmf_bus *bus_if;
 	struct brcmf_sdio_dev *sdiodev;
 	mmc_pm_flag_t sdio_flags;
+	struct brcmf_cfg80211_info *config;
+	int retry = BRCMF_PM_WAIT_MAXRETRY;
 
 	func = container_of(dev, struct sdio_func, dev);
+	bus_if = dev_get_drvdata(dev);
+	config = bus_if->drvr->config;
+
 	brcmf_dbg(SDIO, "Enter: F%d\n", func->num);
+
 	if (func->num != 1)
 		return 0;
 
+	while (retry &&
+	       config->pm_state == BRCMF_CFG80211_PM_STATE_SUSPENDING) {
+		usleep_range(10000, 20000);
+		retry--;
+	}
+	if (!retry && config->pm_state == BRCMF_CFG80211_PM_STATE_SUSPENDING)
+		brcmf_err("timed out wait for cfg80211 suspended\n");
 
-	bus_if = dev_get_drvdata(dev);
 	sdiodev = bus_if->bus_priv.sdio;
 
 	brcmf_sdiod_freezer_on(sdiodev);
@@ -1165,6 +1206,7 @@ static struct sdio_driver brcmf_sdmmc_driver = {
 #ifdef CONFIG_PM_SLEEP
 		.pm = &brcmf_sdio_pm_ops,
 #endif	/* CONFIG_PM_SLEEP */
+		.shutdown = brcmf_ops_sdio_shutdown,
 		.coredump = brcmf_dev_coredump,
 	},
 };

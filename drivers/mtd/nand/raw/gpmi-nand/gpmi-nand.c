@@ -13,6 +13,9 @@
 #include <linux/mtd/partitions.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/busfreq-imx.h>
+#include <linux/pm_runtime.h>
+#include <linux/pinctrl/consumer.h>
 #include "gpmi-nand.h"
 #include "bch-regs.h"
 
@@ -20,6 +23,8 @@
 #define GPMI_NAND_GPMI_REGS_ADDR_RES_NAME  "gpmi-nand"
 #define GPMI_NAND_BCH_REGS_ADDR_RES_NAME   "bch"
 #define GPMI_NAND_BCH_INTERRUPT_RES_NAME   "bch"
+
+#define GPMI_RPM_TIMEOUT		50 /* ms */
 
 /* add our owner bbt descriptor */
 static uint8_t scan_ff_pattern[] = { 0xff };
@@ -106,9 +111,25 @@ static const struct gpmi_devdata gpmi_devdata_imx6q = {
 	.clks_count = ARRAY_SIZE(gpmi_clks_for_mx6),
 };
 
+static const struct gpmi_devdata gpmi_devdata_imx6qp = {
+	.type = IS_MX6QP,
+	.bch_max_ecc_strength = 40,
+	.max_chain_delay = 12000,
+	.clks = gpmi_clks_for_mx6,
+	.clks_count = ARRAY_SIZE(gpmi_clks_for_mx6),
+};
+
 static const struct gpmi_devdata gpmi_devdata_imx6sx = {
 	.type = IS_MX6SX,
 	.bch_max_ecc_strength = 62,
+	.max_chain_delay = 12000,
+	.clks = gpmi_clks_for_mx6,
+	.clks_count = ARRAY_SIZE(gpmi_clks_for_mx6),
+};
+
+static const struct gpmi_devdata gpmi_devdata_imx6ul = {
+	.type = IS_MX6UL,
+	.bch_max_ecc_strength = 40,
 	.max_chain_delay = 12000,
 	.clks = gpmi_clks_for_mx6,
 	.clks_count = ARRAY_SIZE(gpmi_clks_for_mx6),
@@ -124,6 +145,26 @@ static const struct gpmi_devdata gpmi_devdata_imx7d = {
 	.max_chain_delay = 12000,
 	.clks = gpmi_clks_for_mx7d,
 	.clks_count = ARRAY_SIZE(gpmi_clks_for_mx7d),
+};
+
+static const struct gpmi_devdata gpmi_devdata_imx6ull = {
+	.type = IS_MX6ULL,
+	.bch_max_ecc_strength = 40,
+	.max_chain_delay = 12000,
+	.clks = gpmi_clks_for_mx6,
+	.clks_count = ARRAY_SIZE(gpmi_clks_for_mx6),
+};
+
+static const char * gpmi_clks_for_mx8qxp[GPMI_CLK_MAX] = {
+	"gpmi_apb", "gpmi_bch", "gpmi_apb_bch",
+};
+
+static const struct gpmi_devdata gpmi_devdata_imx8qxp = {
+	.type = IS_MX8QXP,
+	.bch_max_ecc_strength = 62,
+	.max_chain_delay = 12000,
+	.clks = gpmi_clks_for_mx8qxp,
+	.clks_count = ARRAY_SIZE(gpmi_clks_for_mx8qxp),
 };
 
 static irqreturn_t bch_irq(int irq, void *cookie)
@@ -179,6 +220,36 @@ static inline bool gpmi_check_ecc(struct gpmi_nand_data *this)
 	return geo->ecc_strength <= this->devdata->bch_max_ecc_strength;
 }
 
+static inline bool bbm_in_data_chunk(struct gpmi_nand_data *this,
+			unsigned int *chunk_num)
+{
+	struct bch_geometry *geo = &this->bch_geometry;
+	struct mtd_info *mtd = &this->nand.mtd;
+	unsigned int i, j;
+
+	if (geo->ecc_chunk0_size != geo->ecc_chunkn_size) {
+		dev_err(this->dev, "The size of chunk0 must equal to chunkn\n");
+		return false;
+	}
+
+	i = (mtd->writesize * 8 - geo->metadata_size * 8) /
+		(geo->gf_len * geo->ecc_strength +
+			geo->ecc_chunkn_size * 8);
+
+	j = (mtd->writesize * 8 - geo->metadata_size * 8) -
+		(geo->gf_len * geo->ecc_strength +
+			geo->ecc_chunkn_size * 8) * i;
+
+	if (j < geo->ecc_chunkn_size * 8) {
+		*chunk_num = i+1;
+		dev_dbg(this->dev, "Set ecc to %d and bbm in chunk %d\n",
+				geo->ecc_strength, *chunk_num);
+		return true;
+	}
+
+	return false;
+}
+
 /*
  * If we can get the ECC information from the nand chip, we do not
  * need to calculate them ourselves.
@@ -207,13 +278,14 @@ static int set_geometry_by_ecc_info(struct gpmi_nand_data *this,
 			chip->ecc_strength_ds, chip->ecc_step_ds);
 		return -EINVAL;
 	}
-	geo->ecc_chunk_size = ecc_step;
+	geo->ecc_chunk0_size = ecc_step;
+	geo->ecc_chunkn_size = ecc_step;
 	geo->ecc_strength = round_up(ecc_strength, 2);
 	if (!gpmi_check_ecc(this))
 		return -EINVAL;
 
 	/* Keep the C >= O */
-	if (geo->ecc_chunk_size < mtd->oobsize) {
+	if (geo->ecc_chunkn_size < mtd->oobsize) {
 		dev_err(this->dev,
 			"unsupported nand chip. ecc size: %d, oob size : %d\n",
 			ecc_step, mtd->oobsize);
@@ -223,7 +295,7 @@ static int set_geometry_by_ecc_info(struct gpmi_nand_data *this,
 	/* The default value, see comment in the legacy_set_geometry(). */
 	geo->metadata_size = 10;
 
-	geo->ecc_chunk_count = mtd->writesize / geo->ecc_chunk_size;
+	geo->ecc_chunk_count = mtd->writesize / geo->ecc_chunkn_size;
 
 	/*
 	 * Now, the NAND chip with 2K page(data chunk is 512byte) shows below:
@@ -295,6 +367,132 @@ static int set_geometry_by_ecc_info(struct gpmi_nand_data *this,
 	return 0;
 }
 
+static int set_geometry_for_large_oob(struct gpmi_nand_data *this)
+{
+	struct bch_geometry *geo = &this->bch_geometry;
+	struct mtd_info *mtd = &this->nand.mtd;
+	struct nand_chip *chip = mtd_to_nand(mtd);
+	unsigned int block_mark_bit_offset;
+	unsigned int max_ecc;
+	unsigned int bbm_chunk;
+	unsigned int i;
+
+
+	/* sanity check for the minimum ecc nand required */
+	if (!(chip->ecc_strength_ds > 0 && chip->ecc_step_ds > 0))
+		return -EINVAL;
+	geo->ecc_strength = chip->ecc_strength_ds;
+
+	/* check if platform can support this nand */
+	if (!gpmi_check_ecc(this)) {
+		dev_err(this->dev,
+				"unsupported NAND chip,\
+				minimum ecc required %d\n"
+				, geo->ecc_strength);
+		return -EINVAL;
+	}
+
+	/* calculate the maximum ecc platform can support*/
+	geo->metadata_size = 10;
+	geo->gf_len = 14;
+	geo->ecc_chunk0_size = 1024;
+	geo->ecc_chunkn_size = 1024;
+	geo->ecc_chunk_count = mtd->writesize / geo->ecc_chunkn_size;
+	max_ecc = min(get_ecc_strength(this),
+			this->devdata->bch_max_ecc_strength);
+
+	/* search a supported ecc strength that makes bbm */
+	/* located in data chunk  */
+	geo->ecc_strength = chip->ecc_strength_ds;
+	while (!(geo->ecc_strength > max_ecc)) {
+		if (bbm_in_data_chunk(this, &bbm_chunk))
+			goto geo_setting;
+		geo->ecc_strength += 2;
+	}
+
+	/* if none of them works, keep using the minimum ecc */
+	/* nand required but changing ecc page layout  */
+	geo->ecc_strength = chip->ecc_strength_ds;
+	/* add extra ecc for meta data */
+	geo->ecc_chunk0_size = 0;
+	geo->ecc_chunk_count = (mtd->writesize / geo->ecc_chunkn_size) + 1;
+	geo->ecc_for_meta = 1;
+	/* check if oob can afford this extra ecc chunk */
+	if (mtd->oobsize * 8 < geo->metadata_size * 8 +
+			geo->gf_len * geo->ecc_strength
+			* geo->ecc_chunk_count) {
+		dev_err(this->dev, "unsupported NAND chip with new layout\n");
+		return -EINVAL;
+	}
+
+	/* calculate in which chunk bbm located */
+	bbm_chunk = (mtd->writesize * 8 - geo->metadata_size * 8 -
+		geo->gf_len * geo->ecc_strength) /
+		(geo->gf_len * geo->ecc_strength +
+				geo->ecc_chunkn_size * 8) + 1;
+
+geo_setting:
+
+	geo->page_size = mtd->writesize + geo->metadata_size +
+		(geo->gf_len * geo->ecc_strength * geo->ecc_chunk_count) / 8;
+	geo->payload_size = mtd->writesize;
+
+	/*
+	 * The auxiliary buffer contains the metadata and the ECC status. The
+	 * metadata is padded to the nearest 32-bit boundary. The ECC status
+	 * contains one byte for every ECC chunk, and is also padded to the
+	 * nearest 32-bit boundary.
+	 */
+	geo->auxiliary_status_offset = ALIGN(geo->metadata_size, 4);
+	geo->auxiliary_size = ALIGN(geo->metadata_size, 4)
+				+ ALIGN(geo->ecc_chunk_count, 4);
+
+	if (!this->swap_block_mark)
+		return 0;
+
+	/* calculate the number of ecc chunk behind the bbm */
+	i = (mtd->writesize / geo->ecc_chunkn_size) - bbm_chunk + 1;
+
+	block_mark_bit_offset = mtd->writesize * 8 -
+		(geo->ecc_strength * geo->gf_len * (geo->ecc_chunk_count - i)
+				+ geo->metadata_size * 8);
+
+	geo->block_mark_byte_offset = block_mark_bit_offset / 8;
+	geo->block_mark_bit_offset  = block_mark_bit_offset % 8;
+
+	dev_dbg(this->dev, "BCH Geometry :\n"
+		"GF length              : %u\n"
+		"ECC Strength           : %u\n"
+		"Page Size in Bytes     : %u\n"
+		"Metadata Size in Bytes : %u\n"
+		"ECC Chunk0 Size in Bytes: %u\n"
+		"ECC Chunkn Size in Bytes: %u\n"
+		"ECC Chunk Count        : %u\n"
+		"Payload Size in Bytes  : %u\n"
+		"Auxiliary Size in Bytes: %u\n"
+		"Auxiliary Status Offset: %u\n"
+		"Block Mark Byte Offset : %u\n"
+		"Block Mark Bit Offset  : %u\n"
+		"Block Mark in chunk	: %u\n"
+		"Ecc for Meta data	: %u\n",
+		geo->gf_len,
+		geo->ecc_strength,
+		geo->page_size,
+		geo->metadata_size,
+		geo->ecc_chunk0_size,
+		geo->ecc_chunkn_size,
+		geo->ecc_chunk_count,
+		geo->payload_size,
+		geo->auxiliary_size,
+		geo->auxiliary_status_offset,
+		geo->block_mark_byte_offset,
+		geo->block_mark_bit_offset,
+		bbm_chunk,
+		geo->ecc_for_meta);
+
+	return 0;
+}
+
 static int legacy_set_geometry(struct gpmi_nand_data *this)
 {
 	struct bch_geometry *geo = &this->bch_geometry;
@@ -314,20 +512,22 @@ static int legacy_set_geometry(struct gpmi_nand_data *this)
 	geo->gf_len = 13;
 
 	/* The default for chunk size. */
-	geo->ecc_chunk_size = 512;
-	while (geo->ecc_chunk_size < mtd->oobsize) {
-		geo->ecc_chunk_size *= 2; /* keep C >= O */
+	geo->ecc_chunk0_size = 512;
+	geo->ecc_chunkn_size = 512;
+	while (geo->ecc_chunkn_size < mtd->oobsize) {
+		geo->ecc_chunk0_size *= 2; /* keep C >= O */
+		geo->ecc_chunkn_size *= 2; /* keep C >= O */
 		geo->gf_len = 14;
 	}
 
-	geo->ecc_chunk_count = mtd->writesize / geo->ecc_chunk_size;
+	geo->ecc_chunk_count = mtd->writesize / geo->ecc_chunkn_size;
 
 	/* We use the same ECC strength for all chunks. */
 	geo->ecc_strength = get_ecc_strength(this);
 	if (!gpmi_check_ecc(this)) {
 		dev_err(this->dev,
 			"ecc strength: %d cannot be supported by the controller (%d)\n"
-			"try to use minimum ecc strength that NAND chip required\n",
+			"try to use maximum ecc strength that NAND chip required\n",
 			geo->ecc_strength,
 			this->devdata->bch_max_ecc_strength);
 		return -EINVAL;
@@ -409,22 +609,27 @@ static int legacy_set_geometry(struct gpmi_nand_data *this)
 
 int common_nfc_set_geometry(struct gpmi_nand_data *this)
 {
-	struct nand_chip *chip = &this->nand;
+	struct mtd_info *mtd = &this->nand.mtd;
+	struct nand_chip *chip = mtd_to_nand(mtd);
 
-	if (chip->ecc.strength > 0 && chip->ecc.size > 0)
-		return set_geometry_by_ecc_info(this, chip->ecc.strength,
-						chip->ecc.size);
-
-	if ((of_property_read_bool(this->dev->of_node, "fsl,use-minimum-ecc"))
-				|| legacy_set_geometry(this)) {
-		if (!(chip->ecc_strength_ds > 0 && chip->ecc_step_ds > 0))
-			return -EINVAL;
-
-		return set_geometry_by_ecc_info(this, chip->ecc_strength_ds,
-						chip->ecc_step_ds);
+	if (chip->ecc_strength_ds > this->devdata->bch_max_ecc_strength) {
+		dev_err(this->dev,
+			"unsupported NAND chip, minimum ecc required %d\n"
+			, chip->ecc_strength_ds);
+		return -EINVAL;
 	}
 
-	return 0;
+	if ((!(chip->ecc_strength_ds > 0 && chip->ecc_step_ds > 0) &&
+			(mtd->oobsize < 1024)) || this->legacy_bch_geometry) {
+		dev_warn(this->dev, "use legacy bch geometry\n");
+		return legacy_set_geometry(this);
+	}
+
+	if (mtd->oobsize > 1024 || chip->ecc_step_ds < mtd->oobsize)
+		return set_geometry_for_large_oob(this);
+
+	return set_geometry_by_ecc_info(this, chip->ecc_strength_ds,
+					chip->ecc_step_ds);
 }
 
 struct dma_chan *get_dma_chan(struct gpmi_nand_data *this)
@@ -612,7 +817,7 @@ static int gpmi_get_clks(struct gpmi_nand_data *this)
 		r->clock[i] = clk;
 	}
 
-	if (GPMI_IS_MX6(this))
+	if (GPMI_IS_MX6(this) || GPMI_IS_MX8(this))
 		/*
 		 * Set the default value for the gpmi clock.
 		 *
@@ -626,6 +831,15 @@ static int gpmi_get_clks(struct gpmi_nand_data *this)
 err_clock:
 	dev_dbg(this->dev, "failed in finding the clocks.\n");
 	return err;
+}
+
+static int init_rpm(struct gpmi_nand_data *this)
+{
+	pm_runtime_enable(this->dev);
+	pm_runtime_set_autosuspend_delay(this->dev, GPMI_RPM_TIMEOUT);
+	pm_runtime_use_autosuspend(this->dev);
+
+	return 0;
 }
 
 static int acquire_resources(struct gpmi_nand_data *this)
@@ -644,13 +858,10 @@ static int acquire_resources(struct gpmi_nand_data *this)
 	if (ret)
 		goto exit_regs;
 
-	ret = acquire_dma_channels(this);
-	if (ret)
-		goto exit_regs;
-
 	ret = gpmi_get_clks(this);
 	if (ret)
 		goto exit_clock;
+
 	return 0;
 
 exit_clock:
@@ -836,13 +1047,12 @@ static void gpmi_select_chip(struct mtd_info *mtd, int chipnr)
 	 * die is selected/unselected.
 	 */
 	if (this->current_chip < 0 && chipnr >= 0) {
-		ret = gpmi_enable_clk(this);
-		if (ret)
+		ret = pm_runtime_get_sync(this->dev);
+		if (ret < 0)
 			dev_err(this->dev, "Failed to enable the clock\n");
 	} else if (this->current_chip >= 0 && chipnr < 0) {
-		ret = gpmi_disable_clk(this);
-		if (ret)
-			dev_err(this->dev, "Failed to disable the clock\n");
+		pm_runtime_mark_last_busy(this->dev);
+		pm_runtime_use_autosuspend(this->dev);
 	}
 
 	/*
@@ -943,6 +1153,7 @@ static int gpmi_ecc_read_page_data(struct nand_chip *chip,
 {
 	struct gpmi_nand_data *this = nand_get_controller_data(chip);
 	struct bch_geometry *nfc_geo = &this->bch_geometry;
+	void __iomem *bch_regs = this->resources.bch_regs;
 	struct mtd_info *mtd = nand_to_mtd(chip);
 	dma_addr_t    payload_phys;
 	unsigned int  i;
@@ -950,6 +1161,7 @@ static int gpmi_ecc_read_page_data(struct nand_chip *chip,
 	unsigned int  max_bitflips = 0;
 	int           ret;
 	bool          direct = false;
+	int flag = 0;
 
 	dev_dbg(this->dev, "page number is : %d\n", page);
 
@@ -985,8 +1197,16 @@ static int gpmi_ecc_read_page_data(struct nand_chip *chip,
 		memcpy(buf, this->payload_virt, nfc_geo->payload_size);
 
 	for (i = 0; i < nfc_geo->ecc_chunk_count; i++, status++) {
-		if ((*status == STATUS_GOOD) || (*status == STATUS_ERASED))
+		if (*status == STATUS_GOOD)
 			continue;
+
+		if (*status == STATUS_ERASED) {
+			if (GPMI_IS_MX6QP(this) || GPMI_IS_MX7D(this) ||
+					GPMI_IS_MX6UL(this))
+				if (readl(bch_regs + HW_BCH_DEBUG1))
+					flag = 1;
+			continue;
+		}
 
 		if (*status == STATUS_UNCORRECTABLE) {
 			int eccbits = nfc_geo->ecc_strength * nfc_geo->gf_len;
@@ -997,7 +1217,7 @@ static int gpmi_ecc_read_page_data(struct nand_chip *chip,
 
 			/* Read ECC bytes into our internal raw_buffer */
 			offset = nfc_geo->metadata_size * 8;
-			offset += ((8 * nfc_geo->ecc_chunk_size) + eccbits) * (i + 1);
+			offset += ((8 * nfc_geo->ecc_chunkn_size) + eccbits) * (i + 1);
 			offset -= eccbits;
 			bitoffset = offset % 8;
 			eccbytes = DIV_ROUND_UP(offset + eccbits, 8);
@@ -1034,16 +1254,16 @@ static int gpmi_ecc_read_page_data(struct nand_chip *chip,
 			if (i == 0) {
 				/* The first block includes metadata */
 				flips = nand_check_erased_ecc_chunk(
-						buf + i * nfc_geo->ecc_chunk_size,
-						nfc_geo->ecc_chunk_size,
+						buf + i * nfc_geo->ecc_chunkn_size,
+						nfc_geo->ecc_chunkn_size,
 						eccbuf, eccbytes,
 						this->auxiliary_virt,
 						nfc_geo->metadata_size,
 						nfc_geo->ecc_strength);
 			} else {
 				flips = nand_check_erased_ecc_chunk(
-						buf + i * nfc_geo->ecc_chunk_size,
-						nfc_geo->ecc_chunk_size,
+						buf + i * nfc_geo->ecc_chunkn_size,
+						nfc_geo->ecc_chunkn_size,
 						eccbuf, eccbytes,
 						NULL, 0,
 						nfc_geo->ecc_strength);
@@ -1081,6 +1301,10 @@ static int gpmi_ecc_read_page_data(struct nand_chip *chip,
 		memset(chip->oob_poi, ~0, mtd->oobsize);
 		chip->oob_poi[0] = ((uint8_t *)this->auxiliary_virt)[0];
 	}
+
+	/* if bitflip occurred in erased page, change data to all 0xff */
+	if (flag)
+		memset(buf, 0xff, nfc_geo->payload_size);
 
 	return max_bitflips;
 }
@@ -1134,9 +1358,24 @@ static int gpmi_ecc_read_subpage(struct mtd_info *mtd, struct nand_chip *chip,
 		}
 	}
 
+	/*
+	 * if there is an ECC dedicate for meta:
+	 * - need to add an extra ECC size when calculating col and page_size,
+	 *   if the meta size is NOT zero.
+	 * - chunk0 size need to set to the same size as other chunks,
+	 *   if the meta size is zero.
+	 */
+
 	meta = geo->metadata_size;
 	if (first) {
-		col = meta + (size + ecc_parity_size) * first;
+		if (geo->ecc_for_meta)
+			col = meta + ecc_parity_size
+				+ (size + ecc_parity_size) * first;
+		else
+			col = meta + (size + ecc_parity_size) * first;
+
+		chip->cmdfunc(mtd, NAND_CMD_RNDOUT, col, -1);
+
 		meta = 0;
 		buf = buf + first * size;
 	}
@@ -1149,21 +1388,37 @@ static int gpmi_ecc_read_subpage(struct mtd_info *mtd, struct nand_chip *chip,
 
 	/* change the BCH registers and bch_geometry{} */
 	n = last - first + 1;
-	page_size = meta + (size + ecc_parity_size) * n;
+
+	if (geo->ecc_for_meta && meta)
+		page_size = meta + ecc_parity_size
+			+ (size + ecc_parity_size) * n;
+	else
+		page_size = meta + (size + ecc_parity_size) * n;
 
 	r1_new &= ~(BM_BCH_FLASH0LAYOUT0_NBLOCKS |
 			BM_BCH_FLASH0LAYOUT0_META_SIZE);
-	r1_new |= BF_BCH_FLASH0LAYOUT0_NBLOCKS(n - 1)
+	r1_new |= BF_BCH_FLASH0LAYOUT0_NBLOCKS(
+			(geo->ecc_for_meta && meta) ? n : n - 1)
 			| BF_BCH_FLASH0LAYOUT0_META_SIZE(meta);
+
+	/* set chunk0 size if meta size is 0 */
+	if (!meta) {
+		if (GPMI_IS_MX6(this) || GPMI_IS_MX8(this))
+			r1_new &= ~MX6Q_BM_BCH_FLASH0LAYOUT0_DATA0_SIZE;
+		else
+			r1_new &= ~BM_BCH_FLASH0LAYOUT0_DATA0_SIZE;
+		r1_new |= BF_BCH_FLASH0LAYOUT0_DATA0_SIZE(size, this);
+	}
 	writel(r1_new, bch_regs + HW_BCH_FLASH0LAYOUT0);
 
 	r2_new &= ~BM_BCH_FLASH0LAYOUT1_PAGE_SIZE;
 	r2_new |= BF_BCH_FLASH0LAYOUT1_PAGE_SIZE(page_size);
 	writel(r2_new, bch_regs + HW_BCH_FLASH0LAYOUT1);
 
-	geo->ecc_chunk_count = n;
+	geo->ecc_chunk_count = (geo->ecc_for_meta && meta) ? n + 1 : n;
 	geo->payload_size = n * size;
 	geo->page_size = page_size;
+	geo->metadata_size = meta;
 	geo->auxiliary_status_offset = ALIGN(meta, 4);
 
 	dev_dbg(this->dev, "page:%d(%d:%d)%d, chunk:(%d:%d), BCH PG size:%d\n",
@@ -1386,7 +1641,7 @@ static int gpmi_ecc_read_page_raw(struct mtd_info *mtd,
 {
 	struct gpmi_nand_data *this = nand_get_controller_data(chip);
 	struct bch_geometry *nfc_geo = &this->bch_geometry;
-	int eccsize = nfc_geo->ecc_chunk_size;
+	int eccsize = nfc_geo->ecc_chunkn_size;
 	int eccbits = nfc_geo->ecc_strength * nfc_geo->gf_len;
 	u8 *tmp_buf = this->raw_buffer;
 	size_t src_bit_off;
@@ -1394,6 +1649,7 @@ static int gpmi_ecc_read_page_raw(struct mtd_info *mtd,
 	size_t oob_byte_off;
 	uint8_t *oob = chip->oob_poi;
 	int step;
+	int ecc_chunk_count;
 
 	nand_read_page_op(chip, page, 0, tmp_buf,
 			  mtd->writesize + mtd->oobsize);
@@ -1417,9 +1673,22 @@ static int gpmi_ecc_read_page_raw(struct mtd_info *mtd,
 
 	oob_bit_off = nfc_geo->metadata_size * 8;
 	src_bit_off = oob_bit_off;
+	ecc_chunk_count = nfc_geo->ecc_chunk_count;
+
+	/* if bch requires dedicate ecc for meta */
+	if (nfc_geo->ecc_for_meta) {
+		if (oob_required)
+			gpmi_copy_bits(oob, oob_bit_off,
+				       tmp_buf, src_bit_off,
+				       eccbits);
+
+		src_bit_off += eccbits;
+		oob_bit_off += eccbits;
+		ecc_chunk_count = nfc_geo->ecc_chunk_count - 1;
+	}
 
 	/* Extract interleaved payload data and ECC bits */
-	for (step = 0; step < nfc_geo->ecc_chunk_count; step++) {
+	for (step = 0; step < ecc_chunk_count; step++) {
 		if (buf)
 			gpmi_copy_bits(buf, step * eccsize * 8,
 				       tmp_buf, src_bit_off,
@@ -1427,7 +1696,7 @@ static int gpmi_ecc_read_page_raw(struct mtd_info *mtd,
 		src_bit_off += eccsize * 8;
 
 		/* Align last ECC block to align a byte boundary */
-		if (step == nfc_geo->ecc_chunk_count - 1 &&
+		if (step == ecc_chunk_count - 1 &&
 		    (oob_bit_off + eccbits) % 8)
 			eccbits += 8 - ((oob_bit_off + eccbits) % 8);
 
@@ -1471,7 +1740,7 @@ static int gpmi_ecc_write_page_raw(struct mtd_info *mtd,
 {
 	struct gpmi_nand_data *this = nand_get_controller_data(chip);
 	struct bch_geometry *nfc_geo = &this->bch_geometry;
-	int eccsize = nfc_geo->ecc_chunk_size;
+	int eccsize = nfc_geo->ecc_chunkn_size;
 	int eccbits = nfc_geo->ecc_strength * nfc_geo->gf_len;
 	u8 *tmp_buf = this->raw_buffer;
 	uint8_t *oob = chip->oob_poi;
@@ -1479,6 +1748,7 @@ static int gpmi_ecc_write_page_raw(struct mtd_info *mtd,
 	size_t oob_bit_off;
 	size_t oob_byte_off;
 	int step;
+	int ecc_chunk_count;
 
 	/*
 	 * Initialize all bits to 1 in case we don't have a buffer for the
@@ -1495,16 +1765,28 @@ static int gpmi_ecc_write_page_raw(struct mtd_info *mtd,
 	memcpy(tmp_buf, oob, nfc_geo->metadata_size);
 	oob_bit_off = nfc_geo->metadata_size * 8;
 	dst_bit_off = oob_bit_off;
+	ecc_chunk_count = nfc_geo->ecc_chunk_count;
+
+	/* if bch requires dedicate ecc for meta */
+	if (nfc_geo->ecc_for_meta) {
+		if (oob_required)
+			gpmi_copy_bits(tmp_buf, dst_bit_off,
+				       oob, oob_bit_off, eccbits);
+
+		dst_bit_off += eccbits;
+		oob_bit_off += eccbits;
+		ecc_chunk_count = nfc_geo->ecc_chunk_count - 1;
+	}
 
 	/* Interleave payload data and ECC bits */
-	for (step = 0; step < nfc_geo->ecc_chunk_count; step++) {
+	for (step = 0; step < ecc_chunk_count; step++) {
 		if (buf)
 			gpmi_copy_bits(tmp_buf, dst_bit_off,
 				       buf, step * eccsize * 8, eccsize * 8);
 		dst_bit_off += eccsize * 8;
 
 		/* Align last ECC block to align a byte boundary */
-		if (step == nfc_geo->ecc_chunk_count - 1 &&
+		if (step == ecc_chunk_count - 1 &&
 		    (oob_bit_off + eccbits) % 8)
 			eccbits += 8 - ((oob_bit_off + eccbits) % 8);
 
@@ -1768,7 +2050,7 @@ static int mx23_boot_init(struct gpmi_nand_data  *this)
 		 */
 		chipnr = block >> (chip->chip_shift - chip->phys_erase_shift);
 		page = block << (chip->phys_erase_shift - chip->page_shift);
-		byte = block <<  chip->phys_erase_shift;
+		byte = (loff_t) block <<  chip->phys_erase_shift;
 
 		/* Send the command to read the conventional block mark. */
 		chip->select_chip(mtd, chipnr);
@@ -1837,6 +2119,11 @@ static int gpmi_init_last(struct gpmi_nand_data *this)
 	if (ret)
 		return ret;
 
+	/* Save the geometry to debugfs*/
+	ret = bch_create_debugfs(this);
+	if (ret)
+		return ret;
+
 	/* Init the nand_ecc_ctrl{} */
 	ecc->read_page	= gpmi_ecc_read_page;
 	ecc->write_page	= gpmi_ecc_write_page;
@@ -1847,7 +2134,7 @@ static int gpmi_init_last(struct gpmi_nand_data *this)
 	ecc->read_oob_raw = gpmi_ecc_read_oob_raw;
 	ecc->write_oob_raw = gpmi_ecc_write_oob_raw;
 	ecc->mode	= NAND_ECC_HW;
-	ecc->size	= bch_geo->ecc_chunk_size;
+	ecc->size	= bch_geo->ecc_chunkn_size;
 	ecc->strength	= bch_geo->ecc_strength;
 	mtd_set_ooblayout(mtd, &gpmi_ooblayout_ops);
 
@@ -1856,7 +2143,7 @@ static int gpmi_init_last(struct gpmi_nand_data *this)
 	 *  (1) the chip is imx6, and
 	 *  (2) the size of the ECC parity is byte aligned.
 	 */
-	if (GPMI_IS_MX6(this) &&
+	if ((GPMI_IS_MX6(this) || GPMI_IS_MX8(this)) &&
 		((bch_geo->gf_len * bch_geo->ecc_strength) % 8) == 0) {
 		ecc->read_subpage = gpmi_ecc_read_subpage;
 		chip->options |= NAND_SUBPAGE_READ;
@@ -1876,6 +2163,10 @@ static int gpmi_nand_attach_chip(struct nand_chip *chip)
 		if (of_property_read_bool(this->dev->of_node,
 					  "fsl,no-blockmark-swap"))
 			this->swap_block_mark = false;
+
+		if (of_property_read_bool(this->dev->of_node,
+					"fsl,legacy-bch-geometry"))
+			this->legacy_bch_geometry = true;
 	}
 	dev_dbg(this->dev, "Blockmark swapping %sabled\n",
 		this->swap_block_mark ? "en" : "dis");
@@ -1934,7 +2225,7 @@ static int gpmi_nand_init(struct gpmi_nand_data *this)
 		goto err_out;
 
 	chip->dummy_controller.ops = &gpmi_nand_controller_ops;
-	ret = nand_scan(mtd, GPMI_IS_MX6(this) ? 2 : 1);
+	ret = nand_scan(mtd, (GPMI_IS_MX6(this) || GPMI_IS_MX8(this)) ? 2 : 1);
 	if (ret)
 		goto err_out;
 
@@ -1968,11 +2259,23 @@ static const struct of_device_id gpmi_nand_id_table[] = {
 		.compatible = "fsl,imx6q-gpmi-nand",
 		.data = &gpmi_devdata_imx6q,
 	}, {
+		.compatible = "fsl,imx6qp-gpmi-nand",
+		.data = (void *)&gpmi_devdata_imx6qp,
+	}, {
 		.compatible = "fsl,imx6sx-gpmi-nand",
 		.data = &gpmi_devdata_imx6sx,
 	}, {
+		.compatible = "fsl,imx6ul-gpmi-nand",
+		.data = (void *)&gpmi_devdata_imx6ul,
+	}, {
 		.compatible = "fsl,imx7d-gpmi-nand",
 		.data = &gpmi_devdata_imx7d,
+	}, {
+		.compatible = "fsl,imx6ull-gpmi-nand",
+		.data = &gpmi_devdata_imx6ull,
+	}, {
+		.compatible = "fsl,imx8qxp-gpmi-nand",
+		.data = &gpmi_devdata_imx8qxp,
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, gpmi_nand_id_table);
@@ -2003,18 +2306,25 @@ static int gpmi_nand_probe(struct platform_device *pdev)
 	if (ret)
 		goto exit_acquire_resources;
 
+	ret = init_rpm(this);
+	if (ret)
+		goto exit_nfc_init;
+
 	ret = gpmi_init(this);
 	if (ret)
 		goto exit_nfc_init;
 
 	ret = gpmi_nand_init(this);
 	if (ret)
-		goto exit_nfc_init;
+		goto exit_rpm;
 
 	dev_info(this->dev, "driver registered.\n");
 
 	return 0;
 
+exit_rpm:
+	pm_runtime_dont_use_autosuspend(this->dev);
+	pm_runtime_disable(this->dev);
 exit_nfc_init:
 	release_resources(this);
 exit_acquire_resources:
@@ -2026,8 +2336,10 @@ static int gpmi_nand_remove(struct platform_device *pdev)
 {
 	struct gpmi_nand_data *this = platform_get_drvdata(pdev);
 
+	release_bus_freq(BUS_FREQ_HIGH);
 	nand_release(nand_to_mtd(&this->nand));
 	gpmi_free_dma_buffer(this);
+	pm_runtime_disable(this->dev);
 	release_resources(this);
 	return 0;
 }
@@ -2035,10 +2347,12 @@ static int gpmi_nand_remove(struct platform_device *pdev)
 #ifdef CONFIG_PM_SLEEP
 static int gpmi_pm_suspend(struct device *dev)
 {
-	struct gpmi_nand_data *this = dev_get_drvdata(dev);
+	int ret;
 
-	release_dma_channels(this);
-	return 0;
+	pinctrl_pm_select_sleep_state(dev);
+	ret = pm_runtime_force_suspend(dev);
+
+	return ret;
 }
 
 static int gpmi_pm_resume(struct device *dev)
@@ -2046,9 +2360,14 @@ static int gpmi_pm_resume(struct device *dev)
 	struct gpmi_nand_data *this = dev_get_drvdata(dev);
 	int ret;
 
-	ret = acquire_dma_channels(this);
-	if (ret < 0)
+	/* enable clock, acquire dma */
+	ret = pm_runtime_force_resume(dev);
+	if (ret) {
+		dev_err(this->dev, "Error in resume: %d\n", ret);
 		return ret;
+	}
+
+	pinctrl_pm_select_default_state(dev);
 
 	/* re-init the GPMI registers */
 	ret = gpmi_init(this);
@@ -2068,7 +2387,40 @@ static int gpmi_pm_resume(struct device *dev)
 }
 #endif /* CONFIG_PM_SLEEP */
 
+#define gpmi_enable_clk(x)	__gpmi_enable_clk(x, true)
+#define gpmi_disable_clk(x)	__gpmi_enable_clk(x, false)
+
+int gpmi_runtime_suspend(struct device *dev)
+{
+	struct gpmi_nand_data *this = dev_get_drvdata(dev);
+
+	gpmi_disable_clk(this);
+	release_bus_freq(BUS_FREQ_HIGH);
+	release_dma_channels(this);
+
+	return 0;
+}
+
+int gpmi_runtime_resume(struct device *dev)
+{
+	struct gpmi_nand_data *this = dev_get_drvdata(dev);
+	int ret;
+
+	ret = gpmi_enable_clk(this);
+	if (ret)
+		return ret;
+
+	request_bus_freq(BUS_FREQ_HIGH);
+
+	ret = acquire_dma_channels(this);
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
 static const struct dev_pm_ops gpmi_pm_ops = {
+	SET_RUNTIME_PM_OPS(gpmi_runtime_suspend, gpmi_runtime_resume, NULL)
 	SET_SYSTEM_SLEEP_PM_OPS(gpmi_pm_suspend, gpmi_pm_resume)
 };
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Freescale Semiconductor, Inc.
+ * Copyright 2014-2015 Freescale Semiconductor, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -14,9 +14,30 @@
 #include <linux/mfd/syscon/imx6q-iomuxc-gpr.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
+#include <linux/micrel_phy.h>
 
 #include "common.h"
 #include "cpuidle.h"
+static void mmd_write_reg(struct phy_device *dev, int device, int reg, int val)
+{
+	phy_write(dev, 0x0d, device);
+	phy_write(dev, 0x0e, reg);
+	phy_write(dev, 0x0d, (1 << 14) | device);
+	phy_write(dev, 0x0e, val);
+}
+
+static int ksz9031rn_phy_fixup(struct phy_device *dev)
+{
+	/*
+	 * min rx data delay, max rx/tx clock delay,
+	 * min rx/tx control delay
+	 */
+	mmd_write_reg(dev, 2, 4, 0);
+	mmd_write_reg(dev, 2, 5, 0);
+	mmd_write_reg(dev, 2, 8, 0x003ff);
+
+	return 0;
+}
 
 static int ar8031_phy_fixup(struct phy_device *dev)
 {
@@ -25,6 +46,14 @@ static int ar8031_phy_fixup(struct phy_device *dev)
 	/* Set RGMII IO voltage to 1.8V */
 	phy_write(dev, 0x1d, 0x1f);
 	phy_write(dev, 0x1e, 0x8);
+
+	/* disable phy AR8031 SmartEEE function. */
+	phy_write(dev, 0xd, 0x3);
+	phy_write(dev, 0xe, 0x805d);
+	phy_write(dev, 0xd, 0x4003);
+	val = phy_read(dev, 0xe);
+	val &= ~(0x1 << 8);
+	phy_write(dev, 0xe, val);
 
 	/* introduce tx clock delay */
 	phy_write(dev, 0x1d, 0x5);
@@ -38,9 +67,12 @@ static int ar8031_phy_fixup(struct phy_device *dev)
 #define PHY_ID_AR8031   0x004dd074
 static void __init imx6sx_enet_phy_init(void)
 {
-	if (IS_BUILTIN(CONFIG_PHYLIB))
+	if (IS_BUILTIN(CONFIG_PHYLIB)) {
+		phy_register_fixup_for_uid(PHY_ID_KSZ9031, MICREL_PHY_ID_MASK,
+				ksz9031rn_phy_fixup);
 		phy_register_fixup_for_uid(PHY_ID_AR8031, 0xffffffff,
 					   ar8031_phy_fixup);
+	}
 }
 
 static void __init imx6sx_enet_clk_sel(void)
@@ -60,6 +92,7 @@ static void __init imx6sx_enet_clk_sel(void)
 
 static inline void imx6sx_enet_init(void)
 {
+	imx6_enet_mac_init("fsl,imx6sx-fec", "fsl,imx6sx-ocotp");
 	imx6sx_enet_phy_init();
 	imx6sx_enet_clk_sel();
 }
@@ -91,10 +124,17 @@ static void __init imx6sx_init_irq(void)
 
 static void __init imx6sx_init_late(void)
 {
-	imx6sx_cpuidle_init();
-
 	if (IS_ENABLED(CONFIG_ARM_IMX6Q_CPUFREQ))
 		platform_device_register_simple("imx6q-cpufreq", -1, NULL, 0);
+
+	imx6sx_cpuidle_init();
+}
+
+static void __init imx6sx_map_io(void)
+{
+	debug_ll_io_init();
+	imx6_pm_map_io();
+	imx_busfreq_map_io();
 }
 
 static const char * const imx6sx_dt_compat[] __initconst = {
@@ -105,6 +145,7 @@ static const char * const imx6sx_dt_compat[] __initconst = {
 DT_MACHINE_START(IMX6SX, "Freescale i.MX6 SoloX (Device Tree)")
 	.l2c_aux_val 	= 0,
 	.l2c_aux_mask	= ~0,
+	.map_io		= imx6sx_map_io,
 	.init_irq	= imx6sx_init_irq,
 	.init_machine	= imx6sx_init_machine,
 	.dt_compat	= imx6sx_dt_compat,

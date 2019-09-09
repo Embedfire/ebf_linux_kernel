@@ -222,6 +222,35 @@ config IMX_THERMAL
 	  cpufreq is used as the cooling device to throttle CPUs when the
 	  passive trip is crossed.
 
+config IMX8M_THERMAL
+	tristate "i.MX8M Thermal Monitoring Unit"
+	depends on THERMAL_OF
+	depends on HAS_IOMEM
+	help
+	  Support for Thermal Monitoring Unit (TMU) found on i.MX8M platforms.
+	  It supports one critical trip point and one passive trip point. The
+	  cpufreq is used as the cooling device to throttle CPUs when the
+	  passive trip is crossed.
+
+config IMX8MM_THERMAL
+	tristate "i.MX8MM Thermal Monitor Unit"
+	depends on THERMAL_OF
+	depends on HAS_IOMEM
+	help
+	  Support for Thermal Monitor Unit (TMU) found on i.MX8MM platforms.
+	  It supports one critical trip point and one passive trip point. The
+	  cpufreq is used as the cooling device to throttle CPUs when the
+	  passive trip is crossed.
+
+config IMX_SC_THERMAL
+	tristate "thermal sensor driver for NXP i.MX8 SoCs"
+	depends on THERMAL_OF && HAVE_IMX_SC
+	help
+	  Support for Temperature Monitor (TEMPMON) found on NXP i.MX SOCs
+	  with system controller.
+	  cpufreq is used as the cooling device to throttle CPUs when the
+	  passive trip is crossed.
+
 config MAX77620_THERMAL
 	tristate "Temperature sensor driver for Maxim MAX77620 PMIC"
 	depends on MFD_MAX77620
@@ -241,6 +270,13 @@ config QORIQ_THERMAL
 	  It supports one critical trip point and one passive trip point. The
 	  cpufreq is used as the cooling device to throttle CPUs when the
 	  passive trip is crossed.
+
+config DEVICE_THERMAL
+	tristate "generic device cooling support"
+	help
+	  Support for device cooling.
+	  It supports notification of crossing passive trip for devices,
+	  devices need to do their own actions to cool down the SOC.
 
 config SPEAR_THERMAL
 	tristate "SPEAr thermal sensor driver"

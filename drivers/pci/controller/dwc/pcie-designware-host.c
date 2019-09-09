@@ -124,15 +124,12 @@ static void dw_pci_setup_msi_msg(struct irq_data *data, struct msi_msg *msg)
 {
 	struct pcie_port *pp = irq_data_get_irq_chip_data(data);
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
-	u64 msi_target;
 
 	if (pp->ops->get_msi_addr)
-		msi_target = pp->ops->get_msi_addr(pp);
-	else
-		msi_target = (u64)pp->msi_data;
+		pp->msi_target = pp->ops->get_msi_addr(pp);
 
-	msg->address_lo = lower_32_bits(msi_target);
-	msg->address_hi = upper_32_bits(msi_target);
+	msg->address_lo = lower_32_bits(pp->msi_target);
+	msg->address_hi = upper_32_bits(pp->msi_target);
 
 	if (pp->ops->get_msi_data)
 		msg->data = pp->ops->get_msi_data(pp, data->hwirq);
@@ -327,9 +324,30 @@ void dw_pcie_msi_init(struct pcie_port *pp)
 
 	/* Program the msi_data */
 	dw_pcie_wr_own_conf(pp, PCIE_MSI_ADDR_LO, 4,
-			    lower_32_bits(msi_target));
+			    lower_32_bits(pp->msi_target));
 	dw_pcie_wr_own_conf(pp, PCIE_MSI_ADDR_HI, 4,
-			    upper_32_bits(msi_target));
+			    upper_32_bits(pp->msi_target));
+}
+
+void dw_pcie_msi_cfg_store(struct pcie_port *pp)
+{
+	int i;
+
+	for (i = 0; i < MAX_MSI_CTRLS; i++)
+		dw_pcie_rd_own_conf(pp, PCIE_MSI_INTR0_ENABLE + i * 12, 4,
+				    &pp->msi_enable[i]);
+}
+
+void dw_pcie_msi_cfg_restore(struct pcie_port *pp)
+{
+	int i;
+
+	for (i = 0; i < MAX_MSI_CTRLS; i++) {
+		dw_pcie_wr_own_conf(pp, PCIE_MSI_ADDR_LO, 4, pp->msi_target);
+		dw_pcie_wr_own_conf(pp, PCIE_MSI_ADDR_HI, 4, 0);
+		dw_pcie_wr_own_conf(pp, PCIE_MSI_INTR0_ENABLE + i * 12, 4,
+				    pp->msi_enable[i]);
+	}
 }
 
 int dw_pcie_host_init(struct pcie_port *pp)
@@ -717,9 +735,11 @@ void dw_pcie_setup_rc(struct pcie_port *pp)
 		dev_dbg(pci->dev, "iATU unroll: %s\n",
 			pci->iatu_unroll_enabled ? "enabled" : "disabled");
 
-		dw_pcie_prog_outbound_atu(pci, PCIE_ATU_REGION_INDEX0,
-					  PCIE_ATU_TYPE_MEM, pp->mem_base,
-					  pp->mem_bus_addr, pp->mem_size);
+		if (!IS_ENABLED(CONFIG_EP_MODE_IN_EP_RC_SYS)
+				&& !IS_ENABLED(CONFIG_RC_MODE_IN_EP_RC_SYS))
+			dw_pcie_prog_outbound_atu(pci, PCIE_ATU_REGION_INDEX0,
+						  PCIE_ATU_TYPE_MEM, pp->mem_base,
+						  pp->mem_bus_addr, pp->mem_size);
 		if (pci->num_viewport > 2)
 			dw_pcie_prog_outbound_atu(pci, PCIE_ATU_REGION_INDEX2,
 						  PCIE_ATU_TYPE_IO, pp->io_base,

@@ -4,6 +4,7 @@
  *
  * Copyright (C) 2012 Freescale Semiconductor, Inc.
  * Copyright (C) 2012 Linaro Ltd.
+ * Copyright 2017 NXP
  *
  * Author: Dong Aisheng <dong.aisheng@linaro.org>
  */
@@ -27,12 +28,24 @@ extern struct pinmux_ops imx_pmx_ops;
  * @input_val: the select input value for this pin.
  * @configs: the config for this pin.
  */
-struct imx_pin {
-	unsigned int pin;
+struct imx_pin_memmap {
 	unsigned int mux_mode;
 	u16 input_reg;
 	unsigned int input_val;
 	unsigned long config;
+};
+
+struct imx_pin_scu {
+	unsigned long mux;
+	unsigned long config;
+};
+
+struct imx_pin {
+	unsigned int pin;
+	union {
+		struct imx_pin_memmap pin_memmap;
+		struct imx_pin_scu pin_scu;
+	} pin_conf;
 };
 
 /**
@@ -62,6 +75,8 @@ struct imx_pinctrl_soc_info {
 	/* MUX_MODE shift and mask in case SHARE_MUX_CONF_REG */
 	unsigned int mux_mask;
 	u8 mux_shift;
+	u32 ibe_bit;
+	u32 obe_bit;
 
 	/* generic pinconf */
 	bool generic_pinconf;
@@ -101,6 +116,12 @@ struct imx_pinctrl {
 
 #define SHARE_MUX_CONF_REG	0x1
 #define ZERO_OFFSET_VALID	0x2
+#define IMX8_ENABLE_MUX_CONFIG	(1 << 29)
+#define IMX8_ENABLE_PAD_CONFIG	(1 << 30)
+#define IMX8_USE_SCU		(1 << 31)
+
+#define BM_IMX8_GP_ENABLE	(1 << 30)
+#define BM_IMX8_IFMUX_ENABLE	(1 << 31)
 
 #define NO_MUX		0x0
 #define NO_PAD		0x0
@@ -113,4 +134,71 @@ struct imx_pinctrl {
 
 int imx_pinctrl_probe(struct platform_device *pdev,
 			const struct imx_pinctrl_soc_info *info);
+int imx_pinctrl_suspend(struct device *dev);
+int imx_pinctrl_resume(struct device *dev);
+
+#ifdef CONFIG_PINCTRL_IMX_MEMMAP
+int imx_pmx_set_one_pin_mem(struct imx_pinctrl *ipctl, struct imx_pin *pin);
+int imx_pinconf_backend_get_mem(struct pinctrl_dev *pctldev, unsigned pin_id,
+		unsigned long *config);
+int imx_pinconf_backend_set_mem(struct pinctrl_dev *pctldev, unsigned pin_id,
+		unsigned long *configs, unsigned num_configs);
+int imx_pinctrl_parse_pin_mem(struct imx_pinctrl *ipctl,
+		unsigned int *pin_id, struct imx_pin *pin, const __be32 **list_p,
+		u32 generic_config);
+#else
+static inline int imx_pmx_set_one_pin_mem(struct imx_pinctrl *ipctl, struct imx_pin *pin)
+{
+	return 0;
+}
+static inline int imx_pinconf_backend_get_mem(struct pinctrl_dev *pctldev, unsigned pin_id,
+		unsigned long *config)
+{
+	return 0;
+}
+static inline int imx_pinconf_backend_set_mem(struct pinctrl_dev *pctldev, unsigned pin_id,
+		unsigned long *configs, unsigned num_configs)
+{
+	return 0;
+}
+static inline int imx_pinctrl_parse_pin_mem(struct imx_pinctrl *ipctl,
+		unsigned int *pin_id, struct imx_pin *pin, const __be32 **list_p,
+		u32 generic_config)
+{
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_PINCTRL_IMX_SCU
+int imx_pmx_set_one_pin_scu(struct imx_pinctrl *ipctl, struct imx_pin *pin);
+int imx_pinconf_backend_get_scu(struct pinctrl_dev *pctldev, unsigned pin_id,
+		unsigned long *config);
+int imx_pinconf_backend_set_scu(struct pinctrl_dev *pctldev, unsigned pin_id,
+		unsigned long *configs, unsigned num_configs);
+int imx_pinctrl_parse_pin_scu(struct imx_pinctrl *ipctl,
+		unsigned int *pin_id, struct imx_pin *pin, const __be32 **list_p,
+		u32 generic_config);
+#else
+static inline int imx_pmx_set_one_pin_scu(struct imx_pinctrl *ipctl, struct imx_pin *pin)
+{
+	return 0;
+}
+static inline int imx_pinconf_backend_get_scu(struct pinctrl_dev *pctldev, unsigned pin_id,
+		unsigned long *config)
+{
+	return 0;
+}
+static inline int imx_pinconf_backend_set_scu(struct pinctrl_dev *pctldev, unsigned pin_id,
+		unsigned long *configs, unsigned num_configs)
+{
+	return 0;
+}
+static inline int imx_pinctrl_parse_pin_scu(struct imx_pinctrl *ipctl,
+		unsigned int *pin_id, struct imx_pin *pin, const __be32 **list_p,
+		u32 generic_config)
+{
+	return 0;
+}
+#endif
+
 #endif /* __DRIVERS_PINCTRL_IMX_H */

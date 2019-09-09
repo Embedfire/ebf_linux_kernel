@@ -22,7 +22,7 @@ void caam_dump_sg(const char *level, const char *prefix_str, int prefix_type,
 	size_t len;
 	void *buf;
 
-	for (it = sg; it && tlen > 0 ; it = sg_next(sg)) {
+	for (it = sg; it && tlen > 0 ; it = sg_next(it)) {
 		/*
 		 * make sure the scatterlist's page
 		 * has a valid virtual memory mapping
@@ -155,6 +155,20 @@ static const char * const rng_err_id_list[] = {
 	"Uninstantiate",
 	"Secure key generation",
 };
+
+#define SPRINTFCAT(str, format, param, max_alloc)		\
+{								\
+	char *tmp;						\
+								\
+	tmp = kmalloc(sizeof(format) + max_alloc, GFP_ATOMIC);	\
+	if (likely(tmp)) {					\
+		sprintf(tmp, format, param);			\
+		strcat(str, tmp);				\
+		kfree(tmp);					\
+	} else {						\
+		strcat(str, "kmalloc failure in SPRINTFCAT");	\
+	}							\
+}
 
 static void report_ccb_status(struct device *jrdev, const u32 status,
 			      const char *error)

@@ -23,6 +23,7 @@
 #include <linux/usbdevice_fs.h>
 #include <linux/usb/hcd.h>
 #include <linux/usb/otg.h>
+#include <linux/usb/otg-fsm.h>
 #include <linux/usb/quirks.h>
 #include <linux/workqueue.h>
 #include <linux/mutex.h>
@@ -1126,6 +1127,10 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 			need_debounce_delay = true;
 			usb_clear_port_feature(hub->hdev, port1,
 					USB_PORT_FEAT_C_CONNECTION);
+#ifdef CONFIG_USB_OTG
+			if (hdev->bus->is_b_host)
+				usb_bus_start_enum(hdev->bus, port1);
+#endif
 		}
 		if (portchange & USB_PORT_STAT_C_ENABLE) {
 			need_debounce_delay = true;
@@ -2242,9 +2247,9 @@ static inline void announce_device(struct usb_device *udev) { }
  */
 static int usb_enumerate_device_otg(struct usb_device *udev)
 {
+#ifdef	CONFIG_USB_OTG
 	int err = 0;
 
-#ifdef	CONFIG_USB_OTG
 	/*
 	 * OTG-aware devices on OTG-capable root hubs may be able to use SRP,
 	 * to wake us after we've powered off VBUS; and HNP, switching roles
@@ -2285,6 +2290,12 @@ static int usb_enumerate_device_otg(struct usb_device *udev)
 									err);
 				bus->b_hnp_enable = 0;
 			}
+
+			if (bus->otg_fsm) {
+				bus->otg_fsm->b_hnp_enable = 1;
+				if (bus->b_hnp_enable)
+					bus->otg_fsm->a_set_b_hnp_en = 1;
+			}
 		} else if (desc->bLength == sizeof
 				(struct usb_otg_descriptor)) {
 			/* Set a_alt_hnp_support for legacy otg device */
@@ -2301,7 +2312,7 @@ static int usb_enumerate_device_otg(struct usb_device *udev)
 		}
 	}
 #endif
-	return err;
+	return 0;
 }
 
 
@@ -2323,6 +2334,7 @@ static int usb_enumerate_device(struct usb_device *udev)
 {
 	int err;
 	struct usb_hcd *hcd = bus_to_hcd(udev->bus);
+	struct otg_fsm *fsm = udev->bus->otg_fsm;
 
 	if (udev->config == NULL) {
 		err = usb_get_configuration(udev);
@@ -2354,8 +2366,10 @@ static int usb_enumerate_device(struct usb_device *udev)
 			err = usb_port_suspend(udev, PMSG_AUTO_SUSPEND);
 			if (err < 0)
 				dev_dbg(&udev->dev, "HNP fail, %d\n", err);
+			return -ENOTSUPP;
+		} else if (!fsm || !fsm->b_hnp_enable || !fsm->hnp_polling) {
+			return -ENOTSUPP;
 		}
-		return -ENOTSUPP;
 	}
 
 	usb_detect_interface_quirks(udev);
@@ -4662,7 +4676,8 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
 			}
 			if (r) {
 				if (r != -ENODEV)
-					dev_err(&udev->dev, "device descriptor read/64, error %d\n",
+					dev_err(&udev->dev,
+						"device no response, device descriptor read/64, error %d\n",
 							r);
 				retval = -EMSGSIZE;
 				continue;

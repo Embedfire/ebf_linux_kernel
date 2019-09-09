@@ -1164,7 +1164,7 @@ static int set_machine_constraints(struct regulator_dev *rdev,
 		}
 	}
 
-	if ((rdev->constraints->ramp_delay || rdev->constraints->ramp_disable)
+	if ((rdev->constraints->ramp_delay && !rdev->constraints->ramp_disable)
 		&& ops->set_ramp_delay) {
 		ret = ops->set_ramp_delay(rdev, rdev->constraints->ramp_delay);
 		if (ret < 0) {
@@ -2157,6 +2157,7 @@ static int _regulator_do_enable(struct regulator_dev *rdev)
 {
 	int ret, delay;
 
+	_notifier_call_chain(rdev, REGULATOR_EVENT_PRE_DO_ENABLE, NULL);
 	/* Query before enabling in case configuration dependent.  */
 	ret = _regulator_get_enable_time(rdev);
 	if (ret >= 0) {
@@ -2216,6 +2217,7 @@ static int _regulator_do_enable(struct regulator_dev *rdev)
 	_regulator_enable_delay(delay);
 
 	trace_regulator_enable_complete(rdev_get_name(rdev));
+	_notifier_call_chain(rdev, REGULATOR_EVENT_AFT_DO_ENABLE, NULL);
 
 	return 0;
 }
@@ -2297,6 +2299,7 @@ static int _regulator_do_disable(struct regulator_dev *rdev)
 {
 	int ret;
 
+	_notifier_call_chain(rdev, REGULATOR_EVENT_PRE_DO_DISABLE, NULL);
 	trace_regulator_disable(rdev_get_name(rdev));
 
 	if (rdev->ena_pin) {
@@ -2783,6 +2786,11 @@ static int regulator_map_voltage(struct regulator_dev *rdev, int min_uV,
 	if (desc->ops->list_voltage == regulator_list_voltage_linear_range)
 		return regulator_map_voltage_linear_range(rdev, min_uV, max_uV);
 
+	if (desc->ops->list_voltage ==
+		regulator_list_voltage_pickable_linear_range)
+		return regulator_map_voltage_pickable_linear_range(rdev,
+							min_uV, max_uV);
+
 	return regulator_map_voltage_iterate(rdev, min_uV, max_uV);
 }
 
@@ -2994,6 +3002,35 @@ static int _regulator_do_set_suspend_voltage(struct regulator_dev *rdev,
 	return 0;
 }
 
+static bool _regulator_is_bypass(struct regulator_dev *rdev)
+{
+	bool bypassed = false;
+
+	if (rdev->desc->ops->get_bypass)
+		rdev->desc->ops->get_bypass(rdev, &bypassed);
+
+	return bypassed;
+}
+
+static inline bool _regulator_should_adjust_supply(struct regulator_dev *rdev)
+{
+	/* Check for adjustable supply */
+	if (!rdev->supply)
+		return false;
+	if (!regulator_ops_is_valid(rdev->supply->rdev, REGULATOR_CHANGE_VOLTAGE))
+		return false;
+
+	/* Check for need to adjust supply */
+	if (rdev->desc->min_dropout_uV)
+		return true;
+	if (_regulator_is_bypass(rdev))
+		return true;
+	if (!(rdev->desc->ops->get_voltage || rdev->desc->ops->get_voltage_sel))
+		return true;
+
+	return false;
+}
+
 static int regulator_set_voltage_unlocked(struct regulator *regulator,
 					  int min_uV, int max_uV,
 					  suspend_state_t state)
@@ -3048,11 +3085,7 @@ static int regulator_set_voltage_unlocked(struct regulator *regulator,
 	if (ret < 0)
 		goto out2;
 
-	if (rdev->supply &&
-	    regulator_ops_is_valid(rdev->supply->rdev,
-				   REGULATOR_CHANGE_VOLTAGE) &&
-	    (rdev->desc->min_dropout_uV || !(rdev->desc->ops->get_voltage ||
-					   rdev->desc->ops->get_voltage_sel))) {
+	if (_regulator_should_adjust_supply(rdev)) {
 		int current_supply_uV;
 		int selector;
 

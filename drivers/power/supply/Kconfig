@@ -391,6 +391,12 @@ config CHARGER_PCF50633
 	help
 	 Say Y to include support for NXP PCF50633 Main Battery Charger.
 
+config CHARGER_PF1550
+	tristate "Freescale PF1550 battery charger driver"
+	depends on MFD_PF1550
+	help
+	 Say Y to enable support for the Freescale PF1550 battery charger.
+
 config BATTERY_JZ4740
 	tristate "Ingenic JZ4740 battery"
 	depends on MACH_JZ4740
@@ -425,6 +431,14 @@ config CHARGER_ISP1704
 	help
 	  Say Y to enable support for USB Charger Detection with
 	  ISP1707/ISP1704 USB transceivers.
+
+config SABRESD_MAX8903
+       tristate "Sabresd Board Battery DC-DC Charger for USB and Adapter Power"
+       depends on TOUCHSCREEN_MAX11801
+       help
+         Say Y to enable support for the MAX8903 DC-DC charger and sysfs on
+         sabresd board.The driver supports controlling charger and battery
+         based on the status of charger connections with interrupt handlers.
 
 config CHARGER_MAX8903
 	tristate "MAX8903 Battery DC-DC Charger for USB and Adapter Power"

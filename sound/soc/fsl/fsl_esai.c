@@ -1,24 +1,40 @@
-// SPDX-License-Identifier: GPL-2.0
-//
-// Freescale ESAI ALSA SoC Digital Audio Interface (DAI) driver
-//
-// Copyright (C) 2014 Freescale Semiconductor, Inc.
+/*
+ * Freescale ESAI ALSA SoC Digital Audio Interface (DAI) driver
+ *
+ * Copyright (C) 2014-2016 Freescale Semiconductor, Inc.
+ * Copyright 2017 NXP
+ *
+ * This file is licensed under the terms of the GNU General Public License
+ * version 2. This program is licensed "as is" without any warranty of any
+ * kind, whether express or implied.
+ */
 
 #include <linux/clk.h>
 #include <linux/dmaengine.h>
 #include <linux/module.h>
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
+#include <linux/dma-mapping.h>
+#include <linux/dmapool.h>
+#include <linux/pm_runtime.h>
 #include <sound/dmaengine_pcm.h>
 #include <sound/pcm_params.h>
 
 #include "fsl_esai.h"
 #include "imx-pcm.h"
+#include "fsl_dma_workaround.h"
 
 #define FSL_ESAI_FORMATS	(SNDRV_PCM_FMTBIT_S8 | \
 				SNDRV_PCM_FMTBIT_S16_LE | \
 				SNDRV_PCM_FMTBIT_S20_3LE | \
 				SNDRV_PCM_FMTBIT_S24_LE)
+
+struct fsl_esai_soc_data {
+	bool imx;
+	bool dma_workaround;
+	bool channel_swap_workaround;
+	bool constrain_period_size;
+};
 
 /**
  * fsl_esai: ESAI private data
@@ -45,12 +61,15 @@
 struct fsl_esai {
 	struct snd_dmaengine_dai_dma_data dma_params_rx;
 	struct snd_dmaengine_dai_dma_data dma_params_tx;
+	struct snd_pcm_substream *substream[2];
 	struct platform_device *pdev;
 	struct regmap *regmap;
 	struct clk *coreclk;
 	struct clk *extalclk;
 	struct clk *fsysclk;
 	struct clk *spbaclk;
+	const struct fsl_esai_soc_data *soc;
+	struct fsl_dma_workaround_info *dma_info;
 	u32 fifo_depth;
 	u32 slot_width;
 	u32 slots;
@@ -60,9 +79,48 @@ struct fsl_esai {
 	u32 sck_rate[2];
 	bool hck_dir[2];
 	bool sck_div[2];
-	bool slave_mode;
+	bool slave_mode[2];
 	bool synchronous;
 	char name[32];
+};
+
+static struct fsl_esai_soc_data fsl_esai_vf610 = {
+	.imx = false,
+	.dma_workaround = false,
+	.channel_swap_workaround = true,
+	.constrain_period_size = false,
+};
+
+static struct fsl_esai_soc_data fsl_esai_imx35 = {
+	.imx = true,
+	.dma_workaround = false,
+	.channel_swap_workaround = true,
+	.constrain_period_size = false,
+};
+
+static struct fsl_esai_soc_data fsl_esai_imx6ull = {
+	.imx = true,
+	.dma_workaround = false,
+	.channel_swap_workaround = false,
+	.constrain_period_size = false,
+};
+
+/* In imx8qxp rev1, the dma request signal is not revert. For esai
+ * dma request is low valid, but edma assert it as high level valid.
+ * so we need to use GPT to transfer the dma request signal.
+ */
+static struct fsl_esai_soc_data fsl_esai_imx8qxp_v1 = {
+	.imx = true,
+	.dma_workaround = true,
+	.channel_swap_workaround = false,
+	.constrain_period_size = true,
+};
+
+static struct fsl_esai_soc_data fsl_esai_imx8qm = {
+	.imx = true,
+	.dma_workaround = false,
+	.channel_swap_workaround = false,
+	.constrain_period_size = true,
 };
 
 static irqreturn_t esai_isr(int irq, void *devid)
@@ -169,7 +227,7 @@ static int fsl_esai_divisor_cal(struct snd_soc_dai *dai, bool tx, u32 ratio,
 
 			/* Calculate the fraction */
 			sub = sub * 1000 / ratio;
-			if (sub < savesub) {
+			if (sub <= savesub) {
 				savesub = sub;
 				pm = i;
 				fp = j;
@@ -224,10 +282,19 @@ static int fsl_esai_set_dai_sysclk(struct snd_soc_dai *dai, int clk_id,
 	unsigned long clk_rate;
 	int ret;
 
-	if (freq == 0) {
-		dev_err(dai->dev, "%sput freq of HCK%c should not be 0Hz\n",
-			in ? "in" : "out", tx ? 'T' : 'R');
-		return -EINVAL;
+	if (esai_priv->synchronous && !tx) {
+		switch (clk_id) {
+		case ESAI_HCKR_FSYS:
+			fsl_esai_set_dai_sysclk(dai, ESAI_HCKT_FSYS,
+								freq, dir);
+			break;
+		case ESAI_HCKR_EXTAL:
+			fsl_esai_set_dai_sysclk(dai, ESAI_HCKT_EXTAL,
+								freq, dir);
+			break;
+		default:
+			return -EINVAL;
+		}
 	}
 
 	/* Bypass divider settings if the requirement doesn't change */
@@ -321,7 +388,7 @@ static int fsl_esai_set_bclk(struct snd_soc_dai *dai, bool tx, u32 freq)
 	int ret;
 
 	/* Don't apply for fully slave mode or unchanged bclk */
-	if (esai_priv->slave_mode || esai_priv->sck_rate[tx] == freq)
+	if (esai_priv->slave_mode[tx] || esai_priv->sck_rate[tx] == freq)
 		return 0;
 
 	if (ratio * freq > hck_rate)
@@ -430,34 +497,61 @@ static int fsl_esai_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 		return -EINVAL;
 	}
 
-	esai_priv->slave_mode = false;
+	if (esai_priv->slave_mode[0] == esai_priv->slave_mode[1]) {
+		/* DAI clock master masks */
+		switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+		case SND_SOC_DAIFMT_CBM_CFM:
+			esai_priv->slave_mode[0] = true;
+			esai_priv->slave_mode[1] = true;
+			break;
+		case SND_SOC_DAIFMT_CBS_CFM:
+			xccr |= ESAI_xCCR_xCKD;
+			break;
+		case SND_SOC_DAIFMT_CBM_CFS:
+			xccr |= ESAI_xCCR_xFSD;
+			break;
+		case SND_SOC_DAIFMT_CBS_CFS:
+			xccr |= ESAI_xCCR_xFSD | ESAI_xCCR_xCKD;
+			esai_priv->slave_mode[0] = false;
+			esai_priv->slave_mode[1] = false;
+			break;
+		default:
+			return -EINVAL;
+		}
 
-	/* DAI clock master masks */
-	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
-		esai_priv->slave_mode = true;
-		break;
-	case SND_SOC_DAIFMT_CBS_CFM:
-		xccr |= ESAI_xCCR_xCKD;
-		break;
-	case SND_SOC_DAIFMT_CBM_CFS:
-		xccr |= ESAI_xCCR_xFSD;
-		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
-		xccr |= ESAI_xCCR_xFSD | ESAI_xCCR_xCKD;
-		break;
-	default:
-		return -EINVAL;
+		mask = ESAI_xCCR_xCKP | ESAI_xCCR_xHCKP | ESAI_xCCR_xFSP |
+			ESAI_xCCR_xFSD | ESAI_xCCR_xCKD;
+		regmap_update_bits(esai_priv->regmap,
+					REG_ESAI_TCCR, mask, xccr);
+		regmap_update_bits(esai_priv->regmap,
+					REG_ESAI_RCCR, mask, xccr);
+
+	} else {
+
+		mask = ESAI_xCCR_xCKP | ESAI_xCCR_xHCKP | ESAI_xCCR_xFSP |
+			ESAI_xCCR_xFSD | ESAI_xCCR_xCKD;
+		if (esai_priv->slave_mode[0])
+			regmap_update_bits(esai_priv->regmap,
+					REG_ESAI_RCCR, mask, xccr);
+		else
+			regmap_update_bits(esai_priv->regmap, REG_ESAI_RCCR,
+						mask,
+						xccr | ESAI_xCCR_xFSD |
+							ESAI_xCCR_xCKD);
+
+		if (esai_priv->slave_mode[1])
+			regmap_update_bits(esai_priv->regmap,
+						REG_ESAI_TCCR, mask, xccr);
+		else
+			regmap_update_bits(esai_priv->regmap, REG_ESAI_TCCR,
+						mask,
+						xccr | ESAI_xCCR_xFSD |
+							ESAI_xCCR_xCKD);
 	}
 
 	mask = ESAI_xCR_xFSL | ESAI_xCR_xFSR | ESAI_xCR_xWA;
 	regmap_update_bits(esai_priv->regmap, REG_ESAI_TCR, mask, xcr);
 	regmap_update_bits(esai_priv->regmap, REG_ESAI_RCR, mask, xcr);
-
-	mask = ESAI_xCCR_xCKP | ESAI_xCCR_xHCKP | ESAI_xCCR_xFSP |
-		ESAI_xCCR_xFSD | ESAI_xCCR_xCKD;
-	regmap_update_bits(esai_priv->regmap, REG_ESAI_TCCR, mask, xccr);
-	regmap_update_bits(esai_priv->regmap, REG_ESAI_RCCR, mask, xccr);
 
 	return 0;
 }
@@ -466,30 +560,8 @@ static int fsl_esai_startup(struct snd_pcm_substream *substream,
 			    struct snd_soc_dai *dai)
 {
 	struct fsl_esai *esai_priv = snd_soc_dai_get_drvdata(dai);
-	int ret;
-
-	/*
-	 * Some platforms might use the same bit to gate all three or two of
-	 * clocks, so keep all clocks open/close at the same time for safety
-	 */
-	ret = clk_prepare_enable(esai_priv->coreclk);
-	if (ret)
-		return ret;
-	if (!IS_ERR(esai_priv->spbaclk)) {
-		ret = clk_prepare_enable(esai_priv->spbaclk);
-		if (ret)
-			goto err_spbaclk;
-	}
-	if (!IS_ERR(esai_priv->extalclk)) {
-		ret = clk_prepare_enable(esai_priv->extalclk);
-		if (ret)
-			goto err_extalck;
-	}
-	if (!IS_ERR(esai_priv->fsysclk)) {
-		ret = clk_prepare_enable(esai_priv->fsysclk);
-		if (ret)
-			goto err_fsysclk;
-	}
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	bool tx = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
 
 	if (!dai->active) {
 		/* Set synchronous mode */
@@ -504,18 +576,30 @@ static int fsl_esai_startup(struct snd_pcm_substream *substream,
 				   ESAI_xCCR_xDC_MASK, ESAI_xCCR_xDC(2));
 	}
 
+	esai_priv->substream[substream->stream] = substream;
+
+	if (esai_priv->soc->constrain_period_size) {
+		if (tx)
+			snd_pcm_hw_constraint_step(substream->runtime, 0,
+				SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+				esai_priv->dma_params_tx.maxburst);
+		else
+			snd_pcm_hw_constraint_step(substream->runtime, 0,
+				SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+				esai_priv->dma_params_rx.maxburst);
+	}
+
+	if (esai_priv->soc->dma_workaround) {
+		snd_pcm_hw_constraint_minmax(substream->runtime,
+				SNDRV_PCM_HW_PARAM_CHANNELS, 1, 2);
+
+		if (!rtd->dai_link->be_hw_params_fixup)
+			snd_pcm_hw_constraint_minmax(substream->runtime,
+				SNDRV_PCM_HW_PARAM_RATE, 48000, 48000);
+	}
+
 	return 0;
 
-err_fsysclk:
-	if (!IS_ERR(esai_priv->extalclk))
-		clk_disable_unprepare(esai_priv->extalclk);
-err_extalck:
-	if (!IS_ERR(esai_priv->spbaclk))
-		clk_disable_unprepare(esai_priv->spbaclk);
-err_spbaclk:
-	clk_disable_unprepare(esai_priv->coreclk);
-
-	return ret;
 }
 
 static int fsl_esai_hw_params(struct snd_pcm_substream *substream,
@@ -531,15 +615,29 @@ static int fsl_esai_hw_params(struct snd_pcm_substream *substream,
 	u32 bclk, mask, val;
 	int ret;
 
+	if (esai_priv->soc->dma_workaround)
+		configure_gpt_dma(substream, esai_priv->dma_info);
+
 	/* Override slot_width if being specifically set */
 	if (esai_priv->slot_width)
 		slot_width = esai_priv->slot_width;
 
 	bclk = params_rate(params) * slot_width * esai_priv->slots;
 
-	ret = fsl_esai_set_bclk(dai, tx, bclk);
+	ret = fsl_esai_set_bclk(dai, esai_priv->synchronous ? true : tx, bclk);
 	if (ret)
 		return ret;
+
+	if (esai_priv->synchronous && !tx) {
+		/* Use Normal mode to support monaural audio */
+		regmap_update_bits(esai_priv->regmap, REG_ESAI_TCR,
+			   ESAI_xCR_xMOD_MASK, params_channels(params) > 1 ?
+			   ESAI_xCR_xMOD_NETWORK : 0);
+
+		mask = ESAI_xCR_xSWS_MASK | ESAI_xCR_PADC;
+		val = ESAI_xCR_xSWS(slot_width, width) | ESAI_xCR_PADC;
+		regmap_update_bits(esai_priv->regmap, REG_ESAI_TCR, mask, val);
+	}
 
 	/* Use Normal mode to support monaural audio */
 	regmap_update_bits(esai_priv->regmap, REG_ESAI_xCR(tx),
@@ -574,13 +672,8 @@ static void fsl_esai_shutdown(struct snd_pcm_substream *substream,
 {
 	struct fsl_esai *esai_priv = snd_soc_dai_get_drvdata(dai);
 
-	if (!IS_ERR(esai_priv->fsysclk))
-		clk_disable_unprepare(esai_priv->fsysclk);
-	if (!IS_ERR(esai_priv->extalclk))
-		clk_disable_unprepare(esai_priv->extalclk);
-	if (!IS_ERR(esai_priv->spbaclk))
-		clk_disable_unprepare(esai_priv->spbaclk);
-	clk_disable_unprepare(esai_priv->coreclk);
+	esai_priv->substream[substream->stream] = NULL;
+
 }
 
 static int fsl_esai_trigger(struct snd_pcm_substream *substream, int cmd,
@@ -812,14 +905,104 @@ static const struct regmap_config fsl_esai_regmap_config = {
 	.cache_type = REGCACHE_FLAT,
 };
 
+static bool fsl_esai_check_xrun(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct fsl_esai *esai_priv = snd_soc_dai_get_drvdata(cpu_dai);
+	u32 saisr;
+
+	regmap_read(esai_priv->regmap, REG_ESAI_SAISR, &saisr);
+
+	return saisr & (ESAI_SAISR_TUE | ESAI_SAISR_ROE) ;
+}
+
+/*
+ *Here is ESAI underrun reset step:
+ *1. Read "TUE" and got TUE=1
+ *2. stop DMA.
+ *3. stop ESAI TX section.
+ *4. Set the transmitter section individual reset "TPR=1"
+ *5. Reset the ESAI Transmit FIFO (set ESAI_TFCR[1]=1).
+ *6. Config the control registers ESAI_TCCR and ESAI_TCR.config the Transmit FIFO register.
+ *7. clear "TPR"
+ *8. read "TUE"
+ *9. Prefill ESAI TX FIFO.
+ *10.Start DMA.
+ *11 Enable the ESAI
+ */
+static void fsl_esai_reset(struct snd_pcm_substream *substream, bool stop)
+{
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct fsl_esai *esai_priv = snd_soc_dai_get_drvdata(cpu_dai);
+	unsigned long flags = 0;
+	u32 saisr;
+
+	if (stop)
+		imx_stop_lock_pcm_streams(esai_priv->substream, 2, &flags);
+
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_ECR,
+				ESAI_ECR_ESAIEN_MASK | ESAI_ECR_ERST_MASK,
+				ESAI_ECR_ESAIEN | ESAI_ECR_ERST);
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_ECR,
+				ESAI_ECR_ESAIEN_MASK | ESAI_ECR_ERST_MASK,
+				ESAI_ECR_ESAIEN);
+
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_TCR, ESAI_xCR_xPR_MASK, ESAI_xCR_xPR);
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_RCR, ESAI_xCR_xPR_MASK, ESAI_xCR_xPR);
+
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_PRRC, ESAI_PRRC_PDC_MASK, 0);
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_PCRC, ESAI_PCRC_PC_MASK, 0);
+
+	/*
+	 * Add fifo reset here, because the regcache_sync will write one more data to ETDR.
+	 * Which will cause channel shift.
+	 */
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_TFCR, ESAI_xFCR_xFR_MASK, ESAI_xFCR_xFR);
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_RFCR, ESAI_xFCR_xFR_MASK, ESAI_xFCR_xFR);
+
+	regcache_mark_dirty(esai_priv->regmap);
+	regcache_sync(esai_priv->regmap);
+
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_TFCR, ESAI_xFCR_xFR_MASK, 0);
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_RFCR, ESAI_xFCR_xFR_MASK, 0);
+
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_TCR, ESAI_xCR_xPR_MASK, 0);
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_RCR, ESAI_xCR_xPR_MASK, 0);
+
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_PRRC,
+				   ESAI_PRRC_PDC_MASK, ESAI_PRRC_PDC(ESAI_GPIO));
+	regmap_update_bits(esai_priv->regmap, REG_ESAI_PCRC,
+				   ESAI_PCRC_PC_MASK, ESAI_PCRC_PC(ESAI_GPIO));
+
+	regmap_read(esai_priv->regmap, REG_ESAI_SAISR, &saisr);
+
+	if (stop)
+		imx_start_unlock_pcm_streams(esai_priv->substream, 2, &flags);
+}
+
+static const struct of_device_id fsl_esai_dt_ids[] = {
+	{ .compatible = "fsl,imx8qxp-v1-esai", .data = &fsl_esai_imx8qxp_v1 },
+	{ .compatible = "fsl,imx8qm-esai", .data = &fsl_esai_imx8qm },
+	{ .compatible = "fsl,imx6ull-esai", .data = &fsl_esai_imx6ull },
+	{ .compatible = "fsl,imx35-esai", .data = &fsl_esai_imx35 },
+	{ .compatible = "fsl,vf610-esai", .data = &fsl_esai_vf610 },
+	{}
+};
+MODULE_DEVICE_TABLE(of, fsl_esai_dt_ids);
+
 static int fsl_esai_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
+	const struct of_device_id *of_id;
 	struct fsl_esai *esai_priv;
 	struct resource *res;
 	const __be32 *iprop;
 	void __iomem *regs;
 	int irq, ret;
+	u32 buffer_size;
+	unsigned long irqflag = 0;
 
 	esai_priv = devm_kzalloc(&pdev->dev, sizeof(*esai_priv), GFP_KERNEL);
 	if (!esai_priv)
@@ -827,6 +1010,12 @@ static int fsl_esai_probe(struct platform_device *pdev)
 
 	esai_priv->pdev = pdev;
 	strncpy(esai_priv->name, np->name, sizeof(esai_priv->name) - 1);
+
+	of_id = of_match_device(fsl_esai_dt_ids, &pdev->dev);
+	if (!of_id || !of_id->data)
+		return -EINVAL;
+
+	esai_priv->soc = of_id->data;
 
 	/* Get the addresses and IRQ */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -870,7 +1059,11 @@ static int fsl_esai_probe(struct platform_device *pdev)
 		return irq;
 	}
 
-	ret = devm_request_irq(&pdev->dev, irq, esai_isr, 0,
+	/* ESAI shared interrupt */
+	if (of_property_read_bool(np, "shared-interrupt"))
+		irqflag = IRQF_SHARED;
+
+	ret = devm_request_irq(&pdev->dev, irq, esai_isr, irqflag,
 			       esai_priv->name, esai_priv);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to claim irq %u\n", irq);
@@ -880,9 +1073,6 @@ static int fsl_esai_probe(struct platform_device *pdev)
 	/* Set a default slot number */
 	esai_priv->slots = 2;
 
-	/* Set a default master/slave state */
-	esai_priv->slave_mode = true;
-
 	/* Determine the FIFO depth */
 	iprop = of_get_property(np, "fsl,fifo-depth", NULL);
 	if (iprop)
@@ -890,13 +1080,39 @@ static int fsl_esai_probe(struct platform_device *pdev)
 	else
 		esai_priv->fifo_depth = 64;
 
+	esai_priv->dma_params_rx.chan_name = "rx";
+	esai_priv->dma_params_tx.chan_name = "tx";
 	esai_priv->dma_params_tx.maxburst = 16;
 	esai_priv->dma_params_rx.maxburst = 16;
 	esai_priv->dma_params_tx.addr = res->start + REG_ESAI_ETDR;
 	esai_priv->dma_params_rx.addr = res->start + REG_ESAI_ERDR;
 
+	/* From imx6ull, the channel swap issue in underrun/overrun is
+	 * fixed in hardware. So remove the workaround.
+	 */
+	if (esai_priv->soc->channel_swap_workaround) {
+		esai_priv->dma_params_tx.check_xrun = fsl_esai_check_xrun;
+		esai_priv->dma_params_rx.check_xrun = fsl_esai_check_xrun;
+		esai_priv->dma_params_tx.device_reset = fsl_esai_reset;
+		esai_priv->dma_params_rx.device_reset = fsl_esai_reset;
+	}
+
 	esai_priv->synchronous =
 		of_property_read_bool(np, "fsl,esai-synchronous");
+
+	if (!esai_priv->synchronous) {
+		if (of_property_read_bool(pdev->dev.of_node, "fsl,txm-rxs")) {
+			/* 0 --  rx,  1 -- tx */
+			esai_priv->slave_mode[0] = true;
+			esai_priv->slave_mode[1] = false;
+		}
+
+		if (of_property_read_bool(pdev->dev.of_node, "fsl,txs-rxm")) {
+			/* 0 --  rx,  1 -- tx */
+			esai_priv->slave_mode[0] = false;
+			esai_priv->slave_mode[1] = true;
+		}
+	}
 
 	/* Implement full symmetry for synchronous mode */
 	if (esai_priv->synchronous) {
@@ -940,37 +1156,58 @@ static int fsl_esai_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	ret = imx_pcm_dma_init(pdev, IMX_ESAI_DMABUF_SIZE);
+	if (of_property_read_u32(np, "fsl,dma-buffer-size", &buffer_size))
+		buffer_size = IMX_ESAI_DMABUF_SIZE;
+
+	/* workaround for esai issue in imx8qxp */
+	if (esai_priv->soc->dma_workaround)
+		esai_priv->dma_info =
+			fsl_dma_workaround_alloc_info("tcd_pool_esai",
+						      &pdev->dev,
+						      "nxp,imx8qm-acm",
+						      FSL_DMA_WORKAROUND_ESAI);
+
+	pm_runtime_enable(&pdev->dev);
+	regcache_cache_only(esai_priv->regmap, true);
+
+	ret = imx_pcm_component_register(&pdev->dev);
 	if (ret)
 		dev_err(&pdev->dev, "failed to init imx pcm dma: %d\n", ret);
 
 	return ret;
 }
 
-static const struct of_device_id fsl_esai_dt_ids[] = {
-	{ .compatible = "fsl,imx35-esai", },
-	{ .compatible = "fsl,vf610-esai", },
-	{}
-};
-MODULE_DEVICE_TABLE(of, fsl_esai_dt_ids);
-
-#ifdef CONFIG_PM_SLEEP
-static int fsl_esai_suspend(struct device *dev)
-{
-	struct fsl_esai *esai = dev_get_drvdata(dev);
-
-	regcache_cache_only(esai->regmap, true);
-	regcache_mark_dirty(esai->regmap);
-
-	return 0;
-}
-
-static int fsl_esai_resume(struct device *dev)
+#ifdef CONFIG_PM
+static int fsl_esai_runtime_resume(struct device *dev)
 {
 	struct fsl_esai *esai = dev_get_drvdata(dev);
 	int ret;
 
+	/*
+	 * Some platforms might use the same bit to gate all three or two of
+	 * clocks, so keep all clocks open/close at the same time for safety
+	 */
+	ret = clk_prepare_enable(esai->coreclk);
+	if (ret)
+		return ret;
+	if (!IS_ERR(esai->spbaclk)) {
+		ret = clk_prepare_enable(esai->spbaclk);
+		if (ret)
+			goto disable_core_clk;
+	}
+	if (!IS_ERR(esai->extalclk)) {
+		ret = clk_prepare_enable(esai->extalclk);
+		if (ret)
+			goto disable_spba_clk;
+	}
+	if (!IS_ERR(esai->fsysclk)) {
+		ret = clk_prepare_enable(esai->fsysclk);
+		if (ret)
+			goto disable_extal_clk;
+	}
+
 	regcache_cache_only(esai->regmap, false);
+	regcache_mark_dirty(esai->regmap);
 
 	/* FIFO reset for safety */
 	regmap_update_bits(esai->regmap, REG_ESAI_TFCR,
@@ -980,18 +1217,52 @@ static int fsl_esai_resume(struct device *dev)
 
 	ret = regcache_sync(esai->regmap);
 	if (ret)
-		return ret;
+		goto disable_fsys_clk;
 
 	/* FIFO reset done */
 	regmap_update_bits(esai->regmap, REG_ESAI_TFCR, ESAI_xFCR_xFR, 0);
 	regmap_update_bits(esai->regmap, REG_ESAI_RFCR, ESAI_xFCR_xFR, 0);
 
 	return 0;
+
+disable_fsys_clk:
+	if (!IS_ERR(esai->fsysclk))
+		clk_disable_unprepare(esai->fsysclk);
+disable_extal_clk:
+	if (!IS_ERR(esai->extalclk))
+		clk_disable_unprepare(esai->extalclk);
+disable_spba_clk:
+	if (!IS_ERR(esai->spbaclk))
+		clk_disable_unprepare(esai->spbaclk);
+disable_core_clk:
+	clk_disable_unprepare(esai->coreclk);
+
+	return ret;
 }
-#endif /* CONFIG_PM_SLEEP */
+
+static int fsl_esai_runtime_suspend(struct device *dev)
+{
+	struct fsl_esai *esai = dev_get_drvdata(dev);
+
+	regcache_cache_only(esai->regmap, true);
+
+	if (!IS_ERR(esai->fsysclk))
+		clk_disable_unprepare(esai->fsysclk);
+	if (!IS_ERR(esai->extalclk))
+		clk_disable_unprepare(esai->extalclk);
+	if (!IS_ERR(esai->spbaclk))
+		clk_disable_unprepare(esai->spbaclk);
+	clk_disable_unprepare(esai->coreclk);
+
+	return 0;
+}
+#endif
 
 static const struct dev_pm_ops fsl_esai_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(fsl_esai_suspend, fsl_esai_resume)
+	SET_RUNTIME_PM_OPS(fsl_esai_runtime_suspend,
+			   fsl_esai_runtime_resume,
+			   NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver fsl_esai_driver = {

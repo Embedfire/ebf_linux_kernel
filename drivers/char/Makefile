@@ -14,6 +14,7 @@ obj-$(CONFIG_MSPEC)		+= mspec.o
 obj-$(CONFIG_UV_MMTIMER)	+= uv_mmtimer.o
 obj-$(CONFIG_IBM_BSR)		+= bsr.o
 obj-$(CONFIG_SGI_MBCS)		+= mbcs.o
+obj-$(CONFIG_FSL_OTP)		+= fsl_otp.o
 
 obj-$(CONFIG_PRINTER)		+= lp.o
 
@@ -59,3 +60,4 @@ obj-$(CONFIG_XILLYBUS)		+= xillybus/
 obj-$(CONFIG_POWERNV_OP_PANEL)	+= powernv-op-panel.o
 obj-$(CONFIG_ADI)		+= adi.o
 obj-$(CONFIG_BRCM_CHAR_DRIVERS) += broadcom/
+obj-$(CONFIG_HAVE_IMX_AMP)      += imx_amp/

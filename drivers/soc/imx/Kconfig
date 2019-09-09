@@ -7,4 +7,23 @@ config IMX7_PM_DOMAINS
 	select PM_GENERIC_DOMAINS
 	default y if SOC_IMX7D
 
+config HAVE_IMX_MU
+	bool
+
+config HAVE_IMX8_SOC
+	bool
+
+config HAVE_IMX_SC
+	bool
+
+config HAVE_IMX_SC_PD
+	bool
+
+config HAVE_IMX_GPC_PSCI
+	bool
+
+config HAVE_IMX_RPMSG
+	select RPMSG_VIRTIO
+	select RPMSG
+	bool
 endmenu

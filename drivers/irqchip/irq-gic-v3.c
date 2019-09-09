@@ -17,6 +17,8 @@
 
 #define pr_fmt(fmt)	"GICv3: " fmt
 
+#include <linux/arm-smccc.h>
+#include <soc/imx/fsl_sip.h>
 #include <linux/acpi.h>
 #include <linux/cpu.h>
 #include <linux/cpu_pm.h>
@@ -62,6 +64,8 @@ struct gic_chip_data {
 
 static struct gic_chip_data gic_data __read_mostly;
 static DEFINE_STATIC_KEY_TRUE(supports_deactivate_key);
+
+static unsigned int err11171;
 
 static struct gic_kvm_info gic_v3_kvm_info;
 static DEFINE_PER_CPU(bool, has_rss);
@@ -758,9 +762,16 @@ static void gic_raise_softirq(const struct cpumask *mask, unsigned int irq)
 		tlist = gic_compute_target_list(&cpu, mask, cluster_id);
 		gic_send_sgi(cluster_id, tlist, irq);
 	}
-
 	/* Force the above writes to ICC_SGI1R_EL1 to be executed */
 	isb();
+
+	if (err11171) {
+		struct arm_smccc_res res;
+
+		arm_smccc_smc(FSL_SIP_GPC, FSL_SIP_CONFIG_GPC_CORE_WAKE,
+				*cpumask_bits(mask), 0, 0, 0, 0, 0, &res);
+	}
+
 }
 
 static void gic_smp_init(void)
@@ -1312,6 +1323,12 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 			goto out_unmap_rdist;
 		}
 		rdist_regs[i].phys_base = res.start;
+	}
+
+	if (of_machine_is_compatible("fsl,imx8mq")) {
+		/* sw workaround for IPI can't wakeup CORE
+		   ERRATA(ERR011171) on i.MX8MQ */
+		err11171 = true;
 	}
 
 	if (of_property_read_u64(node, "redistributor-stride", &redist_stride))
