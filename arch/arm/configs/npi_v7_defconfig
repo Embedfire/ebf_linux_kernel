@@ -1,10 +1,10 @@
 #
 # Automatically generated file; DO NOT EDIT.
-# Linux/arm 4.19.69 Kernel Configuration
+# Linux/arm 4.19.71 Kernel Configuration
 #
 
 #
-# Compiler: arm-linux-gnueabihf-gcc (GNU Toolchain for the A-profile Architecture 8.3-2019.03 (arm-rel-8.36)) 8.3.0
+# Compiler: gcc (Raspbian 8.3.0-6+rpi1) 8.3.0
 #
 CONFIG_CC_IS_GCC=y
 CONFIG_GCC_VERSION=80300
@@ -641,9 +641,8 @@ CONFIG_REFCOUNT_FULL=y
 #
 # CONFIG_GCOV_KERNEL is not set
 CONFIG_ARCH_HAS_GCOV_PROFILE_ALL=y
-CONFIG_PLUGIN_HOSTCC="g++"
+CONFIG_PLUGIN_HOSTCC=""
 CONFIG_HAVE_GCC_PLUGINS=y
-# CONFIG_GCC_PLUGINS is not set
 CONFIG_RT_MUTEXES=y
 CONFIG_BASE_SMALL=0
 CONFIG_MODULES=y
@@ -1008,7 +1007,8 @@ CONFIG_PREVENT_FIRMWARE_BUILD=y
 # Firmware loader
 #
 CONFIG_FW_LOADER=y
-CONFIG_EXTRA_FIRMWARE=""
+CONFIG_EXTRA_FIRMWARE="imx/sdma/sdma-imx6q.bin"
+CONFIG_EXTRA_FIRMWARE_DIR="/lib/firmware"
 CONFIG_FW_LOADER_USER_HELPER=y
 CONFIG_FW_LOADER_USER_HELPER_FALLBACK=y
 CONFIG_ALLOW_DEV_COREDUMP=y
