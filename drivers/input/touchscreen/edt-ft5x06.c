@@ -39,6 +39,8 @@
 #include <linux/input/mt.h>
 #include <linux/input/touchscreen.h>
 #include <linux/of_device.h>
+#include <drm/drm_mipi_dsi.h>
+
 
 #define WORK_REGISTER_THRESHOLD		0x00
 #define WORK_REGISTER_REPORT_RATE	0x08
@@ -968,6 +970,8 @@ static int edt_ft5x06_ts_probe(struct i2c_client *client,
 {
 	const struct edt_i2c_chip_data *chip_data;
 	struct edt_ft5x06_ts_data *tsdata;
+	struct mipi_dsi_device *panel;
+	struct device_node *np;
 	struct input_dev *input;
 	unsigned long irq_flags;
 	int error;
@@ -1033,7 +1037,7 @@ static int edt_ft5x06_ts_probe(struct i2c_client *client,
 
 	error = edt_ft5x06_ts_identify(client, tsdata, fw_version);
 	if (error) {
-		dev_err(&client->dev, "touchscreen probe failed\n");
+		dev_dbg(&client->dev, "touchscreen probe failed\n");
 		return error;
 	}
 
@@ -1105,6 +1109,18 @@ static int edt_ft5x06_ts_probe(struct i2c_client *client,
 		tsdata->wake_gpio ? desc_to_gpio(tsdata->wake_gpio) : -1,
 		tsdata->reset_gpio ? desc_to_gpio(tsdata->reset_gpio) : -1);
 
+	np = of_parse_phandle(client->dev.of_node, "panel", 0);
+	if (np) {
+		panel = of_find_mipi_dsi_device_by_node(np);
+		of_node_put(np);
+		if (!panel)
+			return -ENOENT;
+
+		device_link_add(&client->dev, &panel->dev, DL_FLAG_STATELESS |
+				DL_FLAG_AUTOREMOVE_SUPPLIER);
+		put_device(&panel->dev);
+	}
+
 	return 0;
 }
 
@@ -1152,11 +1168,16 @@ static const struct edt_i2c_chip_data edt_ft6236_data = {
 	.max_support_points = 2,
 };
 
+static const struct edt_i2c_chip_data edt_ft6336_data = {
+	.max_support_points = 2,
+};
+
 static const struct i2c_device_id edt_ft5x06_ts_id[] = {
 	{ .name = "edt-ft5x06", .driver_data = (long)&edt_ft5x06_data },
 	{ .name = "edt-ft5506", .driver_data = (long)&edt_ft5506_data },
 	/* Note no edt- prefix for compatibility with the ft6236.c driver */
 	{ .name = "ft6236", .driver_data = (long)&edt_ft6236_data },
+	{ .name = "ft6336", .driver_data = (long)&edt_ft6336_data },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, edt_ft5x06_ts_id);
@@ -1169,6 +1190,7 @@ static const struct of_device_id edt_ft5x06_of_match[] = {
 	{ .compatible = "edt,edt-ft5506", .data = &edt_ft5506_data },
 	/* Note focaltech vendor prefix for compatibility with ft6236.c */
 	{ .compatible = "focaltech,ft6236", .data = &edt_ft6236_data },
+	{ .compatible = "focaltech,ft6336", .data = &edt_ft6336_data },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, edt_ft5x06_of_match);
