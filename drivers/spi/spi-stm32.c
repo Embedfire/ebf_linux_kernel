@@ -18,6 +18,7 @@
  * You should have received a copy of the GNU General Public License along with
  * spi_stm32 driver. If not, see <http://www.gnu.org/licenses/>.
  */
+#include <linux/bitfield.h>
 #include <linux/debugfs.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -26,6 +27,7 @@
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
+#include <linux/of_gpio.h>
 #include <linux/of_platform.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
@@ -54,27 +56,23 @@
 #define SPI_CR1_SSI		BIT(12)
 
 /* STM32_SPI_CR2 bit fields */
-#define SPI_CR2_TSIZE_SHIFT	0
 #define SPI_CR2_TSIZE		GENMASK(15, 0)
+#define SPI_CR2_TSER		GENMASK(31, 16)
+#define SPI_TSIZE_MAX		FIELD_GET(SPI_CR2_TSIZE, SPI_CR2_TSIZE)
+#define SPI_TSER_MAX		FIELD_GET(SPI_CR2_TSER, SPI_CR2_TSER)
 
 /* STM32_SPI_CFG1 bit fields */
-#define SPI_CFG1_DSIZE_SHIFT	0
 #define SPI_CFG1_DSIZE		GENMASK(4, 0)
-#define SPI_CFG1_FTHLV_SHIFT	5
 #define SPI_CFG1_FTHLV		GENMASK(8, 5)
 #define SPI_CFG1_RXDMAEN	BIT(14)
 #define SPI_CFG1_TXDMAEN	BIT(15)
-#define SPI_CFG1_MBR_SHIFT	28
 #define SPI_CFG1_MBR		GENMASK(30, 28)
 #define SPI_CFG1_MBR_MIN	0
-#define SPI_CFG1_MBR_MAX	(GENMASK(30, 28) >> 28)
+#define SPI_CFG1_MBR_MAX	FIELD_GET(SPI_CFG1_MBR, SPI_CFG1_MBR)
 
 /* STM32_SPI_CFG2 bit fields */
-#define SPI_CFG2_MIDI_SHIFT	4
 #define SPI_CFG2_MIDI		GENMASK(7, 4)
-#define SPI_CFG2_COMM_SHIFT	17
 #define SPI_CFG2_COMM		GENMASK(18, 17)
-#define SPI_CFG2_SP_SHIFT	19
 #define SPI_CFG2_SP		GENMASK(21, 19)
 #define SPI_CFG2_MASTER		BIT(22)
 #define SPI_CFG2_LSBFRST	BIT(23)
@@ -90,17 +88,17 @@
 #define SPI_IER_EOTIE		BIT(3)
 #define SPI_IER_TXTFIE		BIT(4)
 #define SPI_IER_OVRIE		BIT(6)
-#define SPI_IER_MODFIE		BIT(9)
+#define SPI_IER_TSERFIE		BIT(10)
 #define SPI_IER_ALL		GENMASK(10, 0)
 
 /* STM32_SPI_SR bit fields */
 #define SPI_SR_RXP		BIT(0)
 #define SPI_SR_TXP		BIT(1)
 #define SPI_SR_EOT		BIT(3)
+#define SPI_SR_TXTF		BIT(4)
 #define SPI_SR_OVR		BIT(6)
-#define SPI_SR_MODF		BIT(9)
+#define SPI_SR_TSERF		BIT(10)
 #define SPI_SR_SUSP		BIT(11)
-#define SPI_SR_RXPLVL_SHIFT	13
 #define SPI_SR_RXPLVL		GENMASK(14, 13)
 #define SPI_SR_RXWNE		BIT(15)
 
@@ -120,8 +118,6 @@
 #define SPI_SIMPLEX_RX		2
 #define SPI_HALF_DUPLEX		3
 
-#define SPI_1HZ_NS		1000000000
-
 /**
  * struct stm32_spi - private data of the SPI controller
  * @dev: driver model representation of the controller
@@ -139,6 +135,7 @@
  * @cur_fthlv: fifo threshold level (data frames in a single data packet)
  * @cur_comm: SPI communication mode
  * @cur_xferlen: current transfer length in bytes
+ * @cur_reload: current transfer remaining bytes to be loaded
  * @cur_usedma: boolean to know if dma is used in current transfer
  * @tx_buf: data to be written, or NULL
  * @rx_buf: data to be read, or NULL
@@ -165,6 +162,7 @@ struct stm32_spi {
 	unsigned int cur_fthlv;
 	unsigned int cur_comm;
 	unsigned int cur_xferlen;
+	unsigned int cur_reload;
 	bool cur_usedma;
 
 	const void *tx_buf;
@@ -173,7 +171,10 @@ struct stm32_spi {
 	int rx_len;
 	struct dma_chan *dma_tx;
 	struct dma_chan *dma_rx;
+	struct completion dma_completion;
 	dma_addr_t phys_addr;
+	struct completion xfer_completion;
+	int xfer_status;
 };
 
 static inline void stm32_spi_set_bits(struct stm32_spi *spi,
@@ -233,8 +234,7 @@ static int stm32_spi_get_bpw_mask(struct stm32_spi *spi)
 	stm32_spi_set_bits(spi, STM32_SPI_CFG1, SPI_CFG1_DSIZE);
 
 	cfg1 = readl_relaxed(spi->base + STM32_SPI_CFG1);
-	max_bpw = (cfg1 & SPI_CFG1_DSIZE) >> SPI_CFG1_DSIZE_SHIFT;
-	max_bpw += 1;
+	max_bpw = FIELD_GET(SPI_CFG1_DSIZE, cfg1) + 1;
 
 	spin_unlock_irqrestore(&spi->lock, flags);
 
@@ -254,7 +254,8 @@ static int stm32_spi_prepare_mbr(struct stm32_spi *spi, u32 speed_hz)
 {
 	u32 div, mbrdiv;
 
-	div = DIV_ROUND_UP(spi->clk_rate, speed_hz);
+	/* Ensure spi->clk_rate is even */
+	div = DIV_ROUND_UP(spi->clk_rate & ~0x1, speed_hz);
 
 	/*
 	 * SPI framework set xfer->speed_hz to master->max_speed_hz if
@@ -282,19 +283,22 @@ static int stm32_spi_prepare_mbr(struct stm32_spi *spi, u32 speed_hz)
  * stm32_spi_prepare_fthlv - Determine FIFO threshold level
  * @spi: pointer to the spi controller data structure
  */
-static u32 stm32_spi_prepare_fthlv(struct stm32_spi *spi)
+static u32 stm32_spi_prepare_fthlv(struct stm32_spi *spi, u32 xfer_len)
 {
-	u32 fthlv, half_fifo;
+	u32 fthlv, half_fifo, packet;
 
 	/* data packet should not exceed 1/2 of fifo space */
 	half_fifo = (spi->fifo_size / 2);
 
+	/* data_packet should not exceed transfer length */
+	packet = (half_fifo > xfer_len) ? xfer_len : half_fifo;
+
 	if (spi->cur_bpw <= 8)
-		fthlv = half_fifo;
+		fthlv = packet;
 	else if (spi->cur_bpw <= 16)
-		fthlv = half_fifo / 2;
+		fthlv = packet / 2;
 	else
-		fthlv = half_fifo / 4;
+		fthlv = packet / 4;
 
 	/* align packet size with data registers access */
 	if (spi->cur_bpw > 8)
@@ -302,7 +306,26 @@ static u32 stm32_spi_prepare_fthlv(struct stm32_spi *spi)
 	else
 		fthlv -= (fthlv % 4); /* multiple of 4 */
 
+	if (!fthlv)
+		fthlv = 1;
+
 	return fthlv;
+}
+
+static void stm32_spi_transfer_extension(struct stm32_spi *spi)
+{
+	if (spi->cur_reload > 0) {
+		u32 cr2 = readl_relaxed(spi->base + STM32_SPI_CR2);
+		u32 tsize = FIELD_GET(SPI_CR2_TSIZE, cr2);
+		u32 tser = SPI_TSER_MAX - (SPI_TSER_MAX % spi->cur_fthlv);
+
+		tser = min(spi->cur_reload, tser);
+
+		writel_relaxed(FIELD_PREP(SPI_CR2_TSER, tser) |
+			       FIELD_PREP(SPI_CR2_TSIZE, tsize),
+			       spi->base + STM32_SPI_CR2);
+		spi->cur_reload -= tser;
+	}
 }
 
 /**
@@ -346,24 +369,24 @@ static void stm32_spi_write_txfifo(struct stm32_spi *spi)
  * Write in rx_buf depends on remaining bytes to avoid to write beyond
  * rx_buf end.
  */
-static void stm32_spi_read_rxfifo(struct stm32_spi *spi, bool flush)
+static void stm32_spi_read_rxfifo(struct stm32_spi *spi)
 {
 	u32 sr = readl_relaxed(spi->base + STM32_SPI_SR);
-	u32 rxplvl = (sr & SPI_SR_RXPLVL) >> SPI_SR_RXPLVL_SHIFT;
+	u32 rxplvl = FIELD_GET(SPI_SR_RXPLVL, sr);
 
 	while ((spi->rx_len > 0) &&
 	       ((sr & SPI_SR_RXP) ||
-		(flush && ((sr & SPI_SR_RXWNE) || (rxplvl > 0))))) {
+		((sr & SPI_SR_EOT) && ((sr & SPI_SR_RXWNE) || (rxplvl > 0))))) {
 		u32 offs = spi->cur_xferlen - spi->rx_len;
 
-		if ((spi->rx_len >= sizeof(u32)) ||
-		    (flush && (sr & SPI_SR_RXWNE))) {
+		if ((spi->rx_len >= sizeof(u32)) || (sr & SPI_SR_RXWNE)) {
 			u32 *rx_buf32 = (u32 *)(spi->rx_buf + offs);
 
 			*rx_buf32 = readl_relaxed(spi->base + STM32_SPI_RXDR);
 			spi->rx_len -= sizeof(u32);
 		} else if ((spi->rx_len >= sizeof(u16)) ||
-			   (flush && (rxplvl >= 2 || spi->cur_bpw > 8))) {
+			   (!(sr & SPI_SR_RXWNE) &&
+			    (rxplvl >= 2 || spi->cur_bpw > 8))) {
 			u16 *rx_buf16 = (u16 *)(spi->rx_buf + offs);
 
 			*rx_buf16 = readw_relaxed(spi->base + STM32_SPI_RXDR);
@@ -376,11 +399,11 @@ static void stm32_spi_read_rxfifo(struct stm32_spi *spi, bool flush)
 		}
 
 		sr = readl_relaxed(spi->base + STM32_SPI_SR);
-		rxplvl = (sr & SPI_SR_RXPLVL) >> SPI_SR_RXPLVL_SHIFT;
+		rxplvl = FIELD_GET(SPI_SR_RXPLVL, sr);
 	}
 
-	dev_dbg(spi->dev, "%s%s: %d bytes left\n", __func__,
-		flush ? "(flush)" : "", spi->rx_len);
+	dev_dbg(spi->dev, "%s: %d bytes left (sr=%08x)\n",
+		__func__, spi->rx_len, sr);
 }
 
 /**
@@ -402,8 +425,7 @@ static void stm32_spi_enable(struct stm32_spi *spi)
  * @spi: pointer to the spi controller data structure
  *
  * RX-Fifo is flushed when SPI controller is disabled. To prevent any data
- * loss, use stm32_spi_read_rxfifo(flush) to read the remaining bytes in
- * RX-Fifo.
+ * loss, use stm32_spi_read_rxfifo to read the remaining bytes in RX-Fifo.
  */
 static void stm32_spi_disable(struct stm32_spi *spi)
 {
@@ -438,7 +460,7 @@ static void stm32_spi_disable(struct stm32_spi *spi)
 	}
 
 	if (!spi->cur_usedma && spi->rx_buf && (spi->rx_len > 0))
-		stm32_spi_read_rxfifo(spi, true);
+		stm32_spi_read_rxfifo(spi);
 
 	if (spi->cur_usedma && spi->tx_buf)
 		dmaengine_terminate_all(spi->dma_tx);
@@ -483,7 +505,7 @@ static irqreturn_t stm32_spi_irq(int irq, void *dev_id)
 {
 	struct spi_master *master = dev_id;
 	struct stm32_spi *spi = spi_master_get_devdata(master);
-	u32 sr, ier, mask;
+	u32 sr, ier, mask, ifcr;
 	unsigned long flags;
 	bool end = false;
 
@@ -491,77 +513,81 @@ static irqreturn_t stm32_spi_irq(int irq, void *dev_id)
 
 	sr = readl_relaxed(spi->base + STM32_SPI_SR);
 	ier = readl_relaxed(spi->base + STM32_SPI_IER);
+	ifcr = 0;
 
 	mask = ier;
-	/* EOTIE is triggered on EOT, SUSP and TXC events. */
+	/*
+	 * EOTIE enables irq from EOT, SUSP and TXC events. We need to set
+	 * SUSP to acknowledge it later. TXC is automatically cleared
+	 */
 	mask |= SPI_SR_SUSP;
 	/*
-	 * When TXTF is set, DXPIE and TXPIE are cleared. So in case of
-	 * Full-Duplex, need to poll RXP event to know if there are remaining
-	 * data, before disabling SPI.
+	 * DXPIE is set in Full-Duplex, one IT will be raised if TXP and RXP
+	 * are set. So in case of Full-Duplex, need to poll TXP and RXP event.
 	 */
-	if (spi->rx_buf && !spi->cur_usedma)
-		mask |= SPI_SR_RXP;
+	if ((spi->cur_comm == SPI_FULL_DUPLEX) && (!spi->cur_usedma))
+		mask |= SPI_SR_TXP | SPI_SR_RXP;
 
-	if (!(sr & mask)) {
-		dev_dbg(spi->dev, "spurious IT (sr=0x%08x, ier=0x%08x)\n",
-			sr, ier);
+	mask &= sr;
+
+	if (!mask) {
+		dev_warn(spi->dev, "spurious IT (sr=0x%08x, ier=0x%08x)\n",
+			 sr, ier);
 		spin_unlock_irqrestore(&spi->lock, flags);
 		return IRQ_NONE;
 	}
 
-	if (sr & SPI_SR_SUSP) {
-		dev_warn(spi->dev, "Communication suspended\n");
-		if (!spi->cur_usedma && (spi->rx_buf && (spi->rx_len > 0)))
-			stm32_spi_read_rxfifo(spi, false);
-		/*
-		 * If communication is suspended while using DMA, it means
-		 * that something went wrong, so stop the current transfer
-		 */
-		if (spi->cur_usedma)
-			end = true;
+	if (mask & SPI_SR_TSERF) {
+		stm32_spi_transfer_extension(spi);
+		ifcr |= SPI_SR_TSERF;
 	}
 
-	if (sr & SPI_SR_MODF) {
-		dev_warn(spi->dev, "Mode fault: transfer aborted\n");
+	if (mask & SPI_SR_SUSP) {
+		dev_warn_once(spi->dev,
+			      "System too slow is limiting data throughput\n");
+
+		if (!spi->cur_usedma && (spi->rx_buf && (spi->rx_len > 0)))
+			stm32_spi_read_rxfifo(spi);
+
+		ifcr |= SPI_SR_SUSP;
+	}
+
+	if (mask & SPI_SR_OVR) {
+		dev_err(spi->dev, "Overrun: RX data lost\n");
+		spi->xfer_status = -EIO;
 		end = true;
+		ifcr |= SPI_SR_OVR;
 	}
 
-	if (sr & SPI_SR_OVR) {
-		dev_warn(spi->dev, "Overrun: received value discarded\n");
-		if (!spi->cur_usedma && (spi->rx_buf && (spi->rx_len > 0)))
-			stm32_spi_read_rxfifo(spi, false);
-		/*
-		 * If overrun is detected while using DMA, it means that
-		 * something went wrong, so stop the current transfer
-		 */
-		if (spi->cur_usedma)
-			end = true;
-	}
+	if (mask & SPI_SR_TXTF)
+		ifcr |= SPI_SR_TXTF;
 
-	if (sr & SPI_SR_EOT) {
+	if (mask & SPI_SR_EOT) {
 		if (!spi->cur_usedma && (spi->rx_buf && (spi->rx_len > 0)))
-			stm32_spi_read_rxfifo(spi, true);
+			stm32_spi_read_rxfifo(spi);
 		end = true;
+		ifcr |= SPI_SR_EOT;
 	}
 
-	if (sr & SPI_SR_TXP)
+	if (mask & SPI_SR_TXP)
 		if (!spi->cur_usedma && (spi->tx_buf && (spi->tx_len > 0)))
 			stm32_spi_write_txfifo(spi);
 
-	if (sr & SPI_SR_RXP)
+	if (mask & SPI_SR_RXP)
 		if (!spi->cur_usedma && (spi->rx_buf && (spi->rx_len > 0)))
-			stm32_spi_read_rxfifo(spi, false);
-
-	writel_relaxed(mask, spi->base + STM32_SPI_IFCR);
-
-	spin_unlock_irqrestore(&spi->lock, flags);
+			stm32_spi_read_rxfifo(spi);
 
 	if (end) {
-		spi_finalize_current_transfer(master);
-		stm32_spi_disable(spi);
+		/* Disable interrupts and clear status flags */
+		writel_relaxed(0, spi->base + STM32_SPI_IER);
+		writel_relaxed(SPI_IFCR_ALL, spi->base + STM32_SPI_IFCR);
+
+		complete(&spi->xfer_completion);
+	} else {
+		writel_relaxed(ifcr, spi->base + STM32_SPI_IFCR);
 	}
 
+	spin_unlock_irqrestore(&spi->lock, flags);
 	return IRQ_HANDLED;
 }
 
@@ -642,25 +668,18 @@ static int stm32_spi_prepare_msg(struct spi_master *master,
 /**
  * stm32_spi_dma_cb - dma callback
  *
- * DMA callback is called when the transfer is complete or when an error
- * occurs. If the transfer is complete, EOT flag is raised.
+ * DMA callback is called when the transfer is complete.
  */
 static void stm32_spi_dma_cb(void *data)
 {
 	struct stm32_spi *spi = data;
 	unsigned long flags;
-	u32 sr;
 
 	spin_lock_irqsave(&spi->lock, flags);
 
-	sr = readl_relaxed(spi->base + STM32_SPI_SR);
+	complete(&spi->dma_completion);
 
 	spin_unlock_irqrestore(&spi->lock, flags);
-
-	if (!(sr & SPI_SR_EOT))
-		dev_warn(spi->dev, "DMA error (sr=0x%08x)\n", sr);
-
-	/* Now wait for EOT, or SUSP or OVR in case of error */
 }
 
 /**
@@ -709,11 +728,8 @@ static void stm32_spi_dma_config(struct stm32_spi *spi,
 /**
  * stm32_spi_transfer_one_irq - transfer a single spi_transfer using
  *				interrupts
- *
- * It must returns 0 if the transfer is finished or 1 if the transfer is still
- * in progress.
  */
-static int stm32_spi_transfer_one_irq(struct stm32_spi *spi)
+static void stm32_spi_transfer_one_irq(struct stm32_spi *spi)
 {
 	unsigned long flags;
 	u32 ier = 0;
@@ -727,7 +743,9 @@ static int stm32_spi_transfer_one_irq(struct stm32_spi *spi)
 		ier |= SPI_IER_RXPIE;
 
 	/* Enable the interrupts relative to the end of transfer */
-	ier |= SPI_IER_EOTIE | SPI_IER_TXTFIE |	SPI_IER_OVRIE |	SPI_IER_MODFIE;
+	ier |= SPI_IER_EOTIE | SPI_IER_TXTFIE |	SPI_IER_OVRIE;
+	/* Enable the interrupt relative to transfer extension */
+	ier |= SPI_IER_TSERFIE;
 
 	spin_lock_irqsave(&spi->lock, flags);
 
@@ -742,25 +760,28 @@ static int stm32_spi_transfer_one_irq(struct stm32_spi *spi)
 	writel_relaxed(ier, spi->base + STM32_SPI_IER);
 
 	spin_unlock_irqrestore(&spi->lock, flags);
-
-	return 1;
 }
 
 /**
  * stm32_spi_transfer_one_dma - transfer a single spi_transfer using DMA
- *
- * It must returns 0 if the transfer is finished or 1 if the transfer is still
- * in progress.
  */
-static int stm32_spi_transfer_one_dma(struct stm32_spi *spi,
-				      struct spi_transfer *xfer)
+static void stm32_spi_transfer_one_dma(struct stm32_spi *spi,
+				       struct spi_transfer *xfer)
 {
+	dma_async_tx_callback rx_done = NULL, tx_done = NULL;
 	struct dma_slave_config tx_dma_conf, rx_dma_conf;
 	struct dma_async_tx_descriptor *tx_dma_desc, *rx_dma_desc;
 	unsigned long flags;
 	u32 ier = 0;
 
 	spin_lock_irqsave(&spi->lock, flags);
+
+	if (spi->rx_buf)
+		rx_done = stm32_spi_dma_cb;
+	else if (spi->tx_buf)
+		tx_done = stm32_spi_dma_cb;
+
+	reinit_completion(&spi->dma_completion);
 
 	rx_dma_desc = NULL;
 	if (spi->rx_buf) {
@@ -794,7 +815,7 @@ static int stm32_spi_transfer_one_dma(struct stm32_spi *spi,
 		goto dma_desc_error;
 
 	if (rx_dma_desc) {
-		rx_dma_desc->callback = stm32_spi_dma_cb;
+		rx_dma_desc->callback = rx_done;
 		rx_dma_desc->callback_param = spi;
 
 		if (dma_submit_error(dmaengine_submit(rx_dma_desc))) {
@@ -807,7 +828,7 @@ static int stm32_spi_transfer_one_dma(struct stm32_spi *spi,
 
 	if (tx_dma_desc) {
 		if (spi->cur_comm == SPI_SIMPLEX_TX) {
-			tx_dma_desc->callback = stm32_spi_dma_cb;
+			tx_dma_desc->callback = tx_done;
 			tx_dma_desc->callback_param = spi;
 		}
 
@@ -823,7 +844,9 @@ static int stm32_spi_transfer_one_dma(struct stm32_spi *spi,
 	}
 
 	/* Enable the interrupts relative to the end of transfer */
-	ier |= SPI_IER_EOTIE | SPI_IER_TXTFIE |	SPI_IER_OVRIE |	SPI_IER_MODFIE;
+	ier |= SPI_IER_EOTIE | SPI_IER_TXTFIE |	SPI_IER_OVRIE;
+	/* Enable the interrupt relative to transfer extension */
+	ier |= SPI_IER_TSERFIE;
 	writel_relaxed(ier, spi->base + STM32_SPI_IER);
 
 	stm32_spi_enable(spi);
@@ -832,7 +855,7 @@ static int stm32_spi_transfer_one_dma(struct stm32_spi *spi,
 
 	spin_unlock_irqrestore(&spi->lock, flags);
 
-	return 1;
+	return;
 
 dma_submit_error:
 	if (spi->rx_buf)
@@ -845,7 +868,8 @@ dma_desc_error:
 
 	dev_info(spi->dev, "DMA issue: fall back to irq transfer\n");
 
-	return stm32_spi_transfer_one_irq(spi);
+	spi->cur_usedma = false;
+	stm32_spi_transfer_one_irq(spi);
 }
 
 /**
@@ -859,26 +883,26 @@ static int stm32_spi_transfer_one_setup(struct stm32_spi *spi,
 {
 	unsigned long flags;
 	u32 cfg1_clrb = 0, cfg1_setb = 0, cfg2_clrb = 0, cfg2_setb = 0;
-	u32 mode, nb_words;
+	u32 fthlv, mode, nb_words, tsize;
 	int ret = 0;
 
 	spin_lock_irqsave(&spi->lock, flags);
 
 	if (spi->cur_bpw != transfer->bits_per_word) {
-		u32 bpw, fthlv;
+		u32 bpw;
 
 		spi->cur_bpw = transfer->bits_per_word;
 		bpw = spi->cur_bpw - 1;
 
 		cfg1_clrb |= SPI_CFG1_DSIZE;
-		cfg1_setb |= (bpw << SPI_CFG1_DSIZE_SHIFT) & SPI_CFG1_DSIZE;
-
-		spi->cur_fthlv = stm32_spi_prepare_fthlv(spi);
-		fthlv = spi->cur_fthlv - 1;
-
-		cfg1_clrb |= SPI_CFG1_FTHLV;
-		cfg1_setb |= (fthlv << SPI_CFG1_FTHLV_SHIFT) & SPI_CFG1_FTHLV;
+		cfg1_setb |= FIELD_PREP(SPI_CFG1_DSIZE, bpw);
 	}
+
+	spi->cur_fthlv = stm32_spi_prepare_fthlv(spi, transfer->len);
+	fthlv = spi->cur_fthlv - 1;
+
+	cfg1_clrb |= SPI_CFG1_FTHLV;
+	cfg1_setb |= FIELD_PREP(SPI_CFG1_FTHLV, fthlv);
 
 	if (spi->cur_speed != transfer->speed_hz) {
 		int mbr;
@@ -893,7 +917,7 @@ static int stm32_spi_transfer_one_setup(struct stm32_spi *spi,
 		transfer->speed_hz = spi->cur_speed;
 
 		cfg1_clrb |= SPI_CFG1_MBR;
-		cfg1_setb |= ((u32)mbr << SPI_CFG1_MBR_SHIFT) & SPI_CFG1_MBR;
+		cfg1_setb |= FIELD_PREP(SPI_CFG1_MBR, (u32)mbr);
 	}
 
 	if (cfg1_clrb || cfg1_setb)
@@ -924,19 +948,20 @@ static int stm32_spi_transfer_one_setup(struct stm32_spi *spi,
 		spi->cur_comm = mode;
 
 		cfg2_clrb |= SPI_CFG2_COMM;
-		cfg2_setb |= (mode << SPI_CFG2_COMM_SHIFT) & SPI_CFG2_COMM;
+		cfg2_setb |= FIELD_PREP(SPI_CFG2_COMM, mode);
 	}
 
 	cfg2_clrb |= SPI_CFG2_MIDI;
 	if ((transfer->len > 1) && (spi->cur_midi > 0)) {
-		u32 sck_period_ns = DIV_ROUND_UP(SPI_1HZ_NS, spi->cur_speed);
-		u32 midi = min((u32)DIV_ROUND_UP(spi->cur_midi, sck_period_ns),
-			       (u32)SPI_CFG2_MIDI >> SPI_CFG2_MIDI_SHIFT);
+		u32 sck_period_ns = DIV_ROUND_UP(NSEC_PER_SEC, spi->cur_speed);
+		u32 midi = min_t(u32,
+				 DIV_ROUND_UP(spi->cur_midi, sck_period_ns),
+				 FIELD_GET(SPI_CFG2_MIDI, SPI_CFG2_MIDI));
 
 		dev_dbg(spi->dev, "period=%dns, midi=%d(=%dns)\n",
 			sck_period_ns, midi, midi * sck_period_ns);
 
-		cfg2_setb |= (midi << SPI_CFG2_MIDI_SHIFT) & SPI_CFG2_MIDI;
+		cfg2_setb |= FIELD_PREP(SPI_CFG2_MIDI, midi);
 	}
 
 	if (cfg2_clrb || cfg2_setb)
@@ -950,14 +975,19 @@ static int stm32_spi_transfer_one_setup(struct stm32_spi *spi,
 		nb_words = DIV_ROUND_UP(transfer->len * 8, 16);
 	else
 		nb_words = DIV_ROUND_UP(transfer->len * 8, 32);
-	nb_words <<= SPI_CR2_TSIZE_SHIFT;
 
-	if (nb_words <= SPI_CR2_TSIZE) {
-		writel_relaxed(nb_words, spi->base + STM32_SPI_CR2);
+	if (nb_words <= SPI_TSIZE_MAX) {
+		tsize = nb_words;
+		spi->cur_reload = 0;
 	} else {
-		ret = -EMSGSIZE;
-		goto out;
+		tsize = SPI_TSIZE_MAX - (SPI_TSIZE_MAX % spi->cur_fthlv);
+		spi->cur_reload = nb_words - tsize;
 	}
+
+	writel_relaxed(FIELD_PREP(SPI_CR2_TSIZE, tsize),
+		       spi->base + STM32_SPI_CR2);
+	if (spi->cur_reload > 0)
+		stm32_spi_transfer_extension(spi);
 
 	spi->cur_xferlen = transfer->len;
 
@@ -989,6 +1019,8 @@ static int stm32_spi_transfer_one(struct spi_master *master,
 				  struct spi_transfer *transfer)
 {
 	struct stm32_spi *spi = spi_master_get_devdata(master);
+	u32 xfer_time, midi_delay_ns;
+	unsigned long timeout;
 	int ret;
 
 	spi->tx_buf = transfer->tx_buf;
@@ -1005,10 +1037,36 @@ static int stm32_spi_transfer_one(struct spi_master *master,
 		return ret;
 	}
 
+	reinit_completion(&spi->xfer_completion);
+	spi->xfer_status = 0;
+
 	if (spi->cur_usedma)
-		return stm32_spi_transfer_one_dma(spi, transfer);
+		stm32_spi_transfer_one_dma(spi, transfer);
 	else
-		return stm32_spi_transfer_one_irq(spi);
+		stm32_spi_transfer_one_irq(spi);
+
+	/* Wait for transfer to complete */
+	xfer_time = spi->cur_xferlen * 8 * MSEC_PER_SEC / spi->cur_speed;
+	midi_delay_ns = spi->cur_xferlen * 8 / spi->cur_bpw * spi->cur_midi;
+	xfer_time += DIV_ROUND_UP(midi_delay_ns, NSEC_PER_MSEC);
+	xfer_time = max(2 * xfer_time, 100U);
+	timeout = msecs_to_jiffies(xfer_time);
+
+	timeout = wait_for_completion_timeout(&spi->xfer_completion, timeout);
+	if (timeout && spi->cur_usedma)
+		timeout = wait_for_completion_timeout(&spi->dma_completion,
+						      timeout);
+
+	if (!timeout) {
+		dev_err(spi->dev, "SPI transfer timeout (%u ms)\n", xfer_time);
+		spi->xfer_status = -ETIMEDOUT;
+	}
+
+	stm32_spi_disable(spi);
+
+	spi_finalize_current_transfer(master);
+
+	return spi->xfer_status;
 }
 
 /**
@@ -1076,7 +1134,7 @@ static int stm32_spi_probe(struct platform_device *pdev)
 	struct spi_master *master;
 	struct stm32_spi *spi;
 	struct resource *res;
-	int i, ret;
+	int i, ret, num_cs, cs_gpio;
 
 	master = spi_alloc_master(&pdev->dev, sizeof(struct stm32_spi));
 	if (!master) {
@@ -1089,6 +1147,8 @@ static int stm32_spi_probe(struct platform_device *pdev)
 	spi->dev = &pdev->dev;
 	spi->master = master;
 	spin_lock_init(&spi->lock);
+	init_completion(&spi->xfer_completion);
+	init_completion(&spi->dma_completion);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	spi->base = devm_ioremap_resource(&pdev->dev, res);
@@ -1100,8 +1160,9 @@ static int stm32_spi_probe(struct platform_device *pdev)
 
 	spi->irq = platform_get_irq(pdev, 0);
 	if (spi->irq <= 0) {
-		dev_err(&pdev->dev, "no irq: %d\n", spi->irq);
-		ret = -ENOENT;
+		ret = spi->irq;
+		if (ret != -EPROBE_DEFER)
+			dev_err(&pdev->dev, "failed to get irq: %d\n", ret);
 		goto err_master_put;
 	}
 	ret = devm_request_threaded_irq(&pdev->dev, spi->irq, NULL,
@@ -1179,34 +1240,31 @@ static int stm32_spi_probe(struct platform_device *pdev)
 	pm_runtime_set_active(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
-	ret = devm_spi_register_master(&pdev->dev, master);
+	num_cs = of_gpio_named_count(pdev->dev.of_node, "cs-gpios");
+
+	for (i = 0; i < num_cs; i++) {
+		cs_gpio = of_get_named_gpio(pdev->dev.of_node, "cs-gpios", i);
+		if (cs_gpio == -EPROBE_DEFER) {
+			ret = -EPROBE_DEFER;
+			goto err_dma_release;
+		}
+
+		if (gpio_is_valid(cs_gpio)) {
+			ret = devm_gpio_request(&pdev->dev, cs_gpio,
+						DRIVER_NAME);
+			if (ret) {
+				dev_err(&pdev->dev, "can't get CS gpio %i\n",
+					cs_gpio);
+				goto err_dma_release;
+			}
+		}
+	}
+
+	ret = spi_register_master(master);
 	if (ret) {
 		dev_err(&pdev->dev, "spi master registration failed: %d\n",
 			ret);
 		goto err_dma_release;
-	}
-
-	if (!master->cs_gpios) {
-		dev_err(&pdev->dev, "no CS gpios available\n");
-		ret = -EINVAL;
-		goto err_dma_release;
-	}
-
-	for (i = 0; i < master->num_chipselect; i++) {
-		if (!gpio_is_valid(master->cs_gpios[i])) {
-			dev_err(&pdev->dev, "%i is not a valid gpio\n",
-				master->cs_gpios[i]);
-			ret = -EINVAL;
-			goto err_dma_release;
-		}
-
-		ret = devm_gpio_request(&pdev->dev, master->cs_gpios[i],
-					DRIVER_NAME);
-		if (ret) {
-			dev_err(&pdev->dev, "can't get CS gpio %i\n",
-				master->cs_gpios[i]);
-			goto err_dma_release;
-		}
 	}
 
 	dev_info(&pdev->dev, "driver initialized\n");
@@ -1233,6 +1291,9 @@ static int stm32_spi_remove(struct platform_device *pdev)
 	struct spi_master *master = platform_get_drvdata(pdev);
 	struct stm32_spi *spi = spi_master_get_devdata(master);
 
+	pm_runtime_get_sync(&pdev->dev);
+
+	spi_unregister_master(master);
 	stm32_spi_disable(spi);
 
 	if (master->dma_tx)
@@ -1242,7 +1303,12 @@ static int stm32_spi_remove(struct platform_device *pdev)
 
 	clk_disable_unprepare(spi->clk);
 
+	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
+	pm_runtime_set_suspended(&pdev->dev);
+	pm_runtime_dont_use_autosuspend(&pdev->dev);
+
+	pinctrl_pm_select_sleep_state(&pdev->dev);
 
 	return 0;
 }
@@ -1255,13 +1321,18 @@ static int stm32_spi_runtime_suspend(struct device *dev)
 
 	clk_disable_unprepare(spi->clk);
 
-	return 0;
+	return pinctrl_pm_select_sleep_state(dev);
 }
 
 static int stm32_spi_runtime_resume(struct device *dev)
 {
 	struct spi_master *master = dev_get_drvdata(dev);
 	struct stm32_spi *spi = spi_master_get_devdata(master);
+	int ret;
+
+	ret = pinctrl_pm_select_default_state(dev);
+	if (ret)
+		return ret;
 
 	return clk_prepare_enable(spi->clk);
 }
@@ -1291,10 +1362,23 @@ static int stm32_spi_resume(struct device *dev)
 		return ret;
 
 	ret = spi_master_resume(master);
-	if (ret)
+	if (ret) {
 		clk_disable_unprepare(spi->clk);
+		return ret;
+	}
 
-	return ret;
+	ret = pm_runtime_get_sync(dev);
+	if (ret) {
+		dev_err(dev, "Unable to power device:%d\n", ret);
+		return ret;
+	}
+
+	stm32_spi_config(spi);
+
+	pm_runtime_mark_last_busy(dev);
+	pm_runtime_put_autosuspend(dev);
+
+	return 0;
 }
 #endif
 
