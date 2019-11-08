@@ -239,6 +239,12 @@ struct wm8994_pdata {
 	 * GPIO for the IRQ pin if host only supports edge triggering
 	 */
 	int irq_gpio;
+
+	/* MCLK1 clock provider */
+	struct clk *mclk1;
+
+	/* MCLK2 clock provider */
+	struct clk *mclk2;
 };
 
 #endif

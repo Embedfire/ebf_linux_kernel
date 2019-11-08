@@ -12,6 +12,7 @@
  *
  */
 
+#include <linux/clk.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -191,6 +192,12 @@ static int wm8994_resume(struct device *dev)
 	if (!wm8994->suspended)
 		return 0;
 
+	/*
+	 * LDO1/2 minimum cycle time is 36ms according to codec specification
+	 * Wait before enabling regulator to make sure we fit this requirement
+	 */
+	msleep(40);
+
 	ret = regulator_bulk_enable(wm8994->num_supplies,
 				    wm8994->supplies);
 	if (ret != 0) {
@@ -313,6 +320,20 @@ static int wm8994_set_pdata_from_of(struct wm8994 *wm8994)
 	pdata->ldo[1].enable = of_get_named_gpio(np, "wlf,ldo2ena", 0);
 	if (pdata->ldo[1].enable < 0)
 		pdata->ldo[1].enable = 0;
+
+	pdata->mclk1 = devm_clk_get(wm8994->dev, "MCLK1");
+	if (IS_ERR(pdata->mclk1)) {
+		if (PTR_ERR(pdata->mclk1) != -ENOENT)
+			return PTR_ERR(pdata->mclk1);
+		pdata->mclk1 = NULL;
+	}
+
+	pdata->mclk2 = devm_clk_get(wm8994->dev, "MCLK2");
+	if (IS_ERR(pdata->mclk2)) {
+		if (PTR_ERR(pdata->mclk2) != -ENOENT)
+			return PTR_ERR(pdata->mclk2);
+		pdata->mclk2 = NULL;
+	}
 
 	return 0;
 }
