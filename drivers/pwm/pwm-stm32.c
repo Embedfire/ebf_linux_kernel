@@ -12,12 +12,19 @@
 #include <linux/mfd/stm32-timers.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
 
 #define CCMR_CHANNEL_SHIFT 8
 #define CCMR_CHANNEL_MASK  0xFF
 #define MAX_BREAKINPUT 2
+
+struct stm32_breakinput {
+	u32 index;
+	u32 level;
+	u32 filter;
+};
 
 struct stm32_pwm {
 	struct pwm_chip chip;
@@ -26,13 +33,11 @@ struct stm32_pwm {
 	struct regmap *regmap;
 	u32 max_arr;
 	bool have_complementary_output;
+	struct stm32_breakinput breakinput[MAX_BREAKINPUT];
+	unsigned int nbreakinput;
+	struct pwm_state suspend[4];
+	bool suspended[4];
 	u32 capture[4] ____cacheline_aligned; /* DMA'able buffer */
-};
-
-struct stm32_breakinput {
-	u32 index;
-	u32 level;
-	u32 filter;
 };
 
 static inline struct stm32_pwm *to_stm32_pwm_dev(struct pwm_chip *chip)
@@ -374,9 +379,7 @@ static int stm32_pwm_config(struct stm32_pwm *priv, int ch,
 	else
 		regmap_update_bits(priv->regmap, TIM_CCMR2, mask, ccmr);
 
-	regmap_update_bits(priv->regmap, TIM_BDTR,
-			   TIM_BDTR_MOE | TIM_BDTR_AOE,
-			   TIM_BDTR_MOE | TIM_BDTR_AOE);
+	regmap_update_bits(priv->regmap, TIM_BDTR, TIM_BDTR_MOE, TIM_BDTR_MOE);
 
 	return 0;
 }
@@ -512,15 +515,27 @@ static int stm32_pwm_set_breakinput(struct stm32_pwm *priv,
 	return (bdtr & bke) ? 0 : -EINVAL;
 }
 
-static int stm32_pwm_apply_breakinputs(struct stm32_pwm *priv,
+static int stm32_pwm_apply_breakinputs(struct stm32_pwm *priv)
+{
+	int i, ret = 0;
+
+	for (i = 0; i < priv->nbreakinput && !ret; i++) {
+		ret = stm32_pwm_set_breakinput(priv,
+					       priv->breakinput[i].index,
+					       priv->breakinput[i].level,
+					       priv->breakinput[i].filter);
+	}
+
+	return ret;
+}
+
+static int stm32_pwm_probe_breakinputs(struct stm32_pwm *priv,
 				       struct device_node *np)
 {
-	struct stm32_breakinput breakinput[MAX_BREAKINPUT];
-	int nb, ret, i, array_size;
+	int nb, ret, array_size;
 
 	nb = of_property_count_elems_of_size(np, "st,breakinput",
 					     sizeof(struct stm32_breakinput));
-
 	/*
 	 * Because "st,breakinput" parameter is optional do not make probe
 	 * failed if it doesn't exist.
@@ -531,20 +546,14 @@ static int stm32_pwm_apply_breakinputs(struct stm32_pwm *priv,
 	if (nb > MAX_BREAKINPUT)
 		return -EINVAL;
 
+	priv->nbreakinput = nb;
 	array_size = nb * sizeof(struct stm32_breakinput) / sizeof(u32);
 	ret = of_property_read_u32_array(np, "st,breakinput",
-					 (u32 *)breakinput, array_size);
+					 (u32 *)priv->breakinput, array_size);
 	if (ret)
 		return ret;
 
-	for (i = 0; i < nb && !ret; i++) {
-		ret = stm32_pwm_set_breakinput(priv,
-					       breakinput[i].index,
-					       breakinput[i].level,
-					       breakinput[i].filter);
-	}
-
-	return ret;
+	return stm32_pwm_apply_breakinputs(priv);
 }
 
 static void stm32_pwm_detect_complementary(struct stm32_pwm *priv)
@@ -608,11 +617,13 @@ static int stm32_pwm_probe(struct platform_device *pdev)
 	priv->regmap = ddata->regmap;
 	priv->clk = ddata->clk;
 	priv->max_arr = ddata->max_arr;
+	priv->chip.of_xlate = of_pwm_xlate_with_flags;
+	priv->chip.of_pwm_n_cells = 3;
 
 	if (!priv->regmap || !priv->clk)
 		return -EINVAL;
 
-	ret = stm32_pwm_apply_breakinputs(priv, np);
+	ret = stm32_pwm_probe_breakinputs(priv, np);
 	if (ret)
 		return ret;
 
@@ -645,6 +656,53 @@ static int stm32_pwm_remove(struct platform_device *pdev)
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int stm32_pwm_suspend(struct device *dev)
+{
+	struct stm32_pwm *priv = dev_get_drvdata(dev);
+	unsigned int i;
+
+	for (i = 0; i < priv->chip.npwm; i++) {
+		pwm_get_state(&priv->chip.pwms[i], &priv->suspend[i]);
+		priv->suspended[i] = priv->suspend[i].enabled;
+
+		/* safe to call pwm_disable() for already disabled pwm */
+		pwm_disable(&priv->chip.pwms[i]);
+	}
+
+	return pinctrl_pm_select_sleep_state(dev);
+}
+
+static int stm32_pwm_resume(struct device *dev)
+{
+	struct stm32_pwm *priv = dev_get_drvdata(dev);
+	unsigned int i;
+	int ret;
+
+	ret = pinctrl_pm_select_default_state(dev);
+	if (ret)
+		return ret;
+
+	ret = stm32_pwm_apply_breakinputs(priv);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < priv->chip.npwm; i++) {
+		/* Only resume active pwm, not to disrupt other MFD child */
+		if (!priv->suspended[i])
+			continue;
+
+		ret = pwm_apply_state(&priv->chip.pwms[i], &priv->suspend[i]);
+		if (ret)
+			break;
+	}
+
+	return ret;
+}
+#endif
+
+static SIMPLE_DEV_PM_OPS(stm32_pwm_pm_ops, stm32_pwm_suspend, stm32_pwm_resume);
+
 static const struct of_device_id stm32_pwm_of_match[] = {
 	{ .compatible = "st,stm32-pwm",	},
 	{ /* end node */ },
@@ -657,6 +715,7 @@ static struct platform_driver stm32_pwm_driver = {
 	.driver	= {
 		.name = "stm32-pwm",
 		.of_match_table = stm32_pwm_of_match,
+		.pm = &stm32_pwm_pm_ops,
 	},
 };
 module_platform_driver(stm32_pwm_driver);

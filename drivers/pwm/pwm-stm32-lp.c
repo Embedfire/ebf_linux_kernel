@@ -13,6 +13,7 @@
 #include <linux/mfd/stm32-lptimer.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
 
@@ -20,6 +21,8 @@ struct stm32_pwm_lp {
 	struct pwm_chip chip;
 	struct clk *clk;
 	struct regmap *regmap;
+	struct pwm_state suspend;
+	bool suspended;
 };
 
 static inline struct stm32_pwm_lp *to_stm32_pwm_lp(struct pwm_chip *chip)
@@ -229,6 +232,40 @@ static int stm32_pwm_lp_remove(struct platform_device *pdev)
 	return pwmchip_remove(&priv->chip);
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int stm32_pwm_lp_suspend(struct device *dev)
+{
+	struct stm32_pwm_lp *priv = dev_get_drvdata(dev);
+
+	pwm_get_state(&priv->chip.pwms[0], &priv->suspend);
+	priv->suspended = priv->suspend.enabled;
+
+	/* safe to call pwm_disable() for already disabled pwm */
+	pwm_disable(&priv->chip.pwms[0]);
+
+	return pinctrl_pm_select_sleep_state(dev);
+}
+
+static int stm32_pwm_lp_resume(struct device *dev)
+{
+	struct stm32_pwm_lp *priv = dev_get_drvdata(dev);
+	int ret;
+
+	ret = pinctrl_pm_select_default_state(dev);
+	if (ret)
+		return ret;
+
+	/* Only restore suspended pwm, not to disrupt other MFD child */
+	if (!priv->suspended)
+		return 0;
+
+	return pwm_apply_state(&priv->chip.pwms[0], &priv->suspend);
+}
+#endif
+
+static SIMPLE_DEV_PM_OPS(stm32_pwm_lp_pm_ops, stm32_pwm_lp_suspend,
+			 stm32_pwm_lp_resume);
+
 static const struct of_device_id stm32_pwm_lp_of_match[] = {
 	{ .compatible = "st,stm32-pwm-lp", },
 	{},
@@ -241,6 +278,7 @@ static struct platform_driver stm32_pwm_lp_driver = {
 	.driver	= {
 		.name = "stm32-pwm-lp",
 		.of_match_table = of_match_ptr(stm32_pwm_lp_of_match),
+		.pm = &stm32_pwm_lp_pm_ops,
 	},
 };
 module_platform_driver(stm32_pwm_lp_driver);

@@ -125,6 +125,10 @@ struct pinctrl_ops {
  *	the hardware description
  * @custom_conf_items: Information how to print @params in debugfs, must be
  *	the same size as the @custom_params, i.e. @num_custom_params
+ * @link_consumers: If true create a device link between pinctrl and its
+ *	consumers (i.e. the devices requesting pin control states). This is
+ *	sometimes necessary to ascertain the right suspend/resume order for
+ *	example.
  */
 struct pinctrl_desc {
 	const char *name;
@@ -139,6 +143,7 @@ struct pinctrl_desc {
 	const struct pinconf_generic_params *custom_params;
 	const struct pin_config_item *custom_conf_items;
 #endif
+	bool link_consumers;
 };
 
 /* External interface to pin controller */
@@ -147,6 +152,8 @@ extern int pinctrl_register_and_init(struct pinctrl_desc *pctldesc,
 				     struct device *dev, void *driver_data,
 				     struct pinctrl_dev **pctldev);
 extern int pinctrl_enable(struct pinctrl_dev *pctldev);
+
+extern int pinctrl_claim_hogs(struct pinctrl_dev *pctldev);
 
 /* Please use pinctrl_register_and_init() and pinctrl_enable() instead */
 extern struct pinctrl_dev *pinctrl_register(struct pinctrl_desc *pctldesc,
