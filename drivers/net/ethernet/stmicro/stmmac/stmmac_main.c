@@ -2713,6 +2713,8 @@ static int stmmac_release(struct net_device *dev)
 	struct stmmac_priv *priv = netdev_priv(dev);
 	u32 chan;
 
+	stmmac_disable_all_queues(priv);
+
 	if (priv->eee_enabled)
 		del_timer_sync(&priv->eee_ctrl_timer);
 
@@ -2723,8 +2725,6 @@ static int stmmac_release(struct net_device *dev)
 	}
 
 	stmmac_stop_all_queues(priv);
-
-	stmmac_disable_all_queues(priv);
 
 	for (chan = 0; chan < priv->plat->tx_queues_to_use; chan++)
 		del_timer_sync(&priv->tx_queue[chan].txtimer);
@@ -4501,14 +4501,13 @@ int stmmac_suspend(struct device *dev)
 	if (!ndev || !netif_running(ndev))
 		return 0;
 
-	if (ndev->phydev)
-		phy_stop(ndev->phydev);
+	/* call carrier off first to avoid false dev_watchdog timeouts */
+	netif_carrier_off(ndev);
 
 	mutex_lock(&priv->lock);
 
 	netif_device_detach(ndev);
 	stmmac_stop_all_queues(priv);
-
 	stmmac_disable_all_queues(priv);
 
 	/* Stop TX/RX DMA */
@@ -4532,6 +4531,10 @@ int stmmac_suspend(struct device *dev)
 	priv->oldlink = false;
 	priv->speed = SPEED_UNKNOWN;
 	priv->oldduplex = DUPLEX_UNKNOWN;
+
+	if (ndev->phydev)
+		phy_stop(ndev->phydev);
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(stmmac_suspend);
@@ -4572,6 +4575,7 @@ int stmmac_resume(struct device *dev)
 {
 	struct net_device *ndev = dev_get_drvdata(dev);
 	struct stmmac_priv *priv = netdev_priv(ndev);
+	int ret;
 
 	if (!netif_running(ndev))
 		return 0;
@@ -4601,11 +4605,32 @@ int stmmac_resume(struct device *dev)
 
 	netif_device_attach(ndev);
 
+	if (ndev->phydev)
+		phy_start(ndev->phydev);
+
 	mutex_lock(&priv->lock);
 
 	stmmac_reset_queues_param(priv);
 
-	stmmac_clear_descriptors(priv);
+	/* Stop TX/RX DMA and clear the descriptors */
+	stmmac_stop_all_dma(priv);
+
+	/* Release and free the Rx/Tx resources */
+	free_dma_desc_resources(priv);
+
+	ret = alloc_dma_desc_resources(priv);
+	if (ret < 0) {
+		netdev_err(priv->dev, "%s: DMA descriptors allocation failed\n",
+			   __func__);
+		goto dma_desc_error;
+	}
+
+	ret = init_dma_desc_rings(ndev, GFP_KERNEL);
+	if (ret < 0) {
+		netdev_err(priv->dev, "%s: DMA descriptors initialization failed\n",
+			   __func__);
+		goto init_error;
+	}
 
 	stmmac_hw_setup(ndev, false);
 	stmmac_init_tx_coalesce(priv);
@@ -4617,10 +4642,14 @@ int stmmac_resume(struct device *dev)
 
 	mutex_unlock(&priv->lock);
 
-	if (ndev->phydev)
-		phy_start(ndev->phydev);
-
 	return 0;
+init_error:
+	free_dma_desc_resources(priv);
+dma_desc_error:
+	if (ndev->phydev)
+		phy_disconnect(ndev->phydev);
+
+	return -1;
 }
 EXPORT_SYMBOL_GPL(stmmac_resume);
 

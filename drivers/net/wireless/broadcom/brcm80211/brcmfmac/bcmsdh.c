@@ -1129,7 +1129,10 @@ static int brcmf_ops_sdio_suspend(struct device *dev)
 			enable_irq_wake(sdiodev->settings->bus.sdio.oob_irq_nr);
 		else
 			sdio_flags |= MMC_PM_WAKE_SDIO_IRQ;
+	} else {
+		brcmf_sdiod_intr_unregister(sdiodev);
 	}
+
 	if (sdio_set_host_pm_flags(sdiodev->func1, sdio_flags))
 		brcmf_err("Failed to set pm_flags %x\n", sdio_flags);
 	return 0;
@@ -1144,6 +1147,9 @@ static int brcmf_ops_sdio_resume(struct device *dev)
 	brcmf_dbg(SDIO, "Enter: F%d\n", func->num);
 	if (func->num != 2)
 		return 0;
+
+	if (!sdiodev->wowl_enabled)
+		brcmf_sdiod_intr_register(sdiodev);
 
 	brcmf_sdiod_freezer_off(sdiodev);
 	return 0;
