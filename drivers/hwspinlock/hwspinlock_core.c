@@ -333,6 +333,9 @@ int of_hwspin_lock_get_id(struct device_node *np, int index)
 	if (ret)
 		return ret;
 
+	if (!of_device_is_available(args.np))
+		return -ENOENT;
+
 	/* Find the hwspinlock device: we need its base_id */
 	ret = -EPROBE_DEFER;
 	rcu_read_lock();
@@ -742,13 +745,11 @@ struct hwspinlock *hwspin_lock_request_specific(unsigned int id)
 	/* sanity check (this shouldn't happen) */
 	WARN_ON(hwlock_to_id(hwlock) != id);
 
-	/* make sure this hwspinlock is unused */
-	ret = radix_tree_tag_get(&hwspinlock_tree, id, HWSPINLOCK_UNUSED);
-	if (ret == 0) {
-		pr_warn("hwspinlock %u is already in use\n", id);
-		hwlock = NULL;
-		goto out;
-	}
+	/*
+	 * We intentionally do not check for the HWSPINLOCK_UNUSED tag as
+	 * we want to share HWSPINLOCK between several devices. This is safe
+	 * since the lock/unlock requests are called under &hwlock->lock control
+	 */
 
 	/* mark as used and power up */
 	ret = __hwspin_lock_request(hwlock);
