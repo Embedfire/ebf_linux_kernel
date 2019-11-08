@@ -1918,6 +1918,13 @@ static int alg_test_crc32c(const struct alg_test_desc *desc,
 		shash->tfm = tfm;
 		shash->flags = 0;
 
+		err = crypto_shash_init(shash);
+		if (err) {
+			printk(KERN_ERR "alg: crc32c: init failed for "
+			       "%s: %d\n", driver, err);
+			break;
+		}
+
 		*ctx = le32_to_cpu(420553207);
 		err = crypto_shash_final(shash, (u8 *)&val);
 		if (err) {

@@ -28,8 +28,10 @@
 
 /* Registers values */
 #define CRC_CR_RESET            BIT(0)
-#define CRC_CR_REVERSE          (BIT(7) | BIT(6) | BIT(5))
-#define CRC_INIT_DEFAULT        0xFFFFFFFF
+#define CRC_CR_REV_IN_W         (BIT(6) | BIT(5))
+#define CRC_CR_REV_IN_B         BIT(5)
+#define CRC_CR_REV_OUT		BIT(7)
+#define CRC32C_INIT_DEFAULT     0xFFFFFFFF
 
 #define CRC_AUTOSUSPEND_DELAY	50
 
@@ -62,11 +64,16 @@ struct stm32_crc_desc_ctx {
 	struct stm32_crc *crc;
 };
 
+struct stm32_crc_algs_info {
+	struct shash_alg	algs[2];
+	unsigned int		registered;
+};
+
 static int stm32_crc32_cra_init(struct crypto_tfm *tfm)
 {
 	struct stm32_crc_ctx *mctx = crypto_tfm_ctx(tfm);
 
-	mctx->key = CRC_INIT_DEFAULT;
+	mctx->key = 0;
 	mctx->poly = CRC32_POLY_LE;
 	return 0;
 }
@@ -75,7 +82,7 @@ static int stm32_crc32c_cra_init(struct crypto_tfm *tfm)
 {
 	struct stm32_crc_ctx *mctx = crypto_tfm_ctx(tfm);
 
-	mctx->key = CRC_INIT_DEFAULT;
+	mctx->key = CRC32C_INIT_DEFAULT;
 	mctx->poly = CRC32C_POLY_LE;
 	return 0;
 }
@@ -94,25 +101,34 @@ static int stm32_crc_setkey(struct crypto_shash *tfm, const u8 *key,
 	return 0;
 }
 
+static struct stm32_crc *stm32_crc_find_dev(struct stm32_crc_desc_ctx *ctx)
+{
+	struct stm32_crc *crc;
+
+	spin_lock_bh(&crc_list.lock);
+	crc = list_first_entry(&crc_list.dev_list, struct stm32_crc, list);
+	list_move_tail(&crc->list, &crc_list.dev_list);
+		ctx->crc = crc;
+	spin_unlock_bh(&crc_list.lock);
+
+	return crc;
+}
+
 static int stm32_crc_init(struct shash_desc *desc)
 {
 	struct stm32_crc_desc_ctx *ctx = shash_desc_ctx(desc);
 	struct stm32_crc_ctx *mctx = crypto_shash_ctx(desc->tfm);
-	struct stm32_crc *crc;
 
-	spin_lock_bh(&crc_list.lock);
-	list_for_each_entry(crc, &crc_list.dev_list, list) {
-		ctx->crc = crc;
-		break;
-	}
-	spin_unlock_bh(&crc_list.lock);
+	if (!stm32_crc_find_dev(ctx))
+		return -ENODEV;
 
 	pm_runtime_get_sync(ctx->crc->dev);
 
 	/* Reset, set key, poly and configure in bit reverse mode */
 	writel_relaxed(bitrev32(mctx->key), ctx->crc->regs + CRC_INIT);
 	writel_relaxed(bitrev32(mctx->poly), ctx->crc->regs + CRC_POL);
-	writel_relaxed(CRC_CR_RESET | CRC_CR_REVERSE, ctx->crc->regs + CRC_CR);
+	writel_relaxed(CRC_CR_RESET | CRC_CR_REV_IN_W | CRC_CR_REV_OUT,
+		       ctx->crc->regs + CRC_CR);
 
 	/* Store partial result */
 	ctx->partial = readl_relaxed(ctx->crc->regs + CRC_DR);
@@ -183,6 +199,25 @@ static int stm32_crc_final(struct shash_desc *desc, u8 *out)
 {
 	struct stm32_crc_desc_ctx *ctx = shash_desc_ctx(desc);
 	struct stm32_crc_ctx *mctx = crypto_shash_ctx(desc->tfm);
+	struct stm32_crc *crc = ctx->crc;
+	unsigned int i = 0;
+
+	if (unlikely(crc->nb_pending_bytes)) {
+		pm_runtime_get_sync(crc->dev);
+		/* Process pending data */
+		writel_relaxed(CRC_CR_REV_IN_B | CRC_CR_REV_OUT,
+			       ctx->crc->regs + CRC_CR);
+		while (i != crc->nb_pending_bytes) {
+			writeb_relaxed(crc->pending_data[i++],
+				       crc->regs + CRC_DR);
+		}
+
+		crc->nb_pending_bytes = 0;
+		ctx->partial = readl_relaxed(crc->regs + CRC_DR);
+
+		pm_runtime_mark_last_busy(crc->dev);
+		pm_runtime_put_autosuspend(crc->dev);
+	}
 
 	/* Send computed CRC */
 	put_unaligned_le32(mctx->poly == CRC32C_POLY_LE ?
@@ -204,49 +239,63 @@ static int stm32_crc_digest(struct shash_desc *desc, const u8 *data,
 	return stm32_crc_init(desc) ?: stm32_crc_finup(desc, data, length, out);
 }
 
-static struct shash_alg algs[] = {
-	/* CRC-32 */
+static struct stm32_crc_algs_info crc_algs[] = {
 	{
-		.setkey         = stm32_crc_setkey,
-		.init           = stm32_crc_init,
-		.update         = stm32_crc_update,
-		.final          = stm32_crc_final,
-		.finup          = stm32_crc_finup,
-		.digest         = stm32_crc_digest,
-		.descsize       = sizeof(struct stm32_crc_desc_ctx),
-		.digestsize     = CHKSUM_DIGEST_SIZE,
-		.base           = {
-			.cra_name               = "crc32",
-			.cra_driver_name        = DRIVER_NAME,
-			.cra_priority           = 200,
-			.cra_flags		= CRYPTO_ALG_OPTIONAL_KEY,
-			.cra_blocksize          = CHKSUM_BLOCK_SIZE,
-			.cra_alignmask          = 3,
-			.cra_ctxsize            = sizeof(struct stm32_crc_ctx),
-			.cra_module             = THIS_MODULE,
-			.cra_init               = stm32_crc32_cra_init,
-		}
-	},
-	/* CRC-32Castagnoli */
-	{
-		.setkey         = stm32_crc_setkey,
-		.init           = stm32_crc_init,
-		.update         = stm32_crc_update,
-		.final          = stm32_crc_final,
-		.finup          = stm32_crc_finup,
-		.digest         = stm32_crc_digest,
-		.descsize       = sizeof(struct stm32_crc_desc_ctx),
-		.digestsize     = CHKSUM_DIGEST_SIZE,
-		.base           = {
-			.cra_name               = "crc32c",
-			.cra_driver_name        = DRIVER_NAME,
-			.cra_priority           = 200,
-			.cra_flags		= CRYPTO_ALG_OPTIONAL_KEY,
-			.cra_blocksize          = CHKSUM_BLOCK_SIZE,
-			.cra_alignmask          = 3,
-			.cra_ctxsize            = sizeof(struct stm32_crc_ctx),
-			.cra_module             = THIS_MODULE,
-			.cra_init               = stm32_crc32c_cra_init,
+		.algs	= {
+			/* CRC-32 */
+			{
+				.setkey         = stm32_crc_setkey,
+				.init           = stm32_crc_init,
+				.update         = stm32_crc_update,
+				.final          = stm32_crc_final,
+				.finup          = stm32_crc_finup,
+				.digest         = stm32_crc_digest,
+				.descsize       =
+					sizeof(struct stm32_crc_desc_ctx),
+				.digestsize     = CHKSUM_DIGEST_SIZE,
+				.base           = {
+					.cra_name               = "crc32",
+					.cra_driver_name        = DRIVER_NAME,
+					.cra_priority           = 200,
+					.cra_flags		=
+					CRYPTO_ALG_OPTIONAL_KEY,
+					.cra_blocksize          =
+						CHKSUM_BLOCK_SIZE,
+					.cra_alignmask          = 3,
+					.cra_ctxsize            =
+					sizeof(struct stm32_crc_ctx),
+					.cra_module             = THIS_MODULE,
+					.cra_init               =
+					stm32_crc32_cra_init,
+				}
+			},
+		/* CRC-32Castagnoli */
+			{
+				.setkey         = stm32_crc_setkey,
+				.init           = stm32_crc_init,
+				.update         = stm32_crc_update,
+				.final          = stm32_crc_final,
+				.finup          = stm32_crc_finup,
+				.digest         = stm32_crc_digest,
+				.descsize       =
+					sizeof(struct stm32_crc_desc_ctx),
+				.digestsize     = CHKSUM_DIGEST_SIZE,
+				.base           = {
+					.cra_name               = "crc32c",
+					.cra_driver_name        = DRIVER_NAME,
+					.cra_priority           = 200,
+					.cra_flags		=
+					CRYPTO_ALG_OPTIONAL_KEY,
+					.cra_blocksize          =
+						CHKSUM_BLOCK_SIZE,
+					.cra_alignmask          = 3,
+					.cra_ctxsize            =
+					sizeof(struct stm32_crc_ctx),
+					.cra_module             = THIS_MODULE,
+					.cra_init               =
+					stm32_crc32c_cra_init,
+				}
+			}
 		}
 	}
 };
@@ -296,15 +345,19 @@ static int stm32_crc_probe(struct platform_device *pdev)
 	list_add(&crc->list, &crc_list.dev_list);
 	spin_unlock(&crc_list.lock);
 
-	ret = crypto_register_shashes(algs, ARRAY_SIZE(algs));
+	if (!crc_algs->registered) {
+		ret = crypto_register_shashes(crc_algs->algs,
+					      ARRAY_SIZE(crc_algs->algs));
+
 	if (ret) {
 		dev_err(dev, "Failed to register\n");
 		clk_disable_unprepare(crc->clk);
 		return ret;
+		}
 	}
 
+	crc_algs->registered++;
 	dev_info(dev, "Initialized\n");
-
 	pm_runtime_put_sync(dev);
 
 	return 0;
@@ -322,11 +375,12 @@ static int stm32_crc_remove(struct platform_device *pdev)
 	list_del(&crc->list);
 	spin_unlock(&crc_list.lock);
 
-	crypto_unregister_shashes(algs, ARRAY_SIZE(algs));
+	if (!--crc_algs->registered)
+		crypto_unregister_shashes(crc_algs->algs,
+					  ARRAY_SIZE(crc_algs->algs));
 
 	pm_runtime_disable(crc->dev);
 	pm_runtime_put_noidle(crc->dev);
-
 	clk_disable_unprepare(crc->clk);
 
 	return 0;
