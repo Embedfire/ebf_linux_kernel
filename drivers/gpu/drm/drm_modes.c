@@ -130,7 +130,7 @@ EXPORT_SYMBOL(drm_mode_probed_add);
  * according to the hdisplay, vdisplay, vrefresh.
  * It is based from the VESA(TM) Coordinated Video Timing Generator by
  * Graham Loveridge April 9, 2003 available at
- * http://www.elo.utfsm.cl/~elo212/docs/CVTd6r1.xls 
+ * http://www.elo.utfsm.cl/~elo212/docs/CVTd6r1.xls
  *
  * And it is copied from xf86CVTmode in xserver/hw/xfree86/modes/xf86cvt.c.
  * What I have done is to translate it by using integer calculation.
@@ -611,6 +611,15 @@ void drm_display_mode_from_videomode(const struct videomode *vm,
 		dmode->flags |= DRM_MODE_FLAG_DBLSCAN;
 	if (vm->flags & DISPLAY_FLAGS_DOUBLECLK)
 		dmode->flags |= DRM_MODE_FLAG_DBLCLK;
+	if (vm->flags & DISPLAY_FLAGS_PIXDATA_POSEDGE)
+		dmode->flags |= DRM_MODE_FLAG_PPIXDATA;
+	else if (vm->flags & DISPLAY_FLAGS_PIXDATA_NEGEDGE)
+		dmode->flags |= DRM_MODE_FLAG_NPIXDATA;
+	if (vm->flags & DISPLAY_FLAGS_DE_HIGH)
+		dmode->flags |= DRM_MODE_FLAG_PDE;
+	else if (vm->flags & DISPLAY_FLAGS_DE_LOW)
+		dmode->flags |= DRM_MODE_FLAG_NDE;
+
 	drm_mode_set_name(dmode);
 }
 EXPORT_SYMBOL_GPL(drm_display_mode_from_videomode);
@@ -652,6 +661,14 @@ void drm_display_mode_to_videomode(const struct drm_display_mode *dmode,
 		vm->flags |= DISPLAY_FLAGS_DOUBLESCAN;
 	if (dmode->flags & DRM_MODE_FLAG_DBLCLK)
 		vm->flags |= DISPLAY_FLAGS_DOUBLECLK;
+	if (dmode->flags & DRM_MODE_FLAG_PPIXDATA)
+		vm->flags |= DISPLAY_FLAGS_PIXDATA_POSEDGE;
+	else if (dmode->flags & DRM_MODE_FLAG_NPIXDATA)
+		vm->flags |= DISPLAY_FLAGS_PIXDATA_NEGEDGE;
+	if (dmode->flags & DRM_MODE_FLAG_PDE)
+		vm->flags |= DISPLAY_FLAGS_DE_HIGH;
+	else if (dmode->flags & DRM_MODE_FLAG_NDE)
+		vm->flags |= DISPLAY_FLAGS_DE_LOW;
 }
 EXPORT_SYMBOL_GPL(drm_display_mode_to_videomode);
 

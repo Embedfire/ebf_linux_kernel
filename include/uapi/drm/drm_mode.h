@@ -89,6 +89,12 @@ extern "C" {
 #define  DRM_MODE_FLAG_3D_TOP_AND_BOTTOM	(7<<14)
 #define  DRM_MODE_FLAG_3D_SIDE_BY_SIDE_HALF	(8<<14)
 
+/* flags for polarity clock & data enable polarities */
+#define DRM_MODE_FLAG_PPIXDATA			(1 << 19)
+#define DRM_MODE_FLAG_NPIXDATA			(1 << 20)
+#define DRM_MODE_FLAG_PDE			(1 << 21)
+#define DRM_MODE_FLAG_NDE			(1 << 22)
+
 /* Picture aspect ratio options */
 #define DRM_MODE_PICTURE_ASPECT_NONE		0
 #define DRM_MODE_PICTURE_ASPECT_4_3		1

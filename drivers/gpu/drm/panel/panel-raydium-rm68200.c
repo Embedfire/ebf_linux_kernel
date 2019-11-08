@@ -81,15 +81,15 @@ struct rm68200 {
 };
 
 static const struct drm_display_mode default_mode = {
-	.clock = 52582,
+	.clock = 54000,
 	.hdisplay = 720,
-	.hsync_start = 720 + 38,
-	.hsync_end = 720 + 38 + 8,
-	.htotal = 720 + 38 + 8 + 38,
+	.hsync_start = 720 + 48,
+	.hsync_end = 720 + 48 + 9,
+	.htotal = 720 + 48 + 9 + 48,
 	.vdisplay = 1280,
 	.vsync_start = 1280 + 12,
-	.vsync_end = 1280 + 12 + 4,
-	.vtotal = 1280 + 12 + 4 + 12,
+	.vsync_end = 1280 + 12 + 5,
+	.vtotal = 1280 + 12 + 5 + 12,
 	.vrefresh = 50,
 	.flags = 0,
 	.width_mm = 68,
@@ -265,11 +265,6 @@ static int rm68200_unprepare(struct drm_panel *panel)
 
 	msleep(120);
 
-	if (ctx->reset_gpio) {
-		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		msleep(20);
-	}
-
 	regulator_disable(ctx->supply);
 
 	ctx->prepared = false;
@@ -383,7 +378,8 @@ static int rm68200_probe(struct mipi_dsi_device *dsi)
 	ctx->supply = devm_regulator_get(dev, "power");
 	if (IS_ERR(ctx->supply)) {
 		ret = PTR_ERR(ctx->supply);
-		dev_err(dev, "cannot get regulator: %d\n", ret);
+		if (ret != -EPROBE_DEFER)
+			dev_err(dev, "cannot get regulator: %d\n", ret);
 		return ret;
 	}
 

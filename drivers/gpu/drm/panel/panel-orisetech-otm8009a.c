@@ -67,15 +67,15 @@ struct otm8009a {
 };
 
 static const struct drm_display_mode default_mode = {
-	.clock = 32729,
+	.clock = 29700,
 	.hdisplay = 480,
-	.hsync_start = 480 + 120,
-	.hsync_end = 480 + 120 + 63,
-	.htotal = 480 + 120 + 63 + 120,
+	.hsync_start = 480 + 98,
+	.hsync_end = 480 + 98 + 32,
+	.htotal = 480 + 98 + 32 + 98,
 	.vdisplay = 800,
-	.vsync_start = 800 + 12,
-	.vsync_end = 800 + 12 + 12,
-	.vtotal = 800 + 12 + 12 + 12,
+	.vsync_start = 800 + 15,
+	.vsync_end = 800 + 15 + 10,
+	.vtotal = 800 + 15 + 10 + 14,
 	.vrefresh = 50,
 	.flags = 0,
 	.width_mm = 52,
@@ -257,23 +257,11 @@ static int otm8009a_init_sequence(struct otm8009a *ctx)
 static int otm8009a_disable(struct drm_panel *panel)
 {
 	struct otm8009a *ctx = panel_to_otm8009a(panel);
-	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
-	int ret;
 
 	if (!ctx->enabled)
 		return 0; /* This is not an issue so we return 0 here */
 
 	backlight_disable(ctx->bl_dev);
-
-	ret = mipi_dsi_dcs_set_display_off(dsi);
-	if (ret)
-		return ret;
-
-	ret = mipi_dsi_dcs_enter_sleep_mode(dsi);
-	if (ret)
-		return ret;
-
-	msleep(120);
 
 	ctx->enabled = false;
 
@@ -283,14 +271,23 @@ static int otm8009a_disable(struct drm_panel *panel)
 static int otm8009a_unprepare(struct drm_panel *panel)
 {
 	struct otm8009a *ctx = panel_to_otm8009a(panel);
+	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
+	int ret;
 
 	if (!ctx->prepared)
 		return 0;
 
-	if (ctx->reset_gpio) {
-		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		msleep(20);
-	}
+	ret = mipi_dsi_dcs_set_display_off(dsi);
+	if (ret)
+		return ret;
+
+	mdelay(10);
+
+	ret = mipi_dsi_dcs_enter_sleep_mode(dsi);
+	if (ret)
+		return ret;
+
+	mdelay(10);
 
 	regulator_disable(ctx->supply);
 
@@ -307,18 +304,24 @@ static int otm8009a_prepare(struct drm_panel *panel)
 	if (ctx->prepared)
 		return 0;
 
+	if (ctx->reset_gpio) {
+		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+	}
+
+	mdelay(20);
+
 	ret = regulator_enable(ctx->supply);
 	if (ret < 0) {
 		DRM_ERROR("failed to enable supply: %d\n", ret);
 		return ret;
 	}
 
+	mdelay(120);
+
 	if (ctx->reset_gpio) {
 		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
-		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		msleep(20);
-		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
-		msleep(100);
+		mdelay(20);
 	}
 
 	ret = otm8009a_init_sequence(ctx);
@@ -433,10 +436,22 @@ static int otm8009a_probe(struct mipi_dsi_device *dsi)
 		return PTR_ERR(ctx->reset_gpio);
 	}
 
+	/*
+	 * Due to a common reset between panel & touchscreen, the reset pin
+	 * must be set to low level first and leave at high level at the
+	 * end of probe
+	 */
+	if (ctx->reset_gpio) {
+		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+		mdelay(1);
+		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+	}
+
 	ctx->supply = devm_regulator_get(dev, "power");
 	if (IS_ERR(ctx->supply)) {
 		ret = PTR_ERR(ctx->supply);
-		dev_err(dev, "failed to request regulator: %d\n", ret);
+		if (ret != -EPROBE_DEFER)
+			dev_err(dev, "failed to request regulator: %d\n", ret);
 		return ret;
 	}
 
@@ -487,6 +502,13 @@ static int otm8009a_remove(struct mipi_dsi_device *dsi)
 
 	mipi_dsi_detach(dsi);
 	drm_panel_remove(&ctx->panel);
+
+	if (ctx->reset_gpio) {
+		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+		mdelay(20);
+	}
+
+	regulator_disable(ctx->supply);
 
 	return 0;
 }
