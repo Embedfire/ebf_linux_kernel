@@ -125,7 +125,7 @@ static void dwc2_init_fs_ls_pclk_sel(struct dwc2_hsotg *hsotg)
 
 static int dwc2_fs_phy_init(struct dwc2_hsotg *hsotg, bool select_phy)
 {
-	u32 usbcfg, ggpio, i2cctl;
+	u32 usbcfg, i2cctl;
 	int retval = 0;
 
 	/*
@@ -147,19 +147,6 @@ static int dwc2_fs_phy_init(struct dwc2_hsotg *hsotg, bool select_phy)
 				dev_err(hsotg->dev,
 					"%s: Reset failed, aborting", __func__);
 				return retval;
-			}
-		}
-
-		if (hsotg->params.activate_stm_fs_transceiver) {
-			ggpio = dwc2_readl(hsotg, GGPIO);
-			if (!(ggpio & GGPIO_STM32_OTG_GCCFG_PWRDWN)) {
-				dev_dbg(hsotg->dev, "Activating transceiver\n");
-				/*
-				 * STM32F4x9 uses the GGPIO register as general
-				 * core configuration register.
-				 */
-				ggpio |= GGPIO_STM32_OTG_GCCFG_PWRDWN;
-				dwc2_writel(hsotg, ggpio, GGPIO);
 			}
 		}
 	}
@@ -358,16 +345,10 @@ static void dwc2_gusbcfg_init(struct dwc2_hsotg *hsotg)
 
 static int dwc2_vbus_supply_init(struct dwc2_hsotg *hsotg)
 {
-	int ret;
+	if (hsotg->vbus_supply)
+		return regulator_enable(hsotg->vbus_supply);
 
-	hsotg->vbus_supply = devm_regulator_get_optional(hsotg->dev, "vbus");
-	if (IS_ERR(hsotg->vbus_supply)) {
-		ret = PTR_ERR(hsotg->vbus_supply);
-		hsotg->vbus_supply = NULL;
-		return ret == -ENODEV ? 0 : ret;
-	}
-
-	return regulator_enable(hsotg->vbus_supply);
+	return 0;
 }
 
 static int dwc2_vbus_supply_exit(struct dwc2_hsotg *hsotg)
@@ -1328,13 +1309,10 @@ static void dwc2_hc_write_packet(struct dwc2_hsotg *hsotg,
 	u32 remaining_count;
 	u32 byte_count;
 	u32 dword_count;
-	u32 __iomem *data_fifo;
 	u32 *data_buf = (u32 *)chan->xfer_buf;
 
 	if (dbg_hc(chan))
 		dev_vdbg(hsotg->dev, "%s()\n", __func__);
-
-	data_fifo = (u32 __iomem *)(hsotg->regs + HCFIFO(chan->hc_num));
 
 	remaining_count = chan->xfer_len - chan->xfer_count;
 	if (remaining_count > chan->max_packet)
@@ -1934,7 +1912,8 @@ static void dwc2_hcd_cleanup_channels(struct dwc2_hsotg *hsotg)
 		 * release_channel_ddma(), which is called from ep_disable when
 		 * device disconnects
 		 */
-		channel->qh = NULL;
+		if (hsotg->params.host_dma && hsotg->params.dma_desc_enable)
+			channel->qh = NULL;
 	}
 	/* All channels have been freed, mark them available */
 	if (hsotg->params.uframe_sched) {
@@ -3804,7 +3783,8 @@ static int dwc2_hcd_hub_control(struct dwc2_hsotg *hsotg, u16 typereq,
 		if (wvalue != USB_PORT_FEAT_TEST && (!windex || windex > 1))
 			goto error;
 
-		if (!hsotg->flags.b.port_connect_status) {
+		if (!hsotg->flags.b.port_connect_status &&
+		    !dwc2_is_host_mode(hsotg)) {
 			/*
 			 * The port is disconnected, which means the core is
 			 * either in device mode or it soon will be. Just

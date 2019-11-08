@@ -123,6 +123,24 @@ static inline void dwc2_gadget_incr_frame_num(struct dwc2_hsotg_ep *hs_ep)
 }
 
 /**
+ * dwc2_gadget_dec_frame_num_by_one - Decrements the targeted frame number
+ *                                    by one.
+ * @hs_ep: The endpoint.
+ *
+ * This function used in service interval based scheduling flow to calculate
+ * descriptor frame number filed value. For service interval mode frame
+ * number in descriptor should point to last (u)frame in the interval.
+ *
+ */
+static inline void dwc2_gadget_dec_frame_num_by_one(struct dwc2_hsotg_ep *hs_ep)
+{
+	if (hs_ep->target_frame)
+		hs_ep->target_frame -= 1;
+	else
+		hs_ep->target_frame = DSTS_SOFFN_LIMIT;
+}
+
+/**
  * dwc2_hsotg_en_gsint - enable one or more of the general interrupt
  * @hsotg: The device state
  * @ints: A bitmask of the interrupts to enable
@@ -225,6 +243,27 @@ int dwc2_hsotg_tx_fifo_total_depth(struct dwc2_hsotg *hsotg)
 		return 0;
 
 	return tx_addr_max - addr;
+}
+
+/**
+ * dwc2_gadget_wkup_alert_handler - Handler for WKUP_ALERT interrupt
+ *
+ * @hsotg: Programming view of the DWC_otg controller
+ *
+ */
+static void dwc2_gadget_wkup_alert_handler(struct dwc2_hsotg *hsotg)
+{
+	u32 gintsts2;
+	u32 gintmsk2;
+
+	gintsts2 = dwc2_readl(hsotg, GINTSTS2);
+	gintmsk2 = dwc2_readl(hsotg, GINTMSK2);
+
+	if (gintsts2 & GINTSTS2_WKUP_ALERT_INT) {
+		dev_dbg(hsotg->dev, "%s: Wkup_Alert_Int\n", __func__);
+		dwc2_set_bit(hsotg, GINTSTS2, GINTSTS2_WKUP_ALERT_INT);
+		dwc2_set_bit(hsotg, DCTL, DCTL_RMTWKUPSIG);
+	}
 }
 
 /**
@@ -2810,6 +2849,23 @@ static void dwc2_gadget_handle_nak(struct dwc2_hsotg_ep *hs_ep)
 		if (using_desc_dma(hsotg)) {
 			hs_ep->target_frame = hsotg->frame_number;
 			dwc2_gadget_incr_frame_num(hs_ep);
+
+			/* In service interval mode target_frame must
+			 * be set to last (u)frame of the service interval.
+			 */
+			if (hsotg->params.service_interval) {
+				/* Set target_frame to the first (u)frame of
+				 * the service interval
+				 */
+				hs_ep->target_frame &= ~hs_ep->interval + 1;
+
+				/* Set target_frame to the last (u)frame of
+				 * the service interval
+				 */
+				dwc2_gadget_incr_frame_num(hs_ep);
+				dwc2_gadget_dec_frame_num_by_one(hs_ep);
+			}
+
 			dwc2_gadget_start_isoc_ddma(hs_ep);
 			return;
 		}
@@ -3322,6 +3378,10 @@ void dwc2_hsotg_core_init_disconnected(struct dwc2_hsotg *hsotg,
 		dwc2_set_bit(hsotg, DIEPMSK, DIEPMSK_BNAININTRMSK);
 	}
 
+	/* Enable Service Interval mode if supported */
+	if (using_desc_dma(hsotg) && hsotg->params.service_interval)
+		dwc2_set_bit(hsotg, DCTL, DCTL_SERVICE_INTERVAL_SUPPORTED);
+
 	dwc2_writel(hsotg, 0, DAINTMSK);
 
 	dev_dbg(hsotg->dev, "EP0: DIEPCTL0=0x%08x, DOEPCTL0=0x%08x\n",
@@ -3378,6 +3438,10 @@ void dwc2_hsotg_core_init_disconnected(struct dwc2_hsotg *hsotg,
 	/* configure the core to support LPM */
 	dwc2_gadget_init_lpm(hsotg);
 
+	/* program GREFCLK register if needed */
+	if (using_desc_dma(hsotg) && hsotg->params.service_interval)
+		dwc2_gadget_program_ref_clk(hsotg);
+
 	/* must be at-least 3ms to allow bus to see disconnect */
 	mdelay(3);
 
@@ -3390,7 +3454,7 @@ void dwc2_hsotg_core_init_disconnected(struct dwc2_hsotg *hsotg,
 		dwc2_readl(hsotg, DOEPCTL0));
 }
 
-static void dwc2_hsotg_core_disconnect(struct dwc2_hsotg *hsotg)
+void dwc2_hsotg_core_disconnect(struct dwc2_hsotg *hsotg)
 {
 	/* set the soft-disconnect bit */
 	dwc2_set_bit(hsotg, DCTL, DCTL_SFTDISCON);
@@ -3399,7 +3463,8 @@ static void dwc2_hsotg_core_disconnect(struct dwc2_hsotg *hsotg)
 void dwc2_hsotg_core_connect(struct dwc2_hsotg *hsotg)
 {
 	/* remove the soft-disconnect and let's go */
-	dwc2_clear_bit(hsotg, DCTL, DCTL_SFTDISCON);
+	if (!hsotg->edev || (dwc2_readl(hsotg, GOTGCTL) & GOTGCTL_BSESVLD))
+		dwc2_clear_bit(hsotg, DCTL, DCTL_SFTDISCON);
 }
 
 /**
@@ -3685,6 +3750,10 @@ irq_retry:
 
 	if (gintsts & IRQ_RETRY_MASK && --retry_count > 0)
 		goto irq_retry;
+
+	/* Check WKUP_ALERT interrupt*/
+	if (hsotg->params.service_interval)
+		dwc2_gadget_wkup_alert_handler(hsotg);
 
 	spin_unlock(&hsotg->lock);
 
@@ -4795,7 +4864,7 @@ int dwc2_hsotg_suspend(struct dwc2_hsotg *hsotg)
 		hsotg->gadget.speed = USB_SPEED_UNKNOWN;
 		spin_unlock_irqrestore(&hsotg->lock, flags);
 
-		for (ep = 0; ep < hsotg->num_of_eps; ep++) {
+		for (ep = 1; ep < hsotg->num_of_eps; ep++) {
 			if (hsotg->eps_in[ep])
 				dwc2_hsotg_ep_disable_lock(&hsotg->eps_in[ep]->ep);
 			if (hsotg->eps_out[ep])
@@ -4966,8 +5035,32 @@ void dwc2_gadget_init_lpm(struct dwc2_hsotg *hsotg)
 	val |= hsotg->params.lpm_clock_gating ? GLPMCFG_ENBLSLPM : 0;
 	val |= hsotg->params.hird_threshold << GLPMCFG_HIRD_THRES_SHIFT;
 	val |= hsotg->params.besl ? GLPMCFG_ENBESL : 0;
+	val |= GLPMCFG_LPM_ACCEPT_CTRL_ISOC;
 	dwc2_writel(hsotg, val, GLPMCFG);
 	dev_dbg(hsotg->dev, "GLPMCFG=0x%08x\n", dwc2_readl(hsotg, GLPMCFG));
+
+	/* Unmask WKUP_ALERT Interrupt */
+	if (hsotg->params.service_interval)
+		dwc2_set_bit(hsotg, GINTMSK2, GINTMSK2_WKUP_ALERT_INT_MSK);
+}
+
+/**
+ * dwc2_gadget_program_ref_clk - Program GREFCLK register in device mode
+ *
+ * @hsotg: Programming view of DWC_otg controller
+ *
+ */
+void dwc2_gadget_program_ref_clk(struct dwc2_hsotg *hsotg)
+{
+	u32 val = 0;
+
+	val |= GREFCLK_REF_CLK_MODE;
+	val |= hsotg->params.ref_clk_per << GREFCLK_REFCLKPER_SHIFT;
+	val |= hsotg->params.sof_cnt_wkup_alert <<
+	       GREFCLK_SOF_CNT_WKUP_ALERT_SHIFT;
+
+	dwc2_writel(hsotg, val, GREFCLK);
+	dev_dbg(hsotg->dev, "GREFCLK=0x%08x\n", dwc2_readl(hsotg, GREFCLK));
 }
 
 /**

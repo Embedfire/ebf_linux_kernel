@@ -393,10 +393,28 @@ enum dwc2_ep0_state {
  *			0 - No
  *			1 - Yes
  * @hird_threshold:	Value of BESL or HIRD Threshold.
+ * @ref_clk_per:        Indicates in terms of pico seconds the period
+ *                      of ref_clk.
+ *			62500 - 16MHz
+ *                      58823 - 17MHz
+ *                      52083 - 19.2MHz
+ *			50000 - 20MHz
+ *			41666 - 24MHz
+ *			33333 - 30MHz (default)
+ *			25000 - 40MHz
+ * @sof_cnt_wkup_alert: Indicates in term of number of SOF's after which
+ *                      the controller should generate an interrupt if the
+ *                      device had been in L1 state until that period.
+ *                      This is used by SW to initiate Remote WakeUp in the
+ *                      controller so as to sync to the uF number from the host.
  * @activate_stm_fs_transceiver: Activate internal transceiver using GGPIO
  *			register.
  *			0 - Deactivate the transceiver (default)
  *			1 - Activate the transceiver
+ * @activate_stm_id_vb_detection: Activate external ID pin and Vbuslevel
+ *			detection using GGPIO register.
+ *			0 - Deactivate the external level detection (default)
+ *			1 - Activate the external level detection
  * @g_dma:              Enables gadget dma usage (default: autodetect).
  * @g_dma_desc:         Enables gadget descriptor DMA (default: autodetect).
  * @g_rx_fifo_size:	The periodic rx fifo size for the device, in
@@ -416,6 +434,9 @@ enum dwc2_ep0_state {
  *                      back to DWC2_SPEED_PARAM_HIGH while device is gone.
  *			0 - No (default)
  *			1 - Yes
+ * @service_interval:   Enable service interval based scheduling.
+ *                      0 - No
+ *                      1 - Yes
  *
  * The following parameters may be specified when starting the module. These
  * parameters define how the DWC_otg controller should be configured. A
@@ -461,12 +482,18 @@ struct dwc2_core_params {
 	bool lpm_clock_gating;
 	bool besl;
 	bool hird_threshold_en;
+	bool service_interval;
 	u8 hird_threshold;
 	bool activate_stm_fs_transceiver;
+	bool activate_stm_id_vb_detection;
 	bool ipg_isoc_en;
 	u16 max_packet_count;
 	u32 max_transfer_size;
 	u32 ahbcfg;
+
+	/* GREFCLK parameters */
+	u32 ref_clk_per;
+	u16 sof_cnt_wkup_alert;
 
 	/* Host parameters */
 	bool host_dma;
@@ -605,6 +632,10 @@ struct dwc2_core_params {
  *			FIFO sizing is enabled 16 to 32768
  *			Actual maximum value is autodetected and also
  *			the default.
+ * @service_interval_mode: For enabling service interval based scheduling in the
+ *                         controller.
+ *                           0 - Disable
+ *                           1 - Enable
  */
 struct dwc2_hw_params {
 	unsigned op_mode:3;
@@ -635,6 +666,7 @@ struct dwc2_hw_params {
 	unsigned utmi_phy_data_width:2;
 	unsigned lpm_mode:1;
 	unsigned ipg_isoc_en:1;
+	unsigned service_interval_mode:1;
 	u32 snpsid;
 	u32 dev_ep_dirs;
 	u32 g_tx_fifo_size[MAX_EPS_CHANNELS];
@@ -653,6 +685,7 @@ struct dwc2_hw_params {
  * @grxfsiz:		Backup of GRXFSIZ register
  * @gnptxfsiz:		Backup of GNPTXFSIZ register
  * @gi2cctl:		Backup of GI2CCTL register
+ * @ggpio:		Backup of GGPIO register
  * @glpmcfg:		Backup of GLPMCFG register
  * @gdfifocfg:		Backup of GDFIFOCFG register
  * @pcgcctl:		Backup of PCGCCTL register
@@ -669,6 +702,7 @@ struct dwc2_gregs_backup {
 	u32 grxfsiz;
 	u32 gnptxfsiz;
 	u32 gi2cctl;
+	u32 ggpio;
 	u32 glpmcfg;
 	u32 pcgcctl;
 	u32 pcgcctl1;
@@ -828,6 +862,8 @@ struct dwc2_hregs_backup {
  *                      - USB_DR_MODE_PERIPHERAL
  *                      - USB_DR_MODE_HOST
  *                      - USB_DR_MODE_OTG
+ * @edev:		extcon handle
+ * @edev_nb:		extcon notifier
  * @hcd_enabled:	Host mode sub-driver initialization indicator.
  * @gadget_enabled:	Peripheral mode sub-driver initialization indicator.
  * @ll_hw_enabled:	Status of low-level hardware resources.
@@ -842,6 +878,8 @@ struct dwc2_hregs_backup {
  *                      removed once all SoCs support usb transceiver.
  * @supplies:           Definition of USB power supplies
  * @vbus_supply:        Regulator supplying vbus.
+ * @usb33d:		Optional 3.3v regulator used on some stm32 devices to
+ *			supply ID and VBUS detection hardware.
  * @phyif:              PHY interface width
  * @lock:		Spinlock that protects all the driver data structures
  * @priv:		Stores a pointer to the struct usb_hcd
@@ -974,6 +1012,7 @@ struct dwc2_hregs_backup {
  * @ctrl_out_desc_dma:	EP0 OUT data phase desc chain DMA address
  * @ctrl_out_desc:	EP0 OUT data phase desc chain pointer
  * @irq:		Interrupt request line number
+ * @wakeirq:		Wakeup interrupt request line number
  * @clk:		Pointer to otg clock
  * @reset:		Pointer to dwc2 reset controller
  * @reset_ecc:          Pointer to dwc2 optional reset controller in Stratix10.
@@ -1014,6 +1053,8 @@ struct dwc2_hsotg {
 	struct dwc2_core_params params;
 	enum usb_otg_state op_state;
 	enum usb_dr_mode dr_mode;
+	struct extcon_dev *edev;
+	struct notifier_block edev_nb;
 	unsigned int hcd_enabled:1;
 	unsigned int gadget_enabled:1;
 	unsigned int ll_hw_enabled:1;
@@ -1025,11 +1066,13 @@ struct dwc2_hsotg {
 	struct dwc2_hsotg_plat *plat;
 	struct regulator_bulk_data supplies[DWC2_NUM_SUPPLIES];
 	struct regulator *vbus_supply;
+	struct regulator *usb33d;
 	u32 phyif;
 
 	spinlock_t lock;
 	void *priv;
 	int     irq;
+	int	wakeirq;
 	struct clk *clk;
 	struct reset_control *reset;
 	struct reset_control *reset_ecc;
@@ -1276,6 +1319,8 @@ void dwc2_disable_global_interrupts(struct dwc2_hsotg *hcd);
 
 void dwc2_hib_restore_common(struct dwc2_hsotg *hsotg, int rem_wakeup,
 			     int is_host);
+int dwc2_backup_registers(struct dwc2_hsotg *hsotg);
+int dwc2_restore_registers(struct dwc2_hsotg *hsotg);
 int dwc2_backup_global_registers(struct dwc2_hsotg *hsotg);
 int dwc2_restore_global_registers(struct dwc2_hsotg *hsotg);
 
@@ -1325,6 +1370,8 @@ static inline int dwc2_is_device_mode(struct dwc2_hsotg *hsotg)
 	return (dwc2_readl(hsotg, GINTSTS) & GINTSTS_CURMODE_HOST) == 0;
 }
 
+int dwc2_drd_init(struct dwc2_hsotg *hsotg);
+
 /*
  * Dump core registers and SPRAM
  */
@@ -1341,6 +1388,7 @@ int dwc2_hsotg_resume(struct dwc2_hsotg *dwc2);
 int dwc2_gadget_init(struct dwc2_hsotg *hsotg);
 void dwc2_hsotg_core_init_disconnected(struct dwc2_hsotg *dwc2,
 				       bool reset);
+void dwc2_hsotg_core_disconnect(struct dwc2_hsotg *hsotg);
 void dwc2_hsotg_core_connect(struct dwc2_hsotg *hsotg);
 void dwc2_hsotg_disconnect(struct dwc2_hsotg *dwc2);
 int dwc2_hsotg_set_test_mode(struct dwc2_hsotg *hsotg, int testmode);
@@ -1354,6 +1402,7 @@ int dwc2_hsotg_tx_fifo_count(struct dwc2_hsotg *hsotg);
 int dwc2_hsotg_tx_fifo_total_depth(struct dwc2_hsotg *hsotg);
 int dwc2_hsotg_tx_fifo_average_depth(struct dwc2_hsotg *hsotg);
 void dwc2_gadget_init_lpm(struct dwc2_hsotg *hsotg);
+void dwc2_gadget_program_ref_clk(struct dwc2_hsotg *hsotg);
 #else
 static inline int dwc2_hsotg_remove(struct dwc2_hsotg *dwc2)
 { return 0; }
@@ -1388,6 +1437,7 @@ static inline int dwc2_hsotg_tx_fifo_total_depth(struct dwc2_hsotg *hsotg)
 static inline int dwc2_hsotg_tx_fifo_average_depth(struct dwc2_hsotg *hsotg)
 { return 0; }
 static inline void dwc2_gadget_init_lpm(struct dwc2_hsotg *hsotg) {}
+static inline void dwc2_gadget_program_ref_clk(struct dwc2_hsotg *hsotg) {}
 #endif
 
 #if IS_ENABLED(CONFIG_USB_DWC2_HOST) || IS_ENABLED(CONFIG_USB_DWC2_DUAL_ROLE)

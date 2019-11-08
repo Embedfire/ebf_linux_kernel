@@ -28,6 +28,8 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_wakeirq.h>
+#include <linux/regulator/consumer.h>
 #include <linux/reset.h>
 #include <linux/usb.h>
 #include <linux/usb/hcd.h>
@@ -43,6 +45,8 @@
 struct ehci_platform_priv {
 	struct clk *clks[EHCI_MAX_CLKS];
 	struct reset_control *rsts;
+	struct regulator *vbus_supply;
+	int wakeirq;
 	bool reset_on_resume;
 };
 
@@ -71,6 +75,26 @@ static int ehci_platform_reset(struct usb_hcd *hcd)
 	if (pdata->no_io_watchdog)
 		ehci->need_io_watchdog = 0;
 	return 0;
+}
+
+static int ehci_platform_port_power(struct usb_hcd *hcd, int portnum,
+				    bool enable)
+{
+	struct ehci_platform_priv *priv = hcd_to_ehci_priv(hcd);
+	int ret;
+
+	if (!priv->vbus_supply)
+		return 0;
+
+	if (enable)
+		ret = regulator_enable(priv->vbus_supply);
+	else
+		ret = regulator_disable(priv->vbus_supply);
+	if (ret)
+		dev_err(hcd->self.controller, "failed to %s vbus supply: %d\n",
+			enable ? "enable" : "disable", ret);
+
+	return ret;
 }
 
 static int ehci_platform_power_on(struct platform_device *dev)
@@ -110,6 +134,7 @@ static struct hc_driver __read_mostly ehci_platform_hc_driver;
 static const struct ehci_driver_overrides platform_overrides __initconst = {
 	.reset =		ehci_platform_reset,
 	.extra_priv_size =	sizeof(struct ehci_platform_priv),
+	.port_power =		ehci_platform_port_power,
 };
 
 static struct usb_ehci_pdata ehci_platform_defaults = {
@@ -200,6 +225,15 @@ static int ehci_platform_probe(struct platform_device *dev)
 	if (err)
 		goto err_put_clks;
 
+	priv->vbus_supply = devm_regulator_get_optional(&dev->dev, "vbus");
+	if (IS_ERR(priv->vbus_supply)) {
+		err = PTR_ERR(priv->vbus_supply);
+		if (err == -ENODEV)
+			priv->vbus_supply = NULL;
+		else
+			goto err_reset;
+	}
+
 	if (pdata->big_endian_desc)
 		ehci->big_endian_desc = 1;
 	if (pdata->big_endian_mmio)
@@ -245,12 +279,24 @@ static int ehci_platform_probe(struct platform_device *dev)
 	if (err)
 		goto err_power;
 
+	priv->wakeirq = platform_get_irq(dev, 1);
+	if (priv->wakeirq > 0) {
+		err = dev_pm_set_dedicated_wake_irq(hcd->self.controller,
+						    priv->wakeirq);
+		if (err)
+			goto err_hcd;
+	} else if (priv->wakeirq == -EPROBE_DEFER) {
+		goto err_hcd;
+	}
+
 	device_wakeup_enable(hcd->self.controller);
 	device_enable_async_suspend(hcd->self.controller);
 	platform_set_drvdata(dev, hcd);
 
 	return err;
 
+err_hcd:
+	usb_remove_hcd(hcd);
 err_power:
 	if (pdata->power_off)
 		pdata->power_off(dev);
@@ -274,6 +320,9 @@ static int ehci_platform_remove(struct platform_device *dev)
 	struct usb_ehci_pdata *pdata = dev_get_platdata(&dev->dev);
 	struct ehci_platform_priv *priv = hcd_to_ehci_priv(hcd);
 	int clk;
+
+	if (priv->wakeirq > 0)
+		dev_pm_clear_wake_irq(hcd->self.controller);
 
 	usb_remove_hcd(hcd);
 
@@ -299,8 +348,13 @@ static int ehci_platform_suspend(struct device *dev)
 	struct usb_hcd *hcd = dev_get_drvdata(dev);
 	struct usb_ehci_pdata *pdata = dev_get_platdata(dev);
 	struct platform_device *pdev = to_platform_device(dev);
+	struct ehci_platform_priv *priv = hcd_to_ehci_priv(hcd);
 	bool do_wakeup = device_may_wakeup(dev);
 	int ret;
+
+	if (priv->wakeirq > 0 &&
+	    (do_wakeup || dev->power.wakeup_path))
+		enable_irq_wake(priv->wakeirq);
 
 	ret = ehci_suspend(hcd, do_wakeup);
 	if (ret)
@@ -333,6 +387,11 @@ static int ehci_platform_resume(struct device *dev)
 	}
 
 	ehci_resume(hcd, priv->reset_on_resume);
+
+	if (priv->wakeirq > 0 &&
+	    (device_may_wakeup(dev) || dev->power.wakeup_path))
+		disable_irq_wake(priv->wakeirq);
+
 	return 0;
 }
 #endif /* CONFIG_PM_SLEEP */

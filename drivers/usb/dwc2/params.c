@@ -152,6 +152,36 @@ static void dwc2_set_stm32f7_hsotg_params(struct dwc2_hsotg *hsotg)
 	p->host_perio_tx_fifo_size = 256;
 }
 
+static void dwc2_set_stm32mp1_fsotg_params(struct dwc2_hsotg *hsotg)
+{
+	struct dwc2_core_params *p = &hsotg->params;
+
+	p->otg_cap = DWC2_CAP_PARAM_NO_HNP_SRP_CAPABLE;
+	p->speed = DWC2_SPEED_PARAM_FULL;
+	p->host_rx_fifo_size = 128;
+	p->host_nperio_tx_fifo_size = 96;
+	p->host_perio_tx_fifo_size = 96;
+	p->max_packet_count = 256;
+	p->phy_type = DWC2_PHY_TYPE_PARAM_FS;
+	p->i2c_enable = false;
+	p->activate_stm_fs_transceiver = true;
+	p->activate_stm_id_vb_detection = true;
+	p->power_down = DWC2_POWER_DOWN_PARAM_NONE;
+}
+
+static void dwc2_set_stm32mp1_hsotg_params(struct dwc2_hsotg *hsotg)
+{
+	struct dwc2_core_params *p = &hsotg->params;
+	struct device_node *np = hsotg->dev->of_node;
+
+	p->otg_cap = DWC2_CAP_PARAM_NO_HNP_SRP_CAPABLE;
+	p->activate_stm_id_vb_detection = !of_property_read_bool(np, "extcon");
+	p->host_rx_fifo_size = 440;
+	p->host_nperio_tx_fifo_size = 256;
+	p->host_perio_tx_fifo_size = 256;
+	p->power_down = DWC2_POWER_DOWN_PARAM_NONE;
+}
+
 const struct of_device_id dwc2_of_match_table[] = {
 	{ .compatible = "brcm,bcm2835-usb", .data = dwc2_set_bcm_params },
 	{ .compatible = "hisilicon,hi6220-usb", .data = dwc2_set_his_params  },
@@ -173,6 +203,10 @@ const struct of_device_id dwc2_of_match_table[] = {
 	{ .compatible = "st,stm32f4x9-hsotg" },
 	{ .compatible = "st,stm32f7-hsotg",
 	  .data = dwc2_set_stm32f7_hsotg_params },
+	{ .compatible = "st,stm32mp1-fsotg",
+	  .data = dwc2_set_stm32mp1_fsotg_params },
+	{ .compatible = "st,stm32mp1-hsotg",
+	  .data = dwc2_set_stm32mp1_hsotg_params },
 	{},
 };
 MODULE_DEVICE_TABLE(of, dwc2_of_match_table);
@@ -309,9 +343,12 @@ static void dwc2_set_default_params(struct dwc2_hsotg *hsotg)
 	p->hird_threshold_en = true;
 	p->hird_threshold = 4;
 	p->ipg_isoc_en = false;
+	p->service_interval = false;
 	p->max_packet_count = hw->max_packet_count;
 	p->max_transfer_size = hw->max_transfer_size;
 	p->ahbcfg = GAHBCFG_HBSTLEN_INCR << GAHBCFG_HBSTLEN_SHIFT;
+	p->ref_clk_per = 33333;
+	p->sof_cnt_wkup_alert = 100;
 
 	if ((hsotg->dr_mode == USB_DR_MODE_HOST) ||
 	    (hsotg->dr_mode == USB_DR_MODE_OTG)) {
@@ -602,6 +639,7 @@ static void dwc2_check_params(struct dwc2_hsotg *hsotg)
 	CHECK_BOOL(besl, (hsotg->hw_params.snpsid >= DWC2_CORE_REV_3_00a));
 	CHECK_BOOL(hird_threshold_en, hsotg->params.lpm);
 	CHECK_RANGE(hird_threshold, 0, hsotg->params.besl ? 12 : 7, 0);
+	CHECK_BOOL(service_interval, hw->service_interval_mode);
 	CHECK_RANGE(max_packet_count,
 		    15, hw->max_packet_count,
 		    hw->max_packet_count);
@@ -790,6 +828,8 @@ int dwc2_get_hwparams(struct dwc2_hsotg *hsotg)
 				  GHWCFG4_UTMI_PHY_DATA_WIDTH_SHIFT;
 	hw->acg_enable = !!(hwcfg4 & GHWCFG4_ACG_SUPPORTED);
 	hw->ipg_isoc_en = !!(hwcfg4 & GHWCFG4_IPG_ISOC_SUPPORTED);
+	hw->service_interval_mode = !!(hwcfg4 &
+				       GHWCFG4_SERVICE_INTERVAL_SUPPORTED);
 
 	/* fifo sizes */
 	hw->rx_fifo_size = (grxfsiz & GRXFSIZ_DEPTH_MASK) >>
