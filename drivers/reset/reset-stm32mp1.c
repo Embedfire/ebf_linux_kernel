@@ -4,6 +4,7 @@
  * Author: Gabriel Fernandez <gabriel.fernandez@st.com> for STMicroelectronics.
  */
 
+#include <linux/arm-smccc.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/io.h>
@@ -13,10 +14,49 @@
 
 #define CLR_OFFSET 0x4
 
+#define STM32_RCC_TZCR 0x0
+#define CLR_OFFSET 0x4
+
+#define STM32MP1_SVC_RCC 0x82001000
+
+#define SMT32_SPI6_R 3136
+#define STM32_AXIM_R 3216
+#define STM32_MCU_R 8225
+
 struct stm32_reset_data {
 	struct reset_controller_dev	rcdev;
 	void __iomem			*membase;
 };
+
+static int soc_secured;
+
+static int is_stm32_id_secured(unsigned long id)
+{
+	if (id >= SMT32_SPI6_R && id <= STM32_AXIM_R)
+		return 1;
+
+	if (id == STM32_MCU_R)
+		return 1;
+
+	return 0;
+}
+
+static int reset_stm32_secure_update(struct reset_controller_dev *rcdev,
+				     unsigned long id, bool assert)
+{
+	struct arm_smccc_res res;
+	int bank = id / BITS_PER_LONG;
+	int offset = id % BITS_PER_LONG;
+
+	if (assert)
+		arm_smccc_smc(STM32MP1_SVC_RCC, 0x1, (bank * 4),
+			      BIT(offset), 0, 0, 0, 0, &res);
+	else
+		arm_smccc_smc(STM32MP1_SVC_RCC, 0x1, (bank * 4) + CLR_OFFSET,
+			      BIT(offset), 0, 0, 0, 0, &res);
+
+	return 0;
+}
 
 static inline struct stm32_reset_data *
 to_stm32_reset_data(struct reset_controller_dev *rcdev)
@@ -45,12 +85,18 @@ static int stm32_reset_update(struct reset_controller_dev *rcdev,
 static int stm32_reset_assert(struct reset_controller_dev *rcdev,
 			      unsigned long id)
 {
+	if (soc_secured && is_stm32_id_secured(id))
+		return reset_stm32_secure_update(rcdev, id, true);
+
 	return stm32_reset_update(rcdev, id, true);
 }
 
 static int stm32_reset_deassert(struct reset_controller_dev *rcdev,
 				unsigned long id)
 {
+	if (soc_secured && is_stm32_id_secured(id))
+		return reset_stm32_secure_update(rcdev, id, false);
+
 	return stm32_reset_update(rcdev, id, false);
 }
 
@@ -100,6 +146,8 @@ static int stm32_reset_probe(struct platform_device *pdev)
 	data->rcdev.nr_resets = resource_size(res) * BITS_PER_BYTE;
 	data->rcdev.ops = &stm32_reset_ops;
 	data->rcdev.of_node = dev->of_node;
+
+	soc_secured = readl(membase + STM32_RCC_TZCR) & 0x1;
 
 	return devm_reset_controller_register(dev, &data->rcdev);
 }

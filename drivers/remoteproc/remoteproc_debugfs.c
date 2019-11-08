@@ -47,10 +47,23 @@ static struct dentry *rproc_dbg;
 static ssize_t rproc_trace_read(struct file *filp, char __user *userbuf,
 				size_t count, loff_t *ppos)
 {
-	struct rproc_mem_entry *trace = filp->private_data;
-	int len = strnlen(trace->va, trace->len);
+	struct rproc_debug_trace *data = filp->private_data;
+	struct rproc_mem_entry *trace = &data->trace_mem;
+	void *va;
+	char buf[100];
+	int len;
 
-	return simple_read_from_buffer(userbuf, count, ppos, trace->va, len);
+	va = rproc_da_to_va(data->rproc, trace->da, trace->len);
+
+	if (!va) {
+		len = scnprintf(buf, sizeof(buf), "Trace %s not available\n",
+				trace->name);
+		va = buf;
+	} else {
+		len = strnlen(va, trace->len);
+	}
+
+	return simple_read_from_buffer(userbuf, count, ppos, va, len);
 }
 
 static const struct file_operations trace_rproc_ops = {
@@ -260,6 +273,7 @@ static int rproc_carveouts_show(struct seq_file *seq, void *p)
 
 	list_for_each_entry(carveout, &rproc->carveouts, node) {
 		seq_puts(seq, "Carveout memory entry:\n");
+		seq_printf(seq, "\tName: %s\n", carveout->name);
 		seq_printf(seq, "\tVirtual address: %pK\n", carveout->va);
 		seq_printf(seq, "\tDMA address: %pad\n", &carveout->dma);
 		seq_printf(seq, "\tDevice address: 0x%x\n", carveout->da);
@@ -287,7 +301,7 @@ void rproc_remove_trace_file(struct dentry *tfile)
 }
 
 struct dentry *rproc_create_trace_file(const char *name, struct rproc *rproc,
-				       struct rproc_mem_entry *trace)
+				       struct rproc_debug_trace *trace)
 {
 	struct dentry *tfile;
 

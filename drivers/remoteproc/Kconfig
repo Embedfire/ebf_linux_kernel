@@ -13,6 +13,25 @@ config REMOTEPROC
 
 if REMOTEPROC
 
+config REMOTEPROC_SRM_CORE
+	tristate "Remoteproc System Resource Manager core"
+	depends on RPMSG
+	help
+	  Say y here to enable the core driver of the remoteproc System Resource
+	  Manager (SRM).
+	  The SRM handles resources allocated to remote processors.
+	  The core part is in charge of controlling the device children.
+
+config REMOTEPROC_SRM_DEV
+	tristate "Remoteproc System Resource Manager device"
+	depends on REMOTEPROC_SRM_CORE
+	help
+	  Say y here to enable the device driver of the remoteproc System
+	  Resource Manager (SRM).
+	  The SRM handles resources allocated to remote processors.
+	  The device part is in charge of reserving and initializing resources
+	  for a peripheral assigned to a coprocessor.
+
 config IMX_REMOTEPROC
 	tristate "IMX6/7 remoteproc support"
 	depends on SOC_IMX6SX || SOC_IMX7D
@@ -180,6 +199,23 @@ config ST_REMOTEPROC
 
 config ST_SLIM_REMOTEPROC
 	tristate
+
+config STM32_RPROC
+	tristate "STM32 remoteproc support"
+	depends on ARCH_STM32
+	depends on REMOTEPROC
+	select MAILBOX
+	select REMOTEPROC_SRM_CORE
+	select REMOTEPROC_SRM_DEV
+	help
+	  Say y here to support STM32 MCU processors via the
+	  remote processor framework.
+
+	  You want to say y here in order to enable AMP
+	  use-cases to run on your platform (dedicated firmware could be
+	  offloaded to remote MCU processors using this framework).
+
+	  This can be either built-in or a loadable module.
 
 endif # REMOTEPROC
 
