@@ -594,7 +594,8 @@ static int uvc_ioctl_querycap(struct file *file, void *fh,
 	strlcpy(cap->driver, "uvcvideo", sizeof(cap->driver));
 	strlcpy(cap->card, vdev->name, sizeof(cap->card));
 	usb_make_path(stream->dev->udev, cap->bus_info, sizeof(cap->bus_info));
-	cap->capabilities = V4L2_CAP_DEVICE_CAPS | V4L2_CAP_STREAMING
+	cap->capabilities = V4L2_CAP_DEVICE_CAPS | V4L2_CAP_STREAMING |
+			    V4L2_CAP_READWRITE
 			  | chain->caps;
 
 	return 0;
@@ -1433,8 +1434,12 @@ static long uvc_v4l2_compat_ioctl32(struct file *file,
 static ssize_t uvc_v4l2_read(struct file *file, char __user *data,
 		    size_t count, loff_t *ppos)
 {
-	uvc_trace(UVC_TRACE_CALLS, "uvc_v4l2_read: not implemented.\n");
-	return -EINVAL;
+	struct uvc_fh *handle = file->private_data;
+	struct uvc_streaming *stream = handle->stream;
+
+	uvc_trace(UVC_TRACE_CALLS, "uvc_v4l2_read\n");
+
+	return uvc_queue_read(&stream->queue, file, data, count, ppos);
 }
 
 static int uvc_v4l2_mmap(struct file *file, struct vm_area_struct *vma)

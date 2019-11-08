@@ -158,6 +158,9 @@ static void v4l2_fwnode_endpoint_parse_parallel_bus(
 		flags |= v ? V4L2_MBUS_DATA_ENABLE_HIGH :
 			V4L2_MBUS_DATA_ENABLE_LOW;
 
+	if (!fwnode_property_read_u32(fwnode, "pclk-max-frequency", &v))
+		bus->pclk_max_frequency = v;
+
 	bus->flags = flags;
 
 }

@@ -224,7 +224,7 @@ int uvc_queue_init(struct uvc_video_queue *queue, enum v4l2_buf_type type,
 	int ret;
 
 	queue->queue.type = type;
-	queue->queue.io_modes = VB2_MMAP | VB2_USERPTR;
+	queue->queue.io_modes = VB2_MMAP | VB2_USERPTR | VB2_READ;
 	queue->queue.drv_priv = queue;
 	queue->queue.buf_struct_size = sizeof(struct uvc_buffer);
 	queue->queue.mem_ops = &vb2_vmalloc_memops;
@@ -352,6 +352,19 @@ int uvc_queue_streamoff(struct uvc_video_queue *queue, enum v4l2_buf_type type)
 
 	mutex_lock(&queue->mutex);
 	ret = vb2_streamoff(&queue->queue, type);
+	mutex_unlock(&queue->mutex);
+
+	return ret;
+}
+
+ssize_t uvc_queue_read(struct uvc_video_queue *queue, struct file *file,
+		       char __user *buf, size_t count, loff_t *ppos)
+{
+	ssize_t ret;
+
+	mutex_lock(&queue->mutex);
+	ret = vb2_read(&queue->queue, buf, count, ppos,
+		       file->f_flags & O_NONBLOCK);
 	mutex_unlock(&queue->mutex);
 
 	return ret;
