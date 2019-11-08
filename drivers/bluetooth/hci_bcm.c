@@ -1324,7 +1324,8 @@ static int bcm_serdev_probe(struct serdev_device *serdev)
 	if (!bcmdev->shutdown) {
 		dev_warn(&serdev->dev,
 			 "No reset resource, using default baud rate\n");
-		bcmdev->oper_speed = bcmdev->init_speed;
+		if (!bcmdev->oper_speed)
+			bcmdev->oper_speed = bcmdev->init_speed;
 	}
 
 	err = bcm_gpio_set_power(bcmdev, false);
