@@ -9,6 +9,12 @@ Required parameters:
 		"st,stm32h7-timer-trigger"
 - reg:		Identify trigger hardware block.
 
+Optional properties:
+- pinctrl-names: 	Set to "default". An additional "sleep" state can be
+			defined to set pins in sleep state when in low power.
+- pinctrl-n: 		Phandle(s) pointing to pin configuration node for PWM,
+			respectively for "default" and "sleep" states.
+
 Example:
 	timers@40010000 {
 		#address-cells = <1>;
@@ -21,5 +27,8 @@ Example:
 		timer@0 {
 			compatible = "st,stm32-timer-trigger";
 			reg = <0>;
+			pinctrl-0	= <&tim1_pins>;
+			pinctrl-1	= <&tim1_sleep_pins>;
+			pinctrl-names	= "default", "sleep";
 		};
 	};

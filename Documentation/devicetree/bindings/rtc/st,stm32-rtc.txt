@@ -21,9 +21,14 @@ Required properties:
   domain (RTC registers) write protection.
     It is required on stm32(f4/f7/h7).
 
-Optional properties (to override default rtc_ck parent clock on stm32(f4/f7/h7):
+Optional properties:
+* to override default rtc_ck parent clock on stm32(f4/f7/h7):
 - assigned-clocks: reference to the rtc_ck clock entry.
 - assigned-clock-parents: phandle of the new parent clock of rtc_ck.
+* to select and enable RTC Low Speed Clock Output on stm32mp1:
+- st,lsco: defines the RTC output on which RTC Low-Speed Clock is Output. The
+  valid output values are defined in <dt-bindings/rtc/rtc-stm32.h>.
+- pinctrl state named "default" may be defined to reserve pin for RTC output.
 
 Example:
 
@@ -58,4 +63,7 @@ Example:
 		clock-names = "pclk", "rtc_ck";
 		interrupts-extended = <&intc GIC_SPI 3 IRQ_TYPE_NONE>,
 				      <&exti 19 1>;
+		st,lsco = <RTC_OUT2_RMP>;
+		pinctrl-0 = <&rtc_out2_rmp_pins_a>;
+		pinctrl-names = "default";
 	};

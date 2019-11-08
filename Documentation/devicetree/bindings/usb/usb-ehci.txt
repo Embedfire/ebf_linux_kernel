@@ -18,6 +18,11 @@ Optional properties:
  - clocks : a list of phandle + clock specifier pairs
  - phys : see usb-hcd.txt in the current directory
  - resets : phandle + reset specifier pair
+ - vbus-supply : phandle of regulator supplying vbus
+ - wakeup-source: bool flag to indicate this device has wakeup capabilities
+ - interrupt-names, if optional wake-up interrupt is used, should be:
+  - "event": the name for the interrupt line of the USB EHCI instance
+  - "wakeup" the name for the optional wake-up interrupt
 
 additionally the properties from usb-hcd.txt (in the current directory) are
 supported.

@@ -4,9 +4,6 @@ Required properties:
 - compatible:	"st,stm32h7-dmamux"
 - reg:		Memory map for accessing module
 - #dma-cells:	Should be set to <3>.
-		First parameter is request line number.
-		Second is DMA channel configuration
-		Third is Fifo threshold
 		For more details about the three cells, please see
 		stm32-dma.txt documentation binding file
 - dma-masters:	Phandle pointing to the DMA controllers.
@@ -53,7 +50,7 @@ dma2: dma@40020400 {
 		     <68>,
 		     <69>,
 		     <70>;
-	clocks = <&timer_clk>;
+	clocks = <&clk_hclk>;
 	#dma-cells = <4>;
 	st,mem2mem;
 	resets = <&rcc 150>;

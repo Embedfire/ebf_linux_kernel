@@ -5,6 +5,9 @@ Required properties:
 	as a generic SD modulator if modulator not specified in compatible list.
 - #io-channel-cells = <0>: See the IIO bindings section "IIO consumers".
 
+Optional properties:
+- vref-supply: Phandle to the vref input analog reference voltage.
+
 Example node:
 
 	ads1202: adc {

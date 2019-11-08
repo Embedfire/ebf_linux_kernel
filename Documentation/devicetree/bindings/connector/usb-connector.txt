@@ -18,6 +18,8 @@ Optional properties:
 Optional properties for usb-c-connector:
 - power-role: should be one of "source", "sink" or "dual"(DRP) if typec
   connector has power support.
+- power-opmode: should be one of "default", "1.5A", "3.0A" or
+  "usb_power_delivery" if typec connector has power support.
 - try-power-role: preferred power role if "dual"(DRP) can support Try.SNK
   or Try.SRC, should be "sink" for Try.SNK or "source" for Try.SRC.
 - data-role: should be one of "host", "device", "dual"(DRD) if typec

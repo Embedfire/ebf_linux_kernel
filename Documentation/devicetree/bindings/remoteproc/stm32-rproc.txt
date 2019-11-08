@@ -1,0 +1,85 @@
+STMicroelectronics STM32 Remoteproc
+-----------------------------------
+This document defines the binding for the remoteproc component that loads and
+boots firmwares on the ST32MP family chipset.
+
+Required properties:
+- compatible:	Must be "st,stm32mp1-rproc"
+- ranges:	Describe memory addresses translation between Linux processor
+		and the remote processor.
+		Each memory region, is declared with 3 parameters:
+		 - param 1: device base address (remote processor address),
+		 - param 2: physical base address (Linux Processor address),
+		 - param 3: size in Byte of the memory region.
+- resets:	Reference to a reset controller asserting the remote processor.
+- reset-names:	Must be "mcu_rst"
+- st,syscfg-holdboot: Reference to the system configuration controlling the
+		remote processor reset hold boot
+	1st cell: phandle of syscon block
+	2nd cell: register offset containing the hold boot setting
+	3rd cell: register bitmask for the hold boot field
+- st,syscfg-tz: Reference to the system configuration controlling the trust zone
+		mode
+	1st cell: phandle to syscon block
+	2nd cell: register offset containing the trust zone mode setting
+	3rd cell: register bitmask for the trust zone mode bit
+
+Optional properties:
+- interrupt-parent: phandle to the interrupt controller node.
+- interrupts:	Should contain the watchdog interrupt
+- interrupt-names: Must be "wdg"
+- wakeup-source: Flag indicating whether remoteproc can wake up the system by
+		the watchdog interrupt. Only meaningful if the "interrupts"
+		property is defined.
+- mboxes:	List of phandle and mailbox channel specifiers:
+		- a channel (a) used to communicate through virtqueues with the
+		  remote proc.
+		  Bi-directional channel:
+		      - from local to remote = send message
+		      - from remote to local = send message ack
+		- a channel (b) working the opposite direction of channel (a)
+		- a channel (c) used by the local proc to notify the remote proc
+		  that it is about to be shut down.
+		  Mono-directional channel:
+		      - from local to remote, where ACK from the remote means
+		        that it is ready for shutdown
+- mbox-names:	This property is required if the mboxes property is used.
+		- must be "vq0" for channel (a)
+		- must be "vq1" for channel (b)
+		- must be "shutdown" for channel (c)
+- memory-region: phandle to the reserved memory node to be associated with the
+		remoteproc device.
+- st,syscfg-pdds: Reference to the system configuration controlling the remote
+		processor deep sleep setting
+	1st cell: phandle to syscon block
+	2nd cell: register offset containing the deep sleep setting
+	3rd cell: register bitmask for the deep sleep bit
+- st,syscfg-rsc-tbl: Reference to the system configuration controlling the
+		resource table address loaded by the bootloader
+	1st cell: phandle to syscon block
+	2nd cell: register offset containing the resource table address
+	3rd cell: register bitmask for the resource table address
+- auto_boot:	If defined, when remoteproc is probed, it looks for a default
+		firmware and if it finds some, it loads the firmware and starts
+		the remote processor.
+- recovery:	If defined, remoteproc enables the crash recovery process.
+- early-booted:	If defined, when remoteproc tries to boot a firmware, it
+		considers that the remote processor is already running and
+		attaches to this hardware state and updates accordingly (state,
+		resources, ...)
+- rsc-address:	Resource table address of the early-booted firmware. Meaningful
+		only if 'early-booted' is defined.
+- rsc-size:	Resource table size of the early-booted firmware. Meaningful
+		only if 'early-booted' is defined.
+
+Example:
+	m4_rproc: m4 {
+		compatible = "st,stm32mp1-rproc";
+		reg = <0x38000000 0x10000>,
+		      <0x10000000 0x40000>;
+		reg-names = "retram", "mcusram";
+		resets = <&rcc MCU_R>;
+		reset-names = "mcu_rst";
+		st,syscfg-holdboot = <&rcc 0x10C 0x1>;
+		st,syscfg-tz = <&rcc 0x000 0x1>;
+	};

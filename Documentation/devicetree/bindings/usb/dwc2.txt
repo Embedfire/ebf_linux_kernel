@@ -21,6 +21,9 @@ Required properties:
   configured in HS mode;
   - "st,stm32f7-hsotg": The DWC2 USB HS controller instance in STM32F7 SoCs
     configured in HS mode;
+  - "st,stm32mp1-fsotg": The DWC2 USB controller instance in STM32MP1 SoCs,
+  configured in FS mode (using dedicated FS transceiver).
+  - "st,stm32mp1-hsotg": The DWC2 USB controller instance in STM32MP1 SoCs;
 - reg : Should contain 1 register range (address and length)
 - interrupts : Should contain 1 interrupt
 - clocks: clock provider specifier
@@ -36,6 +39,16 @@ Refer to phy/phy-bindings.txt for generic phy consumer properties
 - g-rx-fifo-size: size of rx fifo size in gadget mode.
 - g-np-tx-fifo-size: size of non-periodic tx fifo size in gadget mode.
 - g-tx-fifo-size: size of periodic tx fifo per endpoint (except ep0) in gadget mode.
+- vbus-supply: in Host mode, external VBUS charge pump, when drvvbus signal
+  doesn't drive it.
+- usb33d-supply: external VBUS and ID sensing comparators supply, in order to
+  perform OTG operation, used on STM32MP1 SoCs.
+- extcon: external connector for vbus and id pin changes detection to
+  dynamically force A- or B-peripheral session.
+- wakeup-source: bool flag to indicate this device has wakeup capabilities
+- interrupt-names, if optional wake-up interrupt is used, should be:
+  - "event": the name for the interrupt line of the USB DWC2 instance
+  - "wakeup" the name for the optional wake-up interrupt
 
 Deprecated properties:
 - g-use-dma: gadget DMA mode is automatically detected

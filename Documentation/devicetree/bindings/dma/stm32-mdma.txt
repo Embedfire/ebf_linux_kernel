@@ -10,7 +10,7 @@ Required properties:
 - interrupts: Should contain the MDMA interrupt.
 - clocks: Should contain the input clock of the DMA instance.
 - resets: Reference to a reset controller asserting the DMA controller.
-- #dma-cells : Must be <5>. See DMA client paragraph for more details.
+- #dma-cells : Must be <6>. See DMA client paragraph for more details.
 
 Optional properties:
 - dma-channels: Number of DMA channels supported by the controller.
@@ -26,7 +26,7 @@ Example:
 		interrupts = <122>;
 		clocks = <&timer_clk>;
 		resets = <&rcc 992>;
-		#dma-cells = <5>;
+		#dma-cells = <6>;
 		dma-channels = <16>;
 		dma-requests = <32>;
 		st,ahb-addr-masks = <0x20000000>, <0x00000000>;
@@ -35,60 +35,64 @@ Example:
 * DMA client
 
 DMA clients connected to the STM32 MDMA controller must use the format
-described in the dma.txt file, using a five-cell specifier for each channel:
-a phandle to the MDMA controller plus the following five integer cells:
+described in the dma.txt file, using a six-cell specifier for each channel:
+a phandle to the MDMA controller plus the following six integer cells:
 
 1. The request line number
 2. The priority level
-	0x00: Low
-	0x01: Medium
-	0x10: High
-	0x11: Very high
+	0x0: Low
+	0x1: Medium
+	0x2: High
+	0x3: Very high
 3. A 32bit mask specifying the DMA channel configuration
  -bit 0-1: Source increment mode
-	0x00: Source address pointer is fixed
-	0x10: Source address pointer is incremented after each data transfer
-	0x11: Source address pointer is decremented after each data transfer
+	0x0: Source address pointer is fixed
+	0x2: Source address pointer is incremented after each data transfer
+	0x3: Source address pointer is decremented after each data transfer
  -bit 2-3: Destination increment mode
-	0x00: Destination address pointer is fixed
-	0x10: Destination address pointer is incremented after each data
+	0x0: Destination address pointer is fixed
+	0x2: Destination address pointer is incremented after each data
 	transfer
-	0x11: Destination address pointer is decremented after each data
+	0x3: Destination address pointer is decremented after each data
 	transfer
  -bit 8-9: Source increment offset size
-	0x00: byte (8bit)
-	0x01: half-word (16bit)
-	0x10: word (32bit)
-	0x11: double-word (64bit)
+	0x0: byte (8bit)
+	0x1: half-word (16bit)
+	0x2: word (32bit)
+	0x3: double-word (64bit)
  -bit 10-11: Destination increment offset size
-	0x00: byte (8bit)
-	0x01: half-word (16bit)
-	0x10: word (32bit)
-	0x11: double-word (64bit)
+	0x0: byte (8bit)
+	0x1: half-word (16bit)
+	0x2: word (32bit)
+	0x3: double-word (64bit)
 -bit 25-18: The number of bytes to be transferred in a single transfer
 	(min = 1 byte, max = 128 bytes)
 -bit 29:28: Trigger Mode
-	0x00: Each MDMA request triggers a buffer transfer (max 128 bytes)
-	0x01: Each MDMA request triggers a block transfer (max 64K bytes)
-	0x10: Each MDMA request triggers a repeated block transfer
-	0x11: Each MDMA request triggers a linked list transfer
+	0x0: Each MDMA request triggers a buffer transfer (max 128 bytes)
+	0x1: Each MDMA request triggers a block transfer (max 64K bytes)
+	0x2: Each MDMA request triggers a repeated block transfer
+	0x3: Each MDMA request triggers a linked list transfer
 4. A 32bit value specifying the register to be used to acknowledge the request
    if no HW ack signal is used by the MDMA client
 5. A 32bit mask specifying the value to be written to acknowledge the request
    if no HW ack signal is used by the MDMA client
+6. A bitfield value specifying if the MDMA client wants to generate M2M
+   transfer with HW trigger (1) or not (0). This bitfield should be only
+   enabled for M2M transfer triggered by STM32 DMA client. The memory devices
+   involved in this kind of transfer are SRAM and DDR.
 
 Example:
 
 	i2c4: i2c@5c002000 {
 		compatible = "st,stm32f7-i2c";
 		reg = <0x5c002000 0x400>;
-		interrupts = <95>,
-			     <96>;
-		clocks = <&timer_clk>;
+		interrupts = <GIC_SPI 95 IRQ_TYPE_NONE>,
+			     <GIC_SPI 96 IRQ_TYPE_NONE>;
+		clocks = <&clk_hsi>;
 		#address-cells = <1>;
 		#size-cells = <0>;
-		dmas = <&mdma1 36 0x0 0x40008 0x0 0x0>,
-		       <&mdma1 37 0x0 0x40002 0x0 0x0>;
+		dmas = <&mdma1 36 0x0 0x40008 0x0 0x0 0>,
+		       <&mdma1 37 0x0 0x40002 0x0 0x0 0>;
 		dma-names = "rx", "tx";
 		status = "disabled";
 	};

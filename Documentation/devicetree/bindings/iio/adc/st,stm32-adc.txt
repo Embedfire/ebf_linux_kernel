@@ -46,6 +46,42 @@ Required properties:
 Optional properties:
 - A pinctrl state named "default" for each ADC channel may be defined to set
   inX ADC pins in mode of operation for analog input on external pin.
+- st,max-clk-rate-hz: Allow to specify desired max clock rate used by analog
+  circuitry.
+
+- vdda-supply: Phandle to the vdda input voltage. It can be used to supply ADC
+  analog inputs switches on stm32mp1 and stm32h7.
+
+- vdd-supply: Phandle to the vdd input voltage. It can be used to supply ADC
+  analog inputs switches on stm32mp1.
+
+- st,syscfg-vbooster: Voltage booster control for analog switches supply.
+  This is available on stm32mp1 and stm32h7 (requires vdda-supply property).
+  It must be composed of 3 cells:
+	1st cell: phandle to syscfg
+	2nd cell: register offset within SYSCFG
+	3rd cell: bitmask for BOOSTE on stm32h7, EN_BOOSTER set bit on stm32mp1
+
+- st,syscfg-vbooster-clr: Voltage booster clear for analog switches supply.
+  This is available on stm32mp1 (requires st,syscfg-vbooster and vdda-supply).
+	1st cell: phandle to syscfg
+	2nd cell: clear register offset within SYSCFG
+	3rd cell: bitmask for EN_BOOSTER clear bit on stm32mp1
+
+- st,syscfg-anaswvdd: VDDA / VDD selection for analog switches supply.
+  This is available on stm32mp1 (requires vdda-supply and vdd-supply).
+  It must be composed of 3 cells:
+	1st cell: phandle to syscfg
+	2nd cell: register offset within SYSCFG
+	3rd cell: bitmask for ANASWVDD set bit
+
+- st,syscfg-anaswvdd-clr: VDDA / VDD selection clear for analog switches supply.
+  This is available on stm32mp1 (requires st,syscfg-anaswvdd, vdda-supply and
+  vdd-supply).
+  It must be composed of 3 cells:
+	1st cell: phandle to syscfg
+	2nd cell: clear register offset within SYSCFG
+	3rd cell: bitmask for ANASWVDD clear bit
 
 Contents of a stm32 adc child node:
 -----------------------------------
@@ -63,8 +99,8 @@ Required properties:
 - interrupts: IRQ Line for the ADC (e.g. may be 0 for adc@0, 1 for adc@100 or
   2 for adc@200).
 - st,adc-channels: List of single-ended channels muxed for this ADC.
-  It can have up to 16 channels on stm32f4 or 20 channels on stm32h7, numbered
-  from 0 to 15 or 19 (resp. for in0..in15 or in0..in19).
+  It can have up to 19 channels on stm32f4 or 20 channels on stm32h7, numbered
+  from 0 to 18 or 19 (resp. for in0..in18 or in0..in19).
 - st,adc-diff-channels: List of differential channels muxed for this ADC.
   Depending on part used, some channels can be configured as differential
   instead of single-ended (e.g. stm32h7). List here positive and negative
@@ -91,6 +127,38 @@ Optional properties:
   fine tune of ADC sampling time may be recommended.
   This can be either one value or an array that matches 'st,adc-channels' list,
   to set sample time resp. for all channels, or independently for each channel.
+- st,trigger-polarity: Must be 0 (default), 1 or 2 to set default trigger
+  polarity to respectively "rising-edge", "falling-edge" or "both-edges".
+- st,injected: Use injected conversion sequence on an ADC, rather than regular.
+
+Contents of a STM32 ADC temperature child node:
+-----------------------------------------------
+Required properties:
+- compatible: Should be one of:
+  "st,stm32f4-adc-temp"
+  "st,stm32h7-adc-temp"
+  "st,stm32mp1-adc-temp"
+- io-channels: Phandle to STM32 ADC temperature channel.
+- #io-channel-cells = <0>;
+- #thermal-sensor-cells = <0>;
+
+Optional properties:
+- nvmem-cells: Phandles to nvmem cells that contain "ts_cal1" and "ts_cal2".
+- nvmem-cell-names: Must be "ts_cal1", "ts_cal2".
+
+Contents of a stm32 adc EXTI trigger child node:
+------------------------------------------------
+EXTI (External interrupt) can be used by STM32ADC as trigger source for
+conversions. ADC may use up to two EXTI GPIO lines: 11 & 15, e.g. external
+trigger signal can be routed to GPIOx (x is bank) pin 11 and/or 15. So,
+exti trigger child node is optional.
+
+Required properties:
+- trigger-name: Must be exti11 (regular) or exti15 (injected).
+- interrupts: The exti interrupt source used as trigger. Generic interrupt
+  client node as described in ../../interrupt-controller/interrupts.txt
+  EXTI IRQ number must match with above trigger-name (e.g. 11 or 15).
+- interrupt-parent: Must be phandle to gpio bank.
 
 Example:
 	adc: adc@40012000 {
@@ -119,9 +187,16 @@ Example:
 			dmas = <&dma2 0 0 0x400 0x0>;
 			dma-names = "rx";
 			assigned-resolution-bits = <8>;
+			st,trigger-polarity = <1>;
 		};
 		...
 		other adc child nodes follow...
+
+		exti11 {
+			trigger-name = "exti11";
+			interrupts = <11 0>;
+			interrupt-parent = <&gpioa>;
+		};
 	};
 
 Example to setup:
@@ -136,5 +211,24 @@ Example to setup:
 			...
 			st,adc-channels = <1>;
 			st,adc-diff-channels = <2 6>, <3 7>;
+		};
+	};
+
+Temperature sensor example:
+	adc: adc@40012000 {
+		compatible = "st,stm32f4-adc-core";
+		...
+		adc1: adc@0 {
+			...
+			st,adc-channels = <18>;
+			st,min-sample-time-nsecs = <10000>;
+		};
+		adc_temp: temp {
+			compatible = "st,stm32f4-adc-temp";
+			io-channels = <&adc1 18>;
+			nvmem-cells = <&ts_cal1>, <&ts_cal2>;
+			nvmem-cell-names = "ts_cal1", "ts_cal2";
+			#io-channel-cells = <0>;
+			#thermal-sensor-cells = <0>;
 		};
 	};

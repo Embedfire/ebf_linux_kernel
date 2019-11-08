@@ -147,6 +147,8 @@ Optional endpoint properties
   as 0 (normal). This property is valid for serial busses only.
 - strobe: Whether the clock signal is used as clock (0) or strobe (1). Used
   with CCP2, for instance.
+- pclk-max-frequency: maximum pixel clock frequency admissible by video
+  host interface.
 
 Example
 -------

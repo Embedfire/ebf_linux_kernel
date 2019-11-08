@@ -14,7 +14,23 @@ Required properties:
   (only needed for exti controller with multiple exti under
   same parent interrupt: st,stm32-exti and st,stm32h7-exti)
 
-Example:
+Optional properties:
+
+- hwlocks: reference to a phandle of a hardware spinlock provider node.
+
+Exti could have several parent interrupt controllers. In this case child nodes
+are used to describe those "extra" parent controllers. Properties to use are:
+
+- interrupt-controller: Indentifies the node as an interrupt controller
+- #interrupt-cells: Specifies the number of cells to encode an interrupt
+  specifier, shall be 2
+- interrupt-parent: Phandle to the interrupt parent node.
+- st,irq-number: Interrupt number mapped on the parent.
+
+See example 2.
+
+
+Example 1:
 
 exti: interrupt-controller@40013c00 {
 	compatible = "st,stm32-exti";
@@ -22,4 +38,20 @@ exti: interrupt-controller@40013c00 {
 	#interrupt-cells = <2>;
 	reg = <0x40013C00 0x400>;
 	interrupts = <1>, <2>, <3>, <6>, <7>, <8>, <9>, <10>, <23>, <40>, <41>, <42>, <62>, <76>;
+};
+
+Example 2:
+
+exti: interrupt-controller@5000d000 {
+	compatible = "st,stm32mp1-exti", "syscon";
+	interrupt-controller;
+	#interrupt-cells = <2>;
+	reg = <0x5000d000 0x400>;
+
+	exti_pwr: exti-pwr {
+		interrupt-controller;
+		#interrupt-cells = <2>;
+		interrupt-parent = <&pwr>;
+		st,irq-number = <6>;
+	};
 };

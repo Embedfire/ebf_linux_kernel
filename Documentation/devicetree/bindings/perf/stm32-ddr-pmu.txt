@@ -1,0 +1,18 @@
+* STM32 DDR Performance Monitor (DDRPERFM)
+
+Required properties:
+- compatible: must be "st,stm32-ddr-pmu".
+- reg: physical address and length of the registers set.
+- clocks: list of phandles and specifiers to all input clocks listed in
+	  clock-names property.
+- clock-names: "bus" corresponds to the DDRPERFM bus clock and "ddr" to
+	       the DDR frequency.
+
+Example:
+	ddrperfm: perf@5a007000 {
+		compatible = "st,stm32-ddr-pmu";
+		reg = <0x5a007000 0x400>;
+		clocks = <&rcc DDRPERFM>, <&rcc PLL2_R>;
+		clock-names = "bus", "ddr";
+	};
+

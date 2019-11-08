@@ -13,6 +13,8 @@ Optional subnodes:
 	- video input: this subnode can contain a video input port node
 	  to connect the bridge to a display controller output (See this
 	  documentation [1]).
+	- audio input: this subnode can contain an audio input port node
+	  to connect the bridge to an audio controller output.
 
 [1]: Documentation/devicetree/bindings/media/video-interfaces.txt
 
@@ -29,6 +31,13 @@ Example:
 				reg = <0>;
 				bridge_in: endpoint {
 					remote-endpoint = <&dc_out>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+				codec_endpoint: endpoint {
+					remote-endpoint = <&i2s0_cpu_endpoint>;
 				};
 			};
 		};
