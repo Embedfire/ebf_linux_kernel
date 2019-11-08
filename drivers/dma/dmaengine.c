@@ -737,6 +737,34 @@ struct dma_chan *dma_request_chan(struct device *dev, const char *name)
 EXPORT_SYMBOL_GPL(dma_request_chan);
 
 /**
+ * dma_request_chan_linked - try to allocate an exclusive slave channel
+ * @dev:	pointer to client device structure
+ * @name:	slave channel name
+ *
+ * Returns pointer to appropriate DMA channel on success or an error pointer.
+ * Create device link between DMA channel provider and client device consumer.
+ */
+struct dma_chan *dma_request_chan_linked(struct device *dev, const char *name)
+{
+	struct dma_chan *ch = dma_request_chan(dev, name);
+	struct device *provider_dev = ch->device->dev;
+	struct device_link *link;
+
+	if (!IS_ERR_OR_NULL(ch)) {
+		link = device_link_add(dev, provider_dev, DL_FLAG_STATELESS);
+		if (!link) {
+			dev_err(provider_dev,
+				"failed to add dev link with %s\n",
+				dev_name(dev));
+			return ERR_PTR(-EINVAL);
+		}
+	}
+
+	return ch;
+}
+EXPORT_SYMBOL_GPL(dma_request_chan_linked);
+
+/**
  * dma_request_slave_channel - try to allocate an exclusive slave channel
  * @dev:	pointer to client device structure
  * @name:	slave channel name
@@ -793,6 +821,13 @@ void dma_release_channel(struct dma_chan *chan)
 	mutex_unlock(&dma_list_mutex);
 }
 EXPORT_SYMBOL_GPL(dma_release_channel);
+
+void dma_release_chan_linked(struct device *dev, struct dma_chan *chan)
+{
+	device_link_remove(dev, chan->device->dev);
+	dma_release_channel(chan);
+}
+EXPORT_SYMBOL_GPL(dma_release_chan_linked);
 
 /**
  * dmaengine_get - register interest in dma_channels
