@@ -18,10 +18,14 @@
 #ifndef _CS42L51_H
 #define _CS42L51_H
 
+#include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
+
 struct device;
 
 extern const struct regmap_config cs42l51_regmap;
 int cs42l51_probe(struct device *dev, struct regmap *regmap);
+int cs42l51_remove(struct device *dev);
 extern const struct of_device_id cs42l51_of_match[];
 
 #define CS42L51_CHIP_ID			0x1B
@@ -164,5 +168,22 @@ extern const struct of_device_id cs42l51_of_match[];
  */
 #define CS42L51_LASTREG		0x20
 #define CS42L51_NUMREGS		(CS42L51_LASTREG - CS42L51_FIRSTREG + 1)
+#define CS42L51_NUM_SUPPLIES 4
+
+enum master_slave_mode {
+	MODE_SLAVE,
+	MODE_SLAVE_AUTO,
+	MODE_MASTER,
+};
+
+struct cs42l51_private {
+	unsigned int mclk;
+	struct clk *mclk_handle;
+	unsigned int audio_mode;	/* The mode (I2S or left-justified) */
+	enum master_slave_mode func;
+	struct regulator_bulk_data supplies[CS42L51_NUM_SUPPLIES];
+	struct gpio_desc *reset_gpio;
+	struct regmap *regmap;
+};
 
 #endif

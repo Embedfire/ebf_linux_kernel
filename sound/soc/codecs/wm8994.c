@@ -11,6 +11,7 @@
  * published by the Free Software Foundation.
  */
 
+#include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -844,6 +845,42 @@ static int clk_sys_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+static int mclk_event(struct snd_soc_dapm_widget *w,
+		      struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *comp = snd_soc_dapm_to_component(w->dapm);
+	struct wm8994_priv *wm8994 = snd_soc_component_get_drvdata(comp);
+	struct wm8994 *control = wm8994->wm8994;
+	struct wm8994_pdata *pdata = &control->pdata;
+	struct clk *mclk = pdata->mclk1;
+	int ret, mclk_id = 0;
+
+	if (!strncmp(w->name, "MCLK2", 5)) {
+		mclk_id = 1;
+		mclk = pdata->mclk2;
+	}
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		dev_dbg(comp->dev, "Enable master clock %s\n",
+			mclk_id ? "MCLK2" : "MCLK1");
+
+		ret = clk_prepare_enable(mclk);
+		if (ret < 0) {
+			dev_err(comp->dev, "Failed to enable clock: %d\n", ret);
+			return ret;
+		}
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		dev_dbg(comp->dev, "Disable master clock %s\n",
+			mclk_id ? "MCLK2" : "MCLK1");
+		clk_disable_unprepare(mclk);
+		break;
+	}
+
+	return 0;
+}
+
 static void vmid_reference(struct snd_soc_component *component)
 {
 	struct wm8994_priv *wm8994 = snd_soc_component_get_drvdata(component);
@@ -1160,7 +1197,6 @@ static int aif2clk_ev(struct snd_soc_dapm_widget *w,
 			adc = WM8994_AIF2ADCL_ENA;
 		else
 			adc = WM8994_AIF2ADCL_ENA | WM8994_AIF2ADCR_ENA;
-
 
 		val = snd_soc_component_read32(component, WM8994_AIF2_CONTROL_2);
 		if ((val & WM8994_AIF2DACL_SRC) &&
@@ -1780,6 +1816,16 @@ static const struct snd_soc_dapm_widget wm8994_specific_dapm_widgets[] = {
 SND_SOC_DAPM_MUX("AIF3ADC Mux", SND_SOC_NOPM, 0, 0, &wm8994_aif3adc_mux),
 };
 
+static const struct snd_soc_dapm_widget wm8994_mclk1_dapm_widgets[] = {
+SND_SOC_DAPM_SUPPLY("MCLK1", SND_SOC_NOPM, 0, 0, mclk_event,
+		    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+};
+
+static const struct snd_soc_dapm_widget wm8994_mclk2_dapm_widgets[] = {
+SND_SOC_DAPM_SUPPLY("MCLK2", SND_SOC_NOPM, 0, 0, mclk_event,
+		    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+};
+
 static const struct snd_soc_dapm_widget wm8958_dapm_widgets[] = {
 SND_SOC_DAPM_SUPPLY("AIF3", WM8994_POWER_MANAGEMENT_6, 5, 1, NULL, 0),
 SND_SOC_DAPM_MUX("Mono PCM Out Mux", SND_SOC_NOPM, 0, 0, &mono_pcm_out_mux),
@@ -2004,10 +2050,10 @@ static const struct snd_soc_dapm_route wm8994_lateclk_intercon[] = {
 };
 
 static const struct snd_soc_dapm_route wm8994_revd_intercon[] = {
-	{ "AIF1DACDAT", NULL, "AIF2DACDAT" },
-	{ "AIF2DACDAT", NULL, "AIF1DACDAT" },
-	{ "AIF1ADCDAT", NULL, "AIF2ADCDAT" },
-	{ "AIF2ADCDAT", NULL, "AIF1ADCDAT" },
+//	{ "AIF1DACDAT", NULL, "AIF2DACDAT" },
+//	{ "AIF2DACDAT", NULL, "AIF1DACDAT" },
+//	{ "AIF1ADCDAT", NULL, "AIF2ADCDAT" },
+//	{ "AIF2ADCDAT", NULL, "AIF1ADCDAT" },
 	{ "MICBIAS1", NULL, "CLK_SYS" },
 	{ "MICBIAS1", NULL, "MICBIAS Supply" },
 	{ "MICBIAS2", NULL, "CLK_SYS" },
@@ -2381,11 +2427,26 @@ static int wm8994_set_dai_sysclk(struct snd_soc_dai *dai,
 {
 	struct snd_soc_component *component = dai->component;
 	struct wm8994_priv *wm8994 = snd_soc_component_get_drvdata(component);
+	struct wm8994 *control = wm8994->wm8994;
+	struct wm8994_pdata *pdata = &control->pdata;
 	int i;
 
+	/*
+	 * Simple card provides unconditionnaly clock_id = 0.
+	 * Workaround to select master clock for aif1/2
+	 */
 	switch (dai->id) {
 	case 1:
+		if (pdata->mclk1)
+			clk_id = WM8994_SYSCLK_MCLK1;
+		else if (pdata->mclk2)
+			clk_id = WM8994_SYSCLK_MCLK2;
+		break;
 	case 2:
+		if (pdata->mclk2)
+			clk_id = WM8994_SYSCLK_MCLK2;
+		else if (pdata->mclk1)
+			clk_id = WM8994_SYSCLK_MCLK1;
 		break;
 
 	default:
@@ -3995,6 +4056,7 @@ static int wm8994_component_probe(struct snd_soc_component *component)
 {
 	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
 	struct wm8994 *control = dev_get_drvdata(component->dev->parent);
+	struct wm8994_pdata *pdata = &control->pdata;
 	struct wm8994_priv *wm8994 = snd_soc_component_get_drvdata(component);
 	unsigned int reg;
 	int ret, i;
@@ -4278,6 +4340,14 @@ static int wm8994_component_probe(struct snd_soc_component *component)
 					       ARRAY_SIZE(wm8994_snd_controls));
 		snd_soc_dapm_new_controls(dapm, wm8994_specific_dapm_widgets,
 					  ARRAY_SIZE(wm8994_specific_dapm_widgets));
+		if (pdata->mclk1)
+			snd_soc_dapm_new_controls(dapm, wm8994_mclk1_dapm_widgets,
+						  ARRAY_SIZE(wm8994_mclk1_dapm_widgets));
+
+		if (pdata->mclk2)
+			snd_soc_dapm_new_controls(dapm, wm8994_mclk2_dapm_widgets,
+						  ARRAY_SIZE(wm8994_mclk2_dapm_widgets));
+
 		if (control->revision < 4) {
 			snd_soc_dapm_new_controls(dapm, wm8994_lateclk_revd_widgets,
 						  ARRAY_SIZE(wm8994_lateclk_revd_widgets));

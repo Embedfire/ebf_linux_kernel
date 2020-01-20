@@ -29,18 +29,48 @@ static int cs42l51_i2c_probe(struct i2c_client *i2c,
 	struct regmap_config config;
 
 	config = cs42l51_regmap;
-	config.val_bits = 8;
-	config.reg_bits = 8;
 
 	return cs42l51_probe(&i2c->dev, devm_regmap_init_i2c(i2c, &config));
 }
+
+static int cs42l51_i2c_remove(struct i2c_client *i2c)
+{
+	return cs42l51_remove(&i2c->dev);
+}
+
+#ifdef CONFIG_PM_SLEEP
+static int cs42l51_suspend(struct device *dev)
+{
+	struct cs42l51_private *cs42l51 = dev_get_drvdata(dev);
+
+	regcache_cache_only(cs42l51->regmap, true);
+	regcache_mark_dirty(cs42l51->regmap);
+
+	return 0;
+}
+
+static int cs42l51_resume(struct device *dev)
+{
+	struct cs42l51_private *cs42l51 = dev_get_drvdata(dev);
+
+	regcache_cache_only(cs42l51->regmap, false);
+
+	return regcache_sync(cs42l51->regmap);
+}
+#endif /* CONFIG_PM_SLEEP */
+
+static const struct dev_pm_ops cs42l51_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(cs42l51_suspend, cs42l51_resume)
+};
 
 static struct i2c_driver cs42l51_i2c_driver = {
 	.driver = {
 		.name = "cs42l51",
 		.of_match_table = cs42l51_of_match,
+		.pm = &cs42l51_pm_ops,
 	},
 	.probe = cs42l51_i2c_probe,
+	.remove = cs42l51_i2c_remove,
 	.id_table = cs42l51_i2c_id,
 };
 
