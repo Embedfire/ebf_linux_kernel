@@ -299,7 +299,7 @@
 
 
 &snvs_pwrkey {
-	status = "disabled";
+	status = "okay";
 };
 
 &pxp {
