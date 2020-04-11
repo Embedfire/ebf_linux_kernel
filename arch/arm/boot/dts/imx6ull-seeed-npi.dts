@@ -12,7 +12,7 @@
 #include "imx6ull.dtsi"
 
 / {
-	model = "Seeed i.MX6 ULL NPi Board";
+	model = "Embedfire i.MX6 ULL NPi Board";
 	compatible = "fsl,imx6ull-14x14-evk", "fsl,imx6ull";
 
 	aliases {
