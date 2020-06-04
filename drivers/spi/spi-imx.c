@@ -223,10 +223,11 @@ static bool spi_imx_can_dma(struct spi_master *master, struct spi_device *spi,
 
 	if (!master->dma_rx)
 		return false;
-
+	//modify by embedfire	
+#if 0 
 	if (spi_imx->slave_mode)
 		return false;
-
+#endif
 	bytes_per_word = spi_imx_bytes_per_word(transfer->bits_per_word);
 
 	if (bytes_per_word != 1 && bytes_per_word != 2 && bytes_per_word != 4)
@@ -405,7 +406,7 @@ static void mx53_ecspi_tx_slave(struct spi_imx_data *spi_imx)
 {
 	u32 val = 0;
 	int n_bytes = spi_imx->count % sizeof(val);
-
+	//dev_err(spi_imx->dev, "%s\n", __func__);
 	if (!n_bytes)
 		n_bytes = sizeof(val);
 
@@ -528,7 +529,7 @@ static int mx51_ecspi_config(struct spi_device *spi)
 	ctrl |= MX51_ECSPI_CTRL_CS(spi->chip_select);
 
 	if (spi_imx->slave_mode)
-		ctrl |= (spi_imx->slave_burst * 8 - 1)
+		ctrl |= (spi_imx->bits_per_word - 1)//(spi_imx->slave_burst * 8 - 1)
 			<< MX51_ECSPI_CTRL_BL_OFFSET;
 	else
 		ctrl |= (spi_imx->bits_per_word - 1)
@@ -560,8 +561,8 @@ static int mx51_ecspi_config(struct spi_device *spi)
 		cfg |= MX51_ECSPI_CONFIG_SSBPOL(spi->chip_select);
 	else
 		cfg &= ~MX51_ECSPI_CONFIG_SSBPOL(spi->chip_select);
-
-	if (spi_imx->usedma)
+	//modify by embedfire
+	if (spi_imx->usedma&&!spi_imx->slave_mode)
 		ctrl |= MX51_ECSPI_CTRL_SMC;
 
 	/* CTRL register always go first to bring out controller from reset */
@@ -1308,6 +1309,114 @@ static int spi_imx_calculate_timeout(struct spi_imx_data *spi_imx, int size)
 	return msecs_to_jiffies(2 * timeout * MSEC_PER_SEC);
 }
 
+static int spi_imx_dma_transfer_slave(struct spi_imx_data *spi_imx,
+				struct spi_transfer *transfer)
+{
+	struct dma_async_tx_descriptor *desc_tx, *desc_rx;
+	unsigned long transfer_timeout;
+	unsigned long timeout;
+	struct spi_master *master = spi_imx->bitbang.master;
+	struct sg_table *tx = &transfer->tx_sg, *rx = &transfer->rx_sg;
+	struct scatterlist *last_sg = sg_last(rx->sgl, rx->nents);
+	unsigned int bytes_per_word, i;
+	int ret;
+
+	/* Get the right burst length from the last sg to ensure no tail data */
+	bytes_per_word = spi_imx_bytes_per_word(transfer->bits_per_word);
+	for (i = spi_imx->devtype_data->fifo_size / 2; i > 0; i--) {
+		if (!(sg_dma_len(last_sg) % (i * bytes_per_word)))
+			break;
+	}
+	/* Use 1 as wml in case no available burst length got */
+	if (i == 0)
+		i = 1;
+	spi_imx->wml =  i;
+
+	ret = spi_imx_dma_configure(master);
+	if (ret)
+		return ret;
+
+	if (!spi_imx->devtype_data->setup_wml) {
+		dev_err(spi_imx->dev, "No setup_wml()?\n");
+		return -EINVAL;
+	}
+
+	spi_imx->devtype_data->setup_wml(spi_imx);
+
+	/*
+	 * The TX DMA setup starts the transfer, so make sure RX is configured
+	 * before TX.
+	 */
+	desc_rx = dmaengine_prep_slave_sg(master->dma_rx,
+				rx->sgl, rx->nents, DMA_DEV_TO_MEM,
+				DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
+	if (!desc_rx)
+		return -EINVAL;
+
+	desc_rx->callback = spi_imx_dma_rx_callback;
+	desc_rx->callback_param = (void *)spi_imx;
+	dmaengine_submit(desc_rx);
+	reinit_completion(&spi_imx->dma_rx_completion);
+	dma_async_issue_pending(master->dma_rx);
+
+	desc_tx = dmaengine_prep_slave_sg(master->dma_tx,
+				tx->sgl, tx->nents, DMA_MEM_TO_DEV,
+				DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
+	if (!desc_tx) {
+		dmaengine_terminate_all(master->dma_tx);
+		return -EINVAL;
+	}
+	desc_tx->callback = spi_imx_dma_tx_callback;
+	desc_tx->callback_param = (void *)spi_imx;
+	dmaengine_submit(desc_tx);
+	reinit_completion(&spi_imx->dma_tx_completion);
+	dma_async_issue_pending(master->dma_tx);
+
+	transfer_timeout = spi_imx_calculate_timeout(spi_imx, transfer->len*3);
+
+	/*spi_imx->devtype_data->trigger(spi_imx);*/
+	/* Wait SDMA to finish the data transfer.*/
+
+	wait_for_completion(&spi_imx->dma_tx_completion);
+#if 0	
+	if (wait_for_completion_interruptible(&spi_imx->dma_tx_completion) ||
+	    spi_imx->slave_aborted) {
+		//dev_dbg(&spi->dev, "interrupted\n");
+		return  -EINTR;
+	}
+#endif 
+	//modify by embedfire
+#if 0	
+	timeout = wait_for_completion_timeout(&spi_imx->dma_tx_completion,
+						transfer_timeout);
+	if (!timeout) {
+		dev_err(spi_imx->dev, "I/O Error in DMA TX\n");
+		dmaengine_terminate_all(master->dma_tx);
+		dmaengine_terminate_all(master->dma_rx);
+		return -ETIMEDOUT;
+	}
+#endif 
+	if (wait_for_completion_interruptible(&spi_imx->dma_rx_completion) ||
+	    spi_imx->slave_aborted) {
+		//dev_dbg(&spi->dev, "interrupted\n");
+		return  -EINTR;
+	}
+	//wait_for_completion(&spi_imx->dma_rx_completion);
+	//modify by embedfire
+#if 0
+	timeout = wait_for_completion_timeout(&spi_imx->dma_rx_completion,
+					      transfer_timeout);
+	if (!timeout) {
+		dev_err(&master->dev, "I/O Error in DMA RX\n");
+		spi_imx->devtype_data->reset(spi_imx);
+		dmaengine_terminate_all(master->dma_rx);
+		return -ETIMEDOUT;
+	}
+#endif 
+	return transfer->len;
+
+}
+
 static int spi_imx_dma_transfer(struct spi_imx_data *spi_imx,
 				struct spi_transfer *transfer)
 {
@@ -1482,9 +1591,12 @@ static int spi_imx_transfer(struct spi_device *spi,
 	/* flush rxfifo before transfer */
 	while (spi_imx->devtype_data->rx_available(spi_imx))
 		readl(spi_imx->base + MXC_CSPIRXDATA);
-
+	/* modify by embedfire */
 	if (spi_imx->slave_mode)
-		return spi_imx_pio_transfer_slave(spi, transfer);
+		if (spi_imx->usedma)
+			return spi_imx_dma_transfer_slave(spi_imx, transfer);
+		else
+			return spi_imx_pio_transfer_slave(spi, transfer);
 
 	if (spi_imx->usedma)
 		return spi_imx_dma_transfer(spi_imx, transfer);
