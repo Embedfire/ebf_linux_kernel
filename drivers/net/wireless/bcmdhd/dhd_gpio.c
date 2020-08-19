@@ -3,6 +3,7 @@
 #include <dhd_linux.h>
 #include <linux/gpio.h>
 
+
 #ifdef CUSTOMER_HW_PLATFORM
 #include <plat/sdhci.h>
 #define	sdmmc_channel	sdmmc_device_mmc0
@@ -24,7 +25,8 @@ static int gpio_wl_reg_on = -1; // WL_REG_ON is input pin of WLAN module
 static int gpio_wl_host_wake = -1; // WL_HOST_WAKE is output pin of WLAN module
 #endif
 
-extern void wifi_card_detect(bool on);      //pengjie
+
+extern void wifi_card_detect(bool on);
 
 static int
 dhd_wlan_set_power(int on
@@ -38,7 +40,7 @@ dhd_wlan_set_power(int on
 	if (on) {
 		printf("======== PULL WL_REG_ON(%d) HIGH! ========\n", gpio_wl_reg_on);
 		if (gpio_wl_reg_on >= 0) {
-			err = gpio_direction_output(gpio_wl_reg_on, 1);     // pengjie 这里设置io
+			err = gpio_direction_output(gpio_wl_reg_on, 1);
 			if (err) {
 				printf("%s: WL_REG_ON didn't output high\n", __FUNCTION__);
 				return -EIO;
@@ -112,7 +114,7 @@ static int dhd_wlan_set_carddetect(int present)
 	if (present) {
 #if defined(BCMSDIO)
 		printf("======== Card detection to detect SDIO card! ========\n");
-		wifi_card_detect(1);            // pengjie  2019-5-18 09:50:56
+		wifi_card_detect(1);
 #ifdef CUSTOMER_HW_PLATFORM
 		err = sdhci_force_presence_change(&sdmmc_channel, 1);
 #endif /* CUSTOMER_HW_PLATFORM */
@@ -122,7 +124,7 @@ static int dhd_wlan_set_carddetect(int present)
 	} else {
 #if defined(BCMSDIO)
 		printf("======== Card detection to remove SDIO card! ========\n");
-		wifi_card_detect(0);            // pengjie  2019-5-18 09:50:44
+		wifi_card_detect(1);
 #ifdef CUSTOMER_HW_PLATFORM
 		err = sdhci_force_presence_change(&sdmmc_channel, 0);
 #endif /* CUSTOMER_HW_PLATFORM */
@@ -135,18 +137,29 @@ static int dhd_wlan_set_carddetect(int present)
 	return err;
 }
 
-static int dhd_wlan_get_mac_addr(unsigned char *buf)
+static int dhd_wlan_get_mac_addr(unsigned char *buf
+#ifdef CUSTOM_MULTI_MAC
+	, char *name
+#endif
+)
 {
 	int err = 0;
 
-	printf("======== %s ========\n", __FUNCTION__);
+#ifdef CUSTOM_MULTI_MAC
+	if (!strcmp("wlan1", name)) {
 #ifdef EXAMPLE_GET_MAC
-	/* EXAMPLE code */
-	{
 		struct ether_addr ea_example = {{0x00, 0x11, 0x22, 0x33, 0x44, 0xFF}};
 		bcopy((char *)&ea_example, buf, sizeof(struct ether_addr));
-	}
 #endif /* EXAMPLE_GET_MAC */
+	} else
+#endif /* CUSTOM_MULTI_MAC */
+	{
+#ifdef EXAMPLE_GET_MAC
+		struct ether_addr ea_example = {{0x02, 0x11, 0x22, 0x33, 0x44, 0x55}};
+		bcopy((char *)&ea_example, buf, sizeof(struct ether_addr));
+#endif /* EXAMPLE_GET_MAC */
+	}
+
 #ifdef EXAMPLE_GET_MAC_VER2
 	/* EXAMPLE code */
 	{
@@ -161,6 +174,8 @@ static int dhd_wlan_get_mac_addr(unsigned char *buf)
 		bcopy(macpad, buf+6, sizeof(macpad));
 	}
 #endif /* EXAMPLE_GET_MAC_VER2 */
+
+	printf("======== %s err=%d ========\n", __FUNCTION__, err);
 
 	return err;
 }
@@ -223,7 +238,7 @@ struct resource dhd_wlan_resources[] = {
 	},
 };
 
-struct wifi_platform_data dhd_wlan_control = {      // pengjie 这是sdio的设置函数
+struct wifi_platform_data dhd_wlan_control = {
 	.set_power	= dhd_wlan_set_power,
 	.set_reset	= dhd_wlan_set_reset,
 	.set_carddetect	= dhd_wlan_set_carddetect,
