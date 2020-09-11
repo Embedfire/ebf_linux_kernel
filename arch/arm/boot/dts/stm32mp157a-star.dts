@@ -91,15 +91,38 @@
 		};
 	};
 
-	led {
+	leds {
 		compatible = "gpio-leds";
-		blue {
+		heartbeat {
 			label = "heartbeat";
-			gpios = <&gpiod 11 GPIO_ACTIVE_HIGH>;
+			gpios = <&gpioa 14 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "heartbeat";
 			default-state = "off";
 		};
+
+		red {
+			label = "red";
+			gpios = <&gpioa 13 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+			linux,default-trigger = "none";                       
+		};
+
+		green {
+			label = "green";
+			gpios = <&gpioh 7 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+			linux,default-trigger = "none";                          
+		};
+
+		blue {   
+			label = "blue";
+			gpios = <&gpiob 5 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+			linux,default-trigger = "none";                           
+		};        
 	};
+
+
 
 	sound {
 		compatible = "audio-graph-card";
