@@ -93,7 +93,7 @@
 
 	leds {
 		compatible = "gpio-leds";
-        status = "okay";
+		status = "okay";
 		heartbeat {
 			label = "heartbeat";
 			gpios = <&gpioa 14 GPIO_ACTIVE_HIGH>;
@@ -123,7 +123,16 @@
 		};        
 	};
 
+ 	gpio-keys {
+		compatible = "gpio-keys";
+		status = "okay";
 
+		Key0{
+			label = "Key 0";
+			gpios = <&gpioe 4 GPIO_ACTIVE_HIGH>;
+			linux,code=<KEY_0>;
+		};
+	};   
 
 	sound {
 		compatible = "audio-graph-card";
