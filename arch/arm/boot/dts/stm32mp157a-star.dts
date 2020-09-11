@@ -93,6 +93,7 @@
 
 	leds {
 		compatible = "gpio-leds";
+        status = "okay";
 		heartbeat {
 			label = "heartbeat";
 			gpios = <&gpioa 14 GPIO_ACTIVE_HIGH>;
@@ -862,5 +863,12 @@
 	regulator-min-microvolt = <2500000>;
 	regulator-max-microvolt = <2500000>;
 	vdda-supply = <&vdd>;
+	status = "okay";
+};
+
+&m_can1 {
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&m_can1_pins_a>;
+	pinctrl-1 = <&m_can1_sleep_pins_a>;
 	status = "okay";
 };

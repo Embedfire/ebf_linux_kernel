@@ -633,13 +633,13 @@
 
 			m_can1_pins_a: m-can1-0 {
 				pins1 {
-					pinmux = <STM32_PINMUX('H', 13, AF9)>; /* CAN1_TX */
+					pinmux = <STM32_PINMUX('A', 12, AF9)>; /* CAN1_TX */
 					slew-rate = <0>;
 					drive-push-pull;
 					bias-disable;
 				};
 				pins2 {
-					pinmux = <STM32_PINMUX('I', 9, AF9)>; /* CAN1_RX */
+					pinmux = <STM32_PINMUX('A', 11, AF9)>; /* CAN1_RX */
 					bias-disable;
 				};
 			};
