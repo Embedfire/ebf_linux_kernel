@@ -25,10 +25,8 @@
 #include <linux/input/touchscreen.h>
 #include <linux/module.h>
 #include <linux/delay.h>
-#include <drm/drm_mipi_dsi.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
-#include <linux/gpio.h>
 #include <linux/slab.h>
 #include <linux/acpi.h>
 #include <linux/of.h>
@@ -67,7 +65,10 @@ struct goodix_ts_data {
 #define GOODIX_CONTACT_SIZE		8
 #define GOODIX_MAX_CONTACTS		10
 
-#define GOODIX_CONFIG_MAX_LENGTH	240
+#define GOODIX_CONFIG_MAX_LENGTH	242
+
+#define GOODIX_CONFIG_917S_LENGTH	242
+#define GOODIX_CONFIG_5688_LENGTH	242
 #define GOODIX_CONFIG_911_LENGTH	186
 #define GOODIX_CONFIG_967_LENGTH	228
 
@@ -77,6 +78,9 @@ struct goodix_ts_data {
 
 #define GOODIX_READ_COOR_ADDR		0x814E
 #define GOODIX_GT1X_REG_CONFIG_DATA	0x8050
+#define GOODIX_GT5688_REG_CONFIG_DATA	0x8050
+#define GOODIX_GT917S_REG_CONFIG_DATA	0x8050
+
 #define GOODIX_GT9X_REG_CONFIG_DATA	0x8047
 #define GOODIX_REG_ID			0x8140
 
@@ -116,6 +120,18 @@ static const struct goodix_chip_data gt9x_chip_data = {
 	.check_config		= goodix_check_cfg_8,
 };
 
+static const struct goodix_chip_data gt917s_chip_data = {
+	.config_addr		= GOODIX_GT917S_REG_CONFIG_DATA,
+	.config_len		= GOODIX_CONFIG_MAX_LENGTH,
+	.check_config		= goodix_check_cfg_16,
+};
+
+
+static const struct goodix_chip_data gt5688_chip_data = {
+	.config_addr		= GOODIX_GT5688_REG_CONFIG_DATA,
+	.config_len		= GOODIX_CONFIG_MAX_LENGTH,
+	.check_config		= goodix_check_cfg_16,
+};
 static const unsigned long goodix_irq_flags[] = {
 	IRQ_TYPE_EDGE_RISING,
 	IRQ_TYPE_EDGE_FALLING,
@@ -129,15 +145,6 @@ static const unsigned long goodix_irq_flags[] = {
  */
 static const struct dmi_system_id rotated_screen[] = {
 #if defined(CONFIG_DMI) && defined(CONFIG_X86)
-	{
-		.ident = "Teclast X89",
-		.matches = {
-			/* tPAD is too generic, also match on bios date */
-			DMI_MATCH(DMI_BOARD_VENDOR, "TECLAST"),
-			DMI_MATCH(DMI_BOARD_NAME, "tPAD"),
-			DMI_MATCH(DMI_BIOS_DATE, "12/19/2014"),
-		},
-	},
 	{
 		.ident = "WinBook TW100",
 		.matches = {
@@ -239,6 +246,15 @@ static const struct goodix_chip_data *goodix_get_chip_data(u16 id)
 	case 912:
 	case 967:
 		return &gt967_chip_data;
+
+	case 9157:
+		return &gt9x_chip_data;
+
+	case 917: 
+		return &gt917s_chip_data;
+
+	case 5688: 
+		return &gt5688_chip_data;	
 
 	default:
 		return &gt9x_chip_data;
@@ -368,13 +384,6 @@ static void goodix_free_irq(struct goodix_ts_data *ts)
 
 static int goodix_request_irq(struct goodix_ts_data *ts)
 {
-	int gpio;
-
-	gpio = desc_to_gpio(ts->gpiod_int);
-
-	if (gpio_is_valid(gpio))
-		ts->client->irq = gpio_to_irq(gpio);
-
 	return devm_request_threaded_irq(&ts->client->dev, ts->client->irq,
 					 NULL, goodix_ts_irq_handler,
 					 ts->irq_flags, ts->client->name, ts);
@@ -628,6 +637,16 @@ static int goodix_read_version(struct goodix_ts_data *ts)
 	}
 
 	memcpy(id_str, buf, 4);
+	do
+	{
+		if((id_str[0]=='9')&&(id_str[1]=='1')&&(id_str[2]=='7')&&(id_str[3]=='S'))
+		{
+			id_str[0] = '0';
+			id_str[1] = '9';
+			id_str[2] = '1';
+			id_str[3] = '7';
+		}
+	} while (0);
 	id_str[4] = 0;
 	if (kstrtou16(id_str, 10, &ts->id))
 		ts->id = 0x1001;
@@ -783,8 +802,6 @@ static int goodix_ts_probe(struct i2c_client *client,
 			   const struct i2c_device_id *id)
 {
 	struct goodix_ts_data *ts;
-	struct mipi_dsi_device *panel;
-	struct device_node *np;
 	int error;
 
 	dev_dbg(&client->dev, "I2C Address: 0x%02x\n", client->addr);
@@ -828,7 +845,8 @@ static int goodix_ts_probe(struct i2c_client *client,
 	}
 
 	ts->chip = goodix_get_chip_data(ts->id);
-
+// disable update device config——by embedfire
+#if 0 
 	if (ts->gpiod_int && ts->gpiod_rst) {
 		/* update device config */
 		ts->cfg_name = devm_kasprintf(&client->dev, GFP_KERNEL,
@@ -852,18 +870,10 @@ static int goodix_ts_probe(struct i2c_client *client,
 		if (error)
 			return error;
 	}
-
-	np = of_parse_phandle(client->dev.of_node, "panel", 0);
-	if (np) {
-		panel = of_find_mipi_dsi_device_by_node(np);
-		of_node_put(np);
-		if (!panel)
-			return -ENOENT;
-		device_link_add(&client->dev, &panel->dev, DL_FLAG_STATELESS |
-				DL_FLAG_AUTOREMOVE_SUPPLIER);
-		put_device(&panel->dev);
-	}
-
+#endif
+	error = goodix_configure_dev(ts);
+	if (error)
+		return error;
 	return 0;
 }
 
@@ -918,7 +928,6 @@ static int __maybe_unused goodix_suspend(struct device *dev)
 	 * sooner, delay 58ms here.
 	 */
 	msleep(58);
-
 	return 0;
 }
 
@@ -975,13 +984,15 @@ MODULE_DEVICE_TABLE(acpi, goodix_acpi_match);
 static const struct of_device_id goodix_of_match[] = {
 	{ .compatible = "goodix,gt1151" },
 	{ .compatible = "goodix,gt911" },
+	{ .compatible = "goodix,gt9157" },
+	{ .compatible = "goodix,gt917s" },
 	{ .compatible = "goodix,gt9110" },
 	{ .compatible = "goodix,gt912" },
 	{ .compatible = "goodix,gt927" },
 	{ .compatible = "goodix,gt9271" },
 	{ .compatible = "goodix,gt928" },
 	{ .compatible = "goodix,gt967" },
-	{ .compatible = "goodix,gt9147",},
+	{ .compatible = "goodix,gt5688" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, goodix_of_match);

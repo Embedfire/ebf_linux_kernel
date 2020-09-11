@@ -333,6 +333,19 @@
 	};
 };
 
+&pinctrl{
+	pinctrl_tsc_reset_pin: pinctrl_tsc_reset {
+		pins {
+			pinmux=<STM32_PINMUX('E', 12, GPIO)>;
+		};
+	};
+	pinctrl_tsc_irq_pin: pinctrl_tsc_irq {
+		pins {
+			pinmux=<STM32_PINMUX('F', 2, ANALOG)>;
+		};
+	};
+};
+
 &gpu {
 	contiguous-area = <&gpu_reserved>;
 	status = "okay";
@@ -413,6 +426,24 @@
 			};
 		};
 	};
+
+	gtxx_tsc@5d {
+		compatible = "goodix,gt917s";
+		/*
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_tsc_reset_pin>, <&pinctrl_tsc_irq_pin>;
+		*/
+		reg = <0x5d>;
+		status = "okay";
+		/*gpio*/
+		reset-gpios = <&gpioe 12 GPIO_ACTIVE_LOW>;
+		irq-gpios = <&gpiof 2 GPIO_ACTIVE_HIGH>;
+		/*interrupt­*/
+		interrupt-parent = <&gpiof>;
+		interrupts = <2 IRQ_TYPE_EDGE_FALLING>;
+		irq-flags = <2>;		/*1:rising 2: falling*/	
+	};   
+
 };
 
 &i2c4 {
