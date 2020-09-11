@@ -112,6 +112,78 @@
 		status = "okay";
 	};
 
+	v3v3: regulator-3p3v {
+		compatible = "regulator-fixed";
+		regulator-name = "v3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+	
+	v1v8_audio: regulator-v1v8-audio {
+		compatible = "regulator-fixed";
+		regulator-name = "v1v8_audio";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	v3v3_hdmi: regulator-v3v3-hdmi {
+		compatible = "regulator-fixed";
+		regulator-name = "v3v3_hdmi";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	v1v2_hdmi: regulator-v1v2-hdmi {
+		compatible = "regulator-fixed";
+		regulator-name = "v1v2_hdmi";
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	vdd: regulator-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	vdd_usb: regulator-vdd-usb {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd_usb";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	v2v8: v2v8 {
+		compatible = "regulator-fixed";
+		regulator-name = "v2v8";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	vbus_otg: regulator-vbus-otg {
+		compatible = "regulator-fixed";
+		regulator-name = "vbus_otg";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
 	usb_phy_tuning: usb-phy-tuning {
 		st,hs-dc-level = <2>;
 		st,fs-rftime-tuning;
@@ -163,11 +235,13 @@
 };
 
 &cpu0{
-	cpu-supply = <&vddcore>;
+	//cpu-supply = <&vddcore>;
+	clock-frequency = <650000000>;
 };
 
 &cpu1{
-	cpu-supply = <&vddcore>;
+	//cpu-supply = <&vddcore>;
+	clock-frequency = <650000000>;
 };
 
 &dma1 {
@@ -310,6 +384,7 @@
 			power-opmode = "default";
 		};
 	};
+/*
 
 	pmic: stpmic@33 {
 		compatible = "st,stpmic1";
@@ -452,6 +527,7 @@
 			status = "disabled";
 		};
 	};
+*/
 };
 
 &i2c5 {
