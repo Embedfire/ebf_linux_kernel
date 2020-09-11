@@ -269,8 +269,8 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		compatible = "snps,dwmac-mdio";
-		phy0: ethernet-phy@0 {
-			reg = <0>;
+		phy0: ethernet-phy@1 {
+			reg = <1>;
 		};
 	};
 };
@@ -763,7 +763,7 @@
 		status = "okay";
 	};
 };
-
+/*
 &timers12 {
 	/delete-property/dmas;
 	/delete-property/dma-names;
@@ -778,7 +778,7 @@
 		status = "okay";
 	};
 };
-
+*/
 &uart4 {
 	pinctrl-names = "default", "sleep", "idle", "no_console_suspend";
 	pinctrl-0 = <&uart4_pins_a>;
