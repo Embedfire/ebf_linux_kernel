@@ -399,7 +399,28 @@
 					<STM32_PINMUX('E', 5,  ANALOG)>,/* DCMI_D6 */
 					<STM32_PINMUX('B', 9,  ANALOG)>;/* DCMI_D7 */
 		};
-	};		
+	};
+
+	sdmmc2_d47_pins_a: sdmmc2-d47-0 {
+		pins {
+			pinmux = <STM32_PINMUX('A', 8, AF9)>, /* SDMMC2_D4 */
+					<STM32_PINMUX('A', 9, AF10)>, /* SDMMC2_D5 */
+					<STM32_PINMUX('C', 6, AF10)>, /* SDMMC2_D6 */
+					<STM32_PINMUX('C', 7, AF10)>; /* SDMMC2_D7 */
+			slew-rate = <1>;
+			drive-push-pull;
+			bias-pull-up;
+		};
+	};
+
+	sdmmc2_d47_sleep_pins_a: sdmmc2-d47-sleep-0 {
+		pins {
+			pinmux = <STM32_PINMUX('A', 8, ANALOG)>, /* SDMMC2_D4 */
+					<STM32_PINMUX('A', 9, ANALOG)>, /* SDMMC2_D5 */
+					<STM32_PINMUX('C', 6, ANALOG)>, /* SDMMC2_D6 */
+					<STM32_PINMUX('C', 7, ANALOG)>; /* SDMMC2_D7 */
+		};
+	};
 };
 
 &gpu {
@@ -847,6 +868,19 @@
 	st,neg-edge;
 	bus-width = <4>;
 	vmmc-supply = <&v3v3>;
+	status = "okay";
+};
+
+&sdmmc2 {
+	pinctrl-names = "default", "opendrain", "sleep";
+	pinctrl-0 = <&sdmmc2_b4_pins_b &sdmmc2_d47_pins_a>;
+	pinctrl-1 = <&sdmmc2_b4_od_pins_b>;
+	pinctrl-2 = <&sdmmc2_b4_sleep_pins_a &sdmmc2_d47_sleep_pins_a>;
+	non-removable;
+	st,neg-edge;
+	bus-width = <8>;
+	vmmc-supply = <&v3v3>;
+	keep-power-in-suspend;
 	status = "okay";
 };
 
