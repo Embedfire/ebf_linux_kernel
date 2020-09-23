@@ -134,6 +134,7 @@ struct wm8960_priv {
 	int sysclk;
 	int clk_id;
 	int freq_in;
+	unsigned int hp_det[2];
 	bool is_stream_in_use[2];
 	struct wm8960_data pdata;
 };
@@ -469,6 +470,13 @@ static const struct snd_soc_dapm_route audio_paths_capless[] = {
 	{ "OUT3 VMID", NULL, "Left Output Mixer" },
 	{ "OUT3 VMID", NULL, "Right Output Mixer" },
 };
+
+static int wm8960_of_xlate_dai_id(struct snd_soc_component *component,
+				   struct device_node *endpoint)
+{
+	/* return dai id 0, whatever the endpoint index */
+	return 0;
+}
 
 static int wm8960_add_widgets(struct snd_soc_component *component)
 {
@@ -1344,15 +1352,41 @@ static struct snd_soc_dai_driver wm8960_dai = {
 	.symmetric_rates = 1,
 };
 
+static const struct snd_soc_dapm_widget wm8960_dapm_mclk_widgets[] = {
+	SND_SOC_DAPM_CLOCK_SUPPLY("mclk")
+};
+
+
 static int wm8960_probe(struct snd_soc_component *component)
 {
 	struct wm8960_priv *wm8960 = snd_soc_component_get_drvdata(component);
 	struct wm8960_data *pdata = &wm8960->pdata;
+	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);	
 
 	if (pdata->capless)
 		wm8960->set_bias_level = wm8960_set_bias_level_capless;
 	else
 		wm8960->set_bias_level = wm8960_set_bias_level_out3;
+
+	if (wm8960->mclk)
+		snd_soc_dapm_new_controls(dapm, wm8960_dapm_mclk_widgets, 1);
+
+	/*
+	 * codec ADCLRC pin configured as GPIO, DACLRC pin is used as a frame
+	 * clock for ADCs and DACs
+	 */
+	snd_soc_component_update_bits(component, WM8960_IFACE2, 1<<6, 1<<6);
+
+	/* GPIO1 used as headphone detect output */
+	snd_soc_component_update_bits(component, WM8960_ADDCTL4, 7<<4, 3<<4);
+
+	/* Enable headphone jack detect */
+	snd_soc_component_update_bits(component, WM8960_ADDCTL2, 1<<6, 1<<6);
+	snd_soc_component_update_bits(component, WM8960_ADDCTL2, 1<<5,
+				      wm8960->hp_det[1]<<5);
+	snd_soc_component_update_bits(component, WM8960_ADDCTL4, 3<<2,
+				      wm8960->hp_det[0]<<2);
+	snd_soc_component_update_bits(component, WM8960_ADDCTL1, 3, 3);
 
 	snd_soc_add_component_controls(component, wm8960_snd_controls,
 				     ARRAY_SIZE(wm8960_snd_controls));
@@ -1369,6 +1403,7 @@ static const struct snd_soc_component_driver soc_component_dev_wm8960 = {
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
 	.non_legacy_dai_naming	= 1,
+	.of_xlate_dai_id	= wm8960_of_xlate_dai_id, 
 };
 
 static const struct regmap_config wm8960_regmap = {
@@ -1412,6 +1447,8 @@ static int wm8960_i2c_probe(struct i2c_client *i2c,
 		if (PTR_ERR(wm8960->mclk) == -EPROBE_DEFER)
 			return -EPROBE_DEFER;
 	}
+
+	of_property_read_u32_array(i2c->dev.of_node, "hp-det", wm8960->hp_det, 2);
 
 	wm8960->regmap = devm_regmap_init_i2c(i2c, &wm8960_regmap);
 	if (IS_ERR(wm8960->regmap))
