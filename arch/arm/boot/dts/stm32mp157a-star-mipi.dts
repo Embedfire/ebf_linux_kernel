@@ -54,8 +54,20 @@
 	panel: panel@0 {
 		compatible = "himax,hx8394";
 		reg = <0>;
-		/*reset-gpios = <&gpioe 4 GPIO_ACTIVE_LOW>;*/
+		reset-gpios = <&gpioe 12 GPIO_ACTIVE_LOW>;
 		power-supply = <&v3v3>;
+
+		clock-frequency = <72816000>;
+		hactive = <720>;
+		vactive = <1280>;
+		hfront-porch = <95>;
+		hback-porch = <55>;
+		hsync-len = <55>;
+		vback-porch = <24>;
+		vfront-porch = <8>;
+		vsync-len = <9>;	
+		vrefresh = <60>;
+
 		status = "okay";
 
 		port {

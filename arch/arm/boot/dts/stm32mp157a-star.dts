@@ -155,7 +155,7 @@
 		pinctrl-0 = <&ltdc_pins_a>;
 		pinctrl-1 = <&ltdc_pins_sleep_a>;
 		*/
-		backlight = <&lcd_backlight>;
+		/*backlight = <&lcd_backlight>;*/
 		status = "okay";
 
 		port {
