@@ -54,6 +54,7 @@ struct goodix_ts_data {
 	const char *cfg_name;
 	struct completion firmware_loading_complete;
 	unsigned long irq_flags;
+	bool needed_invert;
 };
 
 #define GOODIX_GPIO_INT_NAME		"irq"
@@ -746,6 +747,13 @@ static int goodix_configure_dev(struct goodix_ts_data *ts)
 			"Applying '180 degrees rotated screen' quirk\n");
 	}
 
+	if(ts->needed_invert) {
+		ts->prop.invert_x = true;
+		ts->prop.invert_y = true;		
+		dev_dbg(&ts->client->dev,
+			"Applying '180 degrees rotated screen' quirk\n");
+	}
+
 	error = input_mt_init_slots(ts->input_dev, ts->max_touch_num,
 				    INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
 	if (error) {
@@ -802,6 +810,7 @@ static int goodix_ts_probe(struct i2c_client *client,
 			   const struct i2c_device_id *id)
 {
 	struct goodix_ts_data *ts;
+	struct device *dev = &client->dev;
 	int error;
 
 	dev_dbg(&client->dev, "I2C Address: 0x%02x\n", client->addr);
@@ -818,6 +827,10 @@ static int goodix_ts_probe(struct i2c_client *client,
 	ts->client = client;
 	i2c_set_clientdata(client, ts);
 	init_completion(&ts->firmware_loading_complete);
+	/* modify by embedfire */ 
+	if(of_property_read_bool(dev->of_node, "needed_invert"))
+		ts->needed_invert = true;
+
 
 	error = goodix_get_gpio_config(ts);
 	if (error)

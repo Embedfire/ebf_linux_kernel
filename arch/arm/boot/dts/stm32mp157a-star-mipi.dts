@@ -78,3 +78,19 @@
 	};
 
 };
+
+&i2c2{
+	gtxx_tsc@5d {
+		compatible = "goodix,gt911";
+		reg = <0x5d>;
+		status = "okay";
+		/*gpio*/
+		reset-gpios = <&gpioz 4 GPIO_ACTIVE_LOW>;
+		irq-gpios = <&gpiof 2 GPIO_ACTIVE_HIGH>;
+		/*interrupt­*/
+		interrupt-parent = <&gpiof>;
+		interrupts = <2 IRQ_TYPE_EDGE_FALLING>;
+		irq-flags = <2>;		/*1:rising 2: falling*/	
+		needed_invert;
+	}; 
+};
