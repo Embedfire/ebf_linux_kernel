@@ -176,8 +176,11 @@ static void hx8394_dcs_write_buf(struct hx8394 *ctx, const void *data,
 	hx8394_dcs_write_buf(ctx, d, ARRAY_SIZE(d));		\
 })
 
-static void hx8394_init_sequence(struct hx8394 *ctx)
+static int hx8394_init_sequence(struct hx8394 *ctx)
 {
+	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
+	int ret = 0; 
+
     /* set extended command set access enable */
     dcs_write_seq(ctx, CMD_SETEXTC, 0xFF, 0x83, 0x94);
     /* 2 LANE */
@@ -217,6 +220,18 @@ static void hx8394_init_sequence(struct hx8394 *ctx)
     dcs_write_seq(ctx, 0xBF, 0x40, 0x81, 0x50, 0x00, 0x1A, 0xFC, 0x01);
     dcs_write_seq(ctx, 0xC6, 0xED);
 
+	dcs_write_seq(ctx, MIPI_DCS_SET_ADDRESS_MODE, 0x01);
+
+	ret = mipi_dsi_dcs_set_column_address(dsi, 0,
+					      default_mode.hdisplay - 1);
+	if (ret)
+		return ret;
+
+	ret = mipi_dsi_dcs_set_page_address(dsi, 0, default_mode.vdisplay - 1);
+	if (ret)
+		return ret;	
+	
+	return 0;
 }
 
 
