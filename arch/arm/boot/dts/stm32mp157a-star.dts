@@ -164,18 +164,27 @@
 			};
 		};
 	};
-
+/*
 	sound {
 		compatible = "audio-graph-card";
-		label = "STM32MP1-DK";
+		label = "wm8960-audio";
+		/*
 		routing =
 			"Playback" , "MCLK",
 			"Capture" , "MCLK",
 			"MICL" , "Mic Bias";
-		dais = <&sai2a_port &sai2b_port &i2s2_port>;
+		
+		dais = <&sai2a_port &sai2b_port>;
 		status = "okay";
 	};
-
+*/
+	sound {
+		compatible = "audio-graph-card";
+		label = "wm8960-audio";
+		dais = <&sai2a_port &sai2b_port>;
+		routing = "Playback", "mclk", "Capture", "mclk", "LINPUT2", "MICB", "LINPUT3", "MICB", "RINPUT1", "MICB", "RINPUT2", "MICB";
+		status = "okay";
+    };
 	v3v3: regulator-3p3v {
 		compatible = "regulator-fixed";
 		regulator-name = "v3v3";
@@ -502,7 +511,7 @@
 	status = "okay";
 	/delete-property/dmas;
 	/delete-property/dma-names;
-
+/*
 	cs42l51: cs42l51@4a {
 		compatible = "cirrus,cs42l51";
 		reg = <0x4a>;
@@ -538,9 +547,7 @@
 			};
 		};
 	};
-
-
-
+*/
 	gtxx_tsc@5d {
 		compatible = "goodix,gt917s";
 		/*
@@ -613,15 +620,49 @@
 					remote-endpoint = <&ltdc_ep0_out>;
 				};
 			};
-
+/*
 			port@1 {
 				reg = <1>;
 				sii9022_tx_endpoint: endpoint {
 					remote-endpoint = <&i2s2_endpoint>;
 				};
 			};
+*/
 		};
-	};		
+	};
+	wm8960:audio_codec@1a {
+		compatible = "wlf,wm8960";
+		reg = <0x1a>;
+		status = "okay";
+		wlf,shared-lrclk;
+		hp-det=<3 1>;
+		clocks = <&sai2a>;
+		clock-names = "mclk";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			wm8960_tx_port: port@0 {
+				reg = <0>;
+				wm8960_tx_endpoint: endpoint {
+					remote-endpoint = <&sai2a_endpoint>;
+					frame-master;				/* Set codec as master of SAI2A for FS clock. */
+					bitclock-master;			/* Set codec as master of SAI2A for SCK clock.*/ 
+				};
+			};
+
+			wm8960_rx_port: port@1 {
+				reg = <1>;
+				wm8960_rx_endpoint: endpoint {
+					remote-endpoint = <&sai2b_endpoint>;
+					frame-master;				/* Set codec as master of SAI2B for FS clock. */
+					bitclock-master;			/* Set codec as master of SAI2B for SCK clock. */
+					
+				};
+			};
+		};
+	};							
 };
 /*
 &i2c4 {
@@ -805,7 +846,7 @@
 	/delete-property/dma-names;
 	status = "disabled";
 };
-
+/*
 &i2s2 {
 	clocks = <&rcc SPI2>, <&rcc SPI2_K>, <&rcc PLL3_Q>, <&rcc PLL3_R>;
 	clock-names = "pclk", "i2sclk", "x8k", "x11k";
@@ -822,6 +863,7 @@
 		};
 	};
 };
+*/
 
 &ipcc {
 	status = "okay";
@@ -898,29 +940,24 @@
 
 		sai2a_port: port {
 			sai2a_endpoint: endpoint {
-				remote-endpoint = <&cs42l51_tx_endpoint>;
+				remote-endpoint = <&wm8960_tx_endpoint>;
 				format = "i2s";
 				mclk-fs = <256>;
-				dai-tdm-slot-num = <2>;
-				dai-tdm-slot-width = <32>;
 			};
 		};
 	};
 
 	sai2b: audio-controller@4400b024 {
 		dma-names = "rx";
-		st,sync = <&sai2a 2>;
-		status = "okay";
 		clocks = <&rcc SAI2_K>, <&sai2a>;
 		clock-names = "sai_ck", "MCLK";
-
+		status = "okay";
+		st,sync = <&sai2a 2>;
 		sai2b_port: port {
 			sai2b_endpoint: endpoint {
-				remote-endpoint = <&cs42l51_rx_endpoint>;
+				remote-endpoint = <&wm8960_rx_endpoint>;	
 				format = "i2s";
 				mclk-fs = <256>;
-				dai-tdm-slot-num = <2>;
-				dai-tdm-slot-width = <32>;
 			};
 		};
 	};
