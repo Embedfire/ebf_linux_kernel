@@ -40,6 +40,8 @@ struct goodix_chip_data {
 	int (*check_config)(struct goodix_ts_data *, const struct firmware *);
 };
 
+
+
 struct goodix_ts_data {
 	struct i2c_client *client;
 	struct input_dev *input_dev;
@@ -65,9 +67,12 @@ struct goodix_ts_data {
 #define GOODIX_CONTACT_SIZE		8
 #define GOODIX_MAX_CONTACTS		10
 
-#define GOODIX_CONFIG_MAX_LENGTH	240
+#define GOODIX_CONFIG_MAX_LENGTH	242    //fire 修改
+#define GOODIX_CONFIG_917_LENGTH	242    //fire 新增
+#define GOODIX_CONFIG_5688_LENGTH	242    //fire 新增
 #define GOODIX_CONFIG_911_LENGTH	186
 #define GOODIX_CONFIG_967_LENGTH	228
+
 
 /* Register defines */
 #define GOODIX_REG_COMMAND		0x8040
@@ -75,6 +80,11 @@ struct goodix_ts_data {
 
 #define GOODIX_READ_COOR_ADDR		0x814E
 #define GOODIX_GT1X_REG_CONFIG_DATA	0x8050
+
+#define GOODIX_GT5688_REG_CONFIG_DATA	0x8050  //fire 新增
+#define GOODIX_GT917_REG_CONFIG_DATA	0x8050  //fire 新增
+
+
 #define GOODIX_GT9X_REG_CONFIG_DATA	0x8047
 #define GOODIX_REG_ID			0x8140
 
@@ -113,6 +123,22 @@ static const struct goodix_chip_data gt9x_chip_data = {
 	.config_len		= GOODIX_CONFIG_MAX_LENGTH,
 	.check_config		= goodix_check_cfg_8,
 };
+
+
+/*fire 新增 ----2020/7/14*/
+static const struct goodix_chip_data gt917_chip_data = {
+	.config_addr		= GOODIX_GT917_REG_CONFIG_DATA,
+	.config_len		= GOODIX_CONFIG_917_LENGTH,
+	.check_config		= goodix_check_cfg_16,
+};
+
+/*fire 新增 ----2020/7/14*/
+static const struct goodix_chip_data gt5688_chip_data = {
+	.config_addr		= GOODIX_GT917_REG_CONFIG_DATA,
+	.config_len		= GOODIX_CONFIG_5688_LENGTH,
+	.check_config		= goodix_check_cfg_16,
+};
+
 
 static const unsigned long goodix_irq_flags[] = {
 	IRQ_TYPE_EDGE_RISING,
@@ -217,15 +243,20 @@ static const struct goodix_chip_data *goodix_get_chip_data(u16 id)
 	switch (id) {
 	case 1151:
 		return &gt1x_chip_data;
-
 	case 911:
 	case 9271:
 	case 9110:
 	case 927:
 	case 928:
 		return &gt911_chip_data;
-
+	
 	case 912:
+	case 9157:         // fire 新增 2020/7/14
+		return &gt9x_chip_data;
+	case 917:         // fire 新增 2020/7/14
+		return &gt917_chip_data;
+	case 5688:         // fire 新增 2020/7/14
+		return &gt5688_chip_data;	
 	case 967:
 		return &gt967_chip_data;
 
@@ -366,11 +397,16 @@ static int goodix_check_cfg_8(struct goodix_ts_data *ts,
 			const struct firmware *cfg)
 {
 	int i, raw_cfg_len = cfg->size - 2;
+
+
 	u8 check_sum = 0;
 
 	for (i = 0; i < raw_cfg_len; i++)
 		check_sum += cfg->data[i];
+
+
 	check_sum = (~check_sum) + 1;
+
 	if (check_sum != cfg->data[raw_cfg_len]) {
 		dev_err(&ts->client->dev,
 			"The checksum of the config fw is not correct");
@@ -382,7 +418,6 @@ static int goodix_check_cfg_8(struct goodix_ts_data *ts,
 			"Config fw must have Config_Fresh register set");
 		return -EINVAL;
 	}
-
 	return 0;
 }
 
@@ -395,6 +430,9 @@ static int goodix_check_cfg_16(struct goodix_ts_data *ts,
 	for (i = 0; i < raw_cfg_len; i += 2)
 		check_sum += get_unaligned_be16(&cfg->data[i]);
 	check_sum = (~check_sum) + 1;
+
+	dev_err(&ts->client->dev,"goodix_check_cfg_16");
+
 	if (check_sum != get_unaligned_be16(&cfg->data[raw_cfg_len])) {
 		dev_err(&ts->client->dev,
 			"The checksum of the config fw is not correct");
@@ -419,6 +457,7 @@ static int goodix_check_cfg_16(struct goodix_ts_data *ts,
 static int goodix_check_cfg(struct goodix_ts_data *ts,
 			    const struct firmware *cfg)
 {
+	dev_err(&ts->client->dev,"cfg->size = %d,GOODIX_CONFIG_MAX_LENGTH = %d",cfg->size,GOODIX_CONFIG_MAX_LENGTH);
 	if (cfg->size > GOODIX_CONFIG_MAX_LENGTH) {
 		dev_err(&ts->client->dev,
 			"The length of the config fw is not correct");
@@ -610,6 +649,23 @@ static int goodix_read_version(struct goodix_ts_data *ts)
 	}
 
 	memcpy(id_str, buf, 4);
+	dev_info(&ts->client->dev, "id_str = %s\n",id_str);
+
+	/**
+	 * 处理ID为917S的情况
+	 * 将917S替换为917
+	*/
+	do
+	{
+		if((id_str[0]=='9')&&(id_str[1]=='1')&&(id_str[2]=='7')&&(id_str[3]=='S'))
+		{
+			id_str[0] = '0';
+			id_str[1] = '9';
+			id_str[2] = '1';
+			id_str[3] = '7';
+		}
+	} while (0);
+	
 	id_str[4] = 0;
 	if (kstrtou16(id_str, 10, &ts->id))
 		ts->id = 0x1001;
@@ -747,14 +803,17 @@ static void goodix_config_cb(const struct firmware *cfg, void *ctx)
 	struct goodix_ts_data *ts = ctx;
 	int error;
 
+	
+
 	if (cfg) {
 		/* send device configuration to the firmware */
 		error = goodix_send_cfg(ts, cfg);
+		
 		if (error)
 			goto err_release_cfg;
 	}
-
 	goodix_configure_dev(ts);
+
 
 err_release_cfg:
 	release_firmware(cfg);
@@ -794,6 +853,11 @@ static int goodix_ts_probe(struct i2c_client *client,
 			return error;
 		}
 	}
+	else
+	{
+		dev_err(&client->dev,"\n requst gpio filed! \n");
+	}
+	
 
 	error = goodix_i2c_test(client);
 	if (error) {
@@ -809,13 +873,14 @@ static int goodix_ts_probe(struct i2c_client *client,
 
 	ts->chip = goodix_get_chip_data(ts->id);
 
-	if (ts->gpiod_int && ts->gpiod_rst) {
+	if (ts->gpiod_int && ts->gpiod_rst) 
+	{
 		/* update device config */
 		ts->cfg_name = devm_kasprintf(&client->dev, GFP_KERNEL,
 					      "goodix_%d_cfg.bin", ts->id);
+		dev_err(&client->dev, "ts->cfg_name = %s \n",ts->cfg_name);
 		if (!ts->cfg_name)
 			return -ENOMEM;
-
 		error = request_firmware_nowait(THIS_MODULE, true, ts->cfg_name,
 						&client->dev, GFP_KERNEL, ts,
 						goodix_config_cb);
@@ -825,9 +890,17 @@ static int goodix_ts_probe(struct i2c_client *client,
 				error);
 			return error;
 		}
-
 		return 0;
-	} else {
+	} 
+	else 
+	{
+		dev_err(&client->dev,"\n requst gpio filed! \n");//fire 新增 
+		dev_err(&client->dev,"\n requst gpio filed! \n");
+		dev_err(&client->dev,"\n requst gpio filed! \n");
+		dev_err(&client->dev,"\n requst gpio filed! \n");
+		dev_err(&client->dev,"\n requst gpio filed! \n");
+		dev_err(&client->dev,"\n requst gpio filed! \n");
+		dev_err(&client->dev,"\n requst gpio filed! \n");
 		error = goodix_configure_dev(ts);
 		if (error)
 			return error;
@@ -924,11 +997,7 @@ static int __maybe_unused goodix_resume(struct device *dev)
 
 static SIMPLE_DEV_PM_OPS(goodix_pm_ops, goodix_suspend, goodix_resume);
 
-static const struct i2c_device_id goodix_ts_id[] = {
-	{ "GDIX1001:00", 0 },
-	{ }
-};
-MODULE_DEVICE_TABLE(i2c, goodix_ts_id);
+
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id goodix_acpi_match[] = {
@@ -938,6 +1007,8 @@ static const struct acpi_device_id goodix_acpi_match[] = {
 };
 MODULE_DEVICE_TABLE(acpi, goodix_acpi_match);
 #endif
+
+
 
 #ifdef CONFIG_OF
 static const struct of_device_id goodix_of_match[] = {
@@ -949,6 +1020,7 @@ static const struct of_device_id goodix_of_match[] = {
 	{ .compatible = "goodix,gt9271" },
 	{ .compatible = "goodix,gt928" },
 	{ .compatible = "goodix,gt967" },
+	{ .compatible = "goodix,gt9xx" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, goodix_of_match);
@@ -957,9 +1029,9 @@ MODULE_DEVICE_TABLE(of, goodix_of_match);
 static struct i2c_driver goodix_ts_driver = {
 	.probe = goodix_ts_probe,
 	.remove = goodix_ts_remove,
-	.id_table = goodix_ts_id,
+	// .id_table = goodix_ts_id,
 	.driver = {
-		.name = "Goodix-TS",
+		.name = "Goodix-TS-CHANGE",
 		.acpi_match_table = ACPI_PTR(goodix_acpi_match),
 		.of_match_table = of_match_ptr(goodix_of_match),
 		.pm = &goodix_pm_ops,
