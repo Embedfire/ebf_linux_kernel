@@ -391,13 +391,6 @@
 	status = "okay";
 };
 
-&usdhc2 {
-	pinctrl-names = "default";
-	pinctrl-0 = <&pinctrl_usdhc2_8bit>;
-	non-removable;
-	status = "okay";
-};
-
 &gpmi {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_gpmi_nand>;
