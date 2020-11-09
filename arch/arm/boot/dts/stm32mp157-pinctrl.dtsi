@@ -1174,7 +1174,7 @@
 					bias-pull-up;
 				};
 				pins3 {
-					pinmux = <STM32_PINMUX('F', 1, AF9)>; /* SDMMC2_CMD */
+					pinmux = <STM32_PINMUX('F', 1, AF9)>; /* SDMMC3_CMD */
 					slew-rate = <1>;
 					drive-open-drain;
 					bias-pull-up;

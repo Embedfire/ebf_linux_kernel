@@ -258,6 +258,16 @@
 		st,hs-rx-offset = <2>;
 		st,no-lsfs-sc;
 	};
+
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&gpioh 4 GPIO_ACTIVE_LOW>;
+	};
+
+	bcmdhd_wlan0: bcmdhd_wlan@0 {
+		compatible = "android,bcmdhd_wlan";
+		status = "okay";
+	};	
 };
 
 &adc {
@@ -989,9 +999,12 @@
 	pinctrl-2 = <&sdmmc3_b4_sleep_pins_a>;
 	broken-cd;
 	st,neg-edge;
+	non-removable;
+	keep-power-in-suspend;
 	bus-width = <4>;
 	vmmc-supply = <&v3v3>;
-	status = "disabled";
+	mmc-pwrseq = <&wifi_pwrseq>;	
+	status = "okay";
 };
 
 &spi4 {
@@ -1226,5 +1239,5 @@
 	pinctrl-0 = <&usart2_pins_b>;
 	pinctrl-1 = <&usart2_sleep_pins_b>;
 	pinctrl-2 = <&usart2_idle_pins_b>;
-	status = "okay";
+	status = "disabled";
 };
