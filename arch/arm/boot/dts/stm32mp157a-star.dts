@@ -1179,14 +1179,17 @@
 	phy-names = "usb";
 	status = "okay";
 };
-/*
+
 &usbotg_hs {
-	extcon = <&typec>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&usbotg_hs_pins_a>;
+	dr_mode = "otg";
 	phys = <&usbphyc_port1 0>;
 	phy-names = "usb2-phy";
+	vbus-supply = <&vbus_otg>;
 	status = "okay";
 };
-*/
+
 &usbphyc {
 	vdd3v3-supply = <&vdd_usb>;
 	status = "okay";
