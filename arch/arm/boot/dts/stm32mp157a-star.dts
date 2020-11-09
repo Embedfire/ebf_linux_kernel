@@ -116,7 +116,7 @@
 
 		green {
 			label = "green";
-			gpios = <&gpioh 7 GPIO_ACTIVE_LOW>;
+			gpios = <&gpiog 2 GPIO_ACTIVE_LOW>;
 			default-state = "off";
 			linux,default-trigger = "none";                          
 		};
