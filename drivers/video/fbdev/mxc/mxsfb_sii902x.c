@@ -411,8 +411,11 @@ static int sii902x_probe(struct i2c_client *client,
 
 	/* Reset sii902x */
 	ret = device_reset(&sii902x.client->dev);
+	/*
 	if (ret)
 		dev_warn(&sii902x.client->dev, "No reset pin found\n");
+	*/
+	
 	if (ret == -EPROBE_DEFER)
 		return ret;
 
