@@ -446,58 +446,13 @@
 };
 
 &pinctrl_z {
-	/*
-		usart1_pins_b: usart1-b-0 {
-			pins1 {
-				pinmux = <STM32_PINMUX('Z', 7, AF7)>; /* USART1_TX 
-				bias-disable;
-				drive-push-pull;
-				slew-rate = <0>;
-			};
-			pins2 {
-				pinmux = <STM32_PINMUX('Z', 6, AF7)>; /* USART1_RX 
-				bias-disable;
-			};
-		};
 
-		usart1_idle_pins_b: usart1-idle-b-0 {
-			pins1 {
-				pinmux = <STM32_PINMUX('Z', 7, ANALOG)>; /* USART1_TX 
-			};
-			pins2 {
-				pinmux = <STM32_PINMUX('Z', 6, AF7)>; /* USART1_RX 
-				bias-disable;
-			};
-		};
-
-		usart1_sleep_pins_b: usart1-sleep-b-0 {
-			pins {
-				pinmux = <STM32_PINMUX('Z', 7, ANALOG)>, /* USART1_TX 
-					<STM32_PINMUX('Z', 6, ANALOG)>; /* USART1_RX 
-			};
-		};
-		*/
-		/* BlueTooth */
-	usart1_bt_pins_a: usart1-bt-0 {
+	usart1_pins_b: usart1-b-0 {
 		pins1 {
-			pinmux = <STM32_PINMUX('Z', 7, AF7)>, /* USART1_TX */
-					<STM32_PINMUX('Z', 5, AF7)>; /* USART1_RTS */
+			pinmux = <STM32_PINMUX('Z', 7, AF7)>; /* USART1_TX */
 			bias-disable;
 			drive-push-pull;
 			slew-rate = <0>;
-		};
-		pins2 {
-			pinmux = <STM32_PINMUX('Z', 6, AF7)>, /* USART1_RX */
-					<STM32_PINMUX('Z', 3, AF7)>; /* USART1_CTS_NSS */
-			bias-disable;
-		};
-	};
-
-	usart1_bt_idle_pins_a: usart1-bt-idle-0 {
-		pins1 {
-			pinmux = <STM32_PINMUX('Z', 7, ANALOG)>, /* USART1_TX */
-					<STM32_PINMUX('Z', 5, ANALOG)>, /* USART1_RTS */
-					<STM32_PINMUX('Z', 3, ANALOG)>; /* USART1_CTS_NSS */
 		};
 		pins2 {
 			pinmux = <STM32_PINMUX('Z', 6, AF7)>; /* USART1_RX */
@@ -505,14 +460,23 @@
 		};
 	};
 
-	usart1_bt_sleep_pins_a: usart1-bt-sleep-0 {
-		pins {
-			pinmux = <STM32_PINMUX('Z', 7, ANALOG)>, /* USART1_TX */
-					<STM32_PINMUX('Z', 5, ANALOG)>, /* USART1_RTS */
-					<STM32_PINMUX('Z', 6, ANALOG)>, /* USART1_RX */
-					<STM32_PINMUX('Z', 3, ANALOG)>; /* USART2_CTS_NSS */
+	usart1_idle_pins_b: usart1-idle-b-0 {
+		pins1 {
+			pinmux = <STM32_PINMUX('Z', 7, ANALOG)>; /* USART1_TX */
+		};
+		pins2 {
+			pinmux = <STM32_PINMUX('Z', 6, AF7)>; /* USART1_RX */
+			bias-disable;
 		};
 	};
+
+	usart1_sleep_pins_b: usart1-sleep-b-0 {
+		pins {
+			pinmux = <STM32_PINMUX('Z', 7, ANALOG)>, /* USART1_TX */
+				<STM32_PINMUX('Z', 6, ANALOG)>; /* USART1_RX */
+		};
+	};
+	
 
 	i2c2_pins_b: i2c2-0 {
 		pins {
@@ -1212,24 +1176,16 @@
 	};
 };
 
-/*
+
 &usart1 {
 	pinctrl-names = "default", "sleep", "idle";
 	pinctrl-0 = <&usart1_pins_b>;
 	pinctrl-1 = <&usart1_sleep_pins_b>;
 	pinctrl-2 = <&usart1_idle_pins_b>;
-	status = "disabled";
-};
-*/
-/* BlueTooth */
-&usart1 {
-	pinctrl-names = "default", "sleep", "idle";
-	pinctrl-0 = <&usart1_bt_pins_a>;
-	pinctrl-1 = <&usart1_bt_sleep_pins_a>;
-	pinctrl-2 = <&usart1_bt_idle_pins_a>;
-	st,hw-flow-ctrl;
 	status = "okay";
 };
+
+
 &usart2 {
 	pinctrl-names = "default", "sleep", "idle";
 	pinctrl-0 = <&usart2_pins_b>;
