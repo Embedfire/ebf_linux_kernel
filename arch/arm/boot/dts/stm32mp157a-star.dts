@@ -21,6 +21,7 @@
 		serial0 = &uart4;
 		serial1 = &usart1;
 		serial2 = &usart2;
+		serial3 = &usart3;
 	};
 	clocks {
 		clk_ext_camera: clk-ext-camera {
@@ -1235,4 +1236,11 @@
 	pinctrl-1 = <&usart2_sleep_pins_b>;
 	pinctrl-2 = <&usart2_idle_pins_b>;
 	status = "disabled";
+};
+&usart3 {
+	pinctrl-names = "default", "sleep", "idle";
+	pinctrl-0 = <&usart3_pins_a>;
+	pinctrl-1 = <&usart3_sleep_pins_a>;
+	pinctrl-2 = <&usart3_idle_pins_a>;
+	status = "okay";
 };
