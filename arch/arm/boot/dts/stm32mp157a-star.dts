@@ -356,18 +356,6 @@
 };
 
 &pinctrl{
-	pinctrl_tsc_reset_pin: pinctrl_tsc_reset {
-		pins {
-			pinmux=<STM32_PINMUX('E', 12, GPIO)>;
-		};
-	};
-	pinctrl_tsc_irq_pin: pinctrl_tsc_irq {
-		pins {
-			pinmux=<STM32_PINMUX('F', 2, ANALOG)>;
-		};
-	};
-
-
 	dcmi_pins_a: dcmi-0 {
 		pins {
 			pinmux = <STM32_PINMUX('A', 4,  AF13)>,/* DCMI_HSYNC */
@@ -489,41 +477,41 @@
 		};
 		*/
 		/* BlueTooth */
-		usart1_bt_pins_a: usart1-bt-0 {
-			pins1 {
-				pinmux = <STM32_PINMUX('Z', 7, AF7)>, /* USART1_TX */
-						<STM32_PINMUX('Z', 5, AF7)>; /* USART1_RTS */
-				bias-disable;
-				drive-push-pull;
-				slew-rate = <0>;
-			};
-			pins2 {
-				pinmux = <STM32_PINMUX('Z', 6, AF7)>, /* USART1_RX */
-						<STM32_PINMUX('Z', 3, AF7)>; /* USART1_CTS_NSS */
-				bias-disable;
-			};
+	usart1_bt_pins_a: usart1-bt-0 {
+		pins1 {
+			pinmux = <STM32_PINMUX('Z', 7, AF7)>, /* USART1_TX */
+					<STM32_PINMUX('Z', 5, AF7)>; /* USART1_RTS */
+			bias-disable;
+			drive-push-pull;
+			slew-rate = <0>;
 		};
+		pins2 {
+			pinmux = <STM32_PINMUX('Z', 6, AF7)>, /* USART1_RX */
+					<STM32_PINMUX('Z', 3, AF7)>; /* USART1_CTS_NSS */
+			bias-disable;
+		};
+	};
 
-		usart1_bt_idle_pins_a: usart1-bt-idle-0 {
-			pins1 {
-				pinmux = <STM32_PINMUX('Z', 7, ANALOG)>, /* USART1_TX */
-						<STM32_PINMUX('Z', 5, ANALOG)>, /* USART1_RTS */
-						<STM32_PINMUX('Z', 3, ANALOG)>; /* USART1_CTS_NSS */
-			};
-			pins2 {
-				pinmux = <STM32_PINMUX('Z', 6, AF7)>; /* USART1_RX */
-				bias-disable;
-			};
+	usart1_bt_idle_pins_a: usart1-bt-idle-0 {
+		pins1 {
+			pinmux = <STM32_PINMUX('Z', 7, ANALOG)>, /* USART1_TX */
+					<STM32_PINMUX('Z', 5, ANALOG)>, /* USART1_RTS */
+					<STM32_PINMUX('Z', 3, ANALOG)>; /* USART1_CTS_NSS */
 		};
+		pins2 {
+			pinmux = <STM32_PINMUX('Z', 6, AF7)>; /* USART1_RX */
+			bias-disable;
+		};
+	};
 
-		usart1_bt_sleep_pins_a: usart1-bt-sleep-0 {
-			pins {
-				pinmux = <STM32_PINMUX('Z', 7, ANALOG)>, /* USART1_TX */
-						<STM32_PINMUX('Z', 5, ANALOG)>, /* USART1_RTS */
-						<STM32_PINMUX('Z', 6, ANALOG)>, /* USART1_RX */
-						<STM32_PINMUX('Z', 3, ANALOG)>; /* USART2_CTS_NSS */
-			};
+	usart1_bt_sleep_pins_a: usart1-bt-sleep-0 {
+		pins {
+			pinmux = <STM32_PINMUX('Z', 7, ANALOG)>, /* USART1_TX */
+					<STM32_PINMUX('Z', 5, ANALOG)>, /* USART1_RTS */
+					<STM32_PINMUX('Z', 6, ANALOG)>, /* USART1_RX */
+					<STM32_PINMUX('Z', 3, ANALOG)>; /* USART2_CTS_NSS */
 		};
+	};
 
 	i2c2_pins_b: i2c2-0 {
 		pins {
@@ -541,6 +529,7 @@
 					<STM32_PINMUX('Z', 1, ANALOG)>; /* I2C2_SDA */
 		};
 	};
+
 };
 
 &gpu {
