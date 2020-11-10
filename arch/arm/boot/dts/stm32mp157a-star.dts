@@ -570,8 +570,8 @@
 		iovcc-supply = <&v3v3_hdmi>;
 		cvcc12-supply = <&v1v2_hdmi>;
 		reset-gpios = <&gpiof 3 GPIO_ACTIVE_LOW>;
-		interrupts = <1 IRQ_TYPE_EDGE_FALLING>;
-		interrupt-parent = <&gpiog>;
+		interrupts = <2 IRQ_TYPE_EDGE_FALLING>;
+		interrupt-parent = <&gpioz>;
 		status = "okay";
 
 		ports {
