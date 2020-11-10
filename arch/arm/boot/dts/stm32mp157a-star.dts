@@ -135,9 +135,15 @@
 
 		Key0{
 			label = "Key 0";
-			gpios = <&gpioe 4 GPIO_ACTIVE_HIGH>;
+			gpios = <&gpiob 13 GPIO_ACTIVE_HIGH>;
 			linux,code=<KEY_0>;
 		};
+
+		Key1{
+			label = "Key 1";
+			gpios = <&gpioh 7 GPIO_ACTIVE_HIGH>;
+			linux,code=<KEY_1>;
+		};		
 		wakeup {
 			label = "user";
 			gpios = <&gpioa 0 GPIO_ACTIVE_HIGH>;
