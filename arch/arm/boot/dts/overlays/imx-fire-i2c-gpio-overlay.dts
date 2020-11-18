@@ -11,6 +11,7 @@
 /plugin/;
 #include <dt-bindings/gpio/gpio.h>
 #include "../imx6ul-pinfunc.h"
+#include "../imx6ull-pinfunc.h"
 /{
 
 	fragment@0{

@@ -6,7 +6,8 @@
  * date : 2020-02-17 
  * version : A001
  */
-#include "../imx6ul-pinfunc.h"
+
+#include "../imx6ull-pinfunc.h"
 #include "../imx6ull-pinfunc-snvs.h"
 #include "dt-bindings/interrupt-controller/irq.h"
 #include "dt-bindings/gpio/gpio.h"
