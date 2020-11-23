@@ -76,12 +76,6 @@
 					MX6UL_PAD_JTAG_TMS__SAI2_MCLK		0x17088
 				>;
 			};
-			pinctrl_spdif: spdifgrp {
-					fsl,pins = <
-					MX6UL_PAD_JTAG_MOD__SPDIF_OUT		0x1b0b0
-					MX6UL_PAD_GPIO1_IO09__SPDIF_IN		0x1b0b0
-				>;
-			};
 		};
 	};
 	
@@ -121,34 +115,5 @@
 
 
 		};
-	};
-
-	fragment@4 {
-		target-path = "/";
-		__overlay__ {
-			sound-spdif {
-				compatible = "fsl,imx-audio-spdif";
-				model = "imx-spdif";
-				spdif-controller = <&spdif>;
-				spdif-in;
-				spdif-out;
-			};		
-		};	
-	};
-
-
-	fragment@5 {
-
-		target=<&spdif>;
-		__overlay__ {
- 			pinctrl-names = "default";
-			pinctrl-0 = <&pinctrl_spdif>;
-			assigned-clocks = <&clks IMX6UL_CLK_SPDIF_SEL>,
-					  <&clks IMX6UL_CLK_SPDIF_PODF>;
-			assigned-clock-parents = <&clks IMX6UL_CLK_PLL4_AUDIO_DIV>;
-			assigned-clock-rates = <0>, <49152000>;
-			status = "okay";
-		};
-
 	};
 };
