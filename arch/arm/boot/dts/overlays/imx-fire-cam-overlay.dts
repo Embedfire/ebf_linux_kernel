@@ -103,15 +103,6 @@
 							MX6UL_PAD_UART5_RX_DATA__I2C2_SDA 0x4001b8b0
 						>;
 					};
-					
-					pinctrl_spi4: spi4grp {
-					fsl,pins = <
-						MX6ULL_PAD_BOOT_MODE0__GPIO5_IO10		0x70a1
-						MX6ULL_PAD_BOOT_MODE1__GPIO5_IO11		0x70a1
-						MX6ULL_PAD_SNVS_TAMPER7__GPIO5_IO07		0x70a1
-						MX6ULL_PAD_SNVS_TAMPER8__GPIO5_IO08		0x80000000
-					>;
-				};
 			};
 		};
 		fragment@4 {
@@ -126,5 +117,17 @@
 				};				
 			};		
 		};
-		
+		fragment@5 {
+		target = <&iomuxc_snvs>;
+		__overlay__ {
+					pinctrl_spi4: spi4grp {
+					fsl,pins = <
+						MX6ULL_PAD_BOOT_MODE0__GPIO5_IO10		0x70a1
+						MX6ULL_PAD_BOOT_MODE1__GPIO5_IO11		0x70a1
+						MX6ULL_PAD_SNVS_TAMPER7__GPIO5_IO07		0x70a1
+						MX6ULL_PAD_SNVS_TAMPER8__GPIO5_IO08		0x80000000
+					>;
+				};		
+
+		};
 };
