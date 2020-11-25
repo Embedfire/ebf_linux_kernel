@@ -14,7 +14,27 @@
 /plugin/;
 
 / {
-	fragment@0{
+	fragment@1 {
+         target = <&i2c2>;
+         __overlay__ {
+		 			clock_frequency = <100000>;
+					pinctrl-names = "default";
+					pinctrl-0 = <&pinctrl_i2c2>;
+					status = "okay";
+					#address-cells = <1>;
+	    			#size-cells = <0>; 
+ 			
+					codec: wm8960@1a {
+						compatible = "wlf,wm8960";
+						reg = <0x1a>;
+						clocks = <&clks IMX6UL_CLK_SAI2>;
+						clock-names = "mclk";
+						wlf,shared-lrclk;
+					};			      
+         };
+     };
+
+	fragment@2{
 		target-path="/";
 		__overlay__{	
 		   sound {		
@@ -58,7 +78,7 @@
 	};	
 
 
-	fragment@1{
+	fragment@3{
 		target=<&iomuxc>;
 		__overlay__ {
 			 pinctrl_i2c2: i2c2grp {
@@ -79,27 +99,7 @@
 		};
 	};
 	
-	fragment@2{
-		target=<&i2c2>;
-		__overlay__{
-			clock_frequency = <100000>;
-			pinctrl-names = "default";
-			pinctrl-0 = <&pinctrl_i2c2>;
-			status = "okay";
-	    #address-cells = <1>;
-	    #size-cells = <0>; 
- 			
-			codec: wm8960@1a {
-				compatible = "wlf,wm8960";
-				reg = <0x1a>;
-				clocks = <&clks IMX6UL_CLK_SAI2>;
-				clock-names = "mclk";
-				wlf,shared-lrclk;
-			};			
-		};
-	};
-	
-	fragment@3 {
+	fragment@4 {
 		target=<&sai2>;
 		__overlay__{
 			pinctrl-names = "default";
@@ -110,10 +110,7 @@
 			<&clks IMX6UL_CLK_SAI2>;
 			assigned-clock-parents = <&clks IMX6UL_CLK_PLL4_AUDIO_DIV>;
 			assigned-clock-rates = <0>, <12288000>;
-
 			status = "okay";
-
-
 		};
 	};
 };

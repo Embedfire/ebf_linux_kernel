@@ -16,9 +16,44 @@
 #include "dt-bindings/clock/imx6ul-clock.h"
 #include "../imx6ull-pinfunc-snvs.h"
 / {
-     fragment@0 {
+	fragment@0 {
+		target-path = "/";		
+		__overlay__ {
+				spi4 {
+					compatible = "spi-gpio";
+					pinctrl-names = "default";
+					pinctrl-0 = <&pinctrl_spi4>;
+					pinctrl-assert-gpios = <&gpio5 8 GPIO_ACTIVE_LOW>;
+					status = "okay";
+					gpio-sck = <&gpio5 11 0>;
+					gpio-mosi = <&gpio5 10 0>;
+					cs-gpios = <&gpio5 7 0>;
+					num-chipselects = <1>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					gpio_spi: gpio_spi@0 {
+						compatible = "fairchild,74hc595";
+						gpio-controller;
+						#gpio-cells = <2>;
+						reg = <0>;
+						registers-number = <1>;
+						registers-default = /bits/ 8 <0x57>;
+						spi-max-frequency = <100000>;
+					};
+				};
+
+		};
+
+	};
+
+     fragment@2 {
         target=<&i2c2>;
         __overlay__ {
+					clock_frequency = <100000>;
+					pinctrl-names = "default";
+					pinctrl-0 = <&pinctrl_i2c2>;
+					status = "okay"; 
 					#address-cells = <1>;
 					#size-cells = <0>;        
 					ov5640: ov5640@3c {
@@ -42,7 +77,7 @@
 					};          
         };
      };
-		fragment@1 {
+		fragment@3 {
 			target=<&iomuxc>;
 			__overlay__ {
 						pinctrl_csi1: csi1grp {
@@ -62,9 +97,24 @@
 							>;
 					};
 
+					pinctrl_i2c2: i2c2grp {
+						fsl,pins = <
+							MX6UL_PAD_UART5_TX_DATA__I2C2_SCL 0x4001b8b0
+							MX6UL_PAD_UART5_RX_DATA__I2C2_SDA 0x4001b8b0
+						>;
+					};
+					
+					pinctrl_spi4: spi4grp {
+					fsl,pins = <
+						MX6ULL_PAD_BOOT_MODE0__GPIO5_IO10		0x70a1
+						MX6ULL_PAD_BOOT_MODE1__GPIO5_IO11		0x70a1
+						MX6ULL_PAD_SNVS_TAMPER7__GPIO5_IO07		0x70a1
+						MX6ULL_PAD_SNVS_TAMPER8__GPIO5_IO08		0x80000000
+					>;
+				};
 			};
 		};
-		fragment@2 {
+		fragment@4 {
 			target = <&csi>;
 			__overlay__ {
 				status = "okay";  /* 摄像头总线使能 */
