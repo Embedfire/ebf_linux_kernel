@@ -726,7 +726,7 @@ static int goodix_configure_dev(struct goodix_ts_data *ts)
 		return -ENOMEM;
 	}
 
-	ts->input_dev->name = "Goodix Capacitive TouchScreen";
+	ts->input_dev->name = "goodix-ts";
 	ts->input_dev->phys = "input/ts";
 	ts->input_dev->id.bustype = BUS_I2C;
 	ts->input_dev->id.vendor = 0x0416;
