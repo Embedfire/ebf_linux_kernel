@@ -278,12 +278,15 @@
 };
 
 &adc {
+	/*
 	pinctrl-names = "default";
 	pinctrl-0 = <&adc12_ain_pins_a>, <&adc12_usb_pwr_pins_a>;
+	
 	vdd-supply = <&vdd>;
+	*/
 	vdda-supply = <&vdd>;
-	vref-supply = <&vrefbuf>;
-	status = "disabled";
+	vref-supply = <&vdd>;
+	status = "okay";
 	adc1: adc@0 {
 		/*
 		 * Type-C USB_PWR_CC1 & USB_PWR_CC2 on in18 & in19.
@@ -294,17 +297,17 @@
 		st,min-sample-time-nsecs = <5000>;
 		/* AIN connector, USB Type-C CC1 & CC2 */
 		st,adc-channels = <0 1 6 13 18 19>;
-		status = "okay";
+		status = "disabled";
 	};
 	adc2: adc@100 {
 		/* AIN connector, temp sensor, USB Type-C CC1 & CC2 */
-		st,adc-channels = <0 1 2 6 12 18 19>;
+		st,adc-channels = <0>;
 		/* temperature sensor min sample time */
 		st,min-sample-time-nsecs = <10000>;
 		status = "okay";
 	};
 	adc_temp: temp {
-		status = "okay";
+		status = "disabled";
 	};
 };
 
