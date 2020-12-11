@@ -24,6 +24,7 @@
 #define SNVS_HPSR_BTN	BIT(6)
 #define SNVS_LPSR_SPO	BIT(18)
 #define SNVS_LPCR_DEP_EN BIT(5)
+#define SNVS_LPCR_BTN_PRESS_TIME 16
 
 #define DEBOUNCE_TIME 30
 #define REPEAT_INTERVAL 60
@@ -123,6 +124,7 @@ static int imx_snvs_pwrkey_probe(struct platform_device *pdev)
 	}
 
 	regmap_update_bits(pdata->snvs, SNVS_LPCR_REG, SNVS_LPCR_DEP_EN, SNVS_LPCR_DEP_EN);
+	regmap_update_bits(pdata->snvs, SNVS_LPCR_REG, 2<<SNVS_LPCR_BTN_PRESS_TIME, 2<<SNVS_LPCR_BTN_PRESS_TIME);
 
 	/* clear the unexpected interrupt before driver ready */
 	regmap_write(pdata->snvs, SNVS_LPSR_REG, SNVS_LPSR_SPO);
