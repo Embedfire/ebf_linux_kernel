@@ -13,7 +13,7 @@
 #include <dt-bindings/mfd/st,stpmic1.h>
 
 / {
-	model = "STMicroelectronics STM32MP157A-DK1 Discovery Board";
+	model = "Embedfire STM32MP157 Star Board";
 	compatible = "st,stm32mp157a-dk1", "st,stm32mp157";
 
 	aliases {
