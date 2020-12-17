@@ -205,8 +205,7 @@ dtbo-$(CONFIG_SOC_IMX6ULL) += \
 	imx-fire-i2c1.dtbo	\
 	imx-fire-i2c2.dtbo	\
 	imx-fire-key.dtbo	\
-	imx-fire-lcd5.dtbo	\
-	imx-fire-lcd43.dtbo	\
+	imx-fire-lcd.dtbo	\
 	imx-fire-led.dtbo	\
 	imx-fire-mpu6050.dtbo	\
 	imx-fire-resistive-screen.dtbo	\
