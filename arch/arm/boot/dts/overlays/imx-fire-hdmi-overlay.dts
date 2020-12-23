@@ -1,0 +1,83 @@
+/*
+ * Copyright (C) 2019 - All Rights Reserved by 
+ * filename : imx-fire-hdmi-overlay.dts
+ * brief : Device Tree overlay for EBF6ull hdmi device
+ * author : embedfire
+ * date : 2019-12-12 
+ * version : A001
+ */
+#include "../imx6ul-pinfunc.h"
+#include "../imx6ull-pinfunc.h"
+#include "../imx6ull-pinfunc-snvs.h"
+#include "dt-bindings/interrupt-controller/irq.h"
+#include "dt-bindings/gpio/gpio.h"
+/dts-v1/;
+/plugin/;
+
+
+/ {
+		fragment@0 {
+			target = <&spi4>;		
+			__overlay__ {
+				status = "okay";
+			};
+		};
+
+		fragment@1 {
+			target=<&i2c2>;
+			__overlay__ {
+				clock_frequency = <100000>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&pinctrl_i2c2>;
+				status = "okay";
+				#address-cells = <1>;
+				#size-cells = <0>; 
+				sii902x: sii902x@39 {
+					compatible = "SiI,sii902x";
+					pinctrl-names = "default";
+					reset-names="sii902x";
+					pinctrl-0 = <&pinctrl_sii902x>;
+					resets = <&sii902x_reset>;
+					interrupt-parent = <&gpio1>;
+					interrupts = <18 IRQ_TYPE_EDGE_FALLING>;
+					mode_str ="640x480M@60";
+					bits-per-pixel = <16>;
+					reg = <0x39>;
+					status = "okay";    /* HDMI 使能 */
+				};
+			};
+		};
+
+		fragment@2 {
+			target-path = "/";
+			__overlay__ {
+
+				sii902x_reset: sii902x-reset {
+					compatible = "gpio-reset";
+					reset-gpios = <&gpio_spi 0 GPIO_ACTIVE_LOW>;
+					reset-delay-us = <100000>;
+					#reset-cells = <0>;
+				};			
+			};
+		};
+		
+		fragment@3 {
+			target = <&iomuxc>;
+			__overlay__ {
+				pinctrl_sii902x: hdmigrp {
+					fsl,pins = <
+						MX6UL_PAD_UART1_CTS_B__GPIO1_IO18 0x59
+					>;
+				};
+				pinctrl_i2c2: i2c2grp {
+						fsl,pins = <
+							MX6UL_PAD_UART5_TX_DATA__I2C2_SCL 0x4001b8b0
+							MX6UL_PAD_UART5_RX_DATA__I2C2_SDA 0x4001b8b0
+						>;
+					};
+		
+			};
+		};
+		
+
+};

@@ -1,0 +1,50 @@
+/*
+ * Copyright (C) 2019 - All Rights Reserved by 
+ * filename : imx-fire-adc-overlay.dts
+ * brief : Device Tree overlay for EBF6ull adc device
+ * author : embedfire
+ * date : 2019-12-12
+ * version : A001
+ */
+ 
+/dts-v1/;
+/plugin/;
+#include "../imx6ul-pinfunc.h"
+#include "../imx6ull-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+
+ / {
+     fragment@0 {
+        target-path="/";
+        __overlay__ {
+					reg_vref_3v3: regulator@2 {
+						compatible = "regulator-fixed";
+						regulator-name = "vref-3v3";
+						regulator-min-microvolt = <3300000>;
+						regulator-max-microvolt = <3300000>;
+					};          
+        };
+     };
+
+    fragment@1 {
+        target=<&adc1>;
+        __overlay__ {
+					pinctrl-names = "default";
+					pinctrl-0 = <&pinctrl_adc1>;
+					vref-supply = <&reg_vref_3v3>;
+					num-channels = <4>; 			
+					status = "okay";
+        };
+    };
+		fragment@2 {
+				target=<&iomuxc>;
+				__overlay__ {
+						pinctrl_adc1: adc1grp{
+						fsl,pins = <
+							MX6UL_PAD_GPIO1_IO03__GPIO1_IO03          0x000010B1
+						>;
+					};				
+
+				};
+		};
+};

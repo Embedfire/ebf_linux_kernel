@@ -1378,3 +1378,13 @@ dtb-$(CONFIG_ARCH_ASPEED) += \
 	aspeed-bmc-opp-zaius.dtb \
 	aspeed-bmc-portwell-neptune.dtb \
 	aspeed-bmc-quanta-q71l.dtb
+
+targets += dtbs dtbs_install
+targets += $(dtb-y)
+
+subdir-y	:= overlays
+
+# Enable fixups to support overlays on imx6ull platforms
+ifeq ($(CONFIG_SOC_IMX6UL),y)
+	DTC_FLAGS ?= -@
+endif

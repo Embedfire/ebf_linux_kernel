@@ -1,0 +1,52 @@
+/*
+ * Copyright (C) 2019 - All Rights Reserved by 
+ * filename : imx-fire-ecspi3-overlay.dts
+ * brief : Device Tree overlay for EBF6ull ecspi3' device
+ * author : embedfire
+ * date : 2019-12-10 
+ * version : A001
+ */
+#include "../imx6ul-pinfunc.h"
+#include "../imx6ull-pinfunc.h"
+#include "../imx6ull-pinfunc-snvs.h"
+#include "dt-bindings/interrupt-controller/irq.h"
+#include "dt-bindings/gpio/gpio.h"
+/dts-v1/;
+/plugin/;
+
+/ {
+		fragment@0 {
+			target = <&ecspi3>;
+			__overlay__ {
+				fsl,spi-num-chipselects = <1>;
+				cs-gpio = <&gpio1 20 GPIO_ACTIVE_LOW>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&pinctrl_ecspi3>;
+				status = "okay";
+				#address-cells = <1>;
+				#size-cells = <0>; 
+				spidev@0 {
+					compatible = "spidev";
+					spi-max-frequency = <20000000>;
+					reg = <0>;
+				};
+			};
+		};
+		
+		fragment@1 {
+			target = <&iomuxc>;
+			__overlay__ {
+				pinctrl_ecspi3:ecspi3grp {
+					fsl,pins = <
+						MX6UL_PAD_UART2_TX_DATA__ECSPI3_SS0     0x1a090//0x10b0 
+						MX6UL_PAD_UART2_RX_DATA__ECSPI3_SCLK		0x11090//0x10b0
+						MX6UL_PAD_UART2_CTS_B__ECSPI3_MOSI			0x11090//0x10b0	
+						MX6UL_PAD_UART2_RTS_B__ECSPI3_MISO			0x11090//0x10b0
+					>;
+				};						
+			};
+		};
+
+
+
+};

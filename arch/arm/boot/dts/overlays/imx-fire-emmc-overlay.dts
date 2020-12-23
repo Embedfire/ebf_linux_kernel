@@ -1,0 +1,26 @@
+/*
+ * Copyright (C) 2019 - All Rights Reserved by 
+ * filename : imx-fire-emmc-overlay.dts
+ * brief : Device Tree overlay for EBF6ull emmc device
+ * author : embedfire
+ * date : 2020-02-17 
+ * version : A001
+ */
+
+#include "../imx6ull-pinfunc.h"
+#include "../imx6ull-pinfunc-snvs.h"
+#include "dt-bindings/interrupt-controller/irq.h"
+#include "dt-bindings/gpio/gpio.h"
+
+/dts-v1/;
+/plugin/;
+
+
+/ {
+		fragment@0 {
+			target = <&gpmi>;
+			__overlay__ {
+				status = "disable";
+			};
+		};
+};
