@@ -13,29 +13,30 @@
 #include "dt-bindings/gpio/gpio.h"
  / {
         fragment@0 {
-            target-path = "/";
-            __overlay__ {
-		dht11{
-			compatible = "dht11";
-			gpios = <&gpio1 2 GPIO_ACTIVE_LOW>;
-			linux,open-drain;
-			pinctrl-names = "default";
-			pinctrl-0 = <&pinctrl_onewire>;
-			status = "okay";
-		};
-            };
-        };
+			target = <&iomuxc>;
+				__overlay__ { 
+					pinctrl_dht11: dht11grp {
+					fsl,pins = <
+						MX6UL_PAD_GPIO1_IO02__GPIO1_IO02	0x10b0	/*dht11*/
+					>;
+				}; 
+			};
+		};    
 
-        fragment@1 {
-            target= <&iomuxc>;
-            __overlay__{
-		pinctrl_onewire: onewire {
-			fsl,pins = <
-				//MX6UL_PAD_GPIO1_IO02__GPIO1_IO02          0x000090B1     DHT11
-				MX6UL_PAD_GPIO1_IO02__GPIO1_IO02          0x400138B1
-			>;
-		};		
-            };
-        };
+		fragment@1 {
+			target-path = "/";
+			__overlay__ {
+				dht11 {
+					#address-cells = <1>;
+					#size-cells = <1>;
+					pinctrl-names = "default";
+					compatible = "fire,temphum_dht11";
+                    linux,open-drain;
+					pinctrl-0 = <&pinctrl_dht11>;
+					dht11_pin = <&gpio1 2 GPIO_ACTIVE_HIGH>;	/*dht11 pin*/
+					status = "okay";
+				};
+			};
+		};
 
  };
