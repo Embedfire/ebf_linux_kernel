@@ -1,6 +1,6 @@
 # Overlays for the Raspberry Pi platform
 dtbo-$(CONFIG_SOC_IMX6ULL) += \
-	imx-fire-18b20.dtbo \
+	imx-fire-ds18b20.dtbo \
 	imx-fire-74hc595.dtbo \
 	imx-fire-485r1.dtbo \
 	imx-fire-485r2.dtbo \
