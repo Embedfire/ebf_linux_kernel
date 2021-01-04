@@ -186,14 +186,14 @@ struct ocelot_ace_stats {
 
 struct ocelot_ace_rule {
 	struct list_head list;
-	struct ocelot_port *port;
+	struct ocelot *ocelot;
 
 	u16 prio;
 	u32 id;
 
 	enum ocelot_ace_action action;
 	struct ocelot_ace_stats stats;
-	int chip_port;
+	u16 ingress_port_mask;
 
 	enum ocelot_vcap_bit dmac_mc;
 	enum ocelot_vcap_bit dmac_bc;
@@ -224,9 +224,9 @@ int ocelot_ace_rule_stats_update(struct ocelot_ace_rule *rule);
 int ocelot_ace_init(struct ocelot *ocelot);
 void ocelot_ace_deinit(void);
 
-int ocelot_setup_tc_block_flower_bind(struct ocelot_port *port,
+int ocelot_setup_tc_block_flower_bind(struct ocelot_port_private *priv,
 				      struct flow_block_offload *f);
-void ocelot_setup_tc_block_flower_unbind(struct ocelot_port *port,
+void ocelot_setup_tc_block_flower_unbind(struct ocelot_port_private *priv,
 					 struct flow_block_offload *f);
 
 #endif /* _MSCC_OCELOT_ACE_H_ */

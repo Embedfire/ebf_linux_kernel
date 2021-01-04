@@ -494,6 +494,11 @@ const struct snd_sof_dsp_ops sof_tng_ops = {
 	.ipc_msg_data	= intel_ipc_msg_data,
 	.ipc_pcm_params	= intel_ipc_pcm_params,
 
+	/* machine driver */
+	.machine_check = sof_machine_check,
+	.machine_register = sof_machine_register,
+	.machine_unregister = sof_machine_unregister,
+
 	/* debug */
 	.debug_map	= byt_debugfs,
 	.debug_map_count	= ARRAY_SIZE(byt_debugfs),
@@ -512,6 +517,13 @@ const struct snd_sof_dsp_ops sof_tng_ops = {
 	/* DAI drivers */
 	.drv = byt_dai,
 	.num_drv = 3, /* we have only 3 SSPs on byt*/
+
+	/* ALSA HW info flags */
+	.hw_info =	SNDRV_PCM_INFO_MMAP |
+			SNDRV_PCM_INFO_MMAP_VALID |
+			SNDRV_PCM_INFO_INTERLEAVED |
+			SNDRV_PCM_INFO_PAUSE |
+			SNDRV_PCM_INFO_NO_PERIOD_WAKEUP,
 };
 EXPORT_SYMBOL(sof_tng_ops);
 
@@ -600,8 +612,11 @@ static int byt_acpi_probe(struct snd_sof_dev *sdev)
 irq:
 	/* register our IRQ */
 	sdev->ipc_irq = platform_get_irq(pdev, desc->irqindex_host_ipc);
-	if (sdev->ipc_irq < 0)
+	if (sdev->ipc_irq < 0) {
+		dev_err(sdev->dev, "error: failed to get IRQ at index %d\n",
+			desc->irqindex_host_ipc);
 		return sdev->ipc_irq;
+	}
 
 	dev_dbg(sdev->dev, "using IRQ %d\n", sdev->ipc_irq);
 	ret = devm_request_threaded_irq(sdev->dev, sdev->ipc_irq,
@@ -655,6 +670,11 @@ const struct snd_sof_dsp_ops sof_byt_ops = {
 	.ipc_msg_data	= intel_ipc_msg_data,
 	.ipc_pcm_params	= intel_ipc_pcm_params,
 
+	/* machine driver */
+	.machine_check = sof_machine_check,
+	.machine_register = sof_machine_register,
+	.machine_unregister = sof_machine_unregister,
+
 	/* debug */
 	.debug_map	= byt_debugfs,
 	.debug_map_count	= ARRAY_SIZE(byt_debugfs),
@@ -673,6 +693,13 @@ const struct snd_sof_dsp_ops sof_byt_ops = {
 	/* DAI drivers */
 	.drv = byt_dai,
 	.num_drv = 3, /* we have only 3 SSPs on byt*/
+
+	/* ALSA HW info flags */
+	.hw_info =	SNDRV_PCM_INFO_MMAP |
+			SNDRV_PCM_INFO_MMAP_VALID |
+			SNDRV_PCM_INFO_INTERLEAVED |
+			SNDRV_PCM_INFO_PAUSE |
+			SNDRV_PCM_INFO_NO_PERIOD_WAKEUP,
 };
 EXPORT_SYMBOL(sof_byt_ops);
 
@@ -714,6 +741,11 @@ const struct snd_sof_dsp_ops sof_cht_ops = {
 	.ipc_msg_data	= intel_ipc_msg_data,
 	.ipc_pcm_params	= intel_ipc_pcm_params,
 
+	/* machine driver */
+	.machine_check = sof_machine_check,
+	.machine_register = sof_machine_register,
+	.machine_unregister = sof_machine_unregister,
+
 	/* debug */
 	.debug_map	= cht_debugfs,
 	.debug_map_count	= ARRAY_SIZE(cht_debugfs),
@@ -733,6 +765,13 @@ const struct snd_sof_dsp_ops sof_cht_ops = {
 	.drv = byt_dai,
 	/* all 6 SSPs may be available for cherrytrail */
 	.num_drv = ARRAY_SIZE(byt_dai),
+
+	/* ALSA HW info flags */
+	.hw_info =	SNDRV_PCM_INFO_MMAP |
+			SNDRV_PCM_INFO_MMAP_VALID |
+			SNDRV_PCM_INFO_INTERLEAVED |
+			SNDRV_PCM_INFO_PAUSE |
+			SNDRV_PCM_INFO_NO_PERIOD_WAKEUP,
 };
 EXPORT_SYMBOL(sof_cht_ops);
 

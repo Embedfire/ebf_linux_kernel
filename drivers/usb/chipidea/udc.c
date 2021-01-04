@@ -26,6 +26,7 @@
 #include "bits.h"
 #include "otg.h"
 #include "otg_fsm.h"
+#include "trace.h"
 
 /* control endpoint description */
 static const struct usb_endpoint_descriptor
@@ -338,7 +339,7 @@ static int hw_usb_reset(struct ci_hdrc *ci)
  *****************************************************************************/
 
 static int add_td_to_list(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq,
-			  unsigned length)
+			unsigned int length, struct scatterlist *s)
 {
 	int i;
 	u32 temp;
@@ -366,7 +367,13 @@ static int add_td_to_list(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq,
 		node->ptr->token |= cpu_to_le32(mul << __ffs(TD_MULTO));
 	}
 
-	temp = (u32) (hwreq->req.dma + hwreq->req.actual);
+	if (s) {
+		temp = (u32) (sg_dma_address(s) + hwreq->req.actual);
+		node->td_remaining_size = CI_MAX_BUF_SIZE - length;
+	} else {
+		temp = (u32) (hwreq->req.dma + hwreq->req.actual);
+	}
+
 	if (length) {
 		node->ptr->page[0] = cpu_to_le32(temp);
 		for (i = 1; i < TD_PAGE_COUNT; i++) {
@@ -400,6 +407,122 @@ static inline u8 _usb_addr(struct ci_hw_ep *ep)
 	return ((ep->dir == TX) ? USB_ENDPOINT_DIR_MASK : 0) | ep->num;
 }
 
+static int prepare_td_for_non_sg(struct ci_hw_ep *hwep,
+		struct ci_hw_req *hwreq)
+{
+	unsigned int rest = hwreq->req.length;
+	int pages = TD_PAGE_COUNT;
+	int ret = 0;
+
+	if (rest == 0) {
+		ret = add_td_to_list(hwep, hwreq, 0, NULL);
+		if (ret < 0)
+			return ret;
+	}
+
+	/*
+	 * The first buffer could be not page aligned.
+	 * In that case we have to span into one extra td.
+	 */
+	if (hwreq->req.dma % PAGE_SIZE)
+		pages--;
+
+	while (rest > 0) {
+		unsigned int count = min(hwreq->req.length - hwreq->req.actual,
+			(unsigned int)(pages * CI_HDRC_PAGE_SIZE));
+
+		ret = add_td_to_list(hwep, hwreq, count, NULL);
+		if (ret < 0)
+			return ret;
+
+		rest -= count;
+	}
+
+	if (hwreq->req.zero && hwreq->req.length && hwep->dir == TX
+	    && (hwreq->req.length % hwep->ep.maxpacket == 0)) {
+		ret = add_td_to_list(hwep, hwreq, 0, NULL);
+		if (ret < 0)
+			return ret;
+	}
+
+	return ret;
+}
+
+static int prepare_td_per_sg(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq,
+		struct scatterlist *s)
+{
+	unsigned int rest = sg_dma_len(s);
+	int ret = 0;
+
+	hwreq->req.actual = 0;
+	while (rest > 0) {
+		unsigned int count = min_t(unsigned int, rest,
+				CI_MAX_BUF_SIZE);
+
+		ret = add_td_to_list(hwep, hwreq, count, s);
+		if (ret < 0)
+			return ret;
+
+		rest -= count;
+	}
+
+	return ret;
+}
+
+static void ci_add_buffer_entry(struct td_node *node, struct scatterlist *s)
+{
+	int empty_td_slot_index = (CI_MAX_BUF_SIZE - node->td_remaining_size)
+			/ CI_HDRC_PAGE_SIZE;
+	int i;
+
+	node->ptr->token +=
+		cpu_to_le32(sg_dma_len(s) << __ffs(TD_TOTAL_BYTES));
+
+	for (i = empty_td_slot_index; i < TD_PAGE_COUNT; i++) {
+		u32 page = (u32) sg_dma_address(s) +
+			(i - empty_td_slot_index) * CI_HDRC_PAGE_SIZE;
+
+		page &= ~TD_RESERVED_MASK;
+		node->ptr->page[i] = cpu_to_le32(page);
+	}
+}
+
+static int prepare_td_for_sg(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
+{
+	struct usb_request *req = &hwreq->req;
+	struct scatterlist *s = req->sg;
+	int ret = 0, i = 0;
+	struct td_node *node = NULL;
+
+	if (!s || req->zero || req->length == 0) {
+		dev_err(hwep->ci->dev, "not supported operation for sg\n");
+		return -EINVAL;
+	}
+
+	while (i++ < req->num_mapped_sgs) {
+		if (sg_dma_address(s) % PAGE_SIZE) {
+			dev_err(hwep->ci->dev, "not page aligned sg buffer\n");
+			return -EINVAL;
+		}
+
+		if (node && (node->td_remaining_size >= sg_dma_len(s))) {
+			ci_add_buffer_entry(node, s);
+			node->td_remaining_size -= sg_dma_len(s);
+		} else {
+			ret = prepare_td_per_sg(hwep, hwreq, s);
+			if (ret)
+				return ret;
+
+			node = list_entry(hwreq->tds.prev,
+				struct td_node, td);
+		}
+
+		s = sg_next(s);
+	}
+
+	return ret;
+}
+
 /**
  * _hardware_enqueue: configures a request at hardware level
  * @hwep:   endpoint
@@ -411,8 +534,6 @@ static int _hardware_enqueue(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 {
 	struct ci_hdrc *ci = hwep->ci;
 	int ret = 0;
-	unsigned rest = hwreq->req.length;
-	int pages = TD_PAGE_COUNT;
 	struct td_node *firstnode, *lastnode;
 
 	/* don't queue twice */
@@ -426,37 +547,13 @@ static int _hardware_enqueue(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 	if (ret)
 		return ret;
 
-	/*
-	 * The first buffer could be not page aligned.
-	 * In that case we have to span into one extra td.
-	 */
-	if (hwreq->req.dma % PAGE_SIZE)
-		pages--;
+	if (hwreq->req.num_mapped_sgs)
+		ret = prepare_td_for_sg(hwep, hwreq);
+	else
+		ret = prepare_td_for_non_sg(hwep, hwreq);
 
-	if (rest == 0) {
-		ret = add_td_to_list(hwep, hwreq, 0);
-		if (ret < 0)
-			goto done;
-	}
-
-	while (rest > 0) {
-		unsigned count = min(hwreq->req.length - hwreq->req.actual,
-					(unsigned)(pages * CI_HDRC_PAGE_SIZE));
-		ret = add_td_to_list(hwep, hwreq, count);
-		if (ret < 0)
-			goto done;
-
-		rest -= count;
-	}
-
-	if (hwreq->req.zero && hwreq->req.length && hwep->dir == TX
-	    && (hwreq->req.length % hwep->ep.maxpacket == 0)) {
-		ret = add_td_to_list(hwep, hwreq, 0);
-		if (ret < 0)
-			goto done;
-	}
-
-	firstnode = list_first_entry(&hwreq->tds, struct td_node, td);
+	if (ret)
+		return ret;
 
 	lastnode = list_entry(hwreq->tds.prev,
 		struct td_node, td);
@@ -464,6 +561,12 @@ static int _hardware_enqueue(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 	lastnode->ptr->next = cpu_to_le32(TD_TERMINATE);
 	if (!hwreq->req.no_interrupt)
 		lastnode->ptr->token |= cpu_to_le32(TD_IOC);
+
+	list_for_each_entry_safe(firstnode, lastnode, &hwreq->tds, td)
+		trace_ci_prepare_td(hwep, hwreq, firstnode);
+
+	firstnode = list_first_entry(&hwreq->tds, struct td_node, td);
+
 	wmb();
 
 	hwreq->req.actual = 0;
@@ -558,6 +661,7 @@ static int _hardware_dequeue(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 
 	list_for_each_entry_safe(node, tmpnode, &hwreq->tds, td) {
 		tmptoken = le32_to_cpu(node->ptr->token);
+		trace_ci_complete_td(hwep, hwreq, node);
 		if ((TD_STATUS_ACTIVE & tmptoken) != 0) {
 			int n = hw_ep_bit(hwep->num, hwep->dir);
 
@@ -1536,30 +1640,18 @@ static int ci_udc_vbus_session(struct usb_gadget *_gadget, int is_active)
 		gadget_ready = 1;
 	spin_unlock_irqrestore(&ci->lock, flags);
 
-	if (ci->usb_phy)
-		usb_phy_set_charger_state(ci->usb_phy, is_active ?
-			USB_CHARGER_PRESENT : USB_CHARGER_ABSENT);
+	if (ci->usb_phy) {
+		/* Charger Detection */
+		ci_usb_charger_connect(ci, is_active);
 
-	if (gadget_ready) {
-		if (is_active) {
-			pm_runtime_get_sync(&_gadget->dev);
-			hw_device_reset(ci);
-			hw_device_state(ci, ci->ep0out->qh.dma);
-			usb_gadget_set_state(_gadget, USB_STATE_POWERED);
-			usb_udc_vbus_handler(_gadget, true);
-		} else {
-			usb_udc_vbus_handler(_gadget, false);
-			if (ci->driver)
-				ci->driver->disconnect(&ci->gadget);
-			hw_device_state(ci, 0);
-			if (ci->platdata->notify_event)
-				ci->platdata->notify_event(ci,
-				CI_HDRC_CONTROLLER_STOPPED_EVENT);
-			_gadget_stop_activity(&ci->gadget);
-			pm_runtime_put_sync(&_gadget->dev);
-			usb_gadget_set_state(_gadget, USB_STATE_NOTATTACHED);
-		}
+		if (is_active)
+			usb_phy_set_event(ci->usb_phy, USB_EVENT_VBUS);
+		else
+			usb_phy_set_event(ci->usb_phy, USB_EVENT_NONE);
 	}
+
+	if (gadget_ready)
+		ci_hdrc_gadget_connect(_gadget, is_active);
 
 	return 0;
 }
@@ -1625,12 +1717,13 @@ static int ci_udc_pullup(struct usb_gadget *_gadget, int is_on)
 	if (ci_otg_is_fsm_mode(ci) || ci->role == CI_ROLE_HOST)
 		return 0;
 
-	pm_runtime_get_sync(&ci->gadget.dev);
+	if (ci->in_lpm)
+		return 0;
+
 	if (is_on)
 		hw_write(ci, OP_USBCMD, USBCMD_RS, USBCMD_RS);
 	else
 		hw_write(ci, OP_USBCMD, USBCMD_RS, 0);
-	pm_runtime_put_sync(&ci->gadget.dev);
 
 	return 0;
 }
@@ -1780,23 +1873,16 @@ static int ci_udc_start(struct usb_gadget *gadget,
 	ci->driver = driver;
 
 	/* Start otg fsm for B-device */
-	if (ci_otg_is_fsm_mode(ci) && ci->fsm.id) {
-		ci_hdrc_otg_fsm_start(ci);
+	if (ci_otg_is_fsm_mode(ci)) {
+		if (ci->fsm.id)
+			ci_hdrc_otg_fsm_start(ci);
 		return retval;
 	}
 
-	pm_runtime_get_sync(&ci->gadget.dev);
-	if (ci->vbus_active) {
-		hw_device_reset(ci);
-	} else {
+	if (ci->vbus_active)
+		ci_hdrc_gadget_connect(&ci->gadget, 1);
+	else
 		usb_udc_vbus_handler(&ci->gadget, false);
-		pm_runtime_put_sync(&ci->gadget.dev);
-		return retval;
-	}
-
-	retval = hw_device_state(ci, ci->ep0out->qh.dma);
-	if (retval)
-		pm_runtime_put_sync(&ci->gadget.dev);
 
 	return retval;
 }
@@ -1835,7 +1921,7 @@ static int ci_udc_stop(struct usb_gadget *gadget)
 			CI_HDRC_CONTROLLER_STOPPED_EVENT);
 		_gadget_stop_activity(&ci->gadget);
 		spin_lock_irqsave(&ci->lock, flags);
-		pm_runtime_put(&ci->gadget.dev);
+		pm_runtime_put(ci->dev);
 	}
 
 	ci->driver = NULL;
@@ -1881,6 +1967,9 @@ static irqreturn_t udc_irq(struct ci_hdrc *ci)
 		if (USBi_PCI & intr) {
 			ci->gadget.speed = hw_port_is_high_speed(ci) ?
 				USB_SPEED_HIGH : USB_SPEED_FULL;
+			if (ci->usb_phy)
+				usb_phy_set_event(ci->usb_phy,
+					USB_EVENT_ENUMERATED);
 			if (ci->suspended) {
 				if (ci->driver->resume) {
 					spin_unlock(&ci->lock);
@@ -1932,6 +2021,7 @@ static int udc_start(struct ci_hdrc *ci)
 	ci->gadget.max_speed    = USB_SPEED_HIGH;
 	ci->gadget.name         = ci->platdata->name;
 	ci->gadget.otg_caps	= otg_caps;
+	ci->gadget.sg_supported = 1;
 
 	if (ci->platdata->flags & CI_HDRC_REQUIRES_ALIGNED_DMA)
 		ci->gadget.quirk_avoids_skb_reserve = 1;
@@ -1967,9 +2057,6 @@ static int udc_start(struct ci_hdrc *ci)
 	if (retval)
 		goto destroy_eps;
 
-	pm_runtime_no_callbacks(&ci->gadget.dev);
-	pm_runtime_enable(&ci->gadget.dev);
-
 	return retval;
 
 destroy_eps:
@@ -1997,6 +2084,52 @@ void ci_hdrc_gadget_destroy(struct ci_hdrc *ci)
 
 	dma_pool_destroy(ci->td_pool);
 	dma_pool_destroy(ci->qh_pool);
+}
+
+int ci_usb_charger_connect(struct ci_hdrc *ci, int is_active)
+{
+	int ret = 0;
+
+	pm_runtime_get_sync(ci->dev);
+
+	if (ci->usb_phy->charger_detect) {
+		usb_phy_set_charger_state(ci->usb_phy, is_active ?
+			USB_CHARGER_PRESENT : USB_CHARGER_ABSENT);
+	} else if (ci->platdata->notify_event) {
+		ret = ci->platdata->notify_event(ci,
+				CI_HDRC_CONTROLLER_VBUS_EVENT);
+		schedule_work(&ci->usb_phy->chg_work);
+	}
+
+	pm_runtime_put_sync(ci->dev);
+	return ret;
+}
+
+/**
+ * ci_hdrc_gadget_connect: caller make sure gadget driver is binded
+ */
+void ci_hdrc_gadget_connect(struct usb_gadget *gadget, int is_active)
+{
+	struct ci_hdrc *ci = container_of(gadget, struct ci_hdrc, gadget);
+
+	if (is_active) {
+		pm_runtime_get_sync(ci->dev);
+		hw_device_reset(ci);
+		hw_device_state(ci, ci->ep0out->qh.dma);
+		usb_gadget_set_state(gadget, USB_STATE_POWERED);
+		usb_udc_vbus_handler(gadget, true);
+	} else {
+		usb_udc_vbus_handler(gadget, false);
+		if (ci->driver)
+			ci->driver->disconnect(gadget);
+		hw_device_state(ci, 0);
+		if (ci->platdata->notify_event)
+			ci->platdata->notify_event(ci,
+			CI_HDRC_CONTROLLER_STOPPED_EVENT);
+		_gadget_stop_activity(gadget);
+		pm_runtime_put_sync(ci->dev);
+		usb_gadget_set_state(gadget, USB_STATE_NOTATTACHED);
+	}
 }
 
 static int udc_id_switch_for_device(struct ci_hdrc *ci)
@@ -2029,6 +2162,44 @@ static void udc_id_switch_for_host(struct ci_hdrc *ci)
 				     ci->platdata->pins_default);
 }
 
+static void udc_suspend_for_power_lost(struct ci_hdrc *ci)
+{
+	/*
+	 * Set OP_ENDPTLISTADDR to be non-zero for
+	 * checking if controller resume from power lost
+	 * in non-host mode.
+	 */
+	if (hw_read(ci, OP_ENDPTLISTADDR, ~0) == 0)
+		hw_write(ci, OP_ENDPTLISTADDR, ~0, ~0);
+}
+
+/* Power lost with device mode */
+static void udc_resume_from_power_lost(struct ci_hdrc *ci)
+{
+	if (ci->is_otg)
+		hw_write_otgsc(ci, OTGSC_BSVIS | OTGSC_BSVIE,
+					OTGSC_BSVIS | OTGSC_BSVIE);
+}
+
+static void udc_suspend(struct ci_hdrc *ci)
+{
+	udc_suspend_for_power_lost(ci);
+
+	if (ci->driver && ci->vbus_active &&
+			(ci->gadget.state != USB_STATE_SUSPENDED))
+		usb_gadget_disconnect(&ci->gadget);
+}
+
+static void udc_resume(struct ci_hdrc *ci, bool power_lost)
+{
+	if (power_lost) {
+		udc_resume_from_power_lost(ci);
+	} else {
+		if (ci->driver && ci->vbus_active)
+			usb_gadget_connect(&ci->gadget);
+	}
+}
+
 /**
  * ci_hdrc_gadget_init - initialize device related bits
  * ci: the controller
@@ -2050,6 +2221,8 @@ int ci_hdrc_gadget_init(struct ci_hdrc *ci)
 	rdrv->start	= udc_id_switch_for_device;
 	rdrv->stop	= udc_id_switch_for_host;
 	rdrv->irq	= udc_irq;
+	rdrv->suspend	= udc_suspend;
+	rdrv->resume	= udc_resume;
 	rdrv->name	= "gadget";
 
 	ret = udc_start(ci);

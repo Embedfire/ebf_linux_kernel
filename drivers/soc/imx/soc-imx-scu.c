@@ -12,6 +12,8 @@
 
 #define IMX_SCU_SOC_DRIVER_NAME		"imx-scu-soc"
 
+bool TKT340553_SW_WORKAROUND;
+
 static struct imx_sc_ipc *soc_ipc_handle;
 
 struct imx_sc_msg_misc_get_soc_id {
@@ -39,18 +41,15 @@ static ssize_t soc_uid_show(struct device *dev,
 	struct imx_sc_msg_misc_get_soc_uid msg;
 	struct imx_sc_rpc_msg *hdr = &msg.hdr;
 	u64 soc_uid;
-	int ret;
+
+	memset(&msg, 0, sizeof(msg));
 
 	hdr->ver = IMX_SC_RPC_VERSION;
 	hdr->svc = IMX_SC_RPC_SVC_MISC;
 	hdr->func = IMX_SC_MISC_FUNC_UNIQUE_ID;
 	hdr->size = 1;
 
-	ret = imx_scu_call_rpc(soc_ipc_handle, &msg, true);
-	if (ret) {
-		pr_err("%s: get soc uid failed, ret %d\n", __func__, ret);
-		return ret;
-	}
+	imx_scu_call_rpc(soc_ipc_handle, &msg, true);
 
 	soc_uid = msg.uid_high;
 	soc_uid <<= 32;
@@ -114,9 +113,13 @@ static int imx_scu_soc_probe(struct platform_device *pdev)
 
 	/* format soc_id value passed from SCU firmware */
 	val = id & 0x1f;
-	soc_dev_attr->soc_id = kasprintf(GFP_KERNEL, "0x%x", val);
-	if (!soc_dev_attr->soc_id)
-		return -ENOMEM;
+	if (of_machine_is_compatible("fsl,imx8qm")) {
+		soc_dev_attr->soc_id = "i.MX8QM";
+		TKT340553_SW_WORKAROUND = true;
+	} else if (of_machine_is_compatible("fsl,imx8qxp"))
+		soc_dev_attr->soc_id = "i.MX8QXP";
+	else if (of_machine_is_compatible("fsl,imx8dxl"))
+		soc_dev_attr->soc_id = "i.MX8DXL";
 
 	/* format revision value passed from SCU firmware */
 	val = (id >> 5) & 0xf;

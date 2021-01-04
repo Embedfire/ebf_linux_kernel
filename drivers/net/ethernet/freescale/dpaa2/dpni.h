@@ -494,7 +494,12 @@ int dpni_get_statistics(struct fsl_mc_io	*mc_io,
 			u32			cmd_flags,
 			u16			token,
 			u8			page,
+			u8			param,
 			union dpni_statistics	*stat);
+
+int dpni_reset_statistics(struct fsl_mc_io *mc_io,
+			  u32 cmd_flags,
+			  u16 token);
 
 /**
  * Enable auto-negotiation
@@ -514,6 +519,24 @@ int dpni_get_statistics(struct fsl_mc_io	*mc_io,
 #define DPNI_LINK_OPT_ASYM_PAUSE	0x0000000000000008ULL
 
 /**
+ * Enable priority flow control pause frames
+ */
+#define DPNI_LINK_OPT_PFC_PAUSE		0x0000000000000010ULL
+/**
+ * Advertised link speeds
+ */
+#define DPNI_ADVERTISED_10BASET_FULL           0x0000000000000001ULL
+#define DPNI_ADVERTISED_100BASET_FULL          0x0000000000000002ULL
+#define DPNI_ADVERTISED_1000BASET_FULL         0x0000000000000004ULL
+#define DPNI_ADVERTISED_10000BASET_FULL        0x0000000000000010ULL
+#define DPNI_ADVERTISED_2500BASEX_FULL         0x0000000000000020ULL
+
+/**
+ * Advertise auto-negotiation enabled
+ */
+#define DPNI_ADVERTISED_AUTONEG                0x0000000000000008ULL
+
+/**
  * struct - Structure representing DPNI link configuration
  * @rate: Rate
  * @options: Mask of available options; use 'DPNI_LINK_OPT_<X>' values
@@ -521,12 +544,18 @@ int dpni_get_statistics(struct fsl_mc_io	*mc_io,
 struct dpni_link_cfg {
 	u32 rate;
 	u64 options;
+	u64 advertising;
 };
 
 int dpni_set_link_cfg(struct fsl_mc_io			*mc_io,
 		      u32				cmd_flags,
 		      u16				token,
 		      const struct dpni_link_cfg	*cfg);
+
+int dpni_set_link_cfg_v2(struct fsl_mc_io		*mc_io,
+			 u32				cmd_flags,
+			 u16				token,
+			 const struct dpni_link_cfg	*cfg);
 
 int dpni_get_link_cfg(struct fsl_mc_io			*mc_io,
 		      u32				cmd_flags,
@@ -542,13 +571,38 @@ int dpni_get_link_cfg(struct fsl_mc_io			*mc_io,
 struct dpni_link_state {
 	u32	rate;
 	u64	options;
+	u64	supported;
+	u64	advertising;
 	int	up;
+	int	state_valid;
 };
 
 int dpni_get_link_state(struct fsl_mc_io	*mc_io,
 			u32			cmd_flags,
 			u16			token,
 			struct dpni_link_state	*state);
+
+int dpni_get_link_state_v2(struct fsl_mc_io	*mc_io,
+			   u32			cmd_flags,
+			   u16			token,
+			   struct dpni_link_state	*state);
+
+/**
+ * struct dpni_tx_shaping - Structure representing DPNI tx shaping configuration
+ * @rate_limit: rate in Mbps
+ * @max_burst_size: burst size in bytes (up to 64KB)
+ */
+struct dpni_tx_shaping_cfg {
+	u32	rate_limit;
+	u16	max_burst_size;
+};
+
+int dpni_set_tx_shaping(struct fsl_mc_io *mc_io,
+			u32 cmd_flags,
+			u16 token,
+			const struct dpni_tx_shaping_cfg *tx_cr_shaper,
+			const struct dpni_tx_shaping_cfg *tx_er_shaper,
+			int coupled);
 
 int dpni_set_max_frame_length(struct fsl_mc_io	*mc_io,
 			      u32		cmd_flags,
@@ -651,6 +705,50 @@ int dpni_prepare_key_cfg(const struct dpkg_profile_cfg *cfg,
 			 u8 *key_cfg_buf);
 
 /**
+ * enum dpni_tx_schedule_mode - DPNI Tx scheduling mode
+ * @DPNI_TX_SCHED_STRICT_PRIORITY: strict priority
+ * @DPNI_TX_SCHED_WEIGHTED_A: weighted based scheduling in group A
+ * @DPNI_TX_SCHED_WEIGHTED_B: weighted based scheduling in group B
+ */
+enum dpni_tx_schedule_mode {
+	DPNI_TX_SCHED_STRICT_PRIORITY = 0,
+	DPNI_TX_SCHED_WEIGHTED_A,
+	DPNI_TX_SCHED_WEIGHTED_B,
+};
+
+/**
+ * struct dpni_tx_schedule_cfg - Structure representing Tx scheduling conf
+ * @mode:		Scheduling mode
+ * @delta_bandwidth:	Bandwidth represented in weights from 100 to 10000;
+ *	not applicable for 'strict-priority' mode;
+ */
+struct dpni_tx_schedule_cfg {
+	enum dpni_tx_schedule_mode mode;
+	u16 delta_bandwidth;
+};
+
+/**
+ * struct dpni_tx_priorities_cfg - Structure representing transmission
+ *					priorities for DPNI TCs
+ * @tc_sched:	An array of traffic-classes
+ * @prio_group_A: Priority of group A
+ * @prio_group_B: Priority of group B
+ * @separate_groups: Treat A and B groups as separate
+ * @ceetm_ch_idx: ceetm channel index to apply the changes
+ */
+struct dpni_tx_priorities_cfg {
+	struct dpni_tx_schedule_cfg tc_sched[DPNI_MAX_TC];
+	u8 prio_group_A;
+	u8 prio_group_B;
+	u8 separate_groups;
+};
+
+int dpni_set_tx_priorities(struct fsl_mc_io *mc_io,
+			   u32 cmd_flags,
+			   u16 token,
+			   const struct dpni_tx_priorities_cfg *cfg);
+
+/**
  * struct dpni_rx_tc_dist_cfg - Rx traffic class distribution configuration
  * @dist_size: Set the distribution size;
  *	supported values: 1,2,3,4,6,7,8,12,14,16,24,28,32,48,56,64,96,
@@ -714,6 +812,26 @@ int dpni_set_rx_hash_dist(struct fsl_mc_io *mc_io,
 			  u32 cmd_flags,
 			  u16 token,
 			  const struct dpni_rx_dist_cfg *cfg);
+
+/**
+ * struct dpni_qos_tbl_cfg - Structure representing QOS table configuration
+ * @key_cfg_iova: I/O virtual address of 256 bytes DMA-able memory filled with
+ *		key extractions to be used as the QoS criteria by calling
+ *		dpkg_prepare_key_cfg()
+ * @discard_on_miss: Set to '1' to discard frames in case of no match (miss);
+ *		'0' to use the 'default_tc' in such cases
+ * @default_tc: Used in case of no-match and 'discard_on_miss'= 0
+ */
+struct dpni_qos_tbl_cfg {
+	u64 key_cfg_iova;
+	int discard_on_miss;
+	u8 default_tc;
+};
+
+int dpni_set_qos_table(struct fsl_mc_io *mc_io,
+		       u32 cmd_flags,
+		       u16 token,
+		       const struct dpni_qos_tbl_cfg *cfg);
 
 /**
  * enum dpni_dest - DPNI destination types
@@ -858,6 +976,68 @@ enum dpni_congestion_point {
 };
 
 /**
+ * struct dpni_dest_cfg - Structure representing DPNI destination parameters
+ * @dest_type:	Destination type
+ * @dest_id:	Either DPIO ID or DPCON ID, depending on the destination type
+ * @priority:	Priority selection within the DPIO or DPCON channel; valid
+ *		values are 0-1 or 0-7, depending on the number of priorities
+ *		in that channel; not relevant for 'DPNI_DEST_NONE' option
+ */
+struct dpni_dest_cfg {
+	enum dpni_dest dest_type;
+	int dest_id;
+	u8 priority;
+};
+
+/* DPNI congestion options */
+
+/**
+ * This congestion will trigger flow control or priority flow control.
+ * This will have effect only if flow control is enabled with
+ * dpni_set_link_cfg().
+ */
+#define DPNI_CONG_OPT_FLOW_CONTROL		0x00000040
+
+/**
+ * struct dpni_congestion_notification_cfg - congestion notification
+ *					configuration
+ * @units: Units type
+ * @threshold_entry: Above this threshold we enter a congestion state.
+ *		set it to '0' to disable it
+ * @threshold_exit: Below this threshold we exit the congestion state.
+ * @message_ctx: The context that will be part of the CSCN message
+ * @message_iova: I/O virtual address (must be in DMA-able memory),
+ *		must be 16B aligned; valid only if 'DPNI_CONG_OPT_WRITE_MEM_<X>'
+ *		is contained in 'options'
+ * @dest_cfg: CSCN can be send to either DPIO or DPCON WQ channel
+ * @notification_mode: Mask of available options; use 'DPNI_CONG_OPT_<X>' values
+ */
+
+struct dpni_congestion_notification_cfg {
+	enum dpni_congestion_unit units;
+	u32 threshold_entry;
+	u32 threshold_exit;
+	u64 message_ctx;
+	u64 message_iova;
+	struct dpni_dest_cfg dest_cfg;
+	u16 notification_mode;
+};
+
+/** Compose TC parameter for function dpni_set_congestion_notification()
+ * and dpni_get_congestion_notification().
+ */
+#define DPNI_BUILD_CH_TC(ceetm_ch_idx, tc) \
+	((((ceetm_ch_idx) & 0x0F) << 4) | ((tc) & 0x0F))
+
+int dpni_set_congestion_notification(
+			struct fsl_mc_io *mc_io,
+			u32 cmd_flags,
+			u16 token,
+			enum dpni_queue_type qtype,
+			u8 tc_id,
+			const struct dpni_congestion_notification_cfg *cfg);
+
+/**
  * struct dpni_taildrop - Structure representing the taildrop
  * @enable:	Indicates whether the taildrop is active or not.
  * @units:	Indicates the unit of THRESHOLD. Queue taildrop only supports
@@ -960,6 +1140,22 @@ int dpni_remove_fs_entry(struct fsl_mc_io *mc_io,
 			 u16 token,
 			 u8 tc_id,
 			 const struct dpni_rule_cfg *cfg);
+
+int dpni_add_qos_entry(struct fsl_mc_io *mc_io,
+		       u32 cmd_flags,
+		       u16 token,
+		       const struct dpni_rule_cfg *cfg,
+		       u8 tc_id,
+		       u16 index);
+
+int dpni_remove_qos_entry(struct fsl_mc_io *mc_io,
+			  u32 cmd_flags,
+			  u16 token,
+			  const struct dpni_rule_cfg *cfg);
+
+int dpni_clear_qos_table(struct fsl_mc_io *mc_io,
+			 u32 cmd_flags,
+			 u16 token);
 
 int dpni_get_api_version(struct fsl_mc_io *mc_io,
 			 u32 cmd_flags,

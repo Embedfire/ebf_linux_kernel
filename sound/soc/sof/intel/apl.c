@@ -53,6 +53,11 @@ const struct snd_sof_dsp_ops sof_apl_ops = {
 	.ipc_msg_data	= hda_ipc_msg_data,
 	.ipc_pcm_params	= hda_ipc_pcm_params,
 
+	/* machine driver */
+	.machine_check = sof_machine_check,
+	.machine_register = sof_machine_register,
+	.machine_unregister = sof_machine_unregister,
+
 	/* debug */
 	.debug_map	= apl_dsp_debugfs,
 	.debug_map_count	= ARRAY_SIZE(apl_dsp_debugfs),
@@ -97,6 +102,13 @@ const struct snd_sof_dsp_ops sof_apl_ops = {
 	.runtime_resume		= hda_dsp_runtime_resume,
 	.runtime_idle		= hda_dsp_runtime_idle,
 	.set_hw_params_upon_resume = hda_dsp_set_hw_params_upon_resume,
+
+	/* ALSA HW info flags */
+	.hw_info =	SNDRV_PCM_INFO_MMAP |
+			SNDRV_PCM_INFO_MMAP_VALID |
+			SNDRV_PCM_INFO_INTERLEAVED |
+			SNDRV_PCM_INFO_PAUSE |
+			SNDRV_PCM_INFO_NO_PERIOD_WAKEUP,
 };
 EXPORT_SYMBOL(sof_apl_ops);
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
 /*
  * Copyright 2014-2016 Freescale Semiconductor Inc.
- * Copyright 2016 NXP
+ * Copyright 2016-2019 NXP
  *
  */
 #include <linux/types.h>
@@ -58,7 +58,7 @@ static inline struct dpaa2_io *service_select_by_cpu(struct dpaa2_io *d,
 	 * If cpu == -1, choose the current cpu, with no guarantees about
 	 * potentially being migrated away.
 	 */
-	if (unlikely(cpu < 0))
+	if (cpu < 0)
 		cpu = smp_processor_id();
 
 	/* If a specific cpu was requested, pick it up immediately */
@@ -67,6 +67,10 @@ static inline struct dpaa2_io *service_select_by_cpu(struct dpaa2_io *d,
 
 static inline struct dpaa2_io *service_select(struct dpaa2_io *d)
 {
+	if (d)
+		return d;
+
+	d = service_select_by_cpu(d, -1);
 	if (d)
 		return d;
 
@@ -433,6 +437,69 @@ int dpaa2_io_service_enqueue_fq(struct dpaa2_io *d,
 EXPORT_SYMBOL(dpaa2_io_service_enqueue_fq);
 
 /**
+ * dpaa2_io_service_enqueue_multiple_fq() - Enqueue multiple frames
+ * to a frame queue using one fqid.
+ * @d: the given DPIO service.
+ * @fqid: the given frame queue id.
+ * @fd: the frame descriptor which is enqueued.
+ * @nb: number of frames to be enqueud
+ *
+ * Return 0 for successful enqueue, -EBUSY if the enqueue ring is not ready,
+ * or -ENODEV if there is no dpio service.
+ */
+int dpaa2_io_service_enqueue_multiple_fq(struct dpaa2_io *d,
+				u32 fqid,
+				const struct dpaa2_fd *fd,
+				int nb)
+{
+	struct qbman_eq_desc ed;
+
+	d = service_select(d);
+	if (!d)
+		return -ENODEV;
+
+	qbman_eq_desc_clear(&ed);
+	qbman_eq_desc_set_no_orp(&ed, 0);
+	qbman_eq_desc_set_fq(&ed, fqid);
+
+	return qbman_swp_enqueue_multiple(d->swp, &ed, fd, 0, nb);
+}
+EXPORT_SYMBOL(dpaa2_io_service_enqueue_multiple_fq);
+
+/**
+ * dpaa2_io_service_enqueue_multiple_desc_fq() - Enqueue multiple frames
+ * to different frame queue using a list of fqids.
+ * @d: the given DPIO service.
+ * @fqid: the given list of frame queue ids.
+ * @fd: the frame descriptor which is enqueued.
+ * @nb: number of frames to be enqueud
+ *
+ * Return 0 for successful enqueue, -EBUSY if the enqueue ring is not ready,
+ * or -ENODEV if there is no dpio service.
+ */
+int dpaa2_io_service_enqueue_multiple_desc_fq(struct dpaa2_io *d,
+				u32 *fqid,
+				const struct dpaa2_fd *fd,
+				int nb)
+{
+	int i;
+	struct qbman_eq_desc ed[32];
+
+	d = service_select(d);
+	if (!d)
+		return -ENODEV;
+
+	for (i = 0; i < nb; i++) {
+		qbman_eq_desc_clear(&ed[i]);
+		qbman_eq_desc_set_no_orp(&ed[i], 0);
+		qbman_eq_desc_set_fq(&ed[i], fqid[i]);
+	}
+
+	return qbman_swp_enqueue_multiple_desc(d->swp, &ed[0], fd, nb);
+}
+EXPORT_SYMBOL(dpaa2_io_service_enqueue_multiple_desc_fq);
+
+/**
  * dpaa2_io_service_enqueue_qd() - Enqueue a frame to a QD.
  * @d: the given DPIO service.
  * @qdid: the given queuing destination id.
@@ -526,7 +593,7 @@ EXPORT_SYMBOL_GPL(dpaa2_io_service_acquire);
 
 /**
  * dpaa2_io_store_create() - Create the dma memory storage for dequeue result.
- * @max_frames: the maximum number of dequeued result for frames, must be <= 16.
+ * @max_frames: the maximum number of dequeued result for frames, must be <= 32.
  * @dev:        the device to allow mapping/unmapping the DMAable region.
  *
  * The size of the storage is "max_frames*sizeof(struct dpaa2_dq)".
@@ -541,7 +608,7 @@ struct dpaa2_io_store *dpaa2_io_store_create(unsigned int max_frames,
 	struct dpaa2_io_store *ret;
 	size_t size;
 
-	if (!max_frames || (max_frames > 16))
+	if (!max_frames || (max_frames > 32))
 		return NULL;
 
 	ret = kmalloc(sizeof(*ret), GFP_KERNEL);
@@ -703,3 +770,118 @@ int dpaa2_io_query_bp_count(struct dpaa2_io *d, u16 bpid, u32 *num)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(dpaa2_io_query_bp_count);
+
+/**
+ * dpaa2_io_service_enqueue_orp_fq() - Enqueue a frame to a frame queue with
+ * order restoration
+ * @d: the given DPIO service.
+ * @fqid: the given frame queue id.
+ * @fd: the frame descriptor which is enqueued.
+ * @orpid: the order restoration point ID
+ * @seqnum: the order sequence number
+ * @last: must be set for the final frame if seqnum is shared (spilt frame)
+ *
+ * Performs an enqueue to a frame queue using the specified order restoration
+ * point. The QMan device will ensure the order of frames placed on the
+ * queue will be ordered as per the sequence number.
+ *
+ * In the case a frame is split it is possible to enqueue using the same
+ * sequence number more than once. The final frame in a shared sequence number
+ * most be indicated by setting last = 1. For non shared sequence numbers
+ * last = 1 must always be set.
+ *
+ * Return 0 for successful enqueue, or -EBUSY if the enqueue ring is not ready,
+ * or -ENODEV if there is no dpio service.
+ */
+int dpaa2_io_service_enqueue_orp_fq(struct dpaa2_io *d, u32 fqid,
+				    const struct dpaa2_fd *fd, u16 orpid,
+				    u16 seqnum, int last)
+{
+	struct qbman_eq_desc ed;
+
+	d = service_select(d);
+	if (!d)
+		return -ENODEV;
+	qbman_eq_desc_clear(&ed);
+	qbman_eq_desc_set_orp(&ed, 0, orpid, seqnum, !last);
+	qbman_eq_desc_set_fq(&ed, fqid);
+	return qbman_swp_enqueue(d->swp, &ed, fd);
+}
+EXPORT_SYMBOL(dpaa2_io_service_enqueue_orp_fq);
+
+/**
+ * dpaa2_io_service_enqueue_orp_qd() - Enqueue a frame to a queueing destination
+ * with order restoration
+ * @d: the given DPIO service.
+ * @qdid: the given queuing destination id.
+ * @fd: the frame descriptor which is enqueued.
+ * @orpid: the order restoration point ID
+ * @seqnum: the order sequence number
+ * @last: must be set for the final frame if seqnum is shared (spilt frame)
+ *
+ * Performs an enqueue to a frame queue using the specified order restoration
+ * point. The QMan device will ensure the order of frames placed on the
+ * queue will be ordered as per the sequence number.
+ *
+ * In the case a frame is split it is possible to enqueue using the same
+ * sequence number more than once. The final frame in a shared sequence number
+ * most be indicated by setting last = 1. For non shared sequence numbers
+ * last = 1 must always be set.
+ *
+ * Return 0 for successful enqueue, or -EBUSY if the enqueue ring is not ready,
+ * or -ENODEV if there is no dpio service.
+ */
+int dpaa2_io_service_enqueue_orp_qd(struct dpaa2_io *d, u32 qdid, u8 prio,
+				    u16 qdbin, const struct dpaa2_fd *fd,
+				    u16 orpid, u16 seqnum, int last)
+{
+	struct qbman_eq_desc ed;
+
+	d = service_select(d);
+	if (!d)
+		return -ENODEV;
+	qbman_eq_desc_clear(&ed);
+	qbman_eq_desc_set_orp(&ed, 0, orpid, seqnum, !last);
+	qbman_eq_desc_set_qd(&ed, qdid, qdbin, prio);
+	return qbman_swp_enqueue(d->swp, &ed, fd);
+}
+EXPORT_SYMBOL_GPL(dpaa2_io_service_enqueue_orp_qd);
+
+/**
+ * dpaa2_io_service_orp_seqnum_drop() - Remove a sequence number from
+ * an order restoration list
+ * @d: the given DPIO service.
+ * @orpid: Order restoration point to remove a sequence number from
+ * @seqnum: Sequence number to remove
+ *
+ * Removes a frames sequence number from an order restoration point without
+ * enqueing the frame. Used to indicate that the order restoration hardware
+ * should not expect to see this sequence number. Typically used to indicate
+ * a frame was terminated or dropped from a flow.
+ *
+ * Return 0 for successful enqueue, or -EBUSY if the enqueue ring is not ready,
+ * or -ENODEV if there is no dpio service.
+ */
+int dpaa2_io_service_orp_seqnum_drop(struct dpaa2_io *d, u16 orpid, u16 seqnum)
+{
+	struct qbman_eq_desc ed;
+	struct dpaa2_fd fd;
+	unsigned long irqflags;
+	int ret;
+
+	d = service_select(d);
+	if (!d)
+		return -ENODEV;
+
+	if ((d->swp->desc->qman_version & QMAN_REV_MASK) >= QMAN_REV_5000) {
+		spin_lock_irqsave(&d->lock_mgmt_cmd, irqflags);
+		ret = qbman_orp_drop(d->swp, orpid, seqnum);
+		spin_unlock_irqrestore(&d->lock_mgmt_cmd, irqflags);
+		return ret;
+	}
+
+	qbman_eq_desc_clear(&ed);
+	qbman_eq_desc_set_orp_hole(&ed, orpid, seqnum);
+	return qbman_swp_enqueue(d->swp, &ed, &fd);
+}
+EXPORT_SYMBOL_GPL(dpaa2_io_service_orp_seqnum_drop);

@@ -1,7 +1,7 @@
 * Freescale i.MX8MQ USB3 PHY binding
 
 Required properties:
-- compatible:	Should be "fsl,imx8mq-usb-phy"
+- compatible:	Should be "fsl,imx8mq-usb-phy" or "fsl,imx8mp-usb-phy"
 - #phys-cells:	must be 0 (see phy-bindings.txt in this directory)
 - reg:		The base address and length of the registers
 - clocks:	phandles to the clocks for each clock listed in clock-names
@@ -9,7 +9,8 @@ Required properties:
 
 Optional properties:
 - vbus-supply: A phandle to the regulator for USB VBUS.
-
+- vbus-power-supply: A phandle to the vbus power supply provider, used to
+		     to detect the possible BC charger type of it.
 Example:
 	usb3_phy0: phy@381f0040 {
 		compatible = "fsl,imx8mq-usb-phy";

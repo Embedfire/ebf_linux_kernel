@@ -19,7 +19,7 @@
 /**
  * Timeout in milliseconds to wait for the completion of an MC command
  */
-#define MC_CMD_COMPLETION_TIMEOUT_MS	500
+#define MC_CMD_COMPLETION_TIMEOUT_MS	15000
 
 /*
  * usleep_range() min and max values used to throttle down polling
@@ -251,7 +251,7 @@ int mc_send_command(struct fsl_mc_io *mc_io, struct fsl_mc_command *cmd)
 		return -EINVAL;
 
 	if (mc_io->flags & FSL_MC_IO_ATOMIC_CONTEXT_PORTAL)
-		spin_lock_irqsave(&mc_io->spinlock, irq_flags);
+		raw_spin_lock_irqsave(&mc_io->spinlock, irq_flags);
 	else
 		mutex_lock(&mc_io->mutex);
 
@@ -287,7 +287,7 @@ int mc_send_command(struct fsl_mc_io *mc_io, struct fsl_mc_command *cmd)
 	error = 0;
 common_exit:
 	if (mc_io->flags & FSL_MC_IO_ATOMIC_CONTEXT_PORTAL)
-		spin_unlock_irqrestore(&mc_io->spinlock, irq_flags);
+		raw_spin_unlock_irqrestore(&mc_io->spinlock, irq_flags);
 	else
 		mutex_unlock(&mc_io->mutex);
 

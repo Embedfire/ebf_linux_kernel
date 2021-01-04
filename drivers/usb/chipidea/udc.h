@@ -61,16 +61,14 @@ struct td_node {
 	struct list_head	td;
 	dma_addr_t		dma;
 	struct ci_hw_td		*ptr;
+	int			td_remaining_size;
 };
 
 /**
  * struct ci_hw_req - usb request representation
  * @req: request structure for gadget drivers
  * @queue: link to QH list
- * @ptr: transfer descriptor for this request
- * @dma: dma address for the transfer descriptor
- * @zptr: transfer descriptor for the zero packet
- * @zdma: dma address of the zero packet's transfer descriptor
+ * @tds: link to TD list
  */
 struct ci_hw_req {
 	struct usb_request	req;
@@ -82,6 +80,8 @@ struct ci_hw_req {
 
 int ci_hdrc_gadget_init(struct ci_hdrc *ci);
 void ci_hdrc_gadget_destroy(struct ci_hdrc *ci);
+int ci_usb_charger_connect(struct ci_hdrc *ci, int is_active);
+void ci_hdrc_gadget_connect(struct usb_gadget *gadget, int is_active);
 
 #else
 
@@ -91,6 +91,17 @@ static inline int ci_hdrc_gadget_init(struct ci_hdrc *ci)
 }
 
 static inline void ci_hdrc_gadget_destroy(struct ci_hdrc *ci)
+{
+
+}
+
+static inline int ci_usb_charger_connect(struct ci_hdrc *ci, int is_active)
+{
+	return 0;
+}
+
+static inline void ci_hdrc_gadget_connect(struct usb_gadget *gadget,
+							int is_active)
 {
 
 }

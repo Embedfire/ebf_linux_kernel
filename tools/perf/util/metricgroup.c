@@ -22,6 +22,7 @@
 #include <linux/string.h>
 #include <linux/zalloc.h>
 #include <subcmd/parse-options.h>
+#include "header.h"
 
 struct metric_event *metricgroup__lookup(struct rblist *metric_events,
 					 struct evsel *evsel,
@@ -299,15 +300,13 @@ static void metricgroup__print_strlist(struct strlist *metrics, bool raw)
 void metricgroup__print(bool metrics, bool metricgroups, char *filter,
 			bool raw, bool details)
 {
-	struct pmu_events_map *map = perf_pmu__find_map(NULL);
+	struct pmu_events_map *map;
+	struct perf_pmu *pmu;
 	struct pmu_event *pe;
 	int i;
 	struct rblist groups;
 	struct rb_node *node, *next;
 	struct strlist *metriclist = NULL;
-
-	if (!map)
-		return;
 
 	if (!metricgroups) {
 		metriclist = strlist__new(NULL, NULL);
@@ -315,67 +314,77 @@ void metricgroup__print(bool metrics, bool metricgroups, char *filter,
 			return;
 	}
 
-	rblist__init(&groups);
-	groups.node_new = mep_new;
-	groups.node_cmp = mep_cmp;
-	groups.node_delete = mep_delete;
-	for (i = 0; ; i++) {
-		const char *g;
-		pe = &map->table[i];
+	pmu = NULL;
+	while ((pmu = perf_pmu__scan(pmu)) != NULL) {
+		map = perf_pmu__find_map(pmu);
 
-		if (!pe->name && !pe->metric_group && !pe->metric_name)
-			break;
-		if (!pe->metric_expr)
+		if (!map)
 			continue;
-		g = pe->metric_group;
-		if (!g && pe->metric_name) {
-			if (pe->name)
+
+		rblist__init(&groups);
+		groups.node_new = mep_new;
+		groups.node_cmp = mep_cmp;
+		groups.node_delete = mep_delete;
+		for (i = 0; ; i++) {
+			const char *g;
+			pe = &map->table[i];
+
+			if (pe->socname && soc_version_check(pe->socname))
 				continue;
-			g = "No_group";
-		}
-		if (g) {
-			char *omg;
-			char *mg = strdup(g);
-
-			if (!mg)
-				return;
-			omg = mg;
-			while ((g = strsep(&mg, ";")) != NULL) {
-				struct mep *me;
-				char *s;
-
-				g = skip_spaces(g);
-				if (*g == 0)
-					g = "No_group";
-				if (filter && !strstr(g, filter))
+			if (!pe->name && !pe->metric_group && !pe->metric_name)
+				break;
+			if (!pe->metric_expr)
+				continue;
+			g = pe->metric_group;
+			if (!g && pe->metric_name) {
+				if (pe->name)
 					continue;
-				if (raw)
-					s = (char *)pe->metric_name;
-				else {
-					if (asprintf(&s, "%s\n%*s%s]",
-						     pe->metric_name, 8, "[", pe->desc) < 0)
-						return;
+				g = "No_group";
+			}
+			if (g) {
+				char *omg;
+				char *mg = strdup(g);
 
-					if (details) {
+				if (!mg)
+					return;
+				omg = mg;
+				while ((g = strsep(&mg, ";")) != NULL) {
+					struct mep *me;
+					char *s;
+
+					g = skip_spaces(g);
+					if (*g == 0)
+						g = "No_group";
+					if (filter && !strstr(g, filter))
+						continue;
+					if (raw)
+						s = (char *)pe->metric_name;
+					else {
 						if (asprintf(&s, "%s\n%*s%s]",
-							     s, 8, "[", pe->metric_expr) < 0)
+							     pe->metric_name, 8, "[", pe->desc) < 0)
 							return;
+
+						if (details) {
+							if (asprintf(&s, "%s\n%*s%s]",
+								     s, 8, "[", pe->metric_expr) < 0)
+								return;
+						}
+					}
+
+					if (!s)
+						continue;
+
+					if (!metricgroups) {
+						strlist__add(metriclist, s);
+					} else {
+						me = mep_lookup(&groups, g);
+						if (!me)
+							continue;
+						strlist__add(me->metrics, s);
 					}
 				}
-
-				if (!s)
-					continue;
-
-				if (!metricgroups) {
-					strlist__add(metriclist, s);
-				} else {
-					me = mep_lookup(&groups, g);
-					if (!me)
-						continue;
-					strlist__add(me->metrics, s);
-				}
+				free(omg);
 			}
-			free(omg);
 		}
 	}
 
@@ -402,70 +411,80 @@ void metricgroup__print(bool metrics, bool metricgroups, char *filter,
 static int metricgroup__add_metric(const char *metric, struct strbuf *events,
 				   struct list_head *group_list)
 {
-	struct pmu_events_map *map = perf_pmu__find_map(NULL);
+	struct pmu_events_map *map;
+	struct perf_pmu *pmu;
 	struct pmu_event *pe;
 	int ret = -EINVAL;
 	int i, j;
 
-	if (!map)
-		return 0;
+	pmu = NULL;
+	while ((pmu = perf_pmu__scan(pmu)) != NULL) {
+		map = perf_pmu__find_map(pmu);
 
-	for (i = 0; ; i++) {
-		pe = &map->table[i];
-
-		if (!pe->name && !pe->metric_group && !pe->metric_name)
-			break;
-		if (!pe->metric_expr)
+		if (!map)
 			continue;
-		if (match_metric(pe->metric_group, metric) ||
-		    match_metric(pe->metric_name, metric)) {
-			const char **ids;
-			int idnum;
-			struct egroup *eg;
-			bool no_group = false;
 
-			pr_debug("metric expr %s for %s\n", pe->metric_expr, pe->metric_name);
+		for (i = 0; ; i++) {
+			pe = &map->table[i];
 
-			if (expr__find_other(pe->metric_expr,
-					     NULL, &ids, &idnum) < 0)
+			if (pe->socname && soc_version_check(pe->socname))
 				continue;
-			if (events->len > 0)
-				strbuf_addf(events, ",");
-			for (j = 0; j < idnum; j++) {
-				pr_debug("found event %s\n", ids[j]);
-				/*
-				 * Duration time maps to a software event and can make
-				 * groups not count. Always use it outside a
-				 * group.
-				 */
-				if (!strcmp(ids[j], "duration_time")) {
-					if (j > 0)
-						strbuf_addf(events, "}:W,");
-					strbuf_addf(events, "duration_time");
-					no_group = true;
-					continue;
-				}
-				strbuf_addf(events, "%s%s",
-					j == 0 || no_group ? "{" : ",",
-					ids[j]);
-				no_group = false;
-			}
-			if (!no_group)
-				strbuf_addf(events, "}:W");
-
-			eg = malloc(sizeof(struct egroup));
-			if (!eg) {
-				ret = -ENOMEM;
+			if (!pe->name && !pe->metric_group && !pe->metric_name)
 				break;
+			if (!pe->metric_expr)
+				continue;
+			if (match_metric(pe->metric_group, metric) ||
+			    match_metric(pe->metric_name, metric)) {
+				const char **ids;
+				int idnum;
+				struct egroup *eg;
+				bool no_group = false;
+
+				pr_debug("metric expr %s for %s\n", pe->metric_expr, pe->metric_name);
+
+				if (expr__find_other(pe->metric_expr,
+						     NULL, &ids, &idnum) < 0)
+					continue;
+				if (events->len > 0)
+					strbuf_addf(events, ",");
+				for (j = 0; j < idnum; j++) {
+					pr_debug("found event %s\n", ids[j]);
+					/*
+					 * Duration time maps to a software event and can make
+					 * groups not count. Always use it outside a
+					 * group.
+					 */
+					if (!strcmp(ids[j], "duration_time")) {
+						if (j > 0)
+							strbuf_addf(events, "}:W,");
+						strbuf_addf(events, "duration_time");
+						no_group = true;
+						continue;
+					}
+					strbuf_addf(events, "%s%s",
+						j == 0 || no_group ? "{" : ",",
+						ids[j]);
+					no_group = false;
+				}
+				if (!no_group)
+					strbuf_addf(events, "}:W");
+
+				eg = malloc(sizeof(struct egroup));
+				if (!eg) {
+					ret = -ENOMEM;
+					return ret;
+				}
+				eg->ids = ids;
+				eg->idnum = idnum;
+				eg->metric_name = pe->metric_name;
+				eg->metric_expr = pe->metric_expr;
+				eg->metric_unit = pe->unit;
+				list_add_tail(&eg->nd, group_list);
+				ret = 0;
 			}
-			eg->ids = ids;
-			eg->idnum = idnum;
-			eg->metric_name = pe->metric_name;
-			eg->metric_expr = pe->metric_expr;
-			eg->metric_unit = pe->unit;
-			list_add_tail(&eg->nd, group_list);
-			ret = 0;
 		}
+		if (ret == 0)
+			return ret;
 	}
 	return ret;
 }
@@ -525,6 +544,7 @@ int metricgroup__parse_groups(const struct option *opt,
 	ret = metricgroup__add_metric_list(str, &extra_events, &group_list);
 	if (ret)
 		return ret;
+
 	pr_debug("adding %s\n", extra_events.buf);
 	memset(&parse_error, 0, sizeof(struct parse_events_error));
 	ret = parse_events(perf_evlist, extra_events.buf, &parse_error);
@@ -542,22 +562,30 @@ out:
 
 bool metricgroup__has_metric(const char *metric)
 {
-	struct pmu_events_map *map = perf_pmu__find_map(NULL);
+	struct pmu_events_map *map;
+	struct perf_pmu *pmu;
 	struct pmu_event *pe;
 	int i;
 
-	if (!map)
-		return false;
+	pmu = NULL;
+	while ((pmu = perf_pmu__scan(pmu)) != NULL) {
+		map = perf_pmu__find_map(pmu);
 
-	for (i = 0; ; i++) {
-		pe = &map->table[i];
-
-		if (!pe->name && !pe->metric_group && !pe->metric_name)
-			break;
-		if (!pe->metric_expr)
+		if (!map)
 			continue;
-		if (match_metric(pe->metric_name, metric))
-			return true;
+
+		for (i = 0; ; i++) {
+			pe = &map->table[i];
+
+			if (pe->socname && soc_version_check(pe->socname))
+				continue;
+			if (!pe->name && !pe->metric_group && !pe->metric_name)
+				break;
+			if (!pe->metric_expr)
+				continue;
+			if (match_metric(pe->metric_name, metric))
+				return true;
+		}
 	}
 	return false;
 }

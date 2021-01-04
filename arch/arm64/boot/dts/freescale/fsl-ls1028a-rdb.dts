@@ -2,7 +2,7 @@
 /*
  * Device Tree file for NXP LS1028A RDB Board.
  *
- * Copyright 2018 NXP
+ * Copyright 2018-2019 NXP
  *
  * Harninder Rai <harninder.rai@nxp.com>
  *
@@ -93,7 +93,13 @@
 
 &esdhc1 {
 	mmc-hs200-1_8v;
+	mmc-hs400-1_8v;
+	bus-width = <8>;
 	status = "okay";
+};
+
+&usb1 {
+	dr_mode = "otg";
 };
 
 &i2c0 {
@@ -152,6 +158,37 @@
 	};
 };
 
+&can0 {
+	status = "okay";
+
+	can-transceiver {
+		max-bitrate = <5000000>;
+	};
+};
+
+&can1 {
+	status = "okay";
+
+	can-transceiver {
+		max-bitrate = <5000000>;
+	};
+};
+
+&fspi {
+	status = "okay";
+	mt35xu02g: flash@0 {
+		compatible = "spansion,m25p80";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		m25p,fast-read;
+		spi-max-frequency = <20000000>;
+		reg = <0>;
+		/* The following setting enables 1-1-8 (CMD-ADDR-DATA) mode */
+		spi-rx-bus-width = <8>; /* 8 SPI Rx lines */
+		spi-tx-bus-width = <1>; /* 1 SPI Tx line */
+	};
+};
+
 &duart0 {
 	status = "okay";
 };
@@ -177,10 +214,64 @@
 	status = "disabled";
 };
 
+&enetc_mdio_pf3 {
+	qsgmii_phy1: ethernet-phy@10 {
+		reg = <0x10>;
+	};
+
+	qsgmii_phy2: ethernet-phy@11 {
+		reg = <0x11>;
+	};
+
+	qsgmii_phy3: ethernet-phy@12 {
+		reg = <0x12>;
+	};
+
+	qsgmii_phy4: ethernet-phy@13 {
+		reg = <0x13>;
+	};
+};
+
+/* l2switch ports */
+&mscc_felix_ports {
+	port@0 {
+		status = "okay";
+		phy-handle = <&qsgmii_phy1>;
+		phy-mode = "qsgmii";
+		managed = "in-band-status";
+	};
+
+	port@1 {
+		status = "okay";
+		phy-handle = <&qsgmii_phy2>;
+		phy-mode = "qsgmii";
+		managed = "in-band-status";
+	};
+
+	port@2 {
+		status = "okay";
+		phy-handle = <&qsgmii_phy3>;
+		phy-mode = "qsgmii";
+		managed = "in-band-status";
+	};
+
+	port@3 {
+		status = "okay";
+		phy-handle = <&qsgmii_phy4>;
+		phy-mode = "qsgmii";
+		managed = "in-band-status";
+	};
+};
+
 &sai4 {
 	status = "okay";
 };
 
 &sata {
+	status = "okay";
+};
+
+&hdptx0 {
+	lane-mapping = <0x4e>;
 	status = "okay";
 };

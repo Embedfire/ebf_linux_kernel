@@ -42,6 +42,7 @@
 struct imx8_priv {
 	struct device *dev;
 	struct snd_sof_dev *sdev;
+	bool suspended;
 
 	/* DSP IPC handler */
 	struct imx_dsp_ipc *dsp_ipc;
@@ -119,7 +120,7 @@ static void imx8_dsp_handle_request(struct imx_dsp_ipc *ipc)
 	snd_sof_ipc_msgs_rx(priv->sdev);
 }
 
-struct imx_dsp_ops dsp_ops = {
+static struct imx_dsp_ops dsp_ops = {
 	.handle_reply		= imx8_dsp_handle_reply,
 	.handle_request		= imx8_dsp_handle_request,
 };
@@ -138,7 +139,7 @@ static int imx8_send_msg(struct snd_sof_dev *sdev, struct snd_sof_ipc_msg *msg)
 /*
  * DSP control.
  */
-static int imx8_run(struct snd_sof_dev *sdev)
+static int imx8x_run(struct snd_sof_dev *sdev)
 {
 	struct imx8_priv *dsp_priv = (struct imx8_priv *)sdev->private;
 	int ret;
@@ -178,6 +179,24 @@ static int imx8_run(struct snd_sof_dev *sdev)
 	return 0;
 }
 
+static int imx8_run(struct snd_sof_dev *sdev)
+{
+	struct imx8_priv *dsp_priv = (struct imx8_priv *)sdev->private;
+	int ret;
+
+	ret = imx_sc_misc_set_control(dsp_priv->sc_ipc, IMX_SC_R_DSP,
+				      IMX_SC_C_OFS_SEL, 0);
+	if (ret < 0) {
+		dev_err(sdev->dev, "Error system address offset source select\n");
+		return ret;
+	}
+
+	imx_sc_pm_cpu_start(dsp_priv->sc_ipc, IMX_SC_R_DSP, true,
+			    RESET_VECTOR_VADDR);
+
+	return 0;
+}
+
 static int imx8_probe(struct snd_sof_dev *sdev)
 {
 	struct platform_device *pdev =
@@ -189,7 +208,7 @@ static int imx8_probe(struct snd_sof_dev *sdev)
 	struct resource res;
 	u32 base, size;
 	int ret = 0;
-	int i;
+	int i = 0;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -206,6 +225,10 @@ static int imx8_probe(struct snd_sof_dev *sdev)
 		dev_err(sdev->dev, "no power-domains property in %pOF\n", np);
 		return priv->num_domains;
 	}
+
+	/* power domain already enabled by PM core */
+	if (priv->num_domains == 1)
+		goto done_pm;
 
 	priv->pd_dev = devm_kmalloc_array(&pdev->dev, priv->num_domains,
 					  sizeof(*priv->pd_dev), GFP_KERNEL);
@@ -234,6 +257,7 @@ static int imx8_probe(struct snd_sof_dev *sdev)
 		}
 	}
 
+done_pm:
 	ret = imx_scu_get_handle(&priv->sc_ipc);
 	if (ret) {
 		dev_err(sdev->dev, "Cannot obtain SCU handle (err = %d)\n",
@@ -355,13 +379,71 @@ static int imx8_ipc_pcm_params(struct snd_sof_dev *sdev,
 	return 0;
 }
 
+int imx8_resume(struct snd_sof_dev *sdev)
+{
+	struct imx8_priv *priv = (struct imx8_priv *)sdev->private;
+	int i;
+
+	for (i = 0; i < DSP_MU_CHAN_NUM; i++)
+		imx_dsp_request_channel(priv->dsp_ipc, i);
+
+	return 0;
+}
+
+int imx8_suspend(struct snd_sof_dev *sdev)
+{
+	struct imx8_priv *priv = (struct imx8_priv *)sdev->private;
+	int i;
+
+	for (i = 0; i < DSP_MU_CHAN_NUM; i++)
+		imx_dsp_free_channel(priv->dsp_ipc, i);
+
+	return 0;
+}
+
+int imx8_dsp_runtime_resume(struct snd_sof_dev *sdev)
+{
+	return imx8_resume(sdev);
+}
+
+int imx8_dsp_runtime_suspend(struct snd_sof_dev *sdev)
+{
+
+	return imx8_suspend(sdev);
+}
+
+int imx8_dsp_resume(struct snd_sof_dev *sdev)
+{
+	struct imx8_priv *priv = (struct imx8_priv *)sdev->private;
+
+	if (priv->suspended) {
+		imx8_resume(sdev);
+		priv->suspended = false;
+	}
+
+	return 0;
+}
+
+int imx8_dsp_suspend(struct snd_sof_dev *sdev)
+{
+	struct imx8_priv *priv = (struct imx8_priv *)sdev->private;
+
+	if (!priv->suspended) {
+		imx8_suspend(sdev);
+		priv->suspended = true;
+	}
+
+	return 0;
+}
+
+
 static struct snd_soc_dai_driver imx8_dai[] = {
 {
 	.name = "esai-port",
 },
 };
 
-/* i.MX8  ops */
+/* i.MX8 ops */
 struct snd_sof_dsp_ops sof_imx8_ops = {
 	/* probe and remove */
 	.probe		= imx8_probe,
@@ -391,7 +473,66 @@ struct snd_sof_dsp_ops sof_imx8_ops = {
 	/* DAI drivers */
 	.drv = imx8_dai,
 	.num_drv = 1, /* we have only 1 ESAI interface on i.MX8 */
+
+	/* PM */
+	.suspend		= imx8_dsp_suspend,
+	.resume			= imx8_dsp_resume,
+	.runtime_suspend	= imx8_dsp_runtime_suspend,
+	.runtime_resume		= imx8_dsp_runtime_resume,
+
+	/* ALSA HW info flags */
+	.hw_info =	SNDRV_PCM_INFO_MMAP |
+			SNDRV_PCM_INFO_MMAP_VALID |
+			SNDRV_PCM_INFO_INTERLEAVED |
+			SNDRV_PCM_INFO_PAUSE |
+			SNDRV_PCM_INFO_NO_PERIOD_WAKEUP
 };
 EXPORT_SYMBOL(sof_imx8_ops);
+
+/* i.MX8X ops */
+struct snd_sof_dsp_ops sof_imx8x_ops = {
+	/* probe and remove */
+	.probe		= imx8_probe,
+	.remove		= imx8_remove,
+	/* DSP core boot */
+	.run		= imx8x_run,
+
+	/* Block IO */
+	.block_read	= sof_block_read,
+	.block_write	= sof_block_write,
+
+	/* ipc */
+	.send_msg	= imx8_send_msg,
+	.fw_ready	= sof_fw_ready,
+	.get_mailbox_offset	= imx8_get_mailbox_offset,
+	.get_window_offset	= imx8_get_window_offset,
+
+	.ipc_msg_data	= imx8_ipc_msg_data,
+	.ipc_pcm_params	= imx8_ipc_pcm_params,
+
+	/* module loading */
+	.load_module	= snd_sof_parse_module_memcpy,
+	.get_bar_index	= imx8_get_bar_index,
+	/* firmware loading */
+	.load_firmware	= snd_sof_load_firmware_memcpy,
+
+	/* DAI drivers */
+	.drv = imx8_dai,
+	.num_drv = 1, /* we have only 1 ESAI interface on i.MX8 */
+
+	/* PM */
+	.suspend		= imx8_dsp_suspend,
+	.resume			= imx8_dsp_resume,
+	.runtime_suspend	= imx8_dsp_runtime_suspend,
+	.runtime_resume		= imx8_dsp_runtime_resume,
+
+	/* ALSA HW info flags */
+	.hw_info =	SNDRV_PCM_INFO_MMAP |
+			SNDRV_PCM_INFO_MMAP_VALID |
+			SNDRV_PCM_INFO_INTERLEAVED |
+			SNDRV_PCM_INFO_PAUSE |
+			SNDRV_PCM_INFO_NO_PERIOD_WAKEUP
+};
+EXPORT_SYMBOL(sof_imx8x_ops);
 
 MODULE_LICENSE("Dual BSD/GPL");

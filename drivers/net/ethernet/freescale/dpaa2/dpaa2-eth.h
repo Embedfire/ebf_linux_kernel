@@ -6,6 +6,7 @@
 #ifndef __DPAA2_ETH_H
 #define __DPAA2_ETH_H
 
+#include <linux/dcbnl.h>
 #include <linux/netdevice.h>
 #include <linux/if_vlan.h>
 #include <linux/fsl/mc.h>
@@ -35,26 +36,48 @@
 /* Convert L3 MTU to L2 MFL */
 #define DPAA2_ETH_L2_MAX_FRM(mtu)	((mtu) + VLAN_ETH_HLEN)
 
-/* Set the taildrop threshold (in bytes) to allow the enqueue of several jumbo
- * frames in the Rx queues (length of the current frame is not
- * taken into account when making the taildrop decision)
+/* Set the taildrop threshold (in bytes) to allow the enqueue of a large
+ * enuough number of jumbo frames in the Rx queues (length of the current
+ * frame is not taken into account when making the taildrop decision)
  */
-#define DPAA2_ETH_TAILDROP_THRESH	(64 * 1024)
+#define DPAA2_ETH_FQ_TAILDROP_THRESH	(1024 * 1024)
+
+/* Maximum burst size value for Tx shaping */
+#define DPAA2_ETH_MAX_BURST_SIZE	0xF7FF
 
 /* Maximum number of Tx confirmation frames to be processed
  * in a single NAPI call
  */
 #define DPAA2_ETH_TXCONF_PER_NAPI	256
 
-/* Buffer quota per queue. Must be large enough such that for minimum sized
- * frames taildrop kicks in before the bpool gets depleted, so we compute
- * how many 64B frames fit inside the taildrop threshold and add a margin
- * to accommodate the buffer refill delay.
+/* Buffer qouta per channel. We want to keep in check number of ingress frames
+ * in flight: for small sized frames, congestion group taildrop may kick in
+ * first; for large sizes, Rx FQ taildrop threshold will ensure only a
+ * reasonable number of frames will be pending at any given time.
+ * Ingress frame drop due to buffer pool depletion should be a corner case only
  */
-#define DPAA2_ETH_MAX_FRAMES_PER_QUEUE	(DPAA2_ETH_TAILDROP_THRESH / 64)
-#define DPAA2_ETH_NUM_BUFS		(DPAA2_ETH_MAX_FRAMES_PER_QUEUE + 256)
+#define DPAA2_ETH_NUM_BUFS		1280
 #define DPAA2_ETH_REFILL_THRESH \
 	(DPAA2_ETH_NUM_BUFS - DPAA2_ETH_BUFS_PER_CMD)
+
+/* Congestion group taildrop threshold: number of frames allowed to accumulate
+ * at any moment in a group of Rx queues belonging to the same traffic class.
+ * Choose value such that we don't risk depleting the buffer pool before the
+ * taildrop kicks in
+ */
+#define DPAA2_ETH_CG_TAILDROP_THRESH(priv)				\
+	(1024 * dpaa2_eth_queue_count(priv) / dpaa2_eth_tc_count(priv))
+
+/* Congestion group notification threshold: when this many frames accumulate
+ * on the Rx queues belonging to the same TC, the MAC is instructed to send
+ * PFC frames for that TC.
+ * When number of pending frames drops below exit threshold transmission of
+ * PFC frames is stopped.
+ */
+#define DPAA2_ETH_CN_THRESH_ENTRY(priv) \
+	(DPAA2_ETH_CG_TAILDROP_THRESH(priv) / 2)
+#define DPAA2_ETH_CN_THRESH_EXIT(priv) \
+	(DPAA2_ETH_CN_THRESH_ENTRY(priv) * 3 / 4)
 
 /* Maximum number of buffers that can be acquired/released through a single
  * QBMan command
@@ -155,6 +178,49 @@ struct dpaa2_fas {
  */
 #define DPAA2_TS_OFFSET			0x8
 
+/* Frame annotation parse results */
+struct dpaa2_fapr {
+	/* 64-bit word 1 */
+	__le32 faf_lo;
+	__le16 faf_ext;
+	__le16 nxt_hdr;
+	/* 64-bit word 2 */
+	__le64 faf_hi;
+	/* 64-bit word 3 */
+	u8 last_ethertype_offset;
+	u8 vlan_tci_offset_n;
+	u8 vlan_tci_offset_1;
+	u8 llc_snap_offset;
+	u8 eth_offset;
+	u8 ip1_pid_offset;
+	u8 shim_offset_2;
+	u8 shim_offset_1;
+	/* 64-bit word 4 */
+	u8 l5_offset;
+	u8 l4_offset;
+	u8 gre_offset;
+	u8 l3_offset_n;
+	u8 l3_offset_1;
+	u8 mpls_offset_n;
+	u8 mpls_offset_1;
+	u8 pppoe_offset;
+	/* 64-bit word 5 */
+	__le16 running_sum;
+	__le16 gross_running_sum;
+	u8 ipv6_frag_offset;
+	u8 nxt_hdr_offset;
+	u8 routing_hdr_offset_2;
+	u8 routing_hdr_offset_1;
+	/* 64-bit word 6 */
+	u8 reserved[5]; /* Soft-parsing context */
+	u8 ip_proto_offset_n;
+	u8 nxt_hdr_frag_offset;
+	u8 parse_error_code;
+};
+
+#define DPAA2_FAPR_OFFSET		0x10
+#define DPAA2_FAPR_SIZE			sizeof((struct dpaa2_fapr))
+
 /* Frame annotation egress action descriptor */
 #define DPAA2_FAEAD_OFFSET		0x58
 
@@ -183,6 +249,11 @@ static inline struct dpaa2_fas *dpaa2_get_fas(void *buf_addr, bool swa)
 static inline __le64 *dpaa2_get_ts(void *buf_addr, bool swa)
 {
 	return dpaa2_get_hwa(buf_addr, swa) + DPAA2_TS_OFFSET;
+}
+
+static inline struct dpaa2_fapr *dpaa2_get_fapr(void *buf_addr, bool swa)
+{
+	return dpaa2_get_hwa(buf_addr, swa) + DPAA2_FAPR_OFFSET;
 }
 
 static inline struct dpaa2_faead *dpaa2_get_faead(void *buf_addr, bool swa)
@@ -236,6 +307,9 @@ static inline struct dpaa2_faead *dpaa2_get_faead(void *buf_addr, bool swa)
 					 DPAA2_FAS_L3CE		| \
 					 DPAA2_FAS_L4CE)
 
+/* TCP indication in Frame Annotation Parse Results */
+#define DPAA2_FAF_HI_TCP_PRESENT	BIT(23)
+
 /* Time in milliseconds between link state updates */
 #define DPAA2_ETH_LINK_STATE_REFRESH	1000
 
@@ -244,6 +318,14 @@ static inline struct dpaa2_faead *dpaa2_get_faead(void *buf_addr, bool swa)
  * of frames dropped on Tx
  */
 #define DPAA2_ETH_ENQUEUE_RETRIES	10
+
+/* Number of times to retry DPIO portal operations while waiting
+ * for portal to finish executing current command and become
+ * available. We want to avoid being stuck in a while loop in case
+ * hardware becomes unresponsive, but not give up too easily if
+ * the portal really is busy for valid reasons
+ */
+#define DPAA2_ETH_SWP_BUSY_RETRIES	1000
 
 /* Driver statistics, other than those in struct rtnl_link_stats64.
  * These are usually collected per-CPU and aggregated by ethtool.
@@ -279,14 +361,20 @@ struct dpaa2_eth_ch_stats {
 	__u64 xdp_tx;
 	__u64 xdp_tx_err;
 	__u64 xdp_redirect;
+	/* Must be last, does not show up in ethtool stats */
+	__u64 frames;
 };
 
 /* Maximum number of queues associated with a DPNI */
 #define DPAA2_ETH_MAX_TCS		8
-#define DPAA2_ETH_MAX_RX_QUEUES		16
+#define DPAA2_ETH_MAX_RX_QUEUES_PER_TC	16
+#define DPAA2_ETH_MAX_RX_QUEUES		\
+	(DPAA2_ETH_MAX_RX_QUEUES_PER_TC * DPAA2_ETH_MAX_TCS)
 #define DPAA2_ETH_MAX_TX_QUEUES		16
+#define DPAA2_ETH_MAX_RX_ERR_QUEUES	1
 #define DPAA2_ETH_MAX_QUEUES		(DPAA2_ETH_MAX_RX_QUEUES + \
-					DPAA2_ETH_MAX_TX_QUEUES)
+					DPAA2_ETH_MAX_TX_QUEUES + \
+					DPAA2_ETH_MAX_RX_ERR_QUEUES)
 #define DPAA2_ETH_MAX_NETDEV_QUEUES	\
 	(DPAA2_ETH_MAX_TX_QUEUES * DPAA2_ETH_MAX_TCS)
 
@@ -295,6 +383,7 @@ struct dpaa2_eth_ch_stats {
 enum dpaa2_eth_fq_type {
 	DPAA2_RX_FQ = 0,
 	DPAA2_TX_CONF_FQ,
+	DPAA2_RX_ERR_FQ
 };
 
 struct dpaa2_eth_priv;
@@ -393,7 +482,8 @@ struct dpaa2_eth_priv {
 	struct dpaa2_eth_drv_stats __percpu *percpu_extras;
 
 	u16 mc_token;
-	u8 rx_td_enabled;
+	u8 rx_fqtd_enabled;
+	u8 rx_cgtd_enabled;
 
 	struct dpni_link_state link_state;
 	bool do_link_poll;
@@ -404,10 +494,19 @@ struct dpaa2_eth_priv {
 	u64 rx_cls_fields;
 	struct dpaa2_eth_cls_rule *cls_rules;
 	u8 rx_cls_enabled;
+	u8 vlan_cls_enabled;
+	u8 pfc_enabled;
+#ifdef CONFIG_FSL_DPAA2_ETH_DCB
+	u8 dcbx_mode;
+	struct ieee_pfc pfc;
+#endif
 	struct bpf_prog *xdp_prog;
 #ifdef CONFIG_DEBUG_FS
 	struct dpaa2_debugfs dbg;
 #endif
+	struct dpni_tx_shaping_cfg shaping_cfg;
+
+	bool ceetm_en;
 };
 
 #define DPAA2_RXH_SUPPORTED	(RXH_L2DA | RXH_VLAN | RXH_L3_PROTO \
@@ -484,6 +583,20 @@ enum dpaa2_eth_rx_dist {
 	(dpaa2_eth_cmp_dpni_ver((priv), DPNI_PAUSE_VER_MAJOR,	\
 				DPNI_PAUSE_VER_MINOR) >= 0)
 
+static inline bool dpaa2_eth_tx_pause_enabled(u64 link_options)
+{
+	return !!(link_options & DPNI_LINK_OPT_PAUSE) ^
+	       !!(link_options & DPNI_LINK_OPT_ASYM_PAUSE);
+}
+
+static inline bool dpaa2_eth_rx_pause_enabled(u64 link_options)
+{
+	return !!(link_options & DPNI_LINK_OPT_PAUSE);
+}
+
+#define DPNI_LINK_AUTONEG_VER_MAJOR	7
+#define DPNI_LINK_AUTONEG_VER_MINOR	8
+
 static inline
 unsigned int dpaa2_eth_needed_headroom(struct dpaa2_eth_priv *priv,
 				       struct sk_buff *skb)
@@ -515,6 +628,11 @@ unsigned int dpaa2_eth_needed_headroom(struct dpaa2_eth_priv *priv,
 static inline unsigned int dpaa2_eth_rx_head_room(struct dpaa2_eth_priv *priv)
 {
 	return priv->tx_data_offset - DPAA2_ETH_RX_HWA_SIZE;
+}
+
+static inline int dpaa2_eth_ch_count(struct dpaa2_eth_priv *priv)
+{
+	return 1;
 }
 
 int dpaa2_eth_set_hash(struct net_device *net_dev, u64 flags);

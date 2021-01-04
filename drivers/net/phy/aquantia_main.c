@@ -22,6 +22,14 @@
 #define PHY_ID_AQR107	0x03a1b4e0
 #define PHY_ID_AQCS109	0x03a1b5c2
 #define PHY_ID_AQR405	0x03a1b4b0
+#define PHY_ID_AQR112	0x03a1b662
+#define PHY_ID_AQR412	0x03a1b712
+
+/* PCS counters */
+#define MDIO_C45_PCS_STAT_XFI_TX_GOOD_FRAMES	0xc860
+#define MDIO_C45_PCS_STAT_XFI_TX_BAD_FRAMES	0xc862
+#define MDIO_C45_PCS_STAT_XFI_RX_GOOD_FRAMES	0xe860
+#define MDIO_C45_PCS_STAT_XFI_RX_BAD_FRAMES	0xe862
 
 #define MDIO_PHYXS_VEND_IF_STATUS		0xe812
 #define MDIO_PHYXS_VEND_IF_STATUS_TYPE_MASK	GENMASK(7, 3)
@@ -30,6 +38,9 @@
 #define MDIO_PHYXS_VEND_IF_STATUS_TYPE_USXGMII	3
 #define MDIO_PHYXS_VEND_IF_STATUS_TYPE_SGMII	6
 #define MDIO_PHYXS_VEND_IF_STATUS_TYPE_OCSGMII	10
+
+#define MDIO_PHYXS_VEND_PROV2			0xC441
+#define MDIO_PHYXS_VEND_PROV2_USX_AN		BIT(3)
 
 #define MDIO_AN_VEND_PROV			0xc400
 #define MDIO_AN_VEND_PROV_1000BASET_FULL	BIT(15)
@@ -121,13 +132,39 @@
 #define VEND1_GLOBAL_INT_VEND_MASK_GLOBAL2	BIT(1)
 #define VEND1_GLOBAL_INT_VEND_MASK_GLOBAL3	BIT(0)
 
+/* registers in MDIO_MMD_VEND1 region */
+#define AQUANTIA_VND1_GLOBAL_SC			0x000
+#define  AQUANTIA_VND1_GLOBAL_SC_LP		BIT(0xb)
+
+/* global start rate, the protocol associated with this speed is used by default
+ * on SI.
+ */
+#define AQUANTIA_VND1_GSTART_RATE		0x31a
+#define  AQUANTIA_VND1_GSTART_RATE_OFF		0
+#define  AQUANTIA_VND1_GSTART_RATE_100M		1
+#define  AQUANTIA_VND1_GSTART_RATE_1G		2
+#define  AQUANTIA_VND1_GSTART_RATE_10G		3
+#define  AQUANTIA_VND1_GSTART_RATE_2_5G		4
+#define  AQUANTIA_VND1_GSTART_RATE_5G		5
+
+/* SYSCFG registers for 100M, 1G, 2.5G, 5G, 10G */
+#define AQUANTIA_VND1_GSYSCFG_BASE		0x31b
+#define AQUANTIA_VND1_GSYSCFG_100M		0
+#define AQUANTIA_VND1_GSYSCFG_1G		1
+#define AQUANTIA_VND1_GSYSCFG_2_5G		2
+#define AQUANTIA_VND1_GSYSCFG_5G		3
+#define AQUANTIA_VND1_GSYSCFG_10G		4
+
 struct aqr107_hw_stat {
 	const char *name;
 	int reg;
 	int size;
+	int devad;
 };
 
-#define SGMII_STAT(n, r, s) { n, MDIO_C22EXT_STAT_SGMII_ ## r, s }
+#define SGMII_STAT(n, r, s) { n, MDIO_C22EXT_STAT_SGMII_ ## r, s, \
+			      MDIO_MMD_C22EXT}
+#define C45_PCS_STAT(n, r, s) { n, MDIO_C45_PCS_STAT_ ## r, s, MDIO_MMD_PCS }
 static const struct aqr107_hw_stat aqr107_hw_stats[] = {
 	SGMII_STAT("sgmii_rx_good_frames",	    RX_GOOD_FRAMES,	26),
 	SGMII_STAT("sgmii_rx_bad_frames",	    RX_BAD_FRAMES,	26),
@@ -139,6 +176,10 @@ static const struct aqr107_hw_stat aqr107_hw_stats[] = {
 	SGMII_STAT("sgmii_tx_line_collisions",	    TX_LINE_COLLISIONS,	 8),
 	SGMII_STAT("sgmii_tx_frame_alignment_err",  TX_FRAME_ALIGN_ERR,	16),
 	SGMII_STAT("sgmii_tx_runt_frames",	    TX_RUNT_FRAMES,	22),
+	C45_PCS_STAT("xfi_rx_good_frames",	    XFI_RX_GOOD_FRAMES,	26),
+	C45_PCS_STAT("xfi_rx_bad_frames",	    XFI_RX_BAD_FRAMES,	26),
+	C45_PCS_STAT("xfi_tx_good_frames",	    XFI_TX_GOOD_FRAMES,	26),
+	C45_PCS_STAT("xfi_tx_bad_frames",	    XFI_TX_BAD_FRAMES,	26),
 };
 #define AQR107_SGMII_STAT_SZ ARRAY_SIZE(aqr107_hw_stats)
 
@@ -168,13 +209,13 @@ static u64 aqr107_get_stat(struct phy_device *phydev, int index)
 	u64 ret;
 	int val;
 
-	val = phy_read_mmd(phydev, MDIO_MMD_C22EXT, stat->reg);
+	val = phy_read_mmd(phydev, stat->devad, stat->reg);
 	if (val < 0)
 		return U64_MAX;
 
 	ret = val & GENMASK(len_l - 1, 0);
 	if (len_h) {
-		val = phy_read_mmd(phydev, MDIO_MMD_C22EXT, stat->reg + 1);
+		val = phy_read_mmd(phydev, stat->devad, stat->reg + 1);
 		if (val < 0)
 			return U64_MAX;
 
@@ -239,6 +280,61 @@ static int aqr_config_aneg(struct phy_device *phydev)
 		changed = true;
 
 	return genphy_c45_check_and_restart_aneg(phydev, changed);
+}
+
+static struct {
+	u16 syscfg;
+	int cnt;
+	u16 start_rate;
+} aquantia_syscfg[PHY_INTERFACE_MODE_MAX] = {
+	[PHY_INTERFACE_MODE_SGMII] =      {0x04b, AQUANTIA_VND1_GSYSCFG_1G,
+					   AQUANTIA_VND1_GSTART_RATE_1G},
+	[PHY_INTERFACE_MODE_2500BASEX] = {0x144, AQUANTIA_VND1_GSYSCFG_2_5G,
+					   AQUANTIA_VND1_GSTART_RATE_2_5G},
+	[PHY_INTERFACE_MODE_XGMII] =      {0x100, AQUANTIA_VND1_GSYSCFG_10G,
+					   AQUANTIA_VND1_GSTART_RATE_10G},
+	[PHY_INTERFACE_MODE_USXGMII] =    {0x080, AQUANTIA_VND1_GSYSCFG_10G,
+					   AQUANTIA_VND1_GSTART_RATE_10G},
+};
+
+/* Sets up protocol on system side before calling aqr_config_aneg */
+static int aqr_config_aneg_set_prot(struct phy_device *phydev)
+{
+	int if_type = phydev->interface;
+	int i;
+
+	if (!aquantia_syscfg[if_type].cnt)
+		return 0;
+
+	/* set PHY in low power mode so we can configure protocols */
+	phy_write_mmd(phydev, MDIO_MMD_VEND1, AQUANTIA_VND1_GLOBAL_SC,
+		      AQUANTIA_VND1_GLOBAL_SC_LP);
+	mdelay(10);
+
+	/* set the default rate to enable the SI link */
+	phy_write_mmd(phydev, MDIO_MMD_VEND1, AQUANTIA_VND1_GSTART_RATE,
+		      aquantia_syscfg[if_type].start_rate);
+
+	for (i = 0; i <= aquantia_syscfg[if_type].cnt; i++) {
+		u16 reg = phy_read_mmd(phydev, MDIO_MMD_VEND1,
+				       AQUANTIA_VND1_GSYSCFG_BASE + i);
+		if (!reg)
+			continue;
+
+		phy_write_mmd(phydev, MDIO_MMD_VEND1,
+			      AQUANTIA_VND1_GSYSCFG_BASE + i,
+			      aquantia_syscfg[if_type].syscfg);
+	}
+
+	if (if_type == PHY_INTERFACE_MODE_USXGMII)
+		phy_write_mmd(phydev, MDIO_MMD_PHYXS, MDIO_PHYXS_VEND_PROV2,
+			      MDIO_PHYXS_VEND_PROV2_USX_AN);
+
+	/* wake PHY back up */
+	phy_write_mmd(phydev, MDIO_MMD_VEND1, AQUANTIA_VND1_GLOBAL_SC, 0);
+	mdelay(10);
+
+	return aqr_config_aneg(phydev);
 }
 
 static int aqr_config_intr(struct phy_device *phydev)
@@ -682,6 +778,30 @@ static struct phy_driver aqr_driver[] = {
 	.ack_interrupt	= aqr_ack_interrupt,
 	.read_status	= aqr_read_status,
 },
+{
+	PHY_ID_MATCH_MODEL(PHY_ID_AQR112),
+	.name		= "Aquantia AQR112",
+	.probe		= aqr107_probe,
+	.config_aneg    = aqr_config_aneg_set_prot,
+	.config_intr	= aqr_config_intr,
+	.ack_interrupt	= aqr_ack_interrupt,
+	.read_status	= aqr_read_status,
+	.get_sset_count	= aqr107_get_sset_count,
+	.get_strings	= aqr107_get_strings,
+	.get_stats	= aqr107_get_stats,
+},
+{
+	PHY_ID_MATCH_MODEL(PHY_ID_AQR412),
+	.name		= "Aquantia AQR412",
+	.probe		= aqr107_probe,
+	.config_aneg    = aqr_config_aneg_set_prot,
+	.config_intr	= aqr_config_intr,
+	.ack_interrupt	= aqr_ack_interrupt,
+	.read_status	= aqr_read_status,
+	.get_sset_count	= aqr107_get_sset_count,
+	.get_strings	= aqr107_get_strings,
+	.get_stats	= aqr107_get_stats,
+},
 };
 
 module_phy_driver(aqr_driver);
@@ -694,6 +814,8 @@ static struct mdio_device_id __maybe_unused aqr_tbl[] = {
 	{ PHY_ID_MATCH_MODEL(PHY_ID_AQR107) },
 	{ PHY_ID_MATCH_MODEL(PHY_ID_AQCS109) },
 	{ PHY_ID_MATCH_MODEL(PHY_ID_AQR405) },
+	{ PHY_ID_MATCH_MODEL(PHY_ID_AQR112) },
+	{ PHY_ID_MATCH_MODEL(PHY_ID_AQR412) },
 	{ }
 };
 

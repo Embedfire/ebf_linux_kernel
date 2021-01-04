@@ -12,7 +12,9 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 #include <linux/types.h>
+#include <soc/imx/soc.h>
 
 #include "clk.h"
 
@@ -82,6 +84,7 @@ static struct imx_pll14xx_clk imx8mn_dram_pll = {
 		.type = PLL_1443X,
 		.rate_table = imx8mn_drampll_tbl,
 		.rate_count = ARRAY_SIZE(imx8mn_drampll_tbl),
+		.flags = CLK_GET_RATE_NOCACHE,
 };
 
 static struct imx_pll14xx_clk imx8mn_arm_pll = {
@@ -123,6 +126,8 @@ static const char * const sys_pll3_bypass_sels[] = {"sys_pll3", "sys_pll3_ref_se
 static const char * const imx8mn_a53_sels[] = {"osc_24m", "arm_pll_out", "sys_pll2_500m",
 					       "sys_pll2_1000m", "sys_pll1_800m", "sys_pll1_400m",
 					       "audio_pll1_out", "sys_pll3_out", };
+
+static const char *imx8mn_a53_core_sels[] = {"arm_a53_div", "arm_pll_out", };
 
 static const char * const imx8mn_gpu_core_sels[] = {"osc_24m", "gpu_pll_out", "sys_pll1_800m",
 						    "sys_pll3_out", "sys_pll2_1000m", "audio_pll1_out",
@@ -368,13 +373,31 @@ static const char * const imx8mn_clko2_sels[] = {"osc_24m", "sys_pll2_200m", "sy
 static struct clk *clks[IMX8MN_CLK_END];
 static struct clk_onecell_data clk_data;
 
-static struct clk ** const uart_clks[] = {
-	&clks[IMX8MN_CLK_UART1_ROOT],
-	&clks[IMX8MN_CLK_UART2_ROOT],
-	&clks[IMX8MN_CLK_UART3_ROOT],
-	&clks[IMX8MN_CLK_UART4_ROOT],
-	NULL
-};
+static int __init imx_clk_init_on(struct device_node *np,
+				  struct clk * const clks[])
+{
+	u32 *array;
+	int i, ret, elems;
+
+	elems = of_property_count_u32_elems(np, "init-on-array");
+	if (elems < 0)
+		return elems;
+	array = kcalloc(elems, sizeof(elems), GFP_KERNEL);
+	if (IS_ERR_OR_NULL(array))
+		return PTR_ERR(array);
+
+	ret = of_property_read_u32_array(np, "init-on-array", array, elems);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < elems; i++) {
+		ret = clk_prepare_enable(clks[array[i]]);
+		if (ret)
+			pr_err("clk_prepare_enable failed %d\n", array[i]);
+	}
+
+	return 0;
+}
 
 static int imx8mn_clocks_probe(struct platform_device *pdev)
 {
@@ -382,6 +405,8 @@ static int imx8mn_clocks_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	void __iomem *base;
 	int ret;
+
+	check_m4_enabled();
 
 	clks[IMX8MN_CLK_DUMMY] = imx_clk_fixed("dummy", 0);
 	clks[IMX8MN_CLK_24M] = of_clk_get_by_name(np, "osc_24m");
@@ -484,6 +509,9 @@ static int imx8mn_clocks_probe(struct platform_device *pdev)
 	clks[IMX8MN_CLK_GPU_CORE_DIV] = imx_clk_divider2("gpu_core_div", "gpu_core_cg", base + 0x8180, 0, 3);
 	clks[IMX8MN_CLK_GPU_SHADER_DIV] = imx_clk_divider2("gpu_shader_div", "gpu_shader_cg", base + 0x8200, 0, 3);
 
+	/* CORE SEL */
+	clks[IMX8MN_CLK_A53_CORE] = imx_clk_mux2_flags("arm_a53_core", base + 0x9880, 24, 1, imx8mn_a53_core_sels, ARRAY_SIZE(imx8mn_a53_core_sels), CLK_IS_CRITICAL);
+
 	/* BUS */
 	clks[IMX8MN_CLK_MAIN_AXI] = imx8m_clk_composite_critical("main_axi", imx8mn_main_axi_sels, base + 0x8800);
 	clks[IMX8MN_CLK_ENET_AXI] = imx8m_clk_composite("enet_axi", imx8mn_enet_axi_sels, base + 0x8880);
@@ -578,11 +606,12 @@ static int imx8mn_clocks_probe(struct platform_device *pdev)
 	clks[IMX8MN_CLK_SAI5_IPG] = imx_clk_gate2_shared2("sai5_ipg_clk", "ipg_audio_root", base + 0x4370, 0, &share_count_sai5);
 	clks[IMX8MN_CLK_SAI6_ROOT] = imx_clk_gate2_shared2("sai6_root_clk", "sai6", base + 0x4380, 0, &share_count_sai6);
 	clks[IMX8MN_CLK_SAI6_IPG] = imx_clk_gate2_shared2("sai6_ipg_clk", "ipg_audio_root", base + 0x4380, 0, &share_count_sai6);
+	clks[IMX8MN_CLK_SNVS_ROOT] = imx_clk_gate4("snvs_root_clk", "ipg_root", base + 0x4470, 0);
 	clks[IMX8MN_CLK_UART1_ROOT] = imx_clk_gate4("uart1_root_clk", "uart1", base + 0x4490, 0);
 	clks[IMX8MN_CLK_UART2_ROOT] = imx_clk_gate4("uart2_root_clk", "uart2", base + 0x44a0, 0);
 	clks[IMX8MN_CLK_UART3_ROOT] = imx_clk_gate4("uart3_root_clk", "uart3", base + 0x44b0, 0);
 	clks[IMX8MN_CLK_UART4_ROOT] = imx_clk_gate4("uart4_root_clk", "uart4", base + 0x44c0, 0);
-	clks[IMX8MN_CLK_USB1_CTRL_ROOT] = imx_clk_gate4("usb1_ctrl_root_clk", "usb_core_ref", base + 0x44d0, 0);
+	clks[IMX8MN_CLK_USB1_CTRL_ROOT] = imx_clk_gate4("usb1_ctrl_root_clk", "usb_bus", base + 0x44d0, 0);
 	clks[IMX8MN_CLK_GPU_CORE_ROOT] = imx_clk_gate4("gpu_core_root_clk", "gpu_core_div", base + 0x44f0, 0);
 	clks[IMX8MN_CLK_USDHC1_ROOT] = imx_clk_gate4("usdhc1_root_clk", "usdhc1", base + 0x4510, 0);
 	clks[IMX8MN_CLK_USDHC2_ROOT] = imx_clk_gate4("usdhc2_root_clk", "usdhc2", base + 0x4520, 0);
@@ -603,14 +632,18 @@ static int imx8mn_clocks_probe(struct platform_device *pdev)
 	clks[IMX8MN_CLK_SDMA2_ROOT] = imx_clk_gate4("sdma2_clk", "ipg_audio_root", base + 0x43b0, 0);
 	clks[IMX8MN_CLK_SDMA3_ROOT] = imx_clk_gate4("sdma3_clk", "ipg_audio_root", base + 0x45f0, 0);
 	clks[IMX8MN_CLK_SAI7_ROOT] = imx_clk_gate2_shared2("sai7_root_clk", "sai7", base + 0x4650, 0, &share_count_sai7);
+	clks[IMX8MN_CLK_SAI7_IPG] = imx_clk_gate2_shared2("sai7_ipg_clk", "ipg_audio_root", base + 0x4650, 0, &share_count_sai7);
 
 	clks[IMX8MN_CLK_DRAM_ALT_ROOT] = imx_clk_fixed_factor("dram_alt_root", "dram_alt", 1, 4);
 
-	clks[IMX8MN_CLK_ARM] = imx_clk_cpu("arm", "arm_a53_div",
-					   clks[IMX8MN_CLK_A53_DIV],
-					   clks[IMX8MN_CLK_A53_SRC],
+	clk_set_parent(clks[IMX8MN_CLK_A53_SRC], clks[IMX8MN_SYS_PLL1_800M]);
+	clk_set_parent(clks[IMX8MN_CLK_A53_CORE], clks[IMX8MN_ARM_PLL_OUT]);
+
+	clks[IMX8MN_CLK_ARM] = imx_clk_cpu("arm", "arm_a53_core",
+					   clks[IMX8MN_CLK_A53_CORE],
+					   clks[IMX8MN_CLK_A53_CORE],
 					   clks[IMX8MN_ARM_PLL_OUT],
-					   clks[IMX8MN_SYS_PLL1_800M]);
+					   clks[IMX8MN_CLK_A53_DIV]);
 
 	imx_check_clocks(clks, ARRAY_SIZE(clks));
 
@@ -622,7 +655,13 @@ static int imx8mn_clocks_probe(struct platform_device *pdev)
 		goto unregister_clks;
 	}
 
-	imx_register_uart_clocks(uart_clks);
+	imx_clk_init_on(np, clks);
+
+	clk_set_parent(clks[IMX8MN_CLK_AUDIO_AHB], clks[IMX8MN_SYS_PLL1_800M]);
+	clk_set_rate(clks[IMX8MN_CLK_AUDIO_AHB], 400000000);
+	clk_set_rate(clks[IMX8MN_CLK_IPG_AUDIO_ROOT], 400000000);
+
+	imx_register_uart_clocks();
 
 	return 0;
 
@@ -646,3 +685,6 @@ static struct platform_driver imx8mn_clk_driver = {
 	},
 };
 module_platform_driver(imx8mn_clk_driver);
+MODULE_AUTHOR("Anson Huang <Anson.Huang@nxp.com>");
+MODULE_DESCRIPTION("NXP i.MX8MN clock driver");
+MODULE_LICENSE("GPL v2");

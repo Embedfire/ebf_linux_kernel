@@ -27,6 +27,10 @@ struct dma_buf_sync {
 	__u64 flags;
 };
 
+struct dma_buf_phys {
+	unsigned long phys;
+};
+
 #define DMA_BUF_SYNC_READ      (1 << 0)
 #define DMA_BUF_SYNC_WRITE     (2 << 0)
 #define DMA_BUF_SYNC_RW        (DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE)
@@ -44,6 +48,7 @@ struct dma_buf_sync {
  * between them in actual uapi, they're just different numbers.
  */
 #define DMA_BUF_SET_NAME	_IOW(DMA_BUF_BASE, 1, const char *)
+#define DMA_BUF_IOCTL_PHYS	_IOW(DMA_BUF_BASE, 10, struct dma_buf_phys)
 #define DMA_BUF_SET_NAME_A	_IOW(DMA_BUF_BASE, 1, u32)
 #define DMA_BUF_SET_NAME_B	_IOW(DMA_BUF_BASE, 1, u64)
 

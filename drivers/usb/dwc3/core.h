@@ -25,9 +25,11 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
 #include <linux/usb/otg.h>
+#include <linux/usb/role.h>
 #include <linux/ulpi/interface.h>
 
 #include <linux/phy/phy.h>
+#include "../host/xhci-plat.h"
 
 #define DWC3_MSG_MAX	500
 
@@ -165,6 +167,21 @@
 /* Bit fields */
 
 /* Global SoC Bus Configuration INCRx Register 0 */
+#ifdef CONFIG_OF
+#define DWC3_GSBUSCFG0_DATARD_SHIFT	28
+#define DWC3_GSBUSCFG0_DATARD(n)	(((n) & 0xf)		\
+			<< DWC3_GSBUSCFG0_DATARD_SHIFT)
+#define DWC3_GSBUSCFG0_DESCRD_SHIFT	24
+#define DWC3_GSBUSCFG0_DESCRD(n)	(((n) & 0xf)		\
+			<< DWC3_GSBUSCFG0_DESCRD_SHIFT)
+#define DWC3_GSBUSCFG0_DATAWR_SHIFT	20
+#define DWC3_GSBUSCFG0_DATAWR(n)	(((n) & 0xf)		\
+			<< DWC3_GSBUSCFG0_DATAWR_SHIFT)
+#define DWC3_GSBUSCFG0_DESCWR_SHIFT	16
+#define DWC3_GSBUSCFG0_DESCWR(n)	(((n) & 0xf)		\
+			<< DWC3_GSBUSCFG0_DESCWR_SHIFT)
+#endif
+
 #define DWC3_GSBUSCFG0_INCR256BRSTENA	(1 << 7) /* INCR256 burst */
 #define DWC3_GSBUSCFG0_INCR128BRSTENA	(1 << 6) /* INCR128 burst */
 #define DWC3_GSBUSCFG0_INCR64BRSTENA	(1 << 5) /* INCR64 burst */
@@ -223,6 +240,7 @@
 
 /* Global Configuration Register */
 #define DWC3_GCTL_PWRDNSCALE(n)	((n) << 19)
+#define DWC3_GCTL_PWRDNSCALE_MASK	DWC3_GCTL_PWRDNSCALE(0x1fff)
 #define DWC3_GCTL_U2RSTECN	BIT(16)
 #define DWC3_GCTL_RAMCLKSEL(x)	(((x) & DWC3_GCTL_CLK_MASK) << 6)
 #define DWC3_GCTL_CLK_BUS	(0)
@@ -232,6 +250,7 @@
 
 #define DWC3_GCTL_PRTCAP(n)	(((n) & (3 << 12)) >> 12)
 #define DWC3_GCTL_PRTCAPDIR(n)	((n) << 12)
+#define DWC3_GCTL_PRTCAP_NONE	0
 #define DWC3_GCTL_PRTCAP_HOST	1
 #define DWC3_GCTL_PRTCAP_DEVICE	2
 #define DWC3_GCTL_PRTCAP_OTG	3
@@ -247,11 +266,13 @@
 
 /* Global User Control Register */
 #define DWC3_GUCTL_HSTINAUTORETRY	BIT(14)
+#define DWC3_GUCTL_REFCLKPER_MASK	GENMASK(31, 22)
+#define DWC3_GUCTL_REFCLKPER_SHIFT	22
 
 /* Global User Control 1 Register */
-#define DWC3_GUCTL1_PARKMODE_DISABLE_SS	BIT(17)
 #define DWC3_GUCTL1_TX_IPGAP_LINECHECK_DIS	BIT(28)
 #define DWC3_GUCTL1_DEV_L1_EXIT_BY_HW	BIT(24)
+#define DWC3_GUCTL1_PARKMODE_DISABLE_SS	BIT(17)
 
 /* Global Status Register */
 #define DWC3_GSTS_OTG_IP	BIT(10)
@@ -371,6 +392,8 @@
 /* Global Frame Length Adjustment Register */
 #define DWC3_GFLADJ_30MHZ_SDBND_SEL		BIT(7)
 #define DWC3_GFLADJ_30MHZ_MASK			0x3f
+#define GFLADJ_REFCLK_FLADJ_MASK		GENMASK(21, 8)
+#define GFLADJ_REFCLK_FLADJ_SHIFT		8
 
 /* Global User Control Register 2 */
 #define DWC3_GUCTL2_RST_ACTBITLATER		BIT(14)
@@ -875,6 +898,8 @@ struct dwc3_hwparams {
  *	or unaligned OUT)
  * @direction: IN or OUT direction flag
  * @mapped: true when request has been dma-mapped
+ * @skip_remain_trbs: true if a short packet received so the remain
+	chained trbs should be skipped.
  */
 struct dwc3_request {
 	struct usb_request	request;
@@ -903,6 +928,7 @@ struct dwc3_request {
 	unsigned		needs_extra_trb:1;
 	unsigned		direction:1;
 	unsigned		mapped:1;
+	unsigned		skip_remain_trbs:1;
 };
 
 /*
@@ -911,6 +937,13 @@ struct dwc3_request {
  */
 struct dwc3_scratchpad_array {
 	__le64	dma_adr[DWC3_MAX_HIBER_SCRATCHBUFS];
+};
+
+struct dwc3_platform_data {
+	struct xhci_plat_priv *xhci_priv;
+	void	(*set_role_post)(struct dwc3 *dwc, u32 role);
+	unsigned long long quirks;
+#define DWC3_SOFT_ITP_SYNC		BIT(0)
 };
 
 /**
@@ -948,6 +981,7 @@ struct dwc3_scratchpad_array {
  * @nr_scratch: number of scratch buffers
  * @u1u2: only used on revisions <1.83a for workaround
  * @maximum_speed: maximum speed requested (mainly for testing purposes)
+ * @otg_caps: the OTG capabilities from hardware point
  * @revision: revision register contents
  * @version_type: VERSIONTYPE register contents, a sub release of a revision
  * @dr_mode: requested mode of operation
@@ -1038,6 +1072,8 @@ struct dwc3_scratchpad_array {
  * 	2	- No de-emphasis
  * 	3	- Reserved
  * @dis_metastability_quirk: set to disable metastability quirk.
+ * @host_vbus_glitches: set to avoid vbus glitch during
+ *                      xhci reset.
  * @imod_interval: set the interrupt moderation interval in 250ns
  *                 increments or 0 to disable.
  */
@@ -1071,6 +1107,7 @@ struct dwc3 {
 	struct clk_bulk_data	*clks;
 	int			num_clks;
 
+	bool			core_inited;
 	struct reset_control	*reset;
 
 	struct usb_phy		*usb2_phy;
@@ -1087,6 +1124,7 @@ struct dwc3 {
 	void __iomem		*regs;
 	size_t			regs_size;
 
+	struct usb_role_switch	*role_switch;
 	enum usb_dr_mode	dr_mode;
 	u32			current_dr_role;
 	u32			desired_dr_role;
@@ -1103,6 +1141,8 @@ struct dwc3 {
 	u32			nr_scratch;
 	u32			u1u2;
 	u32			maximum_speed;
+	struct usb_otg_caps	otg_caps;
+	struct dwc3_priv_data	*priv_data;
 
 	/*
 	 * All 3.1 IP version constants are greater than the 3.0 IP
@@ -1135,7 +1175,6 @@ struct dwc3 {
 #define DWC3_REVISION_290A	0x5533290a
 #define DWC3_REVISION_300A	0x5533300a
 #define DWC3_REVISION_310A	0x5533310a
-#define DWC3_REVISION_330A	0x5533330a
 
 /*
  * NOTICE: we're using bit 31 as a "is usb 3.1" flag. This is really
@@ -1228,6 +1267,7 @@ struct dwc3 {
 	unsigned		tx_de_emphasis:2;
 
 	unsigned		dis_metastability_quirk:1;
+	unsigned		host_vbus_glitches:1;
 
 	u16			imod_interval;
 };

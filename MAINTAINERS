@@ -6574,6 +6574,14 @@ F:	drivers/ptp/ptp_qoriq_debugfs.c
 F:	include/linux/fsl/ptp_qoriq.h
 F:	Documentation/devicetree/bindings/ptp/ptp-qoriq.txt
 
+FREESCALE QORIQ PPFE ETHERNET DRIVER
+M:	Anji Jagarlmudi <anji.jagarlmudi@nxp.com>
+M:	Calvin Johnson <calvin.johnson@nxp.com>
+L:	netdev@vger.kernel.org
+S:	Maintained
+F:	drivers/staging/fsl_ppfe
+F:	Documentation/devicetree/bindings/net/fsl_ppfe/pfe.txt
+
 FREESCALE QUAD SPI DRIVER
 M:	Han Xu <han.xu@nxp.com>
 L:	linux-spi@vger.kernel.org
@@ -6587,6 +6595,12 @@ S:	Maintained
 F:	drivers/soc/fsl/qe/
 F:	include/soc/fsl/*qe*.h
 F:	include/soc/fsl/*ucc*.h
+
+FREESCALE QEIC DRIVERS
+M:	Qiang Zhao <qiang.zhao@nxp.com>
+L:	linux-kernel@vger.kernel.org
+S:	Maintained
+F:	drivers/irqchip/irq-qeic.c
 
 FREESCALE QUICC ENGINE UCC ETHERNET DRIVER
 M:	Li Yang <leoyang.li@nxp.com>
@@ -8764,6 +8778,7 @@ L:	jailhouse-dev@googlegroups.com
 S:	Maintained
 F:	arch/x86/kernel/jailhouse.c
 F:	arch/x86/include/asm/jailhouse_para.h
+F:	drivers/virt/jailhouse_dbgcon.c
 
 JC42.4 TEMPERATURE SENSOR DRIVER
 M:	Guenter Roeck <linux@roeck-us.net>
@@ -9063,6 +9078,18 @@ F:	Documentation/security/keys/trusted-encrypted.rst
 F:	include/keys/trusted-type.h
 F:	security/keys/trusted.c
 F:	include/keys/trusted.h
+
+KEYS-SECURE
+M:	Udit Agarwal <udit.agarwal@nxp.com>
+R:	Sahil Malhotra <sahil.malhotra@nxp.com>
+L:	linux-security-module@vger.kernel.org
+L:	keyrings@vger.kernel.org
+S:	Supported
+F:	include/keys/secure-type.h
+F:	security/keys/secure_key.c
+F:	security/keys/securekey_desc.c
+F:	security/keys/securekey_desc.h
+F:	security/keys/encrypted-keys/masterkey_secure.c
 
 KEYS/KEYRINGS:
 M:	David Howells <dhowells@redhat.com>
@@ -10824,6 +10851,7 @@ M:	Microchip Linux Driver Support <UNGLinuxDriver@microchip.com>
 L:	netdev@vger.kernel.org
 S:	Supported
 F:	drivers/net/ethernet/mscc/
+F:	include/soc/mscc/ocelot*
 
 MICROSOFT SURFACE PRO 3 BUTTON DRIVER
 M:	Chen Yu <yu.c.chen@intel.com>
@@ -12437,6 +12465,16 @@ L:	linux-arm-kernel@lists.infradead.org
 S:	Maintained
 F:	drivers/pci/controller/dwc/*layerscape*
 
+PCI DRIVER FOR NXP LAYERSCAPE GEN4 CONTROLLER
+M:	Hou Zhiqiang <Zhiqiang.Hou@nxp.com>
+M:	Xiaowei Bao <xiaowei.bao@nxp.com>
+L:	linux-pci@vger.kernel.org
+L:	linux-arm-kernel@lists.infradead.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/pci/layerscape-pcie-gen4.txt
+F:	drivers/pci/controller/mobibeil/pcie-layerscape-gen4.c
+F:	drivers/pci/controller/mobiveil/pcie-layerscape-gen4-ep.c
+
 PCI DRIVER FOR GENERIC OF HOSTS
 M:	Will Deacon <will@kernel.org>
 L:	linux-pci@vger.kernel.org
@@ -12477,10 +12515,11 @@ F:	drivers/ntb/hw/mscc/
 PCI DRIVER FOR MOBIVEIL PCIE IP
 M:	Karthikeyan Mitran <m.karthikeyan@mobiveil.co.in>
 M:	Hou Zhiqiang <Zhiqiang.Hou@nxp.com>
+M:	Xiaowei Bao <xiaowei.bao@nxp.com>
 L:	linux-pci@vger.kernel.org
 S:	Supported
 F:	Documentation/devicetree/bindings/pci/mobiveil-pcie.txt
-F:	drivers/pci/controller/pcie-mobiveil.c
+F:	drivers/pci/controller/mobiveil/pcie-mobiveil*
 
 PCI DRIVER FOR MVEBU (Marvell Armada 370 and Armada XP SOC support)
 M:	Thomas Petazzoni <thomas.petazzoni@bootlin.com>
@@ -13436,6 +13475,9 @@ S:	Maintained
 F:	drivers/bus/fsl-mc/
 F:	Documentation/devicetree/bindings/misc/fsl,qoriq-mc.txt
 F:	Documentation/networking/device_drivers/freescale/dpaa2/overview.rst
+F:	Documentation/networking/dpaa2/overview.rst
+F:	include/uapi/linux/fsl_mc.h
+F:	Documentation/ABI/stable/sysfs-bus-fsl-mc
 
 QT1010 MEDIA DRIVER
 M:	Antti Palosaari <crope@iki.fi>
@@ -17349,6 +17391,14 @@ M:	Stephen Chandler Paul <thatslyude@gmail.com>
 S:	Maintained
 F:	drivers/input/serio/userio.c
 F:	include/uapi/linux/userio.h
+
+VITESSE FELIX ETHERNET SWITCH DRIVER
+M:	Vladimir Oltean <vladimir.oltean@nxp.com>
+M:	Claudiu Manoil <claudiu.manoil@nxp.com>
+L:	netdev@vger.kernel.org
+S:	Maintained
+F:	drivers/net/dsa/ocelot/*
+F:	net/dsa/tag_ocelot.c
 
 VIVID VIRTUAL VIDEO DRIVER
 M:	Hans Verkuil <hverkuil@xs4all.nl>

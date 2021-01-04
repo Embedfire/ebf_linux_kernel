@@ -49,6 +49,7 @@
 		reg = <0x75>;
 		#address-cells = <1>;
 		#size-cells = <0>;
+		i2c-mux-never-disable;
 		i2c@1 {
 			#address-cells = <1>;
 			#size-cells = <0>;
@@ -108,7 +109,15 @@
 };
 
 &qspi {
-	status = "disabled";
+	status = "okay";
+
+	s25fs512s0: flash@0 {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "jedec,spi-nor";
+		spi-max-frequency = <50000000>;
+		reg = <0>;
+	};
 };
 
 &sata0 {

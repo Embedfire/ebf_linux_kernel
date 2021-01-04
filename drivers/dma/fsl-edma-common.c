@@ -109,10 +109,15 @@ void fsl_edma_chan_mux(struct fsl_edma_chan *fsl_chan,
 	u32 ch = fsl_chan->vchan.chan.chan_id;
 	void __iomem *muxaddr;
 	unsigned int chans_per_mux, ch_off;
+	int endian_diff[4] = {3, 1, -1, -3};
 	u32 dmamux_nr = fsl_chan->edma->drvdata->dmamuxs;
 
 	chans_per_mux = fsl_chan->edma->n_chans / dmamux_nr;
 	ch_off = fsl_chan->vchan.chan.chan_id % chans_per_mux;
+
+	if (fsl_chan->edma->drvdata->mux_swap)
+		ch_off += endian_diff[ch_off % 4];
+
 	muxaddr = fsl_chan->edma->muxbase[ch / chans_per_mux];
 	slot = EDMAMUX_CHCFG_SOURCE(slot);
 
@@ -305,6 +310,11 @@ static size_t fsl_edma_desc_residue(struct fsl_edma_chan *fsl_chan,
 	return len;
 }
 
+void fsl_edma_get_realcnt(struct fsl_edma_chan *fsl_chan)
+{
+	fsl_chan->chn_real_count = fsl_edma_desc_residue(fsl_chan, NULL, true);
+}
+
 enum dma_status fsl_edma_tx_status(struct dma_chan *chan,
 		dma_cookie_t cookie, struct dma_tx_state *txstate)
 {
@@ -314,8 +324,12 @@ enum dma_status fsl_edma_tx_status(struct dma_chan *chan,
 	unsigned long flags;
 
 	status = dma_cookie_status(chan, cookie, txstate);
-	if (status == DMA_COMPLETE)
+	if (status == DMA_COMPLETE) {
+		spin_lock_irqsave(&fsl_chan->vchan.lock, flags);
+		txstate->residue = fsl_chan->chn_real_count;
+		spin_unlock_irqrestore(&fsl_chan->vchan.lock, flags);
 		return status;
+	}
 
 	if (!txstate)
 		return fsl_chan->status;

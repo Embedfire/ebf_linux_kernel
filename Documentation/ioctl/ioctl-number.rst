@@ -158,7 +158,8 @@ Code  Seq#    Include File                                           Comments
 'I'   00-0F  drivers/isdn/divert/isdn_divert.h                       conflict!
 'I'   40-4F  linux/mISDNif.h                                         conflict!
 'J'   00-1F  drivers/scsi/gdth_ioctl.h
-'K'   all    linux/kd.h
+'K'   all    linux/kd.h                                              conflict!
+'K'   00-01  linux/caam_keygen.h                                     conflict! caam driver
 'L'   00-1F  linux/loop.h                                            conflict!
 'L'   10-1F  drivers/scsi/mpt3sas/mpt3sas_ctl.h                      conflict!
 'L'   20-2F  linux/lightnvm.h
@@ -180,6 +181,7 @@ Code  Seq#    Include File                                           Comments
 'R'   00-1F  linux/random.h                                          conflict!
 'R'   01     linux/rfkill.h                                          conflict!
 'R'   C0-DF  net/bluetooth/rfcomm.h
+'R'   E0     uapi/linux/fsl_mc.h
 'S'   all    linux/cdrom.h                                           conflict!
 'S'   80-81  scsi/scsi_ioctl.h                                       conflict!
 'S'   82-FF  scsi/scsi.h                                             conflict!

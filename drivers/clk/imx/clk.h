@@ -4,16 +4,20 @@
 
 #include <linux/spinlock.h>
 #include <linux/clk-provider.h>
+#include <soc/imx/src.h>
 
 extern spinlock_t imx_ccm_lock;
 
 void imx_check_clocks(struct clk *clks[], unsigned int count);
 void imx_check_clk_hws(struct clk_hw *clks[], unsigned int count);
-void imx_register_uart_clocks(struct clk ** const clks[]);
+void imx_register_uart_clocks(void);
 void imx_mmdc_mask_handshake(void __iomem *ccm_base, unsigned int chn);
 void imx_unregister_clocks(struct clk *clks[], unsigned int count);
 
 extern void imx_cscmr1_fixup(u32 *val);
+extern struct imx_sema4_mutex *amp_power_mutex;
+extern struct imx_shared_mem *shared_mem;
+extern bool uart_from_osc;
 
 enum imx_pllv1_type {
 	IMX_PLLV1_IMX1,
@@ -94,8 +98,9 @@ struct imx_pll14xx_clk {
 #define imx_clk_mux(name, reg, shift, width, parents, num_parents) \
 	to_clk(imx_clk_hw_mux(name, reg, shift, width, parents, num_parents))
 
-struct clk *imx_clk_pll14xx(const char *name, const char *parent_name,
-		 void __iomem *base, const struct imx_pll14xx_clk *pll_clk);
+struct clk *imx_dev_clk_pll14xx(struct device *dev, const char *name,
+				const char *parent_name, void __iomem *base,
+				const struct imx_pll14xx_clk *pll_clk);
 
 struct clk *imx_clk_pllv1(enum imx_pllv1_type type, const char *name,
 		const char *parent, void __iomem *base);
@@ -124,6 +129,25 @@ enum imx_pllv3_type {
 	IMX_PLLV3_SYS_VF610,
 	IMX_PLLV3_DDR_IMX7,
 	IMX_PLLV3_AV_IMX7,
+};
+
+#define MAX_SHARED_CLK_NUMBER		100
+#define SHARED_MEM_MAGIC_NUMBER		0x12345678
+#define MCC_POWER_SHMEM_NUMBER		(6)
+
+struct imx_shared_clk {
+	struct clk *self;
+	struct clk *parent;
+	void *m4_clk;
+	void *m4_clk_parent;
+	u8 ca9_enabled;
+	u8 cm4_enabled;
+};
+
+struct imx_shared_mem {
+	u32 ca9_valid;
+	u32 cm4_valid;
+	struct imx_shared_clk imx_clk[MAX_SHARED_CLK_NUMBER];
 };
 
 struct clk_hw *imx_clk_hw_pllv3(enum imx_pllv3_type type, const char *name,
@@ -180,6 +204,13 @@ struct clk_hw *imx_clk_hw_busy_divider(const char *name, const char *parent_name
 struct clk_hw *imx_clk_hw_busy_mux(const char *name, void __iomem *reg, u8 shift,
 			     u8 width, void __iomem *busy_reg, u8 busy_shift,
 			     const char * const *parent_names, int num_parents);
+
+int imx_update_shared_mem(struct clk_hw *hw, bool enable);
+
+static inline int clk_on_imx6sx(void)
+{
+	return of_machine_is_compatible("fsl,imx6sx");
+}
 
 struct clk_hw *imx7ulp_clk_composite(const char *name,
 				     const char * const *parent_names,
@@ -285,6 +316,25 @@ static inline struct clk *imx_clk_gate(const char *name, const char *parent,
 			shift, 0, &imx_ccm_lock);
 }
 
+static inline struct clk *imx_dev_clk_gate(struct device *dev,
+		const char *name, const char *parent,
+		void __iomem *reg, u8 shift)
+{
+	return clk_register_gate(dev, name, parent, CLK_SET_RATE_PARENT, reg,
+			shift, 0, &imx_ccm_lock);
+}
+
+struct clk *imx_dev_clk_gate_shared(struct device *dev, const char *name,
+					const char *parent, void __iomem *reg,
+					u8 shift, unsigned int *share_count);
+
+static inline struct clk *imx_clk_gate_shared(const char *name,
+		const char *parent, void __iomem *reg, u8 shift,
+		unsigned int *share_count)
+{
+	return imx_dev_clk_gate_shared(NULL, name, parent, reg, shift, share_count);
+}
+
 static inline struct clk_hw *imx_clk_hw_gate_flags(const char *name, const char *parent,
 		void __iomem *reg, u8 shift, unsigned long flags)
 {
@@ -354,7 +404,17 @@ static inline struct clk *imx_clk_gate2_cgr(const char *name,
 static inline struct clk_hw *imx_clk_hw_gate3(const char *name, const char *parent,
 		void __iomem *reg, u8 shift)
 {
-	return clk_hw_register_gate(NULL, name, parent,
+	/*
+	 * per design team's suggestion, clk root is NOT consuming
+	 * much power, and clk root enable/disable does NOT have domain
+	 * control, so they suggest to leave clk root always on when
+	 * M4 is enabled.
+	 */
+	if (imx_src_is_m4_enabled())
+		return clk_hw_register_fixed_factor(NULL, name, parent,
+						 CLK_SET_RATE_PARENT, 1, 1);
+	else
+		return clk_hw_register_gate(NULL, name, parent,
 			CLK_SET_RATE_PARENT | CLK_OPS_PARENT_ENABLE,
 			reg, shift, 0, &imx_ccm_lock);
 }
@@ -394,6 +454,15 @@ static inline struct clk_hw *imx_clk_hw_mux(const char *name, void __iomem *reg,
 			width, 0, &imx_ccm_lock);
 }
 
+static inline struct clk *imx_dev_clk_mux(struct device *dev, const char *name,
+			void __iomem *reg, u8 shift, u8 width,
+			const char * const *parents, int num_parents)
+{
+	return clk_register_mux(dev, name, parents, num_parents,
+			CLK_SET_RATE_NO_REPARENT | CLK_SET_PARENT_GATE,
+			reg, shift, width, 0, &imx_ccm_lock);
+}
+
 static inline struct clk *imx_clk_mux2(const char *name, void __iomem *reg,
 			u8 shift, u8 width, const char * const *parents,
 			int num_parents)
@@ -424,6 +493,16 @@ static inline struct clk *imx_clk_mux_flags(const char *name,
 			&imx_ccm_lock);
 }
 
+static inline struct clk *imx_dev_clk_mux_flags(struct device *dev,
+			const char *name, void __iomem *reg, u8 shift,
+			u8 width, const char * const *parents, int num_parents,
+			unsigned long flags)
+{
+	return clk_register_mux(dev, name, parents, num_parents,
+			flags | CLK_SET_RATE_NO_REPARENT | CLK_SET_PARENT_GATE,
+			reg, shift, width, 0, &imx_ccm_lock);
+}
+
 static inline struct clk *imx_clk_mux2_flags(const char *name,
 		void __iomem *reg, u8 shift, u8 width,
 		const char * const *parents,
@@ -444,6 +523,14 @@ static inline struct clk_hw *imx_clk_hw_mux_flags(const char *name,
 	return clk_hw_register_mux(NULL, name, parents, num_parents,
 				   flags | CLK_SET_RATE_NO_REPARENT,
 				   reg, shift, width, 0, &imx_ccm_lock);
+}
+
+static inline struct clk *imx_clk_pll14xx(const char *name,
+					const char *parent_name,
+					void __iomem *base,
+					const struct imx_pll14xx_clk *pll_clk)
+{
+	return imx_dev_clk_pll14xx(NULL, name, parent_name, base, pll_clk);
 }
 
 struct clk_hw *imx_clk_hw_cpu(const char *name, const char *parent_name,
@@ -470,4 +557,7 @@ struct clk_hw *imx_clk_divider_gate(const char *name, const char *parent_name,
 		unsigned long flags, void __iomem *reg, u8 shift, u8 width,
 		u8 clk_divider_flags, const struct clk_div_table *table,
 		spinlock_t *lock);
+
+void clk_set_delta_k(struct clk_hw *hw, short int delta_k);
+void clk_get_pll_setting(struct clk_hw *hw, u32 *pll_div_ctrl0, u32 *pll_div_ctrl1);
 #endif

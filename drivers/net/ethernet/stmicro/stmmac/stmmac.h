@@ -88,6 +88,7 @@ struct stmmac_channel {
 	struct napi_struct rx_napi ____cacheline_aligned_in_smp;
 	struct napi_struct tx_napi ____cacheline_aligned_in_smp;
 	struct stmmac_priv *priv_data;
+	spinlock_t lock;
 	u32 index;
 };
 
@@ -173,6 +174,7 @@ struct stmmac_priv {
 	struct stmmac_channel channel[STMMAC_CH_MAX];
 
 	int speed;
+	bool mdio_rst_after_resume;
 	unsigned int flow_ctrl;
 	unsigned int pause;
 	struct mii_bus *mii;

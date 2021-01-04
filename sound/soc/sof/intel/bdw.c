@@ -483,8 +483,11 @@ static int bdw_probe(struct snd_sof_dev *sdev)
 
 	/* register our IRQ */
 	sdev->ipc_irq = platform_get_irq(pdev, desc->irqindex_host_ipc);
-	if (sdev->ipc_irq < 0)
+	if (sdev->ipc_irq < 0) {
+		dev_err(sdev->dev, "error: failed to get IRQ at index %d\n",
+			desc->irqindex_host_ipc);
 		return sdev->ipc_irq;
+	}
 
 	dev_dbg(sdev->dev, "using IRQ %d\n", sdev->ipc_irq);
 	ret = devm_request_threaded_irq(sdev->dev, sdev->ipc_irq,
@@ -554,6 +557,11 @@ const struct snd_sof_dsp_ops sof_bdw_ops = {
 	.ipc_msg_data	= intel_ipc_msg_data,
 	.ipc_pcm_params	= intel_ipc_pcm_params,
 
+	/* machine driver */
+	.machine_check = sof_machine_check,
+	.machine_register = sof_machine_register,
+	.machine_unregister = sof_machine_unregister,
+
 	/* debug */
 	.debug_map  = bdw_debugfs,
 	.debug_map_count    = ARRAY_SIZE(bdw_debugfs),
@@ -571,7 +579,14 @@ const struct snd_sof_dsp_ops sof_bdw_ops = {
 
 	/* DAI drivers */
 	.drv = bdw_dai,
-	.num_drv = ARRAY_SIZE(bdw_dai)
+	.num_drv = ARRAY_SIZE(bdw_dai),
+
+	/* ALSA HW info flags */
+	.hw_info =	SNDRV_PCM_INFO_MMAP |
+			SNDRV_PCM_INFO_MMAP_VALID |
+			SNDRV_PCM_INFO_INTERLEAVED |
+			SNDRV_PCM_INFO_PAUSE |
+			SNDRV_PCM_INFO_NO_PERIOD_WAKEUP,
 };
 EXPORT_SYMBOL(sof_bdw_ops);
 

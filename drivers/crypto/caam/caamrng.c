@@ -133,7 +133,7 @@ static inline int submit_job(struct caam_rng_ctx *ctx, int to_current)
 	dev_dbg(jrdev, "submitting job %d\n", !(to_current ^ ctx->current_buf));
 	init_completion(&bd->filled);
 	err = caam_jr_enqueue(jrdev, desc, rng_done, ctx);
-	if (err)
+	if (err != -EINPROGRESS)
 		complete(&bd->filled); /* don't wait on failed job*/
 	else
 		atomic_inc(&bd->empty); /* note if pending */
@@ -153,7 +153,7 @@ static int caam_read(struct hwrng *rng, void *data, size_t max, bool wait)
 		if (atomic_read(&bd->empty) == BUF_EMPTY) {
 			err = submit_job(ctx, 1);
 			/* if can't submit job, can't even wait */
-			if (err)
+			if (err != -EINPROGRESS)
 				return 0;
 		}
 		/* no immediate data, so exit if not waiting */
@@ -258,6 +258,49 @@ static void caam_cleanup(struct hwrng *rng)
 	rng_unmap_ctx(rng_ctx);
 }
 
+#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_RNG_TEST
+static inline void test_len(struct hwrng *rng, size_t len, bool wait)
+{
+	u8 *buf;
+	int real_len;
+
+	buf = kzalloc(sizeof(u8) * len, GFP_KERNEL);
+	real_len = rng->read(rng, buf, len, wait);
+	if (real_len == 0 && wait)
+		pr_err("WAITING FAILED\n");
+	pr_info("wanted %zu bytes, got %d\n", len, real_len);
+	print_hex_dump(KERN_INFO, "random bytes@: ", DUMP_PREFIX_ADDRESS,
+		       16, 4, buf, real_len, 1);
+	kfree(buf);
+}
+
+static inline void test_mode_once(struct hwrng *rng, bool wait)
+{
+#define TEST_CHUNK (RN_BUF_SIZE / 4)
+
+	test_len(rng, TEST_CHUNK, wait);
+	test_len(rng, RN_BUF_SIZE * 2, wait);
+	test_len(rng, RN_BUF_SIZE * 2 - TEST_CHUNK, wait);
+}
+
+static inline void test_mode(struct hwrng *rng, bool wait)
+{
+#define TEST_PASS 1
+	int i;
+
+	for (i = 0; i < TEST_PASS; i++)
+		test_mode_once(rng, wait);
+}
+
+static void self_test(struct hwrng *rng)
+{
+	pr_info("testing without waiting\n");
+	test_mode(rng, false);
+	pr_info("testing with waiting\n");
+	test_mode(rng, true);
+}
+#endif
+
 static int caam_init_buf(struct caam_rng_ctx *ctx, int buf_id)
 {
 	struct buf_data *bd = &ctx->bufs[buf_id];
@@ -320,10 +363,10 @@ int caam_rng_init(struct device *ctrldev)
 
 	/* Check for an instantiated RNG before registration */
 	if (priv->era < 10)
-		rng_inst = (rd_reg32(&priv->ctrl->perfmon.cha_num_ls) &
+		rng_inst = (rd_reg32(&priv->jr[0]->perfmon.cha_num_ls) &
 			    CHA_ID_LS_RNG_MASK) >> CHA_ID_LS_RNG_SHIFT;
 	else
-		rng_inst = rd_reg32(&priv->ctrl->vreg.rng) & CHA_VER_NUM_MASK;
+		rng_inst = rd_reg32(&priv->jr[0]->vreg.rng) & CHA_VER_NUM_MASK;
 
 	if (!rng_inst)
 		return 0;
@@ -341,6 +384,10 @@ int caam_rng_init(struct device *ctrldev)
 	err = caam_init_rng(rng_ctx, dev);
 	if (err)
 		goto free_rng_ctx;
+
+#ifdef CONFIG_CRYPTO_DEV_FSL_CAAM_RNG_TEST
+	self_test(&caam_rng);
+#endif
 
 	dev_info(dev, "registering rng-caam\n");
 

@@ -9,6 +9,7 @@
  * Copyright (c) 2004 Freescale Semiconductor, Inc.
  */
 #include <linux/bitops.h>
+#include <linux/of.h>
 #include <linux/phy.h>
 #include <linux/module.h>
 
@@ -28,6 +29,7 @@
 
 #define RTL8211F_INSR				0x1d
 
+#define RTL8211F_RX_DELAY			BIT(3)
 #define RTL8211F_TX_DELAY			BIT(8)
 #define RTL8211E_TX_DELAY			BIT(1)
 #define RTL8211E_RX_DELAY			BIT(2)
@@ -49,9 +51,19 @@
 
 #define RTL_GENERIC_PHYID			0x001cc800
 
+/* page 0xa43, register 0x19 */
+#define RTL8211F_PHYCR2				0x19
+#define RTL8211F_CLKOUT_EN			BIT(0)
+
+#define RTL821X_CLKOUT_EN_FEATURE		(1 << 0)
+
 MODULE_DESCRIPTION("Realtek PHY driver");
 MODULE_AUTHOR("Johnson Leung");
 MODULE_LICENSE("GPL");
+
+struct rtl821x_priv {
+	u32 quirks;
+};
 
 static int rtl821x_read_page(struct phy_device *phydev)
 {
@@ -61,6 +73,23 @@ static int rtl821x_read_page(struct phy_device *phydev)
 static int rtl821x_write_page(struct phy_device *phydev, int page)
 {
 	return __phy_write(phydev, RTL821x_PAGE_SELECT, page);
+}
+
+static int rtl821x_probe(struct phy_device *phydev)
+{
+	struct device *dev = &phydev->mdio.dev;
+	struct rtl821x_priv *priv;
+
+	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	if (of_property_read_bool(dev->of_node, "rtl821x,clkout_en"))
+		priv->quirks |= RTL821X_CLKOUT_EN_FEATURE;
+
+	phydev->priv = priv;
+
+	return 0;
 }
 
 static int rtl8201_ack_interrupt(struct phy_device *phydev)
@@ -171,42 +200,58 @@ static int rtl8211c_config_init(struct phy_device *phydev)
 
 static int rtl8211f_config_init(struct phy_device *phydev)
 {
-	struct device *dev = &phydev->mdio.dev;
-	u16 val;
+	u16 txdly = 0;
+	u16 rxdly = 0;
 	int ret;
+	struct rtl821x_priv *priv = phydev->priv;
 
 	/* enable TX-delay for rgmii-{id,txid}, and disable it for rgmii and
 	 * rgmii-rxid. The RX-delay can be enabled by the external RXDLY pin.
 	 */
 	switch (phydev->interface) {
-	case PHY_INTERFACE_MODE_RGMII:
-	case PHY_INTERFACE_MODE_RGMII_RXID:
-		val = 0;
-		break;
 	case PHY_INTERFACE_MODE_RGMII_ID:
+		rxdly = RTL8211F_RX_DELAY;
+		txdly = RTL8211F_TX_DELAY;
+		break;
+	case PHY_INTERFACE_MODE_RGMII_RXID:
+		rxdly = RTL8211F_RX_DELAY;
+		break;
 	case PHY_INTERFACE_MODE_RGMII_TXID:
-		val = RTL8211F_TX_DELAY;
+		txdly = RTL8211F_TX_DELAY;
 		break;
 	default: /* the rest of the modes imply leaving delay as is. */
 		return 0;
 	}
 
-	ret = phy_modify_paged_changed(phydev, 0xd08, 0x11, RTL8211F_TX_DELAY,
-				       val);
+	ret = phy_modify_paged(phydev, 0xd08, 0x11, RTL8211F_TX_DELAY, txdly);
 	if (ret < 0) {
-		dev_err(dev, "Failed to update the TX delay register\n");
+		dev_err(&phydev->mdio.dev, "tx delay set failed\n");
 		return ret;
-	} else if (ret) {
-		dev_dbg(dev,
-			"%s 2ns TX delay (and changing the value from pin-strapping RXD1 or the bootloader)\n",
-			val ? "Enabling" : "Disabling");
-	} else {
-		dev_dbg(dev,
-			"2ns TX delay was already %s (by pin-strapping RXD1 or bootloader configuration)\n",
-			val ? "enabled" : "disabled");
 	}
 
-	return 0;
+	ret = phy_modify_paged(phydev, 0xd08, 0x15, RTL8211F_RX_DELAY, rxdly);
+	if (ret < 0) {
+		dev_err(&phydev->mdio.dev, "rx delay set failed\n");
+		return ret;
+	}
+
+	if (priv->quirks & RTL821X_CLKOUT_EN_FEATURE) {
+		ret = phy_modify_paged(phydev, 0xa43, RTL8211F_PHYCR2,
+				       RTL8211F_CLKOUT_EN, RTL8211F_CLKOUT_EN);
+		if (ret < 0) {
+			dev_err(&phydev->mdio.dev, "clkout enable failed\n");
+			return ret;
+		}
+	} else {
+		ret = phy_modify_paged(phydev, 0xa43, RTL8211F_PHYCR2,
+				       RTL8211F_CLKOUT_EN, 0);
+		if (ret < 0) {
+			dev_err(&phydev->mdio.dev, "clkout disable failed\n");
+			return ret;
+		}
+	}
+
+	return ret;
 }
 
 static int rtl8211e_config_init(struct phy_device *phydev)
@@ -514,6 +559,7 @@ static struct phy_driver realtek_drvs[] = {
 	}, {
 		PHY_ID_MATCH_EXACT(0x001cc916),
 		.name		= "RTL8211F Gigabit Ethernet",
+		.probe		= rtl821x_probe,
 		.config_init	= &rtl8211f_config_init,
 		.ack_interrupt	= &rtl8211f_ack_interrupt,
 		.config_intr	= &rtl8211f_config_intr,

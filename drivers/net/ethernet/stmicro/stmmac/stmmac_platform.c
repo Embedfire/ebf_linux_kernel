@@ -507,7 +507,8 @@ stmmac_probe_config_dt(struct platform_device *pdev, const char **mac)
 
 	if (of_device_is_compatible(np, "snps,dwmac-4.00") ||
 	    of_device_is_compatible(np, "snps,dwmac-4.10a") ||
-	    of_device_is_compatible(np, "snps,dwmac-4.20a")) {
+	    of_device_is_compatible(np, "snps,dwmac-4.20a") ||
+	    of_device_is_compatible(np, "snps,dwmac-5.10a")) {
 		plat->has_gmac4 = 1;
 		plat->has_gmac = 0;
 		plat->pmt = 1;
@@ -700,7 +701,7 @@ int stmmac_pltfr_remove(struct platform_device *pdev)
 	struct plat_stmmacenet_data *plat = priv->plat;
 	int ret = stmmac_dvr_remove(&pdev->dev);
 
-	if (plat->exit)
+	if (plat->exit && ndev && netif_running(ndev))
 		plat->exit(pdev, plat->bsp_priv);
 
 	stmmac_remove_config_dt(pdev, plat);
@@ -725,7 +726,7 @@ static int stmmac_pltfr_suspend(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 
 	ret = stmmac_suspend(dev);
-	if (priv->plat->exit)
+	if (priv->plat->exit && ndev && netif_running(ndev))
 		priv->plat->exit(pdev, priv->plat->bsp_priv);
 
 	return ret;
@@ -744,7 +745,7 @@ static int stmmac_pltfr_resume(struct device *dev)
 	struct stmmac_priv *priv = netdev_priv(ndev);
 	struct platform_device *pdev = to_platform_device(dev);
 
-	if (priv->plat->init)
+	if (priv->plat->init && ndev && netif_running(ndev))
 		priv->plat->init(pdev, priv->plat->bsp_priv);
 
 	return stmmac_resume(dev);
