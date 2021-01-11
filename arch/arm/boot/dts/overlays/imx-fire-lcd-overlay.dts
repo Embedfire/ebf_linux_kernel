@@ -6,7 +6,6 @@
  * date : 2019-11-19 
  * version : A001
  */
-#include "../imx6ul-pinfunc.h"
 #include "../imx6ull-pinfunc.h"
 #include "../imx6ull-pinfunc-snvs.h"
 #include "dt-bindings/interrupt-controller/irq.h"
@@ -54,29 +53,6 @@
                 };
             };
         fragment@1 {
-            target = <&i2c1>;
-            __overlay__ { 
-                clock-frequency = <100000>;
-                pinctrl-names = "default";
-                pinctrl-0 = <&pinctrl_i2c1>;
-                status = "okay";
-                gtxx_tsc@5d {
-                	compatible = "goodix,gt9xx";
-                	pinctrl-0 = <&pinctrl_tsc_reset>;
-                	pinctrl-1 = <&pinctrl_tsc_irq>;
-                	reg = <0x5d>;
-                	status = "okay";
-                	/*gpio*/
-                	reset-gpios = <&gpio3 4 GPIO_ACTIVE_LOW>;
-                	irq-gpios = <&gpio5 9 GPIO_ACTIVE_HIGH>;
-                	/*中断*/
-                	interrupt-parent = <&gpio5>;
-                	interrupts = <9 IRQ_TYPE_EDGE_FALLING>;
-                	irq-flags = <2>;		/*1:rising 2: falling*/	
-                };    
-            };
-        };
-        fragment@2 {
                 target = <&iomuxc>;
                 __overlay__ {
                     pinctrl_lcdif_ctrl: lcdifctrlgrp {
@@ -120,31 +96,9 @@
                             MX6UL_PAD_GPIO1_IO08__PWM1_OUT   0x000010B1
                         >;
                     };
-                    pinctrl_tsc_reset: tscresetgrp {
-                        fsl,pins = <
-                            /* used for tsc reset */
-                            MX6UL_PAD_LCD_RESET__GPIO3_IO04		0x05
-                        >;
-                    };
-                    pinctrl_i2c1: i2c1grp {
-                        fsl,pins = <
-                    MX6UL_PAD_UART4_TX_DATA__I2C1_SCL 0x4001b8b0
-                    MX6UL_PAD_UART4_RX_DATA__I2C1_SDA 0x4001b8b0
-                >;
-            };
-            };
-        };
-        fragment@3 {
-            target = <&iomuxc_snvs>;
-            __overlay__ {
-                pinctrl_tsc_irq: tsc_irq {
-                    fsl,pins = <
-                        MX6ULL_PAD_SNVS_TAMPER9__GPIO5_IO09        0x4001b8b0
-                    >;
                 };
-            };
         };
-	fragment@4 {
+	fragment@2 {
 		target-path = "/";
 		__overlay__ {
 			backlight {
@@ -156,7 +110,7 @@
 			};			
 		};	
 	};	
-	fragment@5 {
+	fragment@3 {
 		target=<&pwm1>;
 		__overlay__ {
 			pinctrl-names = "default";

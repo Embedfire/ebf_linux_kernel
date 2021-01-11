@@ -1,0 +1,63 @@
+/*
+ * Copyright (C) 2019 - All Rights Reserved by 
+ * filename : imx-fire-lcd5-overlay.dts
+ * brief : Device Tree overlay for EBF6ull lcd5' or lcd7' device
+ * author : embedfire
+ * date : 2019-11-19 
+ * version : A001
+ */
+#include "../imx6ul-pinfunc.h"
+#include "../imx6ull-pinfunc.h"
+#include "../imx6ull-pinfunc-snvs.h"
+#include "dt-bindings/interrupt-controller/irq.h"
+#include "dt-bindings/gpio/gpio.h"
+/dts-v1/;
+/plugin/;
+
+/ {
+	 compatible = "fsl,imx6ull-14x14-evk", "fsl,imx6ull";
+
+		fragment@0 {
+			target = <&i2c1>;
+			__overlay__ { 
+				#address-cells = <1>;
+				#size-cells = <0>;
+				gtxx_tsc@5d {
+					compatible = "goodix,gt9xx";
+					pinctrl-0 = <&pinctrl_tsc_reset>;
+					pinctrl-1 = <&pinctrl_tsc_irq>;
+					reg = <0x5d>;
+					status = "okay";
+					/*gpio*/
+					reset-gpios = <&gpio3 4 GPIO_ACTIVE_LOW>;
+					irq-gpios = <&gpio5 9 GPIO_ACTIVE_HIGH>;
+					/*interrupt­*/
+					interrupt-parent = <&gpio5>;
+					interrupts = <9 IRQ_TYPE_EDGE_FALLING>;
+					irq-flags = <2>;		/*1:rising 2: falling*/	
+				};
+			};
+		};
+		fragment@1 {
+				target = <&iomuxc>;
+				__overlay__ {
+				pinctrl_tsc_reset: tscresetgrp {
+					fsl,pins = <
+						/* used for tsc reset */
+						MX6UL_PAD_LCD_RESET__GPIO3_IO04		0x05
+					>;
+				};
+			};
+		};
+		fragment@2 {
+			target = <&iomuxc_snvs>;
+			__overlay__ {
+				pinctrl_tsc_irq: tsc_irq {
+					fsl,pins = <
+						MX6ULL_PAD_SNVS_TAMPER9__GPIO5_IO09        0x4001b8b0
+					>;
+				};
+			};
+		};
+};
+

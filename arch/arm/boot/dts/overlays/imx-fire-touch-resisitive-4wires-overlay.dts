@@ -1,0 +1,48 @@
+/*
+ * Copyright (C) 2019 - All Rights Reserved by 
+ * filename : imx-fire-lcd5-overlay.dts
+ * brief : Device Tree overlay for Touch Screen Controller(tsc)
+ * author : embedfire
+ * date : 2019-11-19 
+ * version : A001
+ */
+#include "../imx6ul-pinfunc.h"
+#include "../imx6ull-pinfunc.h"
+#include "../imx6ull-pinfunc-snvs.h"
+#include "dt-bindings/interrupt-controller/irq.h"
+#include "dt-bindings/gpio/gpio.h"
+/dts-v1/;
+/plugin/;
+
+/ {
+		compatible = "fsl,imx6ull-14x14-evk", "fsl,imx6ull";
+		fragment@0 {
+			target = <&iomuxc>;
+				__overlay__ {
+						pinctrl_tsc: tscgrp {
+									fsl,pins = <
+										MX6UL_PAD_GPIO1_IO01__GPIO1_IO01	0xB0
+										MX6UL_PAD_GPIO1_IO02__GPIO1_IO02	0xB0
+										MX6UL_PAD_GPIO1_IO03__GPIO1_IO03	0xB0
+										MX6UL_PAD_GPIO1_IO04__GPIO1_IO04	0xB0
+									>;
+								};
+							};
+		};
+
+	fragment@1 {
+		target=<&tsc>;
+		__overlay__ {
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_tsc>;
+			xnur-gpio = <&gpio1 3 GPIO_ACTIVE_LOW>;
+			measure-delay-time = <0xfffff>;
+			pre-charge-time = <0xffff>;
+			touchscreen-average-samples = <32>;
+			status = "okay";
+		};
+
+	};
+
+};
+
