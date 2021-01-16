@@ -1,0 +1,75 @@
+/*
+ * Copyright (C) 2019 - All Rights Reserved by 
+ * filename : imx-fire-key-overlay.dts
+ * brief : Device Tree overlay for EBF6ull key device
+ * author : embedfire
+ * date : 2019-12-10
+ * version : A001
+ */
+
+#include "imx6ul-pinfunc.h"
+#include "imx6ull-pinfunc-snvs.h"
+#include "dt-bindings/input/linux-event-codes.h"
+#include "dt-bindings/gpio/gpio.h"
+#include <dt-bindings/clock/imx6ul-clock.h>
+#include "dt-bindings/interrupt-controller/irq.h"
+#include "dt-bindings/interrupt-controller/arm-gic.h"
+/dts-v1/;
+/plugin/;
+
+/{
+	
+	fragment@0 {
+		target = <&iomuxc>;
+		__overlay__ {
+			pinctrl_pwm3: pwm3grp {
+				fsl,pins = <
+					MX6UL_PAD_GPIO1_IO04__PWM3_OUT   0x000010B1
+				>;
+			};		
+			pinctrl_pwm7: pwm7grp {
+				fsl,pins = <
+					MX6UL_PAD_CSI_VSYNC__PWM7_OUT    0x000010B1
+				>;
+			};	
+			pinctrl_pwm8: pwm8grp {
+				fsl,pins = <
+					MX6UL_PAD_CSI_HSYNC__PWM8_OUT    0x000010B1
+				>;
+			};
+		};
+	};
+
+	fragment@1 {
+		target = <&pwm3>;
+		__overlay__ {
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_pwm3>;
+			status = "okay";
+		};
+	};
+
+	fragment@2 {
+		target = <&pwm7>;
+		__overlay__ {
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_pwm7>;
+			clocks = <&clks IMX6UL_CLK_PWM7>,
+				 			 <&clks IMX6UL_CLK_PWM7>;
+			status = "okay";
+		};
+	};
+
+
+	fragment@3 {
+		target = <&pwm8>;
+		__overlay__ {
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_pwm8>;
+			clocks = <&clks IMX6UL_CLK_PWM8>,
+				 			 <&clks IMX6UL_CLK_PWM8>;
+			status = "okay";
+		};
+	};
+
+};

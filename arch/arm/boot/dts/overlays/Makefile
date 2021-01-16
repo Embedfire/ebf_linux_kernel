@@ -29,6 +29,7 @@ dtbo-$(CONFIG_SOC_IMX6ULL) += \
 	imx-fire-led.dtbo	\
 	imx-fire-mpu6050.dtbo	\
 	imx-fire-pwm-led.dtbo	\
+	imx-fire-pwm-overlay.dts \
 	imx-fire-resistive-screen.dtbo	\
 	imx-fire-sound.dtbo		\
 	imx-fire-touch-capacitive-goodix.dtbo	\
