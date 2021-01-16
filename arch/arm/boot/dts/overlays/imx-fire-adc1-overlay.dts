@@ -41,6 +41,9 @@
 				__overlay__ {
 						pinctrl_adc1: adc1grp{
 						fsl,pins = <
+							MX6UL_PAD_GPIO1_IO00__GPIO1_IO00          0x000010B1
+							MX6UL_PAD_GPIO1_IO01__GPIO1_IO01          0x000010B1
+							MX6UL_PAD_GPIO1_IO02__GPIO1_IO02          0x000010B1
 							MX6UL_PAD_GPIO1_IO03__GPIO1_IO03          0x000010B1
 						>;
 					};				
