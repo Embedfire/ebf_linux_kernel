@@ -7,8 +7,9 @@
  * version : A001
  */
 
-#include "imx6ul-pinfunc.h"
-#include "imx6ull-pinfunc-snvs.h"
+#include "../imx6ul-pinfunc.h"
+#include "../imx6ull-pinfunc.h"
+#include "../imx6ull-pinfunc-snvs.h"
 #include "dt-bindings/input/linux-event-codes.h"
 #include "dt-bindings/gpio/gpio.h"
 #include <dt-bindings/clock/imx6ul-clock.h>
