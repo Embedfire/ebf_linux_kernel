@@ -922,6 +922,7 @@ dtb-$(CONFIG_ARCH_STM32) += \
 	stm32746g-eval.dtb \
 	stm32h743i-eval.dtb \
 	stm32h743i-disco.dtb \
+	stm32mp157a-basic.dtb\
 	stm32mp157a-star.dtb\
 	stm32mp157a-star-mipi.dtb\
 	stm32mp157a-star-bluetooth.dtb\
