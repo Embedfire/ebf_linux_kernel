@@ -22,9 +22,6 @@
 		serial1 = &usart1;
 		serial2 = &usart2;
 		serial3 = &usart3;
-		sdmmc1 = &sdmmc1;
-		sdmmc2 = &sdmmc2;
-		sdmmc3 = &sdmmc3;
 	};
 	clocks {
 		clk_ext_camera: clk-ext-camera {
