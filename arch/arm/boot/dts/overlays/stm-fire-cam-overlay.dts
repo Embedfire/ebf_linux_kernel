@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (C) STMicroelectronics 2018 - All Rights Reserved
+ * Author: Alexandre Torgue <alexandre.torgue@st.com>.
+ */
+
+/dts-v1/;
+/plugin/;
+//#include "../stm32mp157c.dtsi"
+#include <dt-bindings/pinctrl/stm32-pinfunc.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/mfd/st,stpmic1.h>
+#include <dt-bindings/gpio/gpio.h>
+
+/{
+	fragment@0 {
+		target=<&i2c2>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;     			
+			ov5640: camera@3c {
+				compatible = "ovti,ov5640";
+				reg = <0x3c>;
+				clocks = <&clk_ext_camera>;
+				clock-names = "xclk";
+				DOVDD-supply = <&v2v8>;
+				powerdown-gpios = <&gpioi 8 (GPIO_ACTIVE_HIGH | GPIO_PUSH_PULL)>;
+				reset-gpios = <&gpioi 11 (GPIO_ACTIVE_LOW | GPIO_PUSH_PULL)>;
+				rotation = <180>;
+				status = "okay";
+
+				port {
+					ov5640_0: endpoint {
+							remote-endpoint = <&dcmi_0>;
+							bus-width = <8>;
+							data-shift = <2>; /* lines 9:2 are used */
+							hsync-active = <0>;
+							vsync-active = <0>;
+							pclk-sample = <1>;
+							pclk-max-frequency = <77000000>;
+						};
+				};
+			};
+		};
+	};
+
+	fragment@1{
+		target-path="/";
+		__overlay__{
+			clocks {
+				clk_ext_camera: clk-ext-camera {
+					#clock-cells = <0>;
+					compatible = "fixed-clock";
+					clock-frequency = <24000000>;
+				};
+			};
+		};
+	};
+
+	fragment@2{
+		target=<&dcmi>;
+		__overlay__{
+			status = "okay";
+			pinctrl-names = "default", "sleep";
+			pinctrl-0 = <&dcmi_pins_a>;
+			pinctrl-1 = <&dcmi_sleep_pins_a>;
+
+			port {
+				dcmi_0: endpoint {
+					remote-endpoint = <&ov5640_0>;
+					bus-width = <8>;
+					hsync-active = <0>;
+					vsync-active = <0>;
+					pclk-sample = <1>;
+					pclk-max-frequency = <77000000>;
+				};
+			};
+		};
+	};
+
+	fragment@3{
+		target=<&pinctrl>;
+		__overlay__{
+			dcmi_pins_a: dcmi-0 {
+				pins {
+					pinmux = <STM32_PINMUX('A', 4,  AF13)>,/* DCMI_HSYNC */
+							<STM32_PINMUX('B', 7,  AF13)>,/* DCMI_VSYNC */
+							<STM32_PINMUX('A', 6,  AF13)>,/* DCMI_PIXCLK */
+							<STM32_PINMUX('H', 9,  AF13)>,/* DCMI_D0 */
+							<STM32_PINMUX('H', 10, AF13)>,/* DCMI_D1 */
+							<STM32_PINMUX('H', 11, AF13)>,/* DCMI_D2 */
+							<STM32_PINMUX('E', 1, AF13)>,/* DCMI_D3 */
+							<STM32_PINMUX('E', 11, AF13)>,/* DCMI_D4 */
+							<STM32_PINMUX('D', 3,  AF13)>,/* DCMI_D5 */
+							<STM32_PINMUX('E', 5,  AF13)>,/* DCMI_D6 */
+							<STM32_PINMUX('B', 9,  AF13)>;/* DCMI_D7 */
+					bias-disable;
+				};
+			};
+
+			dcmi_sleep_pins_a: dcmi-sleep-0 {
+				pins {
+					pinmux = <STM32_PINMUX('A', 4,  ANALOG)>,/* DCMI_HSYNC */
+							<STM32_PINMUX('B', 7,  ANALOG)>,/* DCMI_VSYNC */
+							<STM32_PINMUX('A', 6,  ANALOG)>,/* DCMI_PIXCLK */
+							<STM32_PINMUX('H', 9,  ANALOG)>,/* DCMI_D0 */
+							<STM32_PINMUX('H', 10, ANALOG)>,/* DCMI_D1 */
+							<STM32_PINMUX('H', 11, ANALOG)>,/* DCMI_D2 */
+							<STM32_PINMUX('E', 1, ANALOG)>,/* DCMI_D3 */
+							<STM32_PINMUX('E', 11, ANALOG)>,/* DCMI_D4 */
+							<STM32_PINMUX('D', 3,  ANALOG)>,/* DCMI_D5 */
+							<STM32_PINMUX('E', 5,  ANALOG)>,/* DCMI_D6 */
+							<STM32_PINMUX('B', 9,  ANALOG)>;/* DCMI_D7 */
+				};
+			};
+
+		};
+	};
+};

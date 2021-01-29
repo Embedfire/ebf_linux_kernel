@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (C) STMicroelectronics 2018 - All Rights Reserved
+ * Author: Alexandre Torgue <alexandre.torgue@st.com>.
+ */
+
+/dts-v1/;
+/plugin/;
+//#include "../stm32mp157c.dtsi"
+#include <dt-bindings/pinctrl/stm32-pinfunc.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/mfd/st,stpmic1.h>
+#include <dt-bindings/gpio/gpio.h>
+
+/
+{
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			gpio-keys {
+				compatible = "gpio-keys";
+				status = "okay";
+
+				Key0{
+					label = "Key 0";
+					gpios = <&gpiob 13 GPIO_ACTIVE_HIGH>;
+					linux,code=<KEY_0>;
+				};
+
+				Key1{
+					label = "Key 1";
+					gpios = <&gpioh 7 GPIO_ACTIVE_HIGH>;
+					linux,code=<KEY_1>;
+				};		
+				wakeup {
+					label = "user";
+					gpios = <&gpioa 0 GPIO_ACTIVE_HIGH>;
+					gpio-key,wakeup;
+					linux,code = <KEY_ENTER>;
+				};		
+	};            
+
+		};
+	};
+};

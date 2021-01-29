@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (C) STMicroelectronics 2018 - All Rights Reserved
+ * Author: Alexandre Torgue <alexandre.torgue@st.com>.
+ */
+
+/dts-v1/;
+/plugin/;
+//#include "../stm32mp157c.dtsi"
+#include <dt-bindings/pinctrl/stm32-pinfunc.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/mfd/st,stpmic1.h>
+#include <dt-bindings/gpio/gpio.h>
+
+/{
+	fragment@0 {
+		target=<&m_can1>;
+		__overlay__{
+			pinctrl-names = "default", "sleep";
+			pinctrl-0 = <&m_can1_pins_a>;
+			pinctrl-1 = <&m_can1_sleep_pins_a>;
+			status = "okay";           
+		};
+	};
+	fragment@1{
+		target=<&pinctrl>;
+		__overlay__{
+			m_can1_pins_a: m-can1-0 {
+				pins1 {
+					pinmux = <STM32_PINMUX('A', 12, AF9)>; /* CAN1_TX */
+					slew-rate = <0>;
+					drive-push-pull;
+					bias-disable;
+				};
+				pins2 {
+					pinmux = <STM32_PINMUX('A', 11, AF9)>; /* CAN1_RX */
+					bias-disable;
+				};
+			};
+
+			m_can1_sleep_pins_a: m_can1-sleep@0 {
+				pins {
+					pinmux = <STM32_PINMUX('H', 13, ANALOG)>, /* CAN1_TX */
+						 <STM32_PINMUX('I', 9, ANALOG)>; /* CAN1_RX */
+				};
+			};
+			
+		};
+	};
+};

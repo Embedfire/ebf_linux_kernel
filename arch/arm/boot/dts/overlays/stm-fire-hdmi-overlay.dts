@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (C) STMicroelectronics 2018 - All Rights Reserved
+ * Author: Alexandre Torgue <alexandre.torgue@st.com>.
+ */
+
+/dts-v1/;
+/plugin/;
+//#include "../stm32mp157c.dtsi"
+#include <dt-bindings/pinctrl/stm32-pinfunc.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/mfd/st,stpmic1.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+/{
+	fragment@0{
+		target-path="/";
+		__overlay__{
+			v3v3_hdmi: regulator-v3v3-hdmi {
+				compatible = "regulator-fixed";
+				regulator-name = "v3v3_hdmi";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			v1v2_hdmi: regulator-v1v2-hdmi {
+				compatible = "regulator-fixed";
+				regulator-name = "v1v2_hdmi";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+		};
+	};
+
+	fragment@1{
+		target=<&i2c2>;
+		__overlay__{
+			#address-cells = <1>;
+			#size-cells = <0>;  			
+			hdmi-transmitter@39 {
+				compatible = "sil,sii9022";
+				reg = <0x39>;
+				iovcc-supply = <&v3v3_hdmi>;
+				cvcc12-supply = <&v1v2_hdmi>;
+				reset-gpios = <&gpiof 3 GPIO_ACTIVE_LOW>;
+				interrupts = <2 IRQ_TYPE_EDGE_FALLING>;
+				interrupt-parent = <&gpioz>;
+				status = "okay";
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					port@0 {
+						reg = <0>;
+						sii9022_in: endpoint {
+							remote-endpoint = <&ltdc_ep0_out>;
+						};
+					};
+				};
+			};
+		};
+	};
+
+	fragment@2{
+		target=<&ltdc>;
+		__overlay__{
+			port {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				ltdc_ep0_out: endpoint@0 {
+					reg = <0>;
+					remote-endpoint = <&sii9022_in>;
+				};
+			};
+		};
+	};
+};

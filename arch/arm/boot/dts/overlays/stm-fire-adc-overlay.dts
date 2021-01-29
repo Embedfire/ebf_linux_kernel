@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (C) STMicroelectronics 2018 - All Rights Reserved
+ * Author: Alexandre Torgue <alexandre.torgue@st.com>.
+ */
+
+/dts-v1/;
+/plugin/;
+//#include "../stm32mp157c.dtsi"
+#include <dt-bindings/pinctrl/stm32-pinfunc.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/mfd/st,stpmic1.h>
+#include <dt-bindings/gpio/gpio.h>
+
+/{
+    fragment@0{
+        target=<&adc>;
+        __overlay__{
+            /*
+                pinctrl-names = "default";
+                pinctrl-0 = <&adc12_ain_pins_a>, <&adc12_usb_pwr_pins_a>;
+                
+                vdd-supply = <&vdd>;
+            */            
+            vdda-supply = <&vdd>;
+            vref-supply = <&vdd>;
+            status = "okay";
+            adc1: adc@0 {
+                /*
+                * Type-C USB_PWR_CC1 & USB_PWR_CC2 on in18 & in19.
+                * Use at least 5 * RC time, e.g. 5 * (Rp + Rd) * C:
+                * 5 * (56 + 47kOhms) * 5pF => 2.5us.
+                * Use arbitrary margin here (e.g. 5Ã‚Âµs).
+                */
+                st,min-sample-time-nsecs = <5000>;
+                /* AIN connector, USB Type-C CC1 & CC2 */
+                st,adc-channels = <0 1 6 13 18 19>;
+                status = "disabled";
+            };
+            adc2: adc@100 {
+                /* AIN connector, temp sensor, USB Type-C CC1 & CC2 */
+                st,adc-channels = <0>;
+                /* temperature sensor min sample time */
+                st,min-sample-time-nsecs = <10000>;
+                status = "okay";
+            };
+            adc_temp: temp {
+                status = "disabled";
+            };
+        };
+    };
+
+};

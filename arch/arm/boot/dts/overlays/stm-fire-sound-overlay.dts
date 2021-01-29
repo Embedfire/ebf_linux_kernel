@@ -1,0 +1,151 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (C) STMicroelectronics 2018 - All Rights Reserved
+ * Author: Alexandre Torgue <alexandre.torgue@st.com>.
+ */
+
+/dts-v1/;
+/plugin/;
+//#include "../stm32mp157c.dtsi"
+#include <dt-bindings/pinctrl/stm32-pinfunc.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/mfd/st,stpmic1.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/clock/stm32mp1-clks.h>
+/{
+	fragment@0{
+		target-path="/";
+		__overlay__{
+			sound {
+				compatible = "audio-graph-card";
+				label = "wm8960-audio";
+				dais = <&sai2a_port &sai2b_port>;
+				routing = "Playback", "mclk", "Capture", "mclk", "LINPUT2", "MICB", "LINPUT3", "MICB", "RINPUT1", "MICB", "RINPUT2", "MICB";
+				status = "okay";
+			};           
+		};
+	};
+
+	fragment@1{
+		target=<&sai2>;
+		__overlay__{
+			clocks = <&rcc SAI2>, <&rcc PLL3_Q>, <&rcc PLL3_R>;
+			clock-names = "pclk", "x8k", "x11k";
+			pinctrl-names = "default", "sleep";
+			pinctrl-0 = <&sai2a_pins_a>, <&sai2b_pins_b>;
+			pinctrl-1 = <&sai2a_sleep_pins_a>, <&sai2b_sleep_pins_b>;
+			status = "okay";
+
+			sai2a: audio-controller@4400b004 {
+				#clock-cells = <0>;
+				dma-names = "tx";
+				clocks = <&rcc SAI2_K>;
+				clock-names = "sai_ck";
+				status = "okay";
+
+				sai2a_port: port {
+					sai2a_endpoint: endpoint {
+						remote-endpoint = <&wm8960_tx_endpoint>;
+						format = "i2s";
+						mclk-fs = <256>;
+					};
+				};
+			};
+
+			sai2b: audio-controller@4400b024 {
+				dma-names = "rx";
+				clocks = <&rcc SAI2_K>, <&sai2a>;
+				clock-names = "sai_ck", "MCLK";
+				status = "okay";
+				st,sync = <&sai2a 2>;
+				sai2b_port: port {
+					sai2b_endpoint: endpoint {
+						remote-endpoint = <&wm8960_rx_endpoint>;	
+						format = "i2s";
+						mclk-fs = <256>;
+					};
+				};
+			};
+		};
+	};
+
+	fragment@2{
+		target=<&pinctrl>;
+		__overlay__{
+			sai2a_pins_a: sai2a-0 {
+				pins {
+					pinmux = <STM32_PINMUX('I', 5, AF10)>, /* SAI2_SCK_A */
+						 <STM32_PINMUX('I', 6, AF10)>, /* SAI2_SD_A */
+						 <STM32_PINMUX('I', 7, AF10)>, /* SAI2_FS_A */
+						 <STM32_PINMUX('E', 0, AF10)>; /* SAI2_MCLK_A */
+					slew-rate = <0>;
+					drive-push-pull;
+					bias-disable;
+				};
+			};
+			sai2a_sleep_pins_a: sai2a-1 {
+				pins {
+					pinmux = <STM32_PINMUX('I', 5, ANALOG)>, /* SAI2_SCK_A */
+						 <STM32_PINMUX('I', 6, ANALOG)>, /* SAI2_SD_A */
+						 <STM32_PINMUX('I', 7, ANALOG)>, /* SAI2_FS_A */
+						 <STM32_PINMUX('E', 0, ANALOG)>; /* SAI2_MCLK_A */
+				};
+			};
+			sai2b_pins_b: sai2b-2 {
+				pins {
+					pinmux = <STM32_PINMUX('F', 11, AF10)>; /* SAI2_SD_B */
+					bias-disable;
+				};
+			};
+
+			sai2b_sleep_pins_b: sai2b-3 {
+				pins {
+					pinmux = <STM32_PINMUX('F', 11, ANALOG)>; /* SAI2_SD_B */
+				};
+			};            
+
+		};
+	};
+
+	fragment@3{
+		target=<&i2c2>;
+		__overlay__{
+			#address-cells = <1>;
+			#size-cells = <0>;              
+			wm8960:audio_codec@1a {
+				compatible = "wlf,wm8960";
+				reg = <0x1a>;
+				status = "okay";
+				wlf,shared-lrclk;
+				hp-det=<3 1>;
+				clocks = <&sai2a>;
+				clock-names = "mclk";
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					wm8960_tx_port: port@0 {
+						reg = <0>;
+						wm8960_tx_endpoint: endpoint {
+							remote-endpoint = <&sai2a_endpoint>;
+							frame-master;				/* Set codec as master of SAI2A for FS clock. */
+							bitclock-master;			/* Set codec as master of SAI2A for SCK clock.*/ 
+						};
+					};
+
+					wm8960_rx_port: port@1 {
+						reg = <1>;
+						wm8960_rx_endpoint: endpoint {
+							remote-endpoint = <&sai2b_endpoint>;
+							frame-master;				/* Set codec as master of SAI2B for FS clock. */
+							bitclock-master;			/* Set codec as master of SAI2B for SCK clock. */
+							
+						};
+					};
+				};
+			};
+		};
+	};
+};
