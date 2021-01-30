@@ -41,19 +41,19 @@
 #define AEXT_TRACE(name, arg1, args...) \
 	do { \
 		if (android_msg_level & ANDROID_TRACE_LEVEL) { \
-			printk(KERN_INFO "[dhd-%s] AEXT-TRACE) %s : " arg1, name, __func__, ## args); \
+			printk(KERN_DEBUG "[dhd-%s] AEXT-TRACE) %s : " arg1, name, __func__, ## args); \
 		} \
 	} while (0)
 #define AEXT_INFO(name, arg1, args...) \
 	do { \
 		if (android_msg_level & ANDROID_INFO_LEVEL) { \
-			printk(KERN_INFO "[dhd-%s] AEXT-INFO) %s : " arg1, name, __func__, ## args); \
+			printk(KERN_DEBUG "[dhd-%s] AEXT-INFO) %s : " arg1, name, __func__, ## args); \
 		} \
 	} while (0)
 #define AEXT_DBG(name, arg1, args...) \
 	do { \
 		if (android_msg_level & ANDROID_DBG_LEVEL) { \
-			printk(KERN_INFO "[dhd-%s] AEXT-DBG) %s : " arg1, name, __func__, ## args); \
+			printk(KERN_DEBUG "[dhd-%s] AEXT-DBG) %s : " arg1, name, __func__, ## args); \
 		} \
 	} while (0)
 

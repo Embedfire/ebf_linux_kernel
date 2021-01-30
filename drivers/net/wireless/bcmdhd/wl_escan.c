@@ -16,19 +16,19 @@
 #define ESCAN_TRACE(name, arg1, args...) \
 	do { \
 		if (android_msg_level & ANDROID_TRACE_LEVEL) { \
-			printk(KERN_INFO "[dhd-%s] ESCAN-TRACE) %s : " arg1, name, __func__, ## args); \
+			printk(KERN_DEBUG "[dhd-%s] ESCAN-TRACE) %s : " arg1, name, __func__, ## args); \
 		} \
 	} while (0)
 #define ESCAN_SCAN(name, arg1, args...) \
 	do { \
 		if (android_msg_level & ANDROID_SCAN_LEVEL) { \
-			printk(KERN_INFO "[dhd-%s] ESCAN-SCAN) %s : " arg1, name, __func__, ## args); \
+			printk(KERN_DEBUG "[dhd-%s] ESCAN-SCAN) %s : " arg1, name, __func__, ## args); \
 		} \
 	} while (0)
 #define ESCAN_DBG(name, arg1, args...) \
 	do { \
 		if (android_msg_level & ANDROID_DBG_LEVEL) { \
-			printk(KERN_INFO "[dhd-%s] ESCAN-DBG) %s : " arg1, name, __func__, ## args); \
+			printk(KERN_DEBUG "[dhd-%s] ESCAN-DBG) %s : " arg1, name, __func__, ## args); \
 		} \
 	} while (0)
 

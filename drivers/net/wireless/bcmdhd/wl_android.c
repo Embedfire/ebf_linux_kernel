@@ -94,13 +94,13 @@ uint android_msg_level = ANDROID_ERROR_LEVEL | ANDROID_MSG_LEVEL;
 #define ANDROID_TRACE_MSG(x, args...) \
 	do { \
 		if (android_msg_level & ANDROID_TRACE_LEVEL) { \
-			printk(KERN_INFO "[dhd] ANDROID-TRACE) " x, ## args); \
+			printk(KERN_DEBUG "[dhd] ANDROID-TRACE) " x, ## args); \
 		} \
 	} while (0)
 #define ANDROID_INFO_MSG(x, args...) \
 	do { \
 		if (android_msg_level & ANDROID_INFO_LEVEL) { \
-			printk(KERN_INFO "[dhd] ANDROID-INFO) " x, ## args); \
+			printk(KERN_DEBUG "[dhd] ANDROID-INFO) " x, ## args); \
 		} \
 	} while (0)
 #define ANDROID_ERROR(x) ANDROID_ERROR_MSG x

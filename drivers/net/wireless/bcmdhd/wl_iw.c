@@ -62,19 +62,19 @@ uint iw_msg_level = WL_ERROR_LEVEL;
 #define WL_TRACE_MSG(x, args...) \
 	do { \
 		if (iw_msg_level & WL_TRACE_LEVEL) { \
-			printk(KERN_INFO "[dhd] WEXT-TRACE) %s : " x, __func__, ## args); \
+			printk(KERN_DEBUG "[dhd] WEXT-TRACE) %s : " x, __func__, ## args); \
 		} \
 	} while (0)
 #define WL_SCAN_MSG(x, args...) \
 	do { \
 		if (iw_msg_level & WL_SCAN_LEVEL) { \
-			printk(KERN_INFO "[dhd] WEXT-SCAN) %s : " x, __func__, ## args); \
+			printk(KERN_DEBUG "[dhd] WEXT-SCAN) %s : " x, __func__, ## args); \
 		} \
 	} while (0)
 #define WL_WSEC_MSG(x, args...) \
 	do { \
 		if (iw_msg_level & WL_WSEC_LEVEL) { \
-			printk(KERN_INFO "[dhd] WEXT-WSEC) %s : " x, __func__, ## args); \
+			printk(KERN_DEBUG "[dhd] WEXT-WSEC) %s : " x, __func__, ## args); \
 		} \
 	} while (0)
 #define WL_ERROR(x) WL_ERROR_MSG x

@@ -75,7 +75,7 @@ dhd_wifi_init_gpio(void)
 	}
 
 	/* ========== WLAN_PWR_EN ============ */
-	printk(KERN_INFO "%s: gpio_wlan_power : %d\n", __FUNCTION__, wlan_reg_on);
+	printk(KERN_DEBUG "%s: gpio_wlan_power : %d\n", __FUNCTION__, wlan_reg_on);
 
 	/*
 	 * For reg_on, gpio_request will fail if the gpio is configured to output-high
@@ -91,11 +91,11 @@ dhd_wifi_init_gpio(void)
 	}
 
 	gpio_reg_on_val = gpio_get_value(wlan_reg_on);
-	printk(KERN_INFO "%s: Initial WL_REG_ON: [%d]\n",
+	printk(KERN_DEBUG "%s: Initial WL_REG_ON: [%d]\n",
 		__FUNCTION__, gpio_get_value(wlan_reg_on));
 
 	if (gpio_reg_on_val == 0) {
-		printk(KERN_INFO "%s: WL_REG_ON is LOW, drive it HIGH\n", __FUNCTION__);
+		printk(KERN_DEBUG "%s: WL_REG_ON is LOW, drive it HIGH\n", __FUNCTION__);
 		if (gpio_direction_output(wlan_reg_on, 1)) {
 			printk(KERN_ERR "%s: WL_REG_ON is failed to pull up\n", __FUNCTION__);
 			return -EIO;
@@ -108,7 +108,7 @@ dhd_wifi_init_gpio(void)
 	msleep(WIFI_TURNON_DELAY);
 
 	/* ========== WLAN_HOST_WAKE ============ */
-	printk(KERN_INFO "%s: gpio_wlan_host_wake : %d\n", __FUNCTION__, wlan_host_wake_up);
+	printk(KERN_DEBUG "%s: gpio_wlan_host_wake : %d\n", __FUNCTION__, wlan_host_wake_up);
 
 	if (gpio_request_one(wlan_host_wake_up, GPIOF_IN, "WLAN_HOST_WAKE")) {
 		printk(KERN_ERR "%s: Failed to request gpio %d for WLAN_HOST_WAKE\n",
@@ -136,9 +136,9 @@ extern int kirin_pcie_lp_ctrl(u32 enable) __attribute__ ((weak));
 int
 dhd_wlan_power(int onoff)
 {
-	printk(KERN_INFO"------------------------------------------------");
-	printk(KERN_INFO"------------------------------------------------\n");
-	printk(KERN_INFO"%s Enter: power %s\n", __func__, onoff ? "on" : "off");
+	printk(KERN_DEBUG"------------------------------------------------");
+	printk(KERN_DEBUG"------------------------------------------------\n");
+	printk(KERN_DEBUG"%s Enter: power %s\n", __func__, onoff ? "on" : "off");
 
 	if (onoff) {
 		if (gpio_direction_output(wlan_reg_on, 1)) {
@@ -146,7 +146,7 @@ dhd_wlan_power(int onoff)
 			return -EIO;
 		}
 		if (gpio_get_value(wlan_reg_on)) {
-			printk(KERN_INFO"WL_REG_ON on-step-2 : [%d]\n",
+			printk(KERN_DEBUG"WL_REG_ON on-step-2 : [%d]\n",
 				gpio_get_value(wlan_reg_on));
 		} else {
 			printk("[%s] gpio value is 0. We need reinit.\n", __func__);
@@ -189,7 +189,7 @@ dhd_wlan_power(int onoff)
 			return -EIO;
 		}
 		if (gpio_get_value(wlan_reg_on)) {
-			printk(KERN_INFO"WL_REG_ON on-step-2 : [%d]\n",
+			printk(KERN_DEBUG"WL_REG_ON on-step-2 : [%d]\n",
 				gpio_get_value(wlan_reg_on));
 		}
 	}
@@ -256,7 +256,7 @@ dhd_wlan_init(void)
 {
 	int ret;
 
-	printk(KERN_INFO"%s: START.......\n", __FUNCTION__);
+	printk(KERN_DEBUG"%s: START.......\n", __FUNCTION__);
 	ret = dhd_wifi_init_gpio();
 	if (ret < 0) {
 		printk(KERN_ERR "%s: failed to initiate GPIO, ret=%d\n",
@@ -276,7 +276,7 @@ dhd_wlan_init(void)
 #endif /* CONFIG_BROADCOM_WIFI_RESERVED_MEM */
 
 fail:
-	printk(KERN_INFO"%s: FINISH.......\n", __FUNCTION__);
+	printk(KERN_DEBUG"%s: FINISH.......\n", __FUNCTION__);
 	return ret;
 }
 

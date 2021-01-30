@@ -43,7 +43,7 @@ uint dump_msg_level = 0;
 #define CONFIG_TRACE(x, args...) \
 	do { \
 		if (config_msg_level & CONFIG_TRACE_LEVEL) { \
-			printk(KERN_INFO "[dhd] CONFIG-TRACE) %s : " x, __func__, ## args); \
+			printk(KERN_DEBUG "[dhd] CONFIG-TRACE) %s : " x, __func__, ## args); \
 		} \
 	} while (0)
 
