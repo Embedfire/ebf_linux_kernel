@@ -221,12 +221,6 @@
 		>;
 	};
 
-
-	pinctrl_usb_otg1_id: usbotg1idgrp {
-		fsl,pins = <
-			MX6UL_PAD_GPIO1_IO00__ANATOP_OTG1_ID	0x17059
-		>;
-	};
 /*
         pinctrl_dvfs: dvfsgrp {
                 fsl,pins = <
@@ -364,8 +358,6 @@
 
 
 &usbotg1 {
-	pinctrl-names = "default";
-	pinctrl-0 = <&pinctrl_usb_otg1_id>;
 	dr_mode = "otg";
 	srp-disable;
 	hnp-disable;
