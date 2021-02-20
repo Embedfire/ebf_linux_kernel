@@ -12,7 +12,9 @@ dtbo-$(CONFIG_ARCH_STM32) += \
 	stm-fire-sound.dtbo \
 	stm-fire-btwifi.dtbo \
 	stm-fire-adc.dtbo \
-	stm-fire-mipi.dtbo
+	stm-fire-mipi.dtbo \
+	stm-fire-usart1.dtbo \
+	stm-fire-usart3.dtbo 
 
 targets += dtbs dtbs_install
 targets += $(dtbo-y)

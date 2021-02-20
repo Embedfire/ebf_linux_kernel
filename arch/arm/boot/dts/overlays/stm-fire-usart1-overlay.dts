@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (C) STMicroelectronics 2018 - All Rights Reserved
+ * Author: Alexandre Torgue <alexandre.torgue@st.com>.
+ */
+
+/dts-v1/;
+/plugin/;
+#include <dt-bindings/pinctrl/stm32-pinfunc.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/mfd/st,stpmic1.h>
+
+/{
+	fragment@0 {
+		target=<&pinctrl_z>;
+		__overlay__ {
+			/* BlueTooth */
+			usart1_bt_pins_a: usart1-bt-0 {
+				pins1 {
+					pinmux = <STM32_PINMUX('Z', 7, AF7)>, /* USART1_TX */
+							<STM32_PINMUX('Z', 5, AF7)>; /* USART1_RTS */
+					bias-disable;
+					drive-push-pull;
+					slew-rate = <0>;
+				};
+				pins2 {
+					pinmux = <STM32_PINMUX('Z', 6, AF7)>, /* USART1_RX */
+							<STM32_PINMUX('Z', 3, AF7)>; /* USART1_CTS_NSS */
+					bias-disable;
+				};
+			};
+
+			usart1_bt_idle_pins_a: usart1-bt-idle-0 {
+				pins1 {
+					pinmux = <STM32_PINMUX('Z', 7, ANALOG)>, /* USART1_TX */
+							<STM32_PINMUX('Z', 5, ANALOG)>, /* USART1_RTS */
+							<STM32_PINMUX('Z', 3, ANALOG)>; /* USART1_CTS_NSS */
+				};
+				pins2 {
+					pinmux = <STM32_PINMUX('Z', 6, AF7)>; /* USART1_RX */
+					bias-disable;
+				};
+			};
+
+			usart1_bt_sleep_pins_a: usart1-bt-sleep-0 {
+				pins {
+					pinmux = <STM32_PINMUX('Z', 7, ANALOG)>, /* USART1_TX */
+							<STM32_PINMUX('Z', 5, ANALOG)>, /* USART1_RTS */
+							<STM32_PINMUX('Z', 6, ANALOG)>, /* USART1_RX */
+							<STM32_PINMUX('Z', 3, ANALOG)>; /* USART2_CTS_NSS */
+				};
+			};
+		};
+	};
+	fragment@1 {
+		target=<&usart1>;
+		__overlay__ {
+			pinctrl-names = "default", "sleep", "idle";
+			pinctrl-0 = <&usart1_bt_pins_a>;
+			pinctrl-1 = <&usart1_bt_sleep_pins_a>;
+			pinctrl-2 = <&usart1_bt_idle_pins_a>;
+			status = "okay";
+		};
+	};
+
+};

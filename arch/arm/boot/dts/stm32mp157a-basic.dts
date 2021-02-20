@@ -20,6 +20,8 @@
 		ethernet0 = &ethernet0;
 		serial0 = &uart4;
 		serial1 = &usart1;
+		serial2 = &usart2;
+		serial3 = &usart3;		
 	};
 
 	chosen {

@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (C) STMicroelectronics 2018 - All Rights Reserved
+ * Author: Alexandre Torgue <alexandre.torgue@st.com>.
+ */
+
+/dts-v1/;
+/plugin/;
+#include <dt-bindings/pinctrl/stm32-pinfunc.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/mfd/st,stpmic1.h>
+
+/{
+	fragment@0 {
+		target=<&pinctrl>;
+		__overlay__ {
+
+			usart3_pins_a: usart3-0 {
+				pins1 {
+					pinmux = <STM32_PINMUX('B', 10, AF7)>; /* USART3_TX */
+					/* 	 <STM32_PINMUX('G', 8, AF8)>; USART3_RTS */
+					bias-disable;
+					drive-push-pull;
+					slew-rate = <0>;
+				};
+				pins2 {
+					pinmux = <STM32_PINMUX('B', 12, AF8)>; /* USART3_RX */
+						/* <STM32_PINMUX('I', 10, AF8)>;  USART3_CTS_NSS */
+					bias-disable;
+				};
+			};
+
+			usart3_idle_pins_a: usart3-idle-0 {
+				pins1 {
+					pinmux = <STM32_PINMUX('B', 10, ANALOG)>;/* USART3_TX */
+					/*	 <STM32_PINMUX('G', 8, ANALOG)>,  USART3_RTS 
+						 <STM32_PINMUX('I', 10, ANALOG)> USART3_CTS_NSS */
+				};
+				pins2 {
+					pinmux = <STM32_PINMUX('B', 12, AF8)>; /* USART3_RX */
+					bias-disable;
+				};
+			};
+
+			usart3_sleep_pins_a: usart3-sleep-0 {
+				pins {
+					pinmux = <STM32_PINMUX('B', 10, ANALOG)>, /* USART3_TX */
+					/*	 <STM32_PINMUX('G', 8, ANALOG)>,  USART3_RTS 
+						 <STM32_PINMUX('I', 10, ANALOG)>, USART3_CTS_NSS */
+						 <STM32_PINMUX('B', 12, ANALOG)>; /* USART3_RX */
+				};
+			};
+
+        };
+	};
+	fragment@1 {
+		target=<&usart3>;
+		__overlay__ {
+            pinctrl-names = "default", "sleep", "idle";
+            pinctrl-0 = <&usart3_pins_a>;
+            pinctrl-1 = <&usart3_sleep_pins_a>;
+            pinctrl-2 = <&usart3_idle_pins_a>;
+			status = "okay";
+		};
+	};
+
+};
