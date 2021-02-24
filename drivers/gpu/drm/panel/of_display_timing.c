@@ -43,7 +43,7 @@ int of_parse_display_timing(const struct device_node *np,
 		pr_err("%pOF: error reading timing properties\n", np);
 		return -EINVAL;
 	}
-#if 1
+#if 0
     pr_info("hback_porch %d ", hback_porch);
     pr_info("hfront_porch %d ", hfront_porch);
     pr_info("hsync_len %d ", hsync_len);
@@ -58,7 +58,7 @@ int of_parse_display_timing(const struct device_node *np,
 	dm->vsync_end = vactive + vback_porch + vfront_porch;
 	dm->vtotal = vactive + vback_porch + vsync_len + vfront_porch;	
 	dm->vrefresh = vrefresh;
-#if 1
+#if 0
     pr_info("clock：%d ", dm->clock);
     pr_info("hdisplay %d ", dm->hdisplay);
     pr_info("hsync_start %d ", dm->hsync_start);

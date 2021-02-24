@@ -30,7 +30,7 @@
 				vfront-porch = <22>;
 				vsync-len = <1>;		
 				vrefresh = <60>;		
-
+				bits-per-pixel_0=<24>; //unused
 				port {
 					panel_in_rgb: endpoint {
 						remote-endpoint = <&ltdc_ep1_out>;
@@ -181,4 +181,20 @@
 			};
 		};
 	};
+};
+
+/{
+	__overrides__ {
+		clock-frequency_0 = <&panel_rgb>,"clock-frequency:0";
+		hactive_0 = <&panel_rgb>,"hactive:0";
+		vactive_0 = <&panel_rgb>,"vactive:0";
+		hfront-porch_0 = <&panel_rgb>,"hfront-porch:0";
+		hback-porch_0 = <&panel_rgb>,"hback-porch:0";
+		hsync-len_0 = <&panel_rgb>,"hsync-len:0";
+		vback-porch_0 = <&panel_rgb>,"vback-porch:0";
+		vfront-porch_0 = <&panel_rgb>,"vfront-porch:0";	
+		vsync-len_0 = <&panel_rgb>,"vsync-len:0";	
+		bits-per-pixel_0 = <&panel_rgb>,"bits-per-pixel:0";
+	};
+
 };
