@@ -36,6 +36,8 @@
 #include <video/display_timing.h>
 #include <video/videomode.h>
 
+#include "of_display_timing.h"
+static struct drm_display_mode innolux_at070tn92_mode;
 struct panel_desc {
 	const struct drm_display_mode *modes;
 	unsigned int num_modes;
@@ -305,6 +307,9 @@ static int panel_simple_probe(struct device *dev, const struct panel_desc *desc)
 	panel->prepared = false;
 	panel->desc = desc;
 
+
+	err = of_parse_display_timing(dev->of_node, &innolux_at070tn92_mode);
+	
 	panel->supply = devm_regulator_get(dev, "power");
 	if (IS_ERR(panel->supply))
 		return PTR_ERR(panel->supply);
@@ -1205,7 +1210,7 @@ static const struct panel_desc innolux_at043tn24 = {
 	.bus_flags = DRM_BUS_FLAG_DE_HIGH | DRM_BUS_FLAG_PIXDATA_POSEDGE,
 };
 
-static const struct drm_display_mode innolux_at070tn92_mode = {
+static struct drm_display_mode innolux_at070tn92_mode = {
 	.clock = 27000,
 	.hdisplay = 800,
 	.hsync_start = 800 + 46,

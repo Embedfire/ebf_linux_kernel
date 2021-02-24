@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
+obj-y += of_display_timing.o
+
 obj-$(CONFIG_DRM_PANEL_ARM_VERSATILE) += panel-arm-versatile.o
 obj-$(CONFIG_DRM_PANEL_LVDS) += panel-lvds.o
 obj-$(CONFIG_DRM_PANEL_SIMPLE) += panel-simple.o

@@ -20,6 +20,17 @@
 				compatible = "innolux,at070tn92";
 				status = "okay";
 
+				clock-frequency = <27000000>;
+				hactive = <800>;
+				vactive = <480>;
+				hfront-porch = <22>;
+				hback-porch = <46>;
+				hsync-len = <1>;
+				vback-porch = <23>;
+				vfront-porch = <22>;
+				vsync-len = <1>;		
+				vrefresh = <60>;		
+
 				port {
 					panel_in_rgb: endpoint {
 						remote-endpoint = <&ltdc_ep1_out>;
