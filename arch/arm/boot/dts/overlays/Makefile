@@ -14,7 +14,8 @@ dtbo-$(CONFIG_ARCH_STM32) += \
 	stm-fire-adc.dtbo \
 	stm-fire-mipi.dtbo \
 	stm-fire-usart1.dtbo \
-	stm-fire-usart3.dtbo 
+	stm-fire-usart3.dtbo \
+	stm-fire-mpu6050.dtbo
 
 targets += dtbs dtbs_install
 targets += $(dtbo-y)
