@@ -11,7 +11,52 @@
 #include <dt-bindings/mfd/st,stpmic1.h>
 
 /{
-    fragment@0 {
-        target=<>;
-    };
+	fragment@0 {
+		target=<&pinctrl_z>;
+		__overlay__ {
+			usart1_pins_a: usart1-0 {
+				pins1 {
+					pinmux = <STM32_PINMUX('Z', 7, AF7)>;/* USART1_TX */
+
+					bias-disable;
+					drive-push-pull;
+					slew-rate = <0>;
+				};
+				pins2 {
+					pinmux = <STM32_PINMUX('Z', 6, AF7)>; /* USART1_RX */
+					bias-disable;
+				};
+			};
+
+			usart1_idle_pins_a: usart1-idle-0 {
+				pins1 {
+					pinmux = <STM32_PINMUX('Z', 7, ANALOG)>; /* USART1_TX */
+				};
+				pins2 {
+					pinmux = <STM32_PINMUX('Z', 6, AF7)>; /* USART1_RX */
+					bias-disable;
+				};
+			};
+
+			usart1_sleep_pins_a: usart1-sleep-0 {
+				pins {
+					pinmux = <STM32_PINMUX('Z', 7, ANALOG)>, /* USART1_TX */
+							<STM32_PINMUX('Z', 6, ANALOG)>; /* USART1_RX */
+
+				};
+			};
+		};
+	};
+	fragment@1 {
+		target=<&usart1>;
+		__overlay__ {
+			pinctrl-names = "default", "sleep", "idle";
+			pinctrl-0 = <&usart1_pins_a>;
+			pinctrl-1 = <&usart1_sleep_pins_a>;
+			pinctrl-2 = <&usart1_idle_pins_a>;
+            linux,rs485-enabled-at-boot-time;            
+			status = "okay";
+		};
+	};
+
 };
