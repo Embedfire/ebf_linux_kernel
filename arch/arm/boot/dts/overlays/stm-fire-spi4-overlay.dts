@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (C) STMicroelectronics 2018 - All Rights Reserved
+ * Author: Alexandre Torgue <alexandre.torgue@st.com>.
+ */
+
+/dts-v1/;
+/plugin/;
+//#include "../stm32mp157c.dtsi"
+#include <dt-bindings/pinctrl/stm32-pinfunc.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/mfd/st,stpmic1.h>
+#include <dt-bindings/gpio/gpio.h>
+
+/{
+	fragment@0{
+		target=<&spi4>;
+		__overlay__{
+			#address-cells = <1>;
+			#size-cells = <0>;
+            pinctrl-names = "default", "sleep";
+            pinctrl-0 = <&spi4_pins_a>;
+            pinctrl-1 = <&spi4_sleep_pins_a>;
+			cs-gpios = <&gpioe 15 0>;
+			status = "okay";
+			spidev@0 {
+				compatible = "spidev";
+				spi-max-frequency = <20000000>;
+				reg = <0>;
+			};
+		};
+	};
+	fragment@1{
+		target=<&pinctrl>;
+		__overlay__{
+			spi4_pins_a: spi4-0 {
+				pins1 {
+					pinmux = <STM32_PINMUX('E', 12, AF5)>, /* SPI4_SCK */
+						 <STM32_PINMUX('E', 14, AF5)>; /* SPI4_MOSI */
+					bias-disable;
+					drive-push-pull;
+					slew-rate = <1>;
+				};
+
+				pins2 {
+					pinmux = <STM32_PINMUX('E', 13, AF5)>; /* SPI4_MISO */
+					bias-disable;
+				};
+			};
+
+			spi4_sleep_pins_a: spi4-sleep-0 {
+				pins {
+					pinmux = <STM32_PINMUX('E', 12, ANALOG)>, /* SPI4_SCK */
+						 <STM32_PINMUX('E', 13, ANALOG)>, /* SPI4_MISO */
+						 <STM32_PINMUX('E', 14, ANALOG)>; /* SPI4_MOSI */
+				};
+			};
+		};
+	};
+};
