@@ -6,6 +6,20 @@
 
 /dts-v1/;
 
+
+/{
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	soc{
+		/* Fix sdmmc index order */
+		sdmmc@58005000{};
+		sdmmc@58007000{};
+		sdmmc@48004000{};
+	};
+
+};
+
 #include "stm32mp157c.dtsi"
 #include "stm32mp157cac-pinctrl.dtsi"
 #include "stm32mp157c-m4-srm.dtsi"
