@@ -1,0 +1,36 @@
+/*
+ * Copyright (C) 2019 - All Rights Reserved by 
+ * filename : imx-fire-led-overlay.dts
+ * brief : Device Tree overlay for EBF6ull led device
+ * author : embedfire
+ * date : 2019-11-15 
+ * version : A001
+ */
+ /dts-v1/;
+ /plugin/;
+#include "../imx6ul-pinfunc.h"
+#include "../imx6ull-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+ / {
+        fragment@0 {
+            target = <&usbotg1>;
+            __overlay__ {
+                pinctrl-names = "default";
+                pinctrl-0 = <&pinctrl_usb_otg1_id>;
+	            dr_mode = "otg";
+	            srp-disable;
+	            hnp-disable;
+	            adp-disable;
+	            status = "okay";
+                };
+        };
+
+        fragment@1 {
+            target= <&iomuxc>;
+            __overlay__{
+                 pinctrl_usb_otg1_id: usbotg1idgrp {
+                     fsl,pins = <MX6UL_PAD_GPIO1_IO00__ANATOP_OTG1_ID    0x17059>;
+                };
+            };
+        };
+ };

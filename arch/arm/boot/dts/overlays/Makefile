@@ -19,6 +19,7 @@ dtbo-$(CONFIG_SOC_IMX6ULL) += \
 	imx-fire-emmc.dtbo	\
 	imx-fire-gpmi.dtbo	\
 	imx-fire-hdmi.dtbo	\
+	imx-fire-otg1.dtbo	\
 	imx-fire-i2c-gpio.dtbo	\
 	imx-fire-i2c1.dtbo	\
 	imx-fire-i2c2.dtbo	\
