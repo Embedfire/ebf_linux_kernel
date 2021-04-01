@@ -181,9 +181,9 @@ ds18b20_read(struct file *filp, char *buf, size_t len, loff_t *offset)
     *(kerBuf + 1) = (LSB & 0x0f) * 100 >> 4 ;
     
     // ret = copy_to_user(buf, kerBuf, sizeof(kerBuf));
-    lenth = strlen(userBuf);
     sprintf((char *)userBuf, "%d.%dC\r\n", kerBuf[0], kerBuf[1]);
     // printk(KERN_EMERG "%s", userBuf);
+    lenth = strlen(userBuf);
     ret = copy_to_user(buf, userBuf, lenth);
     // printk(KERN_EMERG "%d.%d C\r\n", kerBuf[0], kerBuf[1]);
     if (ret) {
