@@ -86,12 +86,12 @@ const cihp_name_map_t chip_name_map[] = {
 	/* ChipID			Chiprev	AG	 	ChipName	ModuleName  */
 #ifdef BCMSDIO
 	{BCM43362_CHIP_ID,	0,	DONT_CARE,	"bcm40181a0",		""},
-	{BCM43362_CHIP_ID,	1,	DONT_CARE,	"bcm40181a2",		""},
+	{BCM43362_CHIP_ID,	1,	DONT_CARE,	"bcm40181a2",		"ap6181"},
 	{BCM4330_CHIP_ID,	4,	FW_TYPE_G,	"bcm40183b2",		""},
 	{BCM4330_CHIP_ID,	4,	FW_TYPE_AG,	"bcm40183b2_ag",	""},
-	{BCM43430_CHIP_ID,	0,	DONT_CARE,	"bcm43438a0",		""},
+	{BCM43430_CHIP_ID,	0,	DONT_CARE,	"bcm43438a0",		"ap6212"},
 	{BCM43430_CHIP_ID,	1,	DONT_CARE,	"bcm43438a1",		""},
-	{BCM43430_CHIP_ID,	2,	DONT_CARE,	"bcm43436b0",		""},
+	{BCM43430_CHIP_ID,	2,	DONT_CARE,	"bcm43436b0",		"ap6236"},
 	{BCM43012_CHIP_ID,	1,	FW_TYPE_G,	"bcm43013b0",		""},
 	{BCM43012_CHIP_ID,	1,	FW_TYPE_AG,	"bcm43013c0_ag",	""},
 	{BCM43012_CHIP_ID,	2,	DONT_CARE,	"bcm43013c1_ag",	""},
