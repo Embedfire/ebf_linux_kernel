@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Support for SuperH MigoR Quarter VGA LCD Panel
  *
@@ -5,10 +6,6 @@
  *
  * Based on lcd_powertip.c from Kenati Technologies Pvt Ltd.
  * Copyright (c) 2007 Ujjwal Pande <ujjwal@kenati.com>,
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/delay.h>
@@ -17,8 +14,10 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <asm/sh_mobile_lcdc.h>
-#include <asm/migor.h>
+#include <linux/gpio.h>
+#include <video/sh_mobile_lcdc.h>
+#include <cpu/sh7722.h>
+#include <mach/migor.h>
 
 /* LCD Module is a PH240320T according to board schematics. This module
  * is made up of a 240x320 LCD hooked up to a R61505U (or HX8347-A01?)
@@ -30,9 +29,9 @@
 
 static void reset_lcd_module(void)
 {
-	ctrl_outb(ctrl_inb(PORT_PHDR) & ~0x04, PORT_PHDR);
+	gpio_set_value(GPIO_PTH2, 0);
 	mdelay(2);
-	ctrl_outb(ctrl_inb(PORT_PHDR) | 0x04, PORT_PHDR);
+	gpio_set_value(GPIO_PTH2, 1);
 	mdelay(1);
 }
 
@@ -111,8 +110,7 @@ static const unsigned short magic3_data[] = {
 	0x0010, 0x16B0, 0x0011, 0x0111, 0x0007, 0x0061,
 };
 
-int migor_lcd_qvga_setup(void *board_data, void *sohandle,
-			 struct sh_mobile_lcdc_sys_bus_ops *so)
+int migor_lcd_qvga_setup(void *sohandle, struct sh_mobile_lcdc_sys_bus_ops *so)
 {
 	unsigned long xres = 320;
 	unsigned long yres = 240;

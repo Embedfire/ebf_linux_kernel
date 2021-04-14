@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *
  *   YeAH TCP
  *
  * For further details look at:
- *    http://wil.cs.caltech.edu/pfldnet2007/paper/YeAH_TCP.pdf
+ *   https://web.archive.org/web/20080316215752/http://wil.cs.caltech.edu/pfldnet2007/paper/YeAH_TCP.pdf
  *
  */
 #include <linux/mm.h>
@@ -15,13 +16,13 @@
 
 #include "tcp_vegas.h"
 
-#define TCP_YEAH_ALPHA       80 //lin number of packets queued at the bottleneck
-#define TCP_YEAH_GAMMA        1 //lin fraction of queue to be removed per rtt
-#define TCP_YEAH_DELTA        3 //log minimum fraction of cwnd to be removed on loss
-#define TCP_YEAH_EPSILON      1 //log maximum fraction to be removed on early decongestion
-#define TCP_YEAH_PHY          8 //lin maximum delta from base
-#define TCP_YEAH_RHO         16 //lin minumum number of consecutive rtt to consider competition on loss
-#define TCP_YEAH_ZETA        50 //lin minimum number of state switchs to reset reno_count
+#define TCP_YEAH_ALPHA       80 /* number of packets queued at the bottleneck */
+#define TCP_YEAH_GAMMA        1 /* fraction of queue to be removed per rtt */
+#define TCP_YEAH_DELTA        3 /* log minimum fraction of cwnd to be removed on loss */
+#define TCP_YEAH_EPSILON      1 /* log maximum fraction to be removed on early decongestion */
+#define TCP_YEAH_PHY          8 /* maximum delta from base */
+#define TCP_YEAH_RHO         16 /* minimum number of consecutive rtt to consider competition on loss */
+#define TCP_YEAH_ZETA        50 /* minimum number of state switches to reset reno_count */
 
 #define TCP_SCALABLE_AI_CNT	 100U
 
@@ -35,8 +36,6 @@ struct yeah {
 
 	u32 reno_count;
 	u32 fast_count;
-
-	u32 pkts_acked;
 };
 
 static void tcp_yeah_init(struct sock *sk)
@@ -54,54 +53,29 @@ static void tcp_yeah_init(struct sock *sk)
 	/* Ensure the MD arithmetic works.  This is somewhat pedantic,
 	 * since I don't think we will see a cwnd this large. :) */
 	tp->snd_cwnd_clamp = min_t(u32, tp->snd_cwnd_clamp, 0xffffffff/128);
-
 }
 
-
-static void tcp_yeah_pkts_acked(struct sock *sk, u32 pkts_acked, s32 rtt_us)
-{
-	const struct inet_connection_sock *icsk = inet_csk(sk);
-	struct yeah *yeah = inet_csk_ca(sk);
-
-	if (icsk->icsk_ca_state == TCP_CA_Open)
-		yeah->pkts_acked = pkts_acked;
-
-	tcp_vegas_pkts_acked(sk, pkts_acked, rtt_us);
-}
-
-static void tcp_yeah_cong_avoid(struct sock *sk, u32 ack, u32 in_flight)
+static void tcp_yeah_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct yeah *yeah = inet_csk_ca(sk);
 
-	if (!tcp_is_cwnd_limited(sk, in_flight))
+	if (!tcp_is_cwnd_limited(sk))
 		return;
 
-	if (tp->snd_cwnd <= tp->snd_ssthresh)
-		tcp_slow_start(tp);
+	if (tcp_in_slow_start(tp)) {
+		acked = tcp_slow_start(tp, acked);
+		if (!acked)
+			goto do_vegas;
+	}
 
-	else if (!yeah->doing_reno_now) {
+	if (!yeah->doing_reno_now) {
 		/* Scalable */
-
-		tp->snd_cwnd_cnt+=yeah->pkts_acked;
-		if (tp->snd_cwnd_cnt > min(tp->snd_cwnd, TCP_SCALABLE_AI_CNT)){
-			if (tp->snd_cwnd < tp->snd_cwnd_clamp)
-				tp->snd_cwnd++;
-			tp->snd_cwnd_cnt = 0;
-		}
-
-		yeah->pkts_acked = 1;
-
+		tcp_cong_avoid_ai(tp, min(tp->snd_cwnd, TCP_SCALABLE_AI_CNT),
+				  acked);
 	} else {
 		/* Reno */
-
-		if (tp->snd_cwnd_cnt < tp->snd_cwnd)
-			tp->snd_cwnd_cnt++;
-
-		if (tp->snd_cwnd_cnt >= tp->snd_cwnd) {
-			tp->snd_cwnd++;
-			tp->snd_cwnd_cnt = 0;
-		}
+		tcp_cong_avoid_ai(tp, tp->snd_cwnd, acked);
 	}
 
 	/* The key players are v_vegas.beg_snd_una and v_beg_snd_nxt.
@@ -125,9 +99,8 @@ static void tcp_yeah_cong_avoid(struct sock *sk, u32 ack, u32 in_flight)
 	 * of bytes we send in an RTT is often less than our cwnd will allow.
 	 * So we keep track of our cwnd separately, in v_beg_snd_cwnd.
 	 */
-
+do_vegas:
 	if (after(ack, yeah->vegas.beg_snd_nxt)) {
-
 		/* We do the Vegas calculations only if we got enough RTT
 		 * samples that we can be reasonably sure that we got
 		 * at least one RTT sample that wasn't from a delayed ACK.
@@ -164,8 +137,8 @@ static void tcp_yeah_cong_avoid(struct sock *sk, u32 ack, u32 in_flight)
 
 			if (queue > TCP_YEAH_ALPHA ||
 			    rtt - yeah->vegas.baseRTT > (yeah->vegas.baseRTT / TCP_YEAH_PHY)) {
-				if (queue > TCP_YEAH_ALPHA
-				    && tp->snd_cwnd > yeah->reno_count) {
+				if (queue > TCP_YEAH_ALPHA &&
+				    tp->snd_cwnd > yeah->reno_count) {
 					u32 reduction = min(queue / TCP_YEAH_GAMMA ,
 							    tp->snd_cwnd >> TCP_YEAH_EPSILON);
 
@@ -196,7 +169,6 @@ static void tcp_yeah_cong_avoid(struct sock *sk, u32 ack, u32 in_flight)
 			}
 
 			yeah->lastQ = queue;
-
 		}
 
 		/* Save the extent of the current window so we can use this
@@ -212,7 +184,8 @@ static void tcp_yeah_cong_avoid(struct sock *sk, u32 ack, u32 in_flight)
 	}
 }
 
-static u32 tcp_yeah_ssthresh(struct sock *sk) {
+static u32 tcp_yeah_ssthresh(struct sock *sk)
+{
 	const struct tcp_sock *tp = tcp_sk(sk);
 	struct yeah *yeah = inet_csk_ca(sk);
 	u32 reduction;
@@ -220,28 +193,27 @@ static u32 tcp_yeah_ssthresh(struct sock *sk) {
 	if (yeah->doing_reno_now < TCP_YEAH_RHO) {
 		reduction = yeah->lastQ;
 
-		reduction = min( reduction, max(tp->snd_cwnd>>1, 2U) );
+		reduction = min(reduction, max(tp->snd_cwnd>>1, 2U));
 
-		reduction = max( reduction, tp->snd_cwnd >> TCP_YEAH_DELTA);
+		reduction = max(reduction, tp->snd_cwnd >> TCP_YEAH_DELTA);
 	} else
-		reduction = max(tp->snd_cwnd>>1,2U);
+		reduction = max(tp->snd_cwnd>>1, 2U);
 
 	yeah->fast_count = 0;
 	yeah->reno_count = max(yeah->reno_count>>1, 2U);
 
-	return tp->snd_cwnd - reduction;
+	return max_t(int, tp->snd_cwnd - reduction, 2);
 }
 
-static struct tcp_congestion_ops tcp_yeah = {
-	.flags		= TCP_CONG_RTT_STAMP,
+static struct tcp_congestion_ops tcp_yeah __read_mostly = {
 	.init		= tcp_yeah_init,
 	.ssthresh	= tcp_yeah_ssthresh,
+	.undo_cwnd      = tcp_reno_undo_cwnd,
 	.cong_avoid	= tcp_yeah_cong_avoid,
-	.min_cwnd	= tcp_reno_min_cwnd,
 	.set_state	= tcp_vegas_state,
 	.cwnd_event	= tcp_vegas_cwnd_event,
 	.get_info	= tcp_vegas_get_info,
-	.pkts_acked	= tcp_yeah_pkts_acked,
+	.pkts_acked	= tcp_vegas_pkts_acked,
 
 	.owner		= THIS_MODULE,
 	.name		= "yeah",

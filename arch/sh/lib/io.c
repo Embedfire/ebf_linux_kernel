@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/lib/io.c - SH32 optimized I/O routines
  *
@@ -6,20 +7,16 @@
  *
  * Provide real functions which expand to whatever the header file defined.
  * Also definitions of machine independent IO functions.
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/module.h>
 #include <linux/io.h>
 
-void __raw_readsl(unsigned long addr, void *datap, int len)
+void __raw_readsl(const void __iomem *addr, void *datap, int len)
 {
 	u32 *data;
 
 	for (data = datap; (len != 0) && (((u32)data & 0x1f) != 0); len--)
-		*data++ = ctrl_inl(addr);
+		*data++ = __raw_readl(addr);
 
 	if (likely(len >= (0x20 >> 2))) {
 		int tmp2, tmp3, tmp4, tmp5, tmp6;
@@ -59,11 +56,11 @@ void __raw_readsl(unsigned long addr, void *datap, int len)
 	}
 
 	for (; len != 0; len--)
-		*data++ = ctrl_inl(addr);
+		*data++ = __raw_readl(addr);
 }
 EXPORT_SYMBOL(__raw_readsl);
 
-void __raw_writesl(unsigned long addr, const void *data, int len)
+void __raw_writesl(void __iomem *addr, const void *data, int len)
 {
 	if (likely(len != 0)) {
 		int tmp1;

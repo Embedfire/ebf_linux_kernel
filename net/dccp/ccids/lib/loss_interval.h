@@ -1,17 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef _DCCP_LI_HIST_
 #define _DCCP_LI_HIST_
 /*
- *  net/dccp/ccids/lib/loss_interval.h
- *
  *  Copyright (c) 2007   The University of Aberdeen, Scotland, UK
  *  Copyright (c) 2005-7 The University of Waikato, Hamilton, New Zealand.
  *  Copyright (c) 2005-7 Ian McDonald <ian.mcdonald@jandi.co.nz>
  *  Copyright (c) 2005 Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms of the GNU General Public License as published by the Free
- *  Software Foundation; either version 2 of the License, or (at your option)
- *  any later version.
  */
 #include <linux/ktime.h>
 #include <linux/list.h>
@@ -67,9 +61,9 @@ static inline u8 tfrc_lh_length(struct tfrc_loss_hist *lh)
 
 struct tfrc_rx_hist;
 
-extern int  tfrc_lh_interval_add(struct tfrc_loss_hist *, struct tfrc_rx_hist *,
-				 u32 (*first_li)(struct sock *), struct sock *);
-extern u8   tfrc_lh_update_i_mean(struct tfrc_loss_hist *lh, struct sk_buff *);
-extern void tfrc_lh_cleanup(struct tfrc_loss_hist *lh);
+int tfrc_lh_interval_add(struct tfrc_loss_hist *, struct tfrc_rx_hist *,
+			 u32 (*first_li)(struct sock *), struct sock *);
+u8 tfrc_lh_update_i_mean(struct tfrc_loss_hist *lh, struct sk_buff *);
+void tfrc_lh_cleanup(struct tfrc_loss_hist *lh);
 
 #endif /* _DCCP_LI_HIST_ */

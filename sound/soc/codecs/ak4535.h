@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ak4535.h  --  AK4535 Soc Audio driver
  *
@@ -6,10 +7,6 @@
  * Author: Richard Purdie <richard@openedhand.com>
  *
  * Based on wm8753.h
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef _AK4535_H
@@ -33,14 +30,5 @@
 #define AK4535_RATT		0xd
 #define AK4535_VOL		0xe
 #define AK4535_STATUS		0xf
-
-#define AK4535_CACHEREGNUM 	0x10
-
-struct ak4535_setup_data {
-	unsigned short i2c_address;
-};
-
-extern struct snd_soc_dai ak4535_dai;
-extern struct snd_soc_codec_device soc_codec_dev_ak4535;
 
 #endif

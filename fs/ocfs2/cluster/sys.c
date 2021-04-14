@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* -*- mode: c; c-basic-offset: 8; -*-
  * vim: noexpandtab sw=8 ts=8 sts=0:
  *
@@ -6,22 +7,6 @@
  * OCFS2 cluster sysfs interface
  *
  * Copyright (C) 2005 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation,
- * version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
- *
  */
 
 #include <linux/kernel.h>
@@ -41,7 +26,7 @@ static ssize_t version_show(struct kobject *kobj, struct kobj_attribute *attr,
 	return snprintf(buf, PAGE_SIZE, "%u\n", O2NM_API_VERSION);
 }
 static struct kobj_attribute attr_version =
-	__ATTR(interface_revision, S_IFREG | S_IRUGO, version_show, NULL);
+	__ATTR(interface_revision, S_IRUGO, version_show, NULL);
 
 static struct attribute *o2cb_attrs[] = {
 	&attr_version.attr,
@@ -57,7 +42,6 @@ static struct kset *o2cb_kset;
 void o2cb_sys_shutdown(void)
 {
 	mlog_sys_shutdown();
-	sysfs_remove_link(NULL, "o2cb");
 	kset_unregister(o2cb_kset);
 }
 
@@ -68,14 +52,6 @@ int o2cb_sys_init(void)
 	o2cb_kset = kset_create_and_add("o2cb", NULL, fs_kobj);
 	if (!o2cb_kset)
 		return -ENOMEM;
-
-	/*
-	 * Create this symlink for backwards compatibility with old
-	 * versions of ocfs2-tools which look for things in /sys/o2cb.
-	 */
-	ret = sysfs_create_link(NULL, &o2cb_kset->kobj, "o2cb");
-	if (ret)
-		goto error;
 
 	ret = sysfs_create_group(&o2cb_kset->kobj, &o2cb_attr_group);
 	if (ret)

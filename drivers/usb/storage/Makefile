@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for the USB Mass Storage device drivers.
 #
@@ -5,28 +6,42 @@
 # Rewritten to use lists instead of if-statements.
 #
 
-EXTRA_CFLAGS	:= -Idrivers/scsi
+ccflags-y := -I $(srctree)/drivers/scsi
 
+ccflags-y += -DDEFAULT_SYMBOL_NAMESPACE=USB_STORAGE
+
+obj-$(CONFIG_USB_UAS)		+= uas.o
 obj-$(CONFIG_USB_STORAGE)	+= usb-storage.o
 
-usb-storage-obj-$(CONFIG_USB_STORAGE_DEBUG)	+= debug.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_USBAT)	+= shuttle_usbat.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_SDDR09)	+= sddr09.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_SDDR55)	+= sddr55.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_FREECOM)	+= freecom.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_DPCM)	+= dpcm.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_ISD200)	+= isd200.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_DATAFAB)	+= datafab.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_JUMPSHOT)	+= jumpshot.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_ALAUDA)	+= alauda.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_ONETOUCH)	+= onetouch.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_KARMA)	+= karma.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_SIERRA)	+= sierra_ms.o
-usb-storage-obj-$(CONFIG_USB_STORAGE_CYPRESS_ATACB) += cypress_atacb.o
+usb-storage-y := scsiglue.o protocol.o transport.o usb.o
+usb-storage-y += initializers.o sierra_ms.o option_ms.o
+usb-storage-y += usual-tables.o
+usb-storage-$(CONFIG_USB_STORAGE_DEBUG) += debug.o
 
-usb-storage-objs :=	scsiglue.o protocol.o transport.o usb.o \
-			initializers.o $(usb-storage-obj-y)
+obj-$(CONFIG_USB_STORAGE_ALAUDA)	+= ums-alauda.o
+obj-$(CONFIG_USB_STORAGE_CYPRESS_ATACB) += ums-cypress.o
+obj-$(CONFIG_USB_STORAGE_DATAFAB)	+= ums-datafab.o
+obj-$(CONFIG_USB_STORAGE_ENE_UB6250)	+= ums-eneub6250.o
+obj-$(CONFIG_USB_STORAGE_FREECOM)	+= ums-freecom.o
+obj-$(CONFIG_USB_STORAGE_ISD200)	+= ums-isd200.o
+obj-$(CONFIG_USB_STORAGE_JUMPSHOT)	+= ums-jumpshot.o
+obj-$(CONFIG_USB_STORAGE_KARMA)		+= ums-karma.o
+obj-$(CONFIG_USB_STORAGE_ONETOUCH)	+= ums-onetouch.o
+obj-$(CONFIG_USB_STORAGE_REALTEK)	+= ums-realtek.o
+obj-$(CONFIG_USB_STORAGE_SDDR09)	+= ums-sddr09.o
+obj-$(CONFIG_USB_STORAGE_SDDR55)	+= ums-sddr55.o
+obj-$(CONFIG_USB_STORAGE_USBAT)		+= ums-usbat.o
 
-ifneq ($(CONFIG_USB_LIBUSUAL),)
-	obj-$(CONFIG_USB)	+= libusual.o
-endif
+ums-alauda-y		:= alauda.o
+ums-cypress-y		:= cypress_atacb.o
+ums-datafab-y		:= datafab.o
+ums-eneub6250-y		:= ene_ub6250.o
+ums-freecom-y		:= freecom.o
+ums-isd200-y		:= isd200.o
+ums-jumpshot-y		:= jumpshot.o
+ums-karma-y		:= karma.o
+ums-onetouch-y		:= onetouch.o
+ums-realtek-y		:= realtek_cr.o
+ums-sddr09-y		:= sddr09.o
+ums-sddr55-y		:= sddr55.o
+ums-usbat-y		:= shuttle_usbat.o

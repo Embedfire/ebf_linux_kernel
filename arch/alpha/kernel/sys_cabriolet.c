@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/sys_cabriolet.c
  *
@@ -18,12 +19,10 @@
 #include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/core_apecs.h>
 #include <asm/core_cia.h>
 #include <asm/core_lca.h>
@@ -33,7 +32,7 @@
 #include "irq_impl.h"
 #include "pci_impl.h"
 #include "machvec_impl.h"
-
+#include "pc873xx.h"
 
 /* Note mask bit is true for DISABLED irqs.  */
 static unsigned long cached_irq_mask = ~0UL;
@@ -46,39 +45,22 @@ cabriolet_update_irq_hw(unsigned int irq, unsigned long mask)
 }
 
 static inline void
-cabriolet_enable_irq(unsigned int irq)
+cabriolet_enable_irq(struct irq_data *d)
 {
-	cabriolet_update_irq_hw(irq, cached_irq_mask &= ~(1UL << irq));
+	cabriolet_update_irq_hw(d->irq, cached_irq_mask &= ~(1UL << d->irq));
 }
 
 static void
-cabriolet_disable_irq(unsigned int irq)
+cabriolet_disable_irq(struct irq_data *d)
 {
-	cabriolet_update_irq_hw(irq, cached_irq_mask |= 1UL << irq);
+	cabriolet_update_irq_hw(d->irq, cached_irq_mask |= 1UL << d->irq);
 }
 
-static unsigned int
-cabriolet_startup_irq(unsigned int irq)
-{ 
-	cabriolet_enable_irq(irq);
-	return 0; /* never anything pending */
-}
-
-static void
-cabriolet_end_irq(unsigned int irq)
-{ 
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		cabriolet_enable_irq(irq);
-}
-
-static struct hw_interrupt_type cabriolet_irq_type = {
-	.typename	= "CABRIOLET",
-	.startup	= cabriolet_startup_irq,
-	.shutdown	= cabriolet_disable_irq,
-	.enable		= cabriolet_enable_irq,
-	.disable	= cabriolet_disable_irq,
-	.ack		= cabriolet_disable_irq,
-	.end		= cabriolet_end_irq,
+static struct irq_chip cabriolet_irq_type = {
+	.name		= "CABRIOLET",
+	.irq_unmask	= cabriolet_enable_irq,
+	.irq_mask	= cabriolet_disable_irq,
+	.irq_mask_ack	= cabriolet_disable_irq,
 };
 
 static void 
@@ -122,13 +104,15 @@ common_init_irq(void (*srm_dev_int)(unsigned long v))
 		outb(0xff, 0x806);
 
 		for (i = 16; i < 35; ++i) {
-			irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
-			irq_desc[i].chip = &cabriolet_irq_type;
+			irq_set_chip_and_handler(i, &cabriolet_irq_type,
+						 handle_level_irq);
+			irq_set_status_flags(i, IRQ_LEVEL);
 		}
 	}
 
 	common_init_isa_dma();
-	setup_irq(16+4, &isa_cascade_irqaction);
+	if (request_irq(16 + 4, no_action, 0, "isa-cascade", NULL))
+		pr_err("Failed to register isa-cascade interrupt\n");
 }
 
 #ifndef CONFIG_ALPHA_PC164
@@ -190,10 +174,10 @@ pc164_init_irq(void)
  * because it is the Saturn IO (SIO) PCI/ISA Bridge Chip.
  */
 
-static inline int __init
-eb66p_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static inline int
+eb66p_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[5][5] __initdata = {
+	static char irq_tab[5][5] = {
 		/*INT  INTA  INTB  INTC   INTD */
 		{16+0, 16+0, 16+5,  16+9, 16+13},  /* IdSel 6,  slot 0, J25 */
 		{16+1, 16+1, 16+6, 16+10, 16+14},  /* IdSel 7,  slot 1, J26 */
@@ -220,10 +204,10 @@ eb66p_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
  * because it is the Saturn IO (SIO) PCI/ISA Bridge Chip.
  */
 
-static inline int __init
-cabriolet_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static inline int
+cabriolet_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[5][5] __initdata = {
+	static char irq_tab[5][5] = {
 		/*INT   INTA  INTB  INTC   INTD */
 		{ 16+2, 16+2, 16+7, 16+11, 16+15}, /* IdSel 5,  slot 2, J21 */
 		{ 16+0, 16+0, 16+5,  16+9, 16+13}, /* IdSel 6,  slot 0, J19 */
@@ -236,17 +220,30 @@ cabriolet_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 }
 
 static inline void __init
+cabriolet_enable_ide(void)
+{
+	if (pc873xx_probe() == -1) {
+		printk(KERN_ERR "Probing for PC873xx Super IO chip failed.\n");
+	 } else {
+		printk(KERN_INFO "Found %s Super IO chip at 0x%x\n",
+			pc873xx_get_model(), pc873xx_get_base());
+
+		pc873xx_enable_ide();
+	}
+}
+
+static inline void __init
 cabriolet_init_pci(void)
 {
 	common_init_pci();
-	ns87312_enable_ide(0x398);
+	cabriolet_enable_ide();
 }
 
 static inline void __init
 cia_cab_init_pci(void)
 {
 	cia_init_pci();
-	ns87312_enable_ide(0x398);
+	cabriolet_enable_ide();
 }
 
 /*
@@ -291,10 +288,10 @@ cia_cab_init_pci(void)
  * 
  */
 
-static inline int __init
-alphapc164_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static inline int
+alphapc164_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[7][5] __initdata = {
+	static char irq_tab[7][5] = {
 		/*INT   INTA  INTB   INTC   INTD */
 		{ 16+2, 16+2, 16+9,  16+13, 16+17}, /* IdSel  5, slot 2, J20 */
 		{ 16+0, 16+0, 16+7,  16+11, 16+15}, /* IdSel  6, slot 0, J29 */

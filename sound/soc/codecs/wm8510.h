@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * wm8510.h  --  WM8510 Soc Audio driver
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef _WM8510_H
@@ -94,10 +91,9 @@
 #define WM8510_MCLKDIV_12	(7 << 5)
 
 struct wm8510_setup_data {
+	int spi;
+	int i2c_bus;
 	unsigned short i2c_address;
 };
-
-extern struct snd_soc_dai wm8510_dai;
-extern struct snd_soc_codec_device soc_codec_dev_wm8510;
 
 #endif

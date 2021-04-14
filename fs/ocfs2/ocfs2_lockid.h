@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* -*- mode: c; c-basic-offset: 8; -*-
  * vim: noexpandtab sw=8 ts=8 sts=0:
  *
@@ -6,21 +7,6 @@
  * Defines OCFS2 lockid bits.
  *
  * Copyright (C) 2002, 2005 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  */
 
 #ifndef OCFS2_LOCKID_H
@@ -46,6 +32,11 @@ enum ocfs2_lock_type {
 	OCFS2_LOCK_TYPE_DENTRY,
 	OCFS2_LOCK_TYPE_OPEN,
 	OCFS2_LOCK_TYPE_FLOCK,
+	OCFS2_LOCK_TYPE_QINFO,
+	OCFS2_LOCK_TYPE_NFS_SYNC,
+	OCFS2_LOCK_TYPE_ORPHAN_SCAN,
+	OCFS2_LOCK_TYPE_REFCOUNT,
+	OCFS2_LOCK_TYPE_TRIM_FS,
 	OCFS2_NUM_LOCK_TYPES
 };
 
@@ -77,6 +68,21 @@ static inline char ocfs2_lock_type_char(enum ocfs2_lock_type type)
 		case OCFS2_LOCK_TYPE_FLOCK:
 			c = 'F';
 			break;
+		case OCFS2_LOCK_TYPE_QINFO:
+			c = 'Q';
+			break;
+		case OCFS2_LOCK_TYPE_NFS_SYNC:
+			c = 'Y';
+			break;
+		case OCFS2_LOCK_TYPE_ORPHAN_SCAN:
+			c = 'P';
+			break;
+		case OCFS2_LOCK_TYPE_REFCOUNT:
+			c = 'T';
+			break;
+		case OCFS2_LOCK_TYPE_TRIM_FS:
+			c = 'I';
+			break;
 		default:
 			c = '\0';
 	}
@@ -95,6 +101,11 @@ static char *ocfs2_lock_type_strings[] = {
 	[OCFS2_LOCK_TYPE_DENTRY] = "Dentry",
 	[OCFS2_LOCK_TYPE_OPEN] = "Open",
 	[OCFS2_LOCK_TYPE_FLOCK] = "Flock",
+	[OCFS2_LOCK_TYPE_QINFO] = "Quota",
+	[OCFS2_LOCK_TYPE_NFS_SYNC] = "NFSSync",
+	[OCFS2_LOCK_TYPE_ORPHAN_SCAN] = "OrphanScan",
+	[OCFS2_LOCK_TYPE_REFCOUNT] = "Refcount",
+	[OCFS2_LOCK_TYPE_TRIM_FS] = "TrimFs",
 };
 
 static inline const char *ocfs2_lock_type_string(enum ocfs2_lock_type type)

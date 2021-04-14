@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _NET_IPCOMP_H
 #define _NET_IPCOMP_H
 
@@ -9,7 +10,7 @@ struct crypto_comp;
 
 struct ipcomp_data {
 	u16 threshold;
-	struct crypto_comp **tfms;
+	struct crypto_comp * __percpu *tfms;
 };
 
 struct ip_comp_hdr;

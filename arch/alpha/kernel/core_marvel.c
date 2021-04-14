@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/core_marvel.c
  *
@@ -17,14 +18,12 @@
 #include <linux/mc146818rtc.h>
 #include <linux/rtc.h>
 #include <linux/module.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 
 #include <asm/ptrace.h>
 #include <asm/smp.h>
 #include <asm/gct.h>
-#include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
-#include <asm/rtc.h>
 #include <asm/vga.h>
 
 #include "proto.h"
@@ -82,7 +81,10 @@ mk_resource_name(int pe, int port, char *str)
 	char *name;
 	
 	sprintf(tmp, "PCI %s PE %d PORT %d", str, pe, port);
-	name = alloc_bootmem(strlen(tmp) + 1);
+	name = memblock_alloc(strlen(tmp) + 1, SMP_CACHE_BYTES);
+	if (!name)
+		panic("%s: Failed to allocate %zu bytes\n", __func__,
+		      strlen(tmp) + 1);
 	strcpy(name, tmp);
 
 	return name;
@@ -117,9 +119,12 @@ alloc_io7(unsigned int pe)
 		return NULL;
 	}
 
-	io7 = alloc_bootmem(sizeof(*io7));
+	io7 = memblock_alloc(sizeof(*io7), SMP_CACHE_BYTES);
+	if (!io7)
+		panic("%s: Failed to allocate %zu bytes\n", __func__,
+		      sizeof(*io7));
 	io7->pe = pe;
-	spin_lock_init(&io7->irq_lock);
+	raw_spin_lock_init(&io7->irq_lock);
 
 	for (h = 0; h < 4; h++) {
 		io7->ports[h].io7 = io7;
@@ -352,7 +357,7 @@ marvel_init_io7(struct io7 *io7)
 	}
 }
 
-void
+void __init
 marvel_io7_present(gct6_node *node)
 {
 	int pe;
@@ -370,6 +375,7 @@ marvel_io7_present(gct6_node *node)
 static void __init
 marvel_find_console_vga_hose(void)
 {
+#ifdef CONFIG_VGA_HOSE
 	u64 *pu64 = (u64 *)((u64)hwrpb + hwrpb->ctbt_offset);
 
 	if (pu64[7] == 3) {	/* TERM_TYPE == graphics */
@@ -403,9 +409,10 @@ marvel_find_console_vga_hose(void)
 			pci_vga_hose = hose;
 		}
 	}
+#endif
 }
 
-gct6_search_struct gct_wanted_node_list[] = {
+gct6_search_struct gct_wanted_node_list[] __initdata = {
 	{ GCT_TYPE_HOSE, GCT_SUBTYPE_IO_PORT_MODULE, marvel_io7_present },
 	{ 0, 0, NULL }
 };
@@ -655,20 +662,12 @@ __marvel_rtc_io(u8 b, unsigned long addr, int write)
 
 	case 0x71:					/* RTC_PORT(1) */
 		rtc_access.index = index;
-		rtc_access.data = BCD_TO_BIN(b);
+		rtc_access.data = bcd2bin(b);
 		rtc_access.function = 0x48 + !write;	/* GET/PUT_TOY */
 
-#ifdef CONFIG_SMP
-		if (smp_processor_id() != boot_cpuid)
-			smp_call_function_single(boot_cpuid,
-						 __marvel_access_rtc,
-						 &rtc_access, 1);
-		else
-			__marvel_access_rtc(&rtc_access);
-#else
 		__marvel_access_rtc(&rtc_access);
-#endif
-		ret = BIN_TO_BCD(rtc_access.data);
+
+		ret = bin2bcd(rtc_access.data);
 		break;
 
 	default:
@@ -807,7 +806,7 @@ void __iomem *marvel_ioportmap (unsigned long addr)
 }
 
 unsigned int
-marvel_ioread8(void __iomem *xaddr)
+marvel_ioread8(const void __iomem *xaddr)
 {
 	unsigned long addr = (unsigned long) xaddr;
 	if (__marvel_is_port_kbd(addr))
@@ -1024,7 +1023,7 @@ marvel_agp_bind_memory(alpha_agp_info *agp, off_t pg_start, struct agp_memory *m
 {
 	struct marvel_agp_aperture *aper = agp->aperture.sysdata;
 	return iommu_bind(aper->arena, aper->pg_start + pg_start, 
-			  mem->page_count, mem->memory);
+			  mem->page_count, mem->pages);
 }
 
 static int 
@@ -1111,6 +1110,8 @@ marvel_agp_info(void)
 	 * Allocate the info structure.
 	 */
 	agp = kmalloc(sizeof(*agp), GFP_KERNEL);
+	if (!agp)
+		return NULL;
 
 	/*
 	 * Fill it in.

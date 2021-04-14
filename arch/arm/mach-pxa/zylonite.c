@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-pxa/zylonite.c
  *
@@ -7,36 +8,32 @@
  *
  * 2007-09-04: eric miao <eric.miao@marvell.com>
  *             rewrite to align with latest kernel
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
+#include <linux/leds.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
+#include <linux/gpio/machine.h>
+#include <linux/pwm.h>
 #include <linux/pwm_backlight.h>
 #include <linux/smc91x.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
-#include <mach/hardware.h>
+#include "pxa3xx.h"
 #include <mach/audio.h>
-#include <mach/gpio.h>
-#include <mach/pxafb.h>
-#include <mach/zylonite.h>
-#include <mach/mmc.h>
-#include <mach/pxa27x_keypad.h>
-#include <mach/pxa3xx_nand.h>
+#include <linux/platform_data/video-pxafb.h>
+#include "zylonite.h"
+#include <linux/platform_data/mmc-pxamci.h>
+#include <linux/platform_data/usb-ohci-pxa27x.h>
+#include <linux/platform_data/keypad-pxa27x.h>
+#include <linux/platform_data/mtd-nand-pxa3xx.h>
 
 #include "devices.h"
 #include "generic.h"
-
-#define MAX_SLOTS	3
-struct platform_mmc_slot zylonite_mmc_slot[MAX_SLOTS];
 
 int gpio_eth_irq;
 int gpio_debug_led1;
@@ -112,11 +109,14 @@ static inline void zylonite_init_leds(void) {}
 #endif
 
 #if defined(CONFIG_FB_PXA) || defined(CONFIG_FB_PXA_MODULE)
+static struct pwm_lookup zylonite_pwm_lookup[] = {
+	PWM_LOOKUP("pxa27x-pwm.1", 1, "pwm-backlight.0", NULL, 10000,
+		   PWM_POLARITY_NORMAL),
+};
+
 static struct platform_pwm_backlight_data zylonite_backlight_data = {
-	.pwm_id		= 3,
 	.max_brightness	= 100,
 	.dft_brightness	= 100,
-	.pwm_period_ns	= 10000,
 };
 
 static struct platform_device zylonite_backlight_device = {
@@ -197,10 +197,11 @@ static struct pxafb_mach_info zylonite_sharp_lcd_info = {
 
 static void __init zylonite_init_lcd(void)
 {
+	pwm_add_table(zylonite_pwm_lookup, ARRAY_SIZE(zylonite_pwm_lookup));
 	platform_device_register(&zylonite_backlight_device);
 
 	if (lcd_id & 0x20) {
-		set_pxa_fb_info(&zylonite_sharp_lcd_info);
+		pxa_set_fb_info(NULL, &zylonite_sharp_lcd_info);
 		return;
 	}
 
@@ -212,103 +213,85 @@ static void __init zylonite_init_lcd(void)
 	else
 		zylonite_toshiba_lcd_info.modes = &toshiba_ltm04c380k_mode;
 
-	set_pxa_fb_info(&zylonite_toshiba_lcd_info);
+	pxa_set_fb_info(NULL, &zylonite_toshiba_lcd_info);
 }
 #else
 static inline void zylonite_init_lcd(void) {}
 #endif
 
 #if defined(CONFIG_MMC)
-static int zylonite_mci_ro(struct device *dev)
-{
-	struct platform_device *pdev = to_platform_device(dev);
-
-	return gpio_get_value(zylonite_mmc_slot[pdev->id].gpio_wp);
-}
-
-static int zylonite_mci_init(struct device *dev,
-			     irq_handler_t zylonite_detect_int,
-			     void *data)
-{
-	struct platform_device *pdev = to_platform_device(dev);
-	int err, cd_irq, gpio_cd, gpio_wp;
-
-	cd_irq = gpio_to_irq(zylonite_mmc_slot[pdev->id].gpio_cd);
-	gpio_cd = zylonite_mmc_slot[pdev->id].gpio_cd;
-	gpio_wp = zylonite_mmc_slot[pdev->id].gpio_wp;
-
-	/*
-	 * setup GPIO for Zylonite MMC controller
-	 */
-	err = gpio_request(gpio_cd, "mmc card detect");
-	if (err)
-		goto err_request_cd;
-	gpio_direction_input(gpio_cd);
-
-	err = gpio_request(gpio_wp, "mmc write protect");
-	if (err)
-		goto err_request_wp;
-	gpio_direction_input(gpio_wp);
-
-	err = request_irq(cd_irq, zylonite_detect_int,
-			  IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
-			  "MMC card detect", data);
-	if (err) {
-		printk(KERN_ERR "%s: MMC/SD/SDIO: "
-				"can't request card detect IRQ\n", __func__);
-		goto err_request_irq;
-	}
-
-	return 0;
-
-err_request_irq:
-	gpio_free(gpio_wp);
-err_request_wp:
-	gpio_free(gpio_cd);
-err_request_cd:
-	return err;
-}
-
-static void zylonite_mci_exit(struct device *dev, void *data)
-{
-	struct platform_device *pdev = to_platform_device(dev);
-	int cd_irq, gpio_cd, gpio_wp;
-
-	cd_irq = gpio_to_irq(zylonite_mmc_slot[pdev->id].gpio_cd);
-	gpio_cd = zylonite_mmc_slot[pdev->id].gpio_cd;
-	gpio_wp = zylonite_mmc_slot[pdev->id].gpio_wp;
-
-	free_irq(cd_irq, data);
-	gpio_free(gpio_cd);
-	gpio_free(gpio_wp);
-}
-
 static struct pxamci_platform_data zylonite_mci_platform_data = {
-	.detect_delay	= 20,
+	.detect_delay_ms= 200,
 	.ocr_mask	= MMC_VDD_32_33|MMC_VDD_33_34,
-	.init 		= zylonite_mci_init,
-	.exit		= zylonite_mci_exit,
-	.get_ro		= zylonite_mci_ro,
+};
+
+#define PCA9539A_MCI_CD 0
+#define PCA9539A_MCI1_CD 1
+#define PCA9539A_MCI_WP 2
+#define PCA9539A_MCI1_WP 3
+#define PCA9539A_MCI3_CD 30
+#define PCA9539A_MCI3_WP 31
+
+static struct gpiod_lookup_table zylonite_mci_gpio_table = {
+	.dev_id = "pxa2xx-mci.0",
+	.table = {
+		GPIO_LOOKUP("i2c-pca9539-a", PCA9539A_MCI_CD,
+			    "cd", GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP("i2c-pca9539-a", PCA9539A_MCI_WP,
+			    "wp", GPIO_ACTIVE_LOW),
+		{ },
+	},
 };
 
 static struct pxamci_platform_data zylonite_mci2_platform_data = {
-	.detect_delay	= 20,
+	.detect_delay_ms= 200,
 	.ocr_mask	= MMC_VDD_32_33|MMC_VDD_33_34,
+};
+
+static struct gpiod_lookup_table zylonite_mci2_gpio_table = {
+	.dev_id = "pxa2xx-mci.1",
+	.table = {
+		GPIO_LOOKUP("i2c-pca9539-a", PCA9539A_MCI1_CD,
+			    "cd", GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP("i2c-pca9539-a", PCA9539A_MCI1_WP,
+			    "wp", GPIO_ACTIVE_LOW),
+		{ },
+	},
+};
+
+static struct pxamci_platform_data zylonite_mci3_platform_data = {
+	.detect_delay_ms= 200,
+	.ocr_mask	= MMC_VDD_32_33|MMC_VDD_33_34,
+};
+
+static struct gpiod_lookup_table zylonite_mci3_gpio_table = {
+	.dev_id = "pxa2xx-mci.2",
+	.table = {
+		GPIO_LOOKUP("i2c-pca9539-a", PCA9539A_MCI3_CD,
+			    "cd", GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP("i2c-pca9539-a", PCA9539A_MCI3_WP,
+			    "wp", GPIO_ACTIVE_LOW),
+		{ },
+	},
 };
 
 static void __init zylonite_init_mmc(void)
 {
+	gpiod_add_lookup_table(&zylonite_mci_gpio_table);
 	pxa_set_mci_info(&zylonite_mci_platform_data);
+	gpiod_add_lookup_table(&zylonite_mci2_gpio_table);
 	pxa3xx_set_mci2_info(&zylonite_mci2_platform_data);
-	if (cpu_is_pxa310())
-		pxa3xx_set_mci3_info(&zylonite_mci_platform_data);
+	if (cpu_is_pxa310()) {
+		gpiod_add_lookup_table(&zylonite_mci3_gpio_table);
+		pxa3xx_set_mci3_info(&zylonite_mci3_platform_data);
+	}
 }
 #else
 static inline void zylonite_init_mmc(void) {}
 #endif
 
 #if defined(CONFIG_KEYBOARD_PXA27x) || defined(CONFIG_KEYBOARD_PXA27x_MODULE)
-static unsigned int zylonite_matrix_key_map[] = {
+static const unsigned int zylonite_matrix_key_map[] = {
 	/* KEY(row, col, key_code) */
 	KEY(0, 0, KEY_A), KEY(0, 1, KEY_B), KEY(0, 2, KEY_C), KEY(0, 5, KEY_D),
 	KEY(1, 0, KEY_E), KEY(1, 1, KEY_F), KEY(1, 2, KEY_G), KEY(1, 5, KEY_H),
@@ -351,11 +334,15 @@ static unsigned int zylonite_matrix_key_map[] = {
 	KEY(0, 3, KEY_AUX),	/* contact */
 };
 
+static struct matrix_keymap_data zylonite_matrix_keymap_data = {
+	.keymap			= zylonite_matrix_key_map,
+	.keymap_size		= ARRAY_SIZE(zylonite_matrix_key_map),
+};
+
 static struct pxa27x_keypad_platform_data zylonite_keypad_info = {
 	.matrix_key_rows	= 8,
 	.matrix_key_cols	= 8,
-	.matrix_key_map		= zylonite_matrix_key_map,
-	.matrix_key_map_size	= ARRAY_SIZE(zylonite_matrix_key_map),
+	.matrix_keymap_data	= &zylonite_matrix_keymap_data,
 
 	.enable_rotary0		= 1,
 	.rotary0_up_key		= KEY_UP,
@@ -372,7 +359,7 @@ static void __init zylonite_init_keypad(void)
 static inline void zylonite_init_keypad(void) {}
 #endif
 
-#if defined(CONFIG_MTD_NAND_PXA3xx) || defined(CONFIG_MTD_NAND_PXA3xx_MODULE)
+#if IS_ENABLED(CONFIG_MTD_NAND_MARVELL)
 static struct mtd_partition zylonite_nand_partitions[] = {
 	[0] = {
 		.name        = "Bootloader",
@@ -410,7 +397,6 @@ static struct mtd_partition zylonite_nand_partitions[] = {
 };
 
 static struct pxa3xx_nand_platform_data zylonite_nand_info = {
-	.enable_arbiter	= 1,
 	.parts		= zylonite_nand_partitions,
 	.nr_parts	= ARRAY_SIZE(zylonite_nand_partitions),
 };
@@ -421,10 +407,29 @@ static void __init zylonite_init_nand(void)
 }
 #else
 static inline void zylonite_init_nand(void) {}
-#endif /* CONFIG_MTD_NAND_PXA3xx || CONFIG_MTD_NAND_PXA3xx_MODULE */
+#endif /* IS_ENABLED(CONFIG_MTD_NAND_MARVELL) */
+
+#if defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE)
+static struct pxaohci_platform_data zylonite_ohci_info = {
+	.port_mode	= PMM_PERPORT_MODE,
+	.flags		= ENABLE_PORT1 | ENABLE_PORT2 |
+			  POWER_CONTROL_LOW | POWER_SENSE_LOW,
+};
+
+static void __init zylonite_init_ohci(void)
+{
+	pxa_set_ohci_info(&zylonite_ohci_info);
+}
+#else
+static inline void zylonite_init_ohci(void) {}
+#endif /* CONFIG_USB_OHCI_HCD || CONFIG_USB_OHCI_HCD_MODULE */
 
 static void __init zylonite_init(void)
 {
+	pxa_set_ffuart_info(NULL);
+	pxa_set_btuart_info(NULL);
+	pxa_set_stuart_info(NULL);
+
 	/* board-processor specific initialization */
 	zylonite_pxa300_init();
 	zylonite_pxa320_init();
@@ -433,8 +438,8 @@ static void __init zylonite_init(void)
 	 * Note: We depend that the bootloader set
 	 * the correct value to MSC register for SMC91x.
 	 */
-	smc91x_resources[1].start = gpio_to_irq(gpio_eth_irq);
-	smc91x_resources[1].end   = gpio_to_irq(gpio_eth_irq);
+	smc91x_resources[1].start = PXA_GPIO_TO_IRQ(gpio_eth_irq);
+	smc91x_resources[1].end   = PXA_GPIO_TO_IRQ(gpio_eth_irq);
 	platform_device_register(&smc91x_device);
 
 	pxa_set_ac97_info(NULL);
@@ -443,14 +448,16 @@ static void __init zylonite_init(void)
 	zylonite_init_keypad();
 	zylonite_init_nand();
 	zylonite_init_leds();
+	zylonite_init_ohci();
 }
 
 MACHINE_START(ZYLONITE, "PXA3xx Platform Development Kit (aka Zylonite)")
-	.phys_io	= 0x40000000,
-	.boot_params	= 0xa0000100,
-	.io_pg_offst	= (io_p2v(0x40000000) >> 18) & 0xfffc,
-	.map_io		= pxa_map_io,
+	.atag_offset	= 0x100,
+	.map_io		= pxa3xx_map_io,
+	.nr_irqs	= ZYLONITE_NR_IRQS,
 	.init_irq	= pxa3xx_init_irq,
-	.timer		= &pxa_timer,
+	.handle_irq	= pxa3xx_handle_irq,
+	.init_time	= pxa_timer_init,
 	.init_machine	= zylonite_init,
+	.restart	= pxa_restart,
 MACHINE_END

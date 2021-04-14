@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *
  * FIXME: Properly make this race free with refcounting etc...
@@ -5,10 +6,10 @@
  * FIXME: LOCKING !!!
  */
 
-#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 
@@ -643,7 +644,7 @@ static int pmf_add_function_prop(struct pmf_device *dev, void *driverdata,
 
 	while (length >= 12) {
 		/* Allocate a structure */
-		func = kzalloc(sizeof(struct pmf_function), GFP_KERNEL);
+		func = kzalloc(sizeof(*func), GFP_KERNEL);
 		if (func == NULL)
 			goto bail;
 		kref_init(&func->ref);
@@ -685,7 +686,7 @@ static int pmf_add_functions(struct pmf_device *dev, void *driverdata)
 	int count = 0;
 
 	for (pp = dev->node->properties; pp != 0; pp = pp->next) {
-		char *name;
+		const char *name;
 		if (strncmp(pp->name, PP_PREFIX, plen) != 0)
 			continue;
 		name = pp->name + plen;
@@ -708,7 +709,7 @@ int pmf_register_driver(struct device_node *np,
 	if (handlers == NULL)
 		return -EINVAL;
 
-	DBG("pmf: registering driver for node %s\n", np->full_name);
+	DBG("pmf: registering driver for node %pOF\n", np);
 
 	spin_lock_irqsave(&pmf_lock, flags);
 	dev = pmf_find_device(np);
@@ -719,7 +720,7 @@ int pmf_register_driver(struct device_node *np,
 		return -EBUSY;
 	}
 
-	dev = kzalloc(sizeof(struct pmf_device), GFP_KERNEL);
+	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (dev == NULL) {
 		DBG("pmf: no memory !\n");
 		return -ENOMEM;
@@ -781,7 +782,7 @@ void pmf_unregister_driver(struct device_node *np)
 	struct pmf_device *dev;
 	unsigned long flags;
 
-	DBG("pmf: unregistering driver for node %s\n", np->full_name);
+	DBG("pmf: unregistering driver for node %pOF\n", np);
 
 	spin_lock_irqsave(&pmf_lock, flags);
 	dev = pmf_find_device(np);
@@ -804,7 +805,7 @@ void pmf_unregister_driver(struct device_node *np)
 }
 EXPORT_SYMBOL_GPL(pmf_unregister_driver);
 
-struct pmf_function *__pmf_find_function(struct device_node *target,
+static struct pmf_function *__pmf_find_function(struct device_node *target,
 					 const char *name, u32 flags)
 {
 	struct device_node *actor = of_node_get(target);
@@ -836,21 +837,24 @@ struct pmf_function *__pmf_find_function(struct device_node *target,
 		return NULL;
  find_it:
 	dev = pmf_find_device(actor);
-	if (dev == NULL)
-		return NULL;
+	if (dev == NULL) {
+		result = NULL;
+		goto out;
+	}
 
 	list_for_each_entry(func, &dev->functions, link) {
 		if (name && strcmp(name, func->name))
 			continue;
-		if (func->phandle && target->node != func->phandle)
+		if (func->phandle && target->phandle != func->phandle)
 			continue;
 		if ((func->flags & flags) == 0)
 			continue;
 		result = func;
 		break;
 	}
-	of_node_put(actor);
 	pmf_put_device(dev);
+out:
+	of_node_put(actor);
 	return result;
 }
 
@@ -937,7 +941,7 @@ int pmf_call_one(struct pmf_function *func, struct pmf_args *args)
 	void *instdata = NULL;
 	int rc = 0;
 
-	DBG(" ** pmf_call_one(%s/%s) **\n", dev->node->full_name, func->name);
+	DBG(" ** pmf_call_one(%pOF/%s) **\n", dev->node, func->name);
 
 	if (dev->handlers->begin)
 		instdata = dev->handlers->begin(func, args);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /***************************************************************************
                           dpti.c  -  description
                              -------------------
@@ -7,16 +8,12 @@
 			   July 30, 2001 First version being submitted
 			   for inclusion in the kernel.  V2.4
 
-    See Documentation/scsi/dpti.txt for history, notes, license info
+    See Documentation/scsi/dpti.rst for history, notes, license info
     and credits
  ***************************************************************************/
 
 /***************************************************************************
  *                                                                         *
- *   This program is free software; you can redistribute it and/or modify  *
- *   it under the terms of the GNU General Public License as published by  *
- *   the Free Software Foundation; either version 2 of the License, or     *
- *   (at your option) any later version.                                   *
  *                                                                         *
  ***************************************************************************/
 /***************************************************************************
@@ -30,6 +27,7 @@
 /*#define UARTDELAY 1 */
 
 #include <linux/module.h>
+#include <linux/pgtable.h>
 
 MODULE_AUTHOR("Deanna Bonds, with _lots_ of help from Mark Salyzyn");
 MODULE_DESCRIPTION("Adaptec I2O RAID Driver");
@@ -37,7 +35,7 @@ MODULE_DESCRIPTION("Adaptec I2O RAID Driver");
 ////////////////////////////////////////////////////////////////
 
 #include <linux/ioctl.h>	/* For SCSI-Passthrough */
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <linux/stat.h>
 #include <linux/slab.h>		/* for kmalloc() */
@@ -49,7 +47,6 @@ MODULE_DESCRIPTION("Adaptec I2O RAID Driver");
 #include <linux/kernel.h>	/* for printk */
 #include <linux/sched.h>
 #include <linux/reboot.h>
-#include <linux/smp_lock.h>
 #include <linux/spinlock.h>
 #include <linux/dma-mapping.h>
 
@@ -59,7 +56,6 @@ MODULE_DESCRIPTION("Adaptec I2O RAID Driver");
 #include <linux/mutex.h>
 
 #include <asm/processor.h>	/* for boot_cpu_data */
-#include <asm/pgtable.h>
 #include <asm/io.h>		/* for virt_to_bus, etc. */
 
 #include <scsi/scsi.h>
@@ -76,6 +72,7 @@ MODULE_DESCRIPTION("Adaptec I2O RAID Driver");
  * Needed for our management apps
  *============================================================================
  */
+static DEFINE_MUTEX(adpt_mutex);
 static dpt_sig_S DPTI_sig = {
 	{'d', 'P', 't', 'S', 'i', 'G'}, SIG_VERSION,
 #ifdef __i386__
@@ -114,17 +111,19 @@ static int hba_count = 0;
 
 static struct class *adpt_sysfs_class;
 
+static long adpt_unlocked_ioctl(struct file *, unsigned int, unsigned long);
 #ifdef CONFIG_COMPAT
 static long compat_adpt_ioctl(struct file *, unsigned int, unsigned long);
 #endif
 
 static const struct file_operations adpt_fops = {
-	.ioctl		= adpt_ioctl,
+	.unlocked_ioctl	= adpt_unlocked_ioctl,
 	.open		= adpt_open,
 	.release	= adpt_close,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= compat_adpt_ioctl,
 #endif
+	.llseek		= noop_llseek,
 };
 
 /* Structures and definitions for synchronous message posting.
@@ -178,17 +177,21 @@ static u8 adpt_read_blink_led(adpt_hba* host)
  *============================================================================
  */
 
+#ifdef MODULE
 static struct pci_device_id dptids[] = {
 	{ PCI_DPT_VENDOR_ID, PCI_DPT_DEVICE_ID, PCI_ANY_ID, PCI_ANY_ID,},
 	{ PCI_DPT_VENDOR_ID, PCI_DPT_RAPTOR_DEVICE_ID, PCI_ANY_ID, PCI_ANY_ID,},
 	{ 0, }
 };
+#endif
+
 MODULE_DEVICE_TABLE(pci,dptids);
 
 static int adpt_detect(struct scsi_host_template* sht)
 {
 	struct pci_dev *pDev = NULL;
-	adpt_hba* pHba;
+	adpt_hba *pHba;
+	adpt_hba *next;
 
 	PINFO("Detecting Adaptec I2O RAID controllers...\n");
 
@@ -206,7 +209,8 @@ static int adpt_detect(struct scsi_host_template* sht)
 	}
 
 	/* In INIT state, Activate IOPs */
-	for (pHba = hba_chain; pHba; pHba = pHba->next) {
+	for (pHba = hba_chain; pHba; pHba = next) {
+		next = pHba->next;
 		// Activate does get status , init outbound, and get hrt
 		if (adpt_i2o_activate_hba(pHba) < 0) {
 			adpt_i2o_delete_hba(pHba);
@@ -243,7 +247,8 @@ rebuild_sys_tab:
 	PDEBUG("HBA's in OPERATIONAL state\n");
 
 	printk("dpti: If you have a lot of devices this could take a few minutes.\n");
-	for (pHba = hba_chain; pHba; pHba = pHba->next) {
+	for (pHba = hba_chain; pHba; pHba = next) {
+		next = pHba->next;
 		printk(KERN_INFO"%s: Reading the hardware resource table.\n", pHba->name);
 		if (adpt_i2o_lct_get(pHba) < 0){
 			adpt_i2o_delete_hba(pHba);
@@ -263,7 +268,8 @@ rebuild_sys_tab:
 		adpt_sysfs_class = NULL;
 	}
 
-	for (pHba = hba_chain; pHba; pHba = pHba->next) {
+	for (pHba = hba_chain; pHba; pHba = next) {
+		next = pHba->next;
 		if (adpt_scsi_host_alloc(pHba, sht) < 0){
 			adpt_i2o_delete_hba(pHba);
 			continue;
@@ -271,7 +277,7 @@ rebuild_sys_tab:
 		pHba->initialized = TRUE;
 		pHba->state &= ~DPTI_STATE_RESET;
 		if (adpt_sysfs_class) {
-			struct device *dev = device_create_drvdata(adpt_sysfs_class,
+			struct device *dev = device_create(adpt_sysfs_class,
 				NULL, MKDEV(DPTI_I2O_MAJOR, pHba->unit), NULL,
 				"dpti%d", pHba->unit);
 			if (IS_ERR(dev)) {
@@ -293,16 +299,14 @@ rebuild_sys_tab:
 }
 
 
-/*
- * scsi_unregister will be called AFTER we return.
- */
-static int adpt_release(struct Scsi_Host *host)
+static void adpt_release(adpt_hba *pHba)
 {
-	adpt_hba* pHba = (adpt_hba*) host->hostdata[0];
+	struct Scsi_Host *shost = pHba->host;
+
+	scsi_remove_host(shost);
 //	adpt_i2o_quiesce_hba(pHba);
 	adpt_i2o_delete_hba(pHba);
-	scsi_unregister(host);
-	return 0;
+	scsi_host_put(shost);
 }
 
 
@@ -404,20 +408,15 @@ static void adpt_inquiry(adpt_hba* pHba)
 static int adpt_slave_configure(struct scsi_device * device)
 {
 	struct Scsi_Host *host = device->host;
-	adpt_hba* pHba;
-
-	pHba = (adpt_hba *) host->hostdata[0];
 
 	if (host->can_queue && device->tagged_supported) {
-		scsi_adjust_queue_depth(device, MSG_SIMPLE_TAG,
+		scsi_change_queue_depth(device,
 				host->can_queue - 1);
-	} else {
-		scsi_adjust_queue_depth(device, 0, 1);
 	}
 	return 0;
 }
 
-static int adpt_queue(struct scsi_cmnd * cmd, void (*done) (struct scsi_cmnd *))
+static int adpt_queue_lck(struct scsi_cmnd * cmd, void (*done) (struct scsi_cmnd *))
 {
 	adpt_hba* pHba = NULL;
 	struct adpt_device* pDev = NULL;	/* dpt per device information */
@@ -442,19 +441,8 @@ static int adpt_queue(struct scsi_cmnd * cmd, void (*done) (struct scsi_cmnd *))
 	}
 
 	rmb();
-	/*
-	 * TODO: I need to block here if I am processing ioctl cmds
-	 * but if the outstanding cmds all finish before the ioctl,
-	 * the scsi-core will not know to start sending cmds to me again.
-	 * I need to a way to restart the scsi-cores queues or should I block
-	 * calling scsi_done on the outstanding cmds instead
-	 * for now we don't set the IOCTL state
-	 */
-	if(((pHba->state) & DPTI_STATE_IOCTL) || ((pHba->state) & DPTI_STATE_RESET)) {
-		pHba->host->last_reset = jiffies;
-		pHba->host->resetting = 1;
-		return 1;
-	}
+	if ((pHba->state) & DPTI_STATE_RESET)
+		return SCSI_MLQUEUE_HOST_BUSY;
 
 	// TODO if the cmd->device if offline then I may need to issue a bus rescan
 	// followed by a get_lct to see if the device is there anymore
@@ -464,7 +452,7 @@ static int adpt_queue(struct scsi_cmnd * cmd, void (*done) (struct scsi_cmnd *))
 		 * to the device structure.  This should be a TEST_UNIT_READY
 		 * command from scan_scsis_single.
 		 */
-		if ((pDev = adpt_find_device(pHba, (u32)cmd->device->channel, (u32)cmd->device->id, (u32)cmd->device->lun)) == NULL) {
+		if ((pDev = adpt_find_device(pHba, (u32)cmd->device->channel, (u32)cmd->device->id, cmd->device->lun)) == NULL) {
 			// TODO: if any luns are at this bus, scsi id then fake a TEST_UNIT_READY and INQUIRY response 
 			// with type 7F (for all luns less than the max for this bus,id) so the lun scan will continue.
 			cmd->result = (DID_NO_CONNECT << 16);
@@ -484,6 +472,8 @@ static int adpt_queue(struct scsi_cmnd * cmd, void (*done) (struct scsi_cmnd *))
 	}
 	return adpt_scsi_to_i2o(pHba, cmd, pDev);
 }
+
+static DEF_SCSI_QCMD(adpt_queue)
 
 static int adpt_bios_param(struct scsi_device *sdev, struct block_device *dev,
 		sector_t capacity, int geom[])
@@ -545,35 +535,13 @@ static const char *adpt_info(struct Scsi_Host *host)
 	return (char *) (pHba->detail);
 }
 
-static int adpt_proc_info(struct Scsi_Host *host, char *buffer, char **start, off_t offset,
-		  int length, int inout)
+static int adpt_show_info(struct seq_file *m, struct Scsi_Host *host)
 {
 	struct adpt_device* d;
 	int id;
 	int chan;
-	int len = 0;
-	int begin = 0;
-	int pos = 0;
 	adpt_hba* pHba;
 	int unit;
-
-	*start = buffer;
-	if (inout == TRUE) {
-		/*
-		 * The user has done a write and wants us to take the
-		 * data in the buffer and do something with it.
-		 * proc_scsiwrite calls us with inout = 1
-		 *
-		 * Read data from buffer (writing to us) - NOT SUPPORTED
-		 */
-		return -EINVAL;
-	}
-
-	/*
-	 * inout = 0 means the user has done a read and wants information
-	 * returned, so we write information about the cards into the buffer
-	 * proc_scsiread() calls us with inout = 0
-	 */
 
 	// Find HBA (host bus adapter) we are looking for
 	mutex_lock(&adpt_configuration_lock);
@@ -588,126 +556,30 @@ static int adpt_proc_info(struct Scsi_Host *host, char *buffer, char **start, of
 	}
 	host = pHba->host;
 
-	len  = sprintf(buffer    , "Adaptec I2O RAID Driver Version: %s\n\n", DPT_I2O_VERSION);
-	len += sprintf(buffer+len, "%s\n", pHba->detail);
-	len += sprintf(buffer+len, "SCSI Host=scsi%d  Control Node=/dev/%s  irq=%d\n", 
+	seq_printf(m, "Adaptec I2O RAID Driver Version: %s\n\n", DPT_I2O_VERSION);
+	seq_printf(m, "%s\n", pHba->detail);
+	seq_printf(m, "SCSI Host=scsi%d  Control Node=/dev/%s  irq=%d\n", 
 			pHba->host->host_no, pHba->name, host->irq);
-	len += sprintf(buffer+len, "\tpost fifo size  = %d\n\treply fifo size = %d\n\tsg table size   = %d\n\n",
+	seq_printf(m, "\tpost fifo size  = %d\n\treply fifo size = %d\n\tsg table size   = %d\n\n",
 			host->can_queue, (int) pHba->reply_fifo_size , host->sg_tablesize);
 
-	pos = begin + len;
-
-	/* CHECKPOINT */
-	if(pos > offset + length) {
-		goto stop_output;
-	}
-	if(pos <= offset) {
-		/*
-		 * If we haven't even written to where we last left
-		 * off (the last time we were called), reset the 
-		 * beginning pointer.
-		 */
-		len = 0;
-		begin = pos;
-	}
-	len +=  sprintf(buffer+len, "Devices:\n");
+	seq_puts(m, "Devices:\n");
 	for(chan = 0; chan < MAX_CHANNEL; chan++) {
 		for(id = 0; id < MAX_ID; id++) {
 			d = pHba->channel[chan].device[id];
-			while(d){
-				len += sprintf(buffer+len,"\t%-24.24s", d->pScsi_dev->vendor);
-				len += sprintf(buffer+len," Rev: %-8.8s\n", d->pScsi_dev->rev);
-				pos = begin + len;
-
-
-				/* CHECKPOINT */
-				if(pos > offset + length) {
-					goto stop_output;
-				}
-				if(pos <= offset) {
-					len = 0;
-					begin = pos;
-				}
+			while(d) {
+				seq_printf(m,"\t%-24.24s", d->pScsi_dev->vendor);
+				seq_printf(m," Rev: %-8.8s\n", d->pScsi_dev->rev);
 
 				unit = d->pI2o_dev->lct_data.tid;
-				len += sprintf(buffer+len, "\tTID=%d, (Channel=%d, Target=%d, Lun=%d)  (%s)\n\n",
-					       unit, (int)d->scsi_channel, (int)d->scsi_id, (int)d->scsi_lun,
+				seq_printf(m, "\tTID=%d, (Channel=%d, Target=%d, Lun=%llu)  (%s)\n\n",
+					       unit, (int)d->scsi_channel, (int)d->scsi_id, d->scsi_lun,
 					       scsi_device_online(d->pScsi_dev)? "online":"offline"); 
-				pos = begin + len;
-
-				/* CHECKPOINT */
-				if(pos > offset + length) {
-					goto stop_output;
-				}
-				if(pos <= offset) {
-					len = 0;
-					begin = pos;
-				}
-
 				d = d->next_lun;
 			}
 		}
 	}
-
-	/*
-	 * begin is where we last checked our position with regards to offset
-	 * begin is always less than offset.  len is relative to begin.  It
-	 * is the number of bytes written past begin
-	 *
-	 */
-stop_output:
-	/* stop the output and calculate the correct length */
-	*(buffer + len) = '\0';
-
-	*start = buffer + (offset - begin);	/* Start of wanted data */
-	len -= (offset - begin);
-	if(len > length) {
-		len = length;
-	} else if(len < 0){
-		len = 0;
-		**start = '\0';
-	}
-	return len;
-}
-
-/*
- *	Turn a struct scsi_cmnd * into a unique 32 bit 'context'.
- */
-static u32 adpt_cmd_to_context(struct scsi_cmnd *cmd)
-{
-	return (u32)cmd->serial_number;
-}
-
-/*
- *	Go from a u32 'context' to a struct scsi_cmnd * .
- *	This could probably be made more efficient.
- */
-static struct scsi_cmnd *
-	adpt_cmd_from_context(adpt_hba * pHba, u32 context)
-{
-	struct scsi_cmnd * cmd;
-	struct scsi_device * d;
-
-	if (context == 0)
-		return NULL;
-
-	spin_unlock(pHba->host->host_lock);
-	shost_for_each_device(d, pHba->host) {
-		unsigned long flags;
-		spin_lock_irqsave(&d->list_lock, flags);
-		list_for_each_entry(cmd, &d->cmd_list, list) {
-			if (((u32)cmd->serial_number == context)) {
-				spin_unlock_irqrestore(&d->list_lock, flags);
-				scsi_device_put(d);
-				spin_lock(pHba->host->host_lock);
-				return cmd;
-			}
-		}
-		spin_unlock_irqrestore(&d->list_lock, flags);
-	}
-	spin_lock(pHba->host->host_lock);
-
-	return NULL;
+	return 0;
 }
 
 /*
@@ -731,7 +603,6 @@ static u32 adpt_ioctl_to_context(adpt_hba * pHba, void *reply)
 	}
 	spin_unlock_irqrestore(pHba->host->host_lock, flags);
 	if (i >= nr) {
-		kfree (reply);
 		printk(KERN_WARNING"%s: Too many outstanding "
 				"ioctl commands\n", pHba->name);
 		return (u32)-1;
@@ -768,11 +639,8 @@ static int adpt_abort(struct scsi_cmnd * cmd)
 	u32 msg[5];
 	int rcode;
 
-	if(cmd->serial_number == 0){
-		return FAILED;
-	}
 	pHba = (adpt_hba*) cmd->device->host->hostdata[0];
-	printk(KERN_INFO"%s: Trying to Abort cmd=%ld\n",pHba->name, cmd->serial_number);
+	printk(KERN_INFO"%s: Trying to Abort\n",pHba->name);
 	if ((dptdevice = (void*) (cmd->device->hostdata)) == NULL) {
 		printk(KERN_ERR "%s: Unable to abort: No device in cmnd\n",pHba->name);
 		return FAILED;
@@ -782,8 +650,9 @@ static int adpt_abort(struct scsi_cmnd * cmd)
 	msg[0] = FIVE_WORD_MSG_SIZE|SGL_OFFSET_0;
 	msg[1] = I2O_CMD_SCSI_ABORT<<24|HOST_TID<<12|dptdevice->tid;
 	msg[2] = 0;
-	msg[3]= 0; 
-	msg[4] = adpt_cmd_to_context(cmd);
+	msg[3]= 0;
+	/* Add 1 to avoid firmware treating it as invalid command */
+	msg[4] = cmd->request->tag + 1;
 	if (pHba->host)
 		spin_lock_irq(pHba->host->host_lock);
 	rcode = adpt_i2o_post_wait(pHba, msg, sizeof(msg), FOREVER);
@@ -794,10 +663,10 @@ static int adpt_abort(struct scsi_cmnd * cmd)
 			printk(KERN_INFO"%s: Abort cmd not supported\n",pHba->name);
 			return FAILED;
 		}
-		printk(KERN_INFO"%s: Abort cmd=%ld failed.\n",pHba->name, cmd->serial_number);
+		printk(KERN_INFO"%s: Abort failed.\n",pHba->name);
 		return FAILED;
 	} 
-	printk(KERN_INFO"%s: Abort cmd=%ld complete.\n",pHba->name, cmd->serial_number);
+	printk(KERN_INFO"%s: Abort complete.\n",pHba->name);
 	return SUCCESS;
 }
 
@@ -882,14 +751,17 @@ static int __adpt_reset(struct scsi_cmnd* cmd)
 {
 	adpt_hba* pHba;
 	int rcode;
+	char name[32];
+
 	pHba = (adpt_hba*)cmd->device->host->hostdata[0];
-	printk(KERN_WARNING"%s: Hba Reset: scsi id %d: tid: %d\n",pHba->name,cmd->device->channel,pHba->channel[cmd->device->channel].tid );
+	strncpy(name, pHba->name, sizeof(name));
+	printk(KERN_WARNING"%s: Hba Reset: scsi id %d: tid: %d\n", name, cmd->device->channel, pHba->channel[cmd->device->channel].tid);
 	rcode =  adpt_hba_reset(pHba);
 	if(rcode == 0){
-		printk(KERN_WARNING"%s: HBA reset complete\n",pHba->name);
+		printk(KERN_WARNING"%s: HBA reset complete\n", name);
 		return SUCCESS;
 	} else {
-		printk(KERN_WARNING"%s: HBA reset failed (%x)\n",pHba->name, rcode);
+		printk(KERN_WARNING"%s: HBA reset failed (%x)\n", name, rcode);
 		return FAILED;
 	}
 }
@@ -942,7 +814,7 @@ static int adpt_hba_reset(adpt_hba* pHba)
 	}
 	pHba->state &= ~DPTI_STATE_RESET;
 
-	adpt_fail_posted_scbs(pHba);
+	scsi_host_complete_all_commands(pHba->host, DID_RESET);
 	return 0;	/* return success */
 }
 
@@ -957,8 +829,8 @@ static void adpt_i2o_sys_shutdown(void)
 	adpt_hba *pHba, *pNext;
 	struct adpt_i2o_post_wait_data *p1, *old;
 
-	 printk(KERN_INFO"Shutting down Adaptec I2O controllers.\n");
-	 printk(KERN_INFO"   This could take a few minutes if there are many devices attached\n");
+	printk(KERN_INFO "Shutting down Adaptec I2O controllers.\n");
+	printk(KERN_INFO "   This could take a few minutes if there are many devices attached\n");
 	/* Delete all IOPs from the controller chain */
 	/* They should have already been released by the
 	 * scsi-core
@@ -981,7 +853,7 @@ static void adpt_i2o_sys_shutdown(void)
 //	spin_unlock_irqrestore(&adpt_post_wait_lock, flags);
 	adpt_post_wait_queue = NULL;
 
-	 printk(KERN_INFO "Adaptec I2O controllers down.\n");
+	printk(KERN_INFO "Adaptec I2O controllers down.\n");
 }
 
 static int adpt_install_hba(struct scsi_host_template* sht, struct pci_dev* pDev)
@@ -1014,15 +886,15 @@ static int adpt_install_hba(struct scsi_host_template* sht, struct pci_dev* pDev
 	 *	See if we should enable dma64 mode.
 	 */
 	if (sizeof(dma_addr_t) > 4 &&
-	    pci_set_dma_mask(pDev, DMA_64BIT_MASK) == 0) {
-		if (dma_get_required_mask(&pDev->dev) > DMA_32BIT_MASK)
-			dma64 = 1;
-	}
-	if (!dma64 && pci_set_dma_mask(pDev, DMA_32BIT_MASK) != 0)
+	    dma_get_required_mask(&pDev->dev) > DMA_BIT_MASK(32) &&
+	    dma_set_mask(&pDev->dev, DMA_BIT_MASK(64)) == 0)
+		dma64 = 1;
+
+	if (!dma64 && dma_set_mask(&pDev->dev, DMA_BIT_MASK(32)) != 0)
 		return -EINVAL;
 
 	/* adapter only supports message blocks below 4GB */
-	pci_set_consistent_dma_mask(pDev, DMA_32BIT_MASK);
+	dma_set_coherent_mask(&pDev->dev, DMA_BIT_MASK(32));
 
 	base_addr0_phys = pci_resource_start(pDev,0);
 	hba_map0_area_size = pci_resource_len(pDev,0);
@@ -1168,8 +1040,6 @@ static void adpt_i2o_delete_hba(adpt_hba* pHba)
 
 
 	mutex_lock(&adpt_configuration_lock);
-	// scsi_unregister calls our adpt_release which
-	// does a quiese
 	if(pHba->host){
 		free_irq(pHba->host->irq, pHba);
 	}
@@ -1229,11 +1099,10 @@ static void adpt_i2o_delete_hba(adpt_hba* pHba)
 		}
 	}
 	pci_dev_put(pHba->pDev);
-	kfree(pHba);
-
 	if (adpt_sysfs_class)
 		device_destroy(adpt_sysfs_class,
 				MKDEV(DPTI_I2O_MAJOR, pHba->unit));
+	kfree(pHba);
 
 	if(hba_count <= 0){
 		unregister_chrdev(DPTI_I2O_MAJOR, DPT_DRIVER);   
@@ -1244,18 +1113,13 @@ static void adpt_i2o_delete_hba(adpt_hba* pHba)
 	}
 }
 
-static struct adpt_device* adpt_find_device(adpt_hba* pHba, u32 chan, u32 id, u32 lun)
+static struct adpt_device* adpt_find_device(adpt_hba* pHba, u32 chan, u32 id, u64 lun)
 {
 	struct adpt_device* d;
 
-	if(chan < 0 || chan >= MAX_CHANNEL)
+	if (chan >= MAX_CHANNEL)
 		return NULL;
 	
-	if( pHba->channel[chan].device == NULL){
-		printk(KERN_DEBUG"Adaptec I2O RAID: Trying to find device before they are allocated\n");
-		return NULL;
-	}
-
 	d = pHba->channel[chan].device[id];
 	if(!d || d->tid == 0) {
 		return NULL;
@@ -1286,7 +1150,7 @@ static int adpt_i2o_post_wait(adpt_hba* pHba, u32* msg, int len, int timeout)
 	ulong flags = 0;
 	struct adpt_i2o_post_wait_data *p1, *p2;
 	struct adpt_i2o_post_wait_data *wait_data =
-		kmalloc(sizeof(struct adpt_i2o_post_wait_data),GFP_KERNEL);
+		kmalloc(sizeof(struct adpt_i2o_post_wait_data), GFP_ATOMIC);
 	DECLARE_WAITQUEUE(wait, current);
 
 	if (!wait_data)
@@ -1464,7 +1328,6 @@ static s32 adpt_i2o_reset_hba(adpt_hba* pHba)
 		printk(KERN_ERR"IOP reset failed - no free memory.\n");
 		return -ENOMEM;
 	}
-	memset(status,0,4);
 
 	msg[0]=EIGHT_WORD_MSG_SIZE|SGL_OFFSET_0;
 	msg[1]=I2O_CMD_ADAPTER_RESET<<24|HOST_TID<<12|ADAPTER_TID;
@@ -1544,7 +1407,7 @@ static int adpt_i2o_parse_lct(adpt_hba* pHba)
 	i2o_lct *lct = pHba->lct;
 	u8 bus_no = 0;
 	s16 scsi_id;
-	s16 scsi_lun;
+	u64 scsi_lun;
 	u32 buf[10]; // larger than 7, or 8 ...
 	struct adpt_device* pDev; 
 	
@@ -1578,7 +1441,7 @@ static int adpt_i2o_parse_lct(adpt_hba* pHba)
 			}
 			bus_no = buf[0]>>16;
 			scsi_id = buf[1];
-			scsi_lun = (buf[2]>>8 )&0xff;
+			scsi_lun = scsilun_to_int((struct scsi_lun *)&buf[2]);
 			if(bus_no >= MAX_CHANNEL) {	// Something wrong skip it
 				printk(KERN_WARNING"%s: Channel number %d out of range \n", pHba->name, bus_no);
 				continue;
@@ -1653,7 +1516,7 @@ static int adpt_i2o_parse_lct(adpt_hba* pHba)
 			if(adpt_i2o_query_scalar(pHba, tid, 0x8000, -1, buf, 32)>=0) {
 				bus_no = buf[0]>>16;
 				scsi_id = buf[1];
-				scsi_lun = (buf[2]>>8 )&0xff;
+				scsi_lun = scsilun_to_int((struct scsi_lun *)&buf[2]);
 				if(bus_no >= MAX_CHANNEL) {	// Something wrong skip it
 					continue;
 				}
@@ -1728,12 +1591,12 @@ static int adpt_open(struct inode *inode, struct file *file)
 	int minor;
 	adpt_hba* pHba;
 
-	lock_kernel();
+	mutex_lock(&adpt_mutex);
 	//TODO check for root access
 	//
 	minor = iminor(inode);
 	if (minor >= hba_count) {
-		unlock_kernel();
+		mutex_unlock(&adpt_mutex);
 		return -ENXIO;
 	}
 	mutex_lock(&adpt_configuration_lock);
@@ -1744,7 +1607,7 @@ static int adpt_open(struct inode *inode, struct file *file)
 	}
 	if (pHba == NULL) {
 		mutex_unlock(&adpt_configuration_lock);
-		unlock_kernel();
+		mutex_unlock(&adpt_mutex);
 		return -ENXIO;
 	}
 
@@ -1755,7 +1618,7 @@ static int adpt_open(struct inode *inode, struct file *file)
 
 	pHba->in_use = 1;
 	mutex_unlock(&adpt_configuration_lock);
-	unlock_kernel();
+	mutex_unlock(&adpt_mutex);
 
 	return 0;
 }
@@ -1794,7 +1657,7 @@ static int adpt_i2o_passthru(adpt_hba* pHba, u32 __user *arg)
 	u32 reply_size = 0;
 	u32 __user *user_msg = arg;
 	u32 __user * user_reply = NULL;
-	void *sg_list[pHba->sg_tablesize];
+	void **sg_list = NULL;
 	u32 sg_offset = 0;
 	u32 sg_count = 0;
 	int sg_index = 0;
@@ -1835,18 +1698,24 @@ static int adpt_i2o_passthru(adpt_hba* pHba, u32 __user *arg)
 	sg_offset = (msg[0]>>4)&0xf;
 	msg[2] = 0x40000000; // IOCTL context
 	msg[3] = adpt_ioctl_to_context(pHba, reply);
-	if (msg[3] == (u32)-1)
-		return -EBUSY;
+	if (msg[3] == (u32)-1) {
+		rcode = -EBUSY;
+		goto free;
+	}
 
-	memset(sg_list,0, sizeof(sg_list[0])*pHba->sg_tablesize);
+	sg_list = kcalloc(pHba->sg_tablesize, sizeof(*sg_list), GFP_KERNEL);
+	if (!sg_list) {
+		rcode = -ENOMEM;
+		goto free;
+	}
 	if(sg_offset) {
 		// TODO add 64 bit API
 		struct sg_simple_element *sg =  (struct sg_simple_element*) (msg+sg_offset);
 		sg_count = (size - sg_offset*4) / sizeof(struct sg_simple_element);
 		if (sg_count > pHba->sg_tablesize){
 			printk(KERN_DEBUG"%s:IOCTL SG List too large (%u)\n", pHba->name,sg_count);
-			kfree (reply);
-			return -EINVAL;
+			rcode = -EINVAL;
+			goto free;
 		}
 
 		for(i = 0; i < sg_count; i++) {
@@ -1882,21 +1751,23 @@ static int adpt_i2o_passthru(adpt_hba* pHba, u32 __user *arg)
 	}
 
 	do {
-		if(pHba->host)
+		/*
+		 * Stop any new commands from enterring the
+		 * controller while processing the ioctl
+		 */
+		if (pHba->host) {
+			scsi_block_requests(pHba->host);
 			spin_lock_irqsave(pHba->host->host_lock, flags);
-		// This state stops any new commands from enterring the
-		// controller while processing the ioctl
-//		pHba->state |= DPTI_STATE_IOCTL;
-//		We can't set this now - The scsi subsystem sets host_blocked and
-//		the queue empties and stops.  We need a way to restart the queue
+		}
 		rcode = adpt_i2o_post_wait(pHba, msg, size, FOREVER);
 		if (rcode != 0)
 			printk("adpt_i2o_passthru: post wait failed %d %p\n",
 					rcode, reply);
-//		pHba->state &= ~DPTI_STATE_IOCTL;
-		if(pHba->host)
+		if (pHba->host) {
 			spin_unlock_irqrestore(pHba->host->host_lock, flags);
-	} while(rcode == -ETIMEDOUT);  
+			scsi_unblock_requests(pHba->host);
+		}
+	} while (rcode == -ETIMEDOUT);
 
 	if(rcode){
 		goto cleanup;
@@ -1918,6 +1789,10 @@ static int adpt_i2o_passthru(adpt_hba* pHba, u32 __user *arg)
 		}
 		size = size>>16;
 		size *= 4;
+		if (size > MAX_MESSAGE_SIZE) {
+			rcode = -EINVAL;
+			goto cleanup;
+		}
 		/* Copy in the user's I2O command */
 		if (copy_from_user (msg, user_msg, size)) {
 			rcode = -EFAULT;
@@ -1959,7 +1834,6 @@ cleanup:
 	if (rcode != -ETIME && rcode != -EINTR) {
 		struct sg_simple_element *sg =
 				(struct sg_simple_element*) (msg +sg_offset);
-		kfree (reply);
 		while(sg_index) {
 			if(sg_list[--sg_index]) {
 				dma_free_coherent(&pHba->pDev->dev,
@@ -1969,6 +1843,10 @@ cleanup:
 			}
 		}
 	}
+
+free:
+	kfree(sg_list);
+	kfree(reply);
 	return rcode;
 }
 
@@ -2002,6 +1880,9 @@ static void adpt_alpha_info(sysInfo_S* si)
 #endif
 
 #if defined __i386__
+
+#include <uapi/asm/vm86.h>
+
 static void adpt_i386_info(sysInfo_S* si)
 {
 	// This is all the info we need for now
@@ -2062,8 +1943,7 @@ static int adpt_system_info(void __user *buffer)
 	return 0;
 }
 
-static int adpt_ioctl(struct inode *inode, struct file *file, uint cmd,
-	      ulong arg)
+static int adpt_ioctl(struct inode *inode, struct file *file, uint cmd, ulong arg)
 {
 	int minor;
 	int error = 0;
@@ -2129,13 +2009,16 @@ static int adpt_ioctl(struct inode *inode, struct file *file, uint cmd,
 		}
 		break;
 		}
-	case I2ORESETCMD:
-		if(pHba->host)
-			spin_lock_irqsave(pHba->host->host_lock, flags);
+	case I2ORESETCMD: {
+		struct Scsi_Host *shost = pHba->host;
+
+		if (shost)
+			spin_lock_irqsave(shost->host_lock, flags);
 		adpt_hba_reset(pHba);
-		if(pHba->host)
-			spin_unlock_irqrestore(pHba->host->host_lock, flags);
+		if (shost)
+			spin_unlock_irqrestore(shost->host_lock, flags);
 		break;
+	}
 	case I2ORESCANCMD:
 		adpt_rescan(pHba);
 		break;
@@ -2146,6 +2029,20 @@ static int adpt_ioctl(struct inode *inode, struct file *file, uint cmd,
 	return error;
 }
 
+static long adpt_unlocked_ioctl(struct file *file, uint cmd, ulong arg)
+{
+	struct inode *inode;
+	long ret;
+ 
+	inode = file_inode(file);
+ 
+	mutex_lock(&adpt_mutex);
+	ret = adpt_ioctl(inode, file, cmd, arg);
+	mutex_unlock(&adpt_mutex);
+
+	return ret;
+}
+
 #ifdef CONFIG_COMPAT
 static long compat_adpt_ioctl(struct file *file,
 				unsigned int cmd, unsigned long arg)
@@ -2153,9 +2050,9 @@ static long compat_adpt_ioctl(struct file *file,
 	struct inode *inode;
 	long ret;
  
-	inode = file->f_dentry->d_inode;
+	inode = file_inode(file);
  
-	lock_kernel();
+	mutex_lock(&adpt_mutex);
  
 	switch(cmd) {
 		case DPT_SIGNATURE:
@@ -2173,7 +2070,7 @@ static long compat_adpt_ioctl(struct file *file,
 			ret =  -ENOIOCTLCMD;
 	}
  
-	unlock_kernel();
+	mutex_unlock(&adpt_mutex);
  
 	return ret;
 }
@@ -2252,20 +2149,27 @@ static irqreturn_t adpt_isr(int irq, void *dev_id)
 				status = I2O_POST_WAIT_OK;
 			}
 			if(!(context & 0x40000000)) {
-				cmd = adpt_cmd_from_context(pHba,
-							readl(reply+12));
+				/*
+				 * The request tag is one less than the command tag
+				 * as the firmware might treat a 0 tag as invalid
+				 */
+				cmd = scsi_host_find_tag(pHba->host,
+							 readl(reply + 12) - 1);
 				if(cmd != NULL) {
 					printk(KERN_WARNING"%s: Apparent SCSI cmd in Post Wait Context - cmd=%p context=%x\n", pHba->name, cmd, context);
 				}
 			}
 			adpt_i2o_post_wait_complete(context, status);
 		} else { // SCSI message
-			cmd = adpt_cmd_from_context (pHba, readl(reply+12));
+			/*
+			 * The request tag is one less than the command tag
+			 * as the firmware might treat a 0 tag as invalid
+			 */
+			cmd = scsi_host_find_tag(pHba->host,
+						 readl(reply + 12) - 1);
 			if(cmd != NULL){
 				scsi_dma_unmap(cmd);
-				if(cmd->serial_number != 0) { // If not timedout
-					adpt_i2o_to_scsi(reply, cmd);
-				}
+				adpt_i2o_scsi_complete(reply, cmd);
 			}
 		}
 		writel(m, pHba->reply_port);
@@ -2331,7 +2235,8 @@ static s32 adpt_scsi_to_i2o(adpt_hba* pHba, struct scsi_cmnd* cmd, struct adpt_d
 	// I2O_CMD_SCSI_EXEC
 	msg[1] = ((0xff<<24)|(HOST_TID<<12)|d->tid);
 	msg[2] = 0;
-	msg[3] = adpt_cmd_to_context(cmd);  /* Want SCSI control block back */
+	/* Add 1 to avoid firmware treating it as invalid command */
+	msg[3] = cmd->request->tag + 1;
 	// Our cards use the transaction context as the tag for queueing
 	// Adaptec/DPT Private stuff 
 	msg[4] = I2O_CMD_SCSI_EXEC|(DPT_ORGANIZATION_ID<<16);
@@ -2431,7 +2336,7 @@ static s32 adpt_scsi_host_alloc(adpt_hba* pHba, struct scsi_host_template *sht)
 }
 
 
-static s32 adpt_i2o_to_scsi(void __iomem *reply, struct scsi_cmnd* cmd)
+static void adpt_i2o_scsi_complete(void __iomem *reply, struct scsi_cmnd *cmd)
 {
 	adpt_hba* pHba;
 	u32 hba_status;
@@ -2445,7 +2350,7 @@ static s32 adpt_i2o_to_scsi(void __iomem *reply, struct scsi_cmnd* cmd)
 	hba_status = detailed_status >> 8;
 
 	// calculate resid for sg 
-	scsi_set_resid(cmd, scsi_bufflen(cmd) - readl(reply+5));
+	scsi_set_resid(cmd, scsi_bufflen(cmd) - readl(reply+20));
 
 	pHba = (adpt_hba*) cmd->device->host->hostdata[0];
 
@@ -2456,7 +2361,7 @@ static s32 adpt_i2o_to_scsi(void __iomem *reply, struct scsi_cmnd* cmd)
 		case I2O_SCSI_DSC_SUCCESS:
 			cmd->result = (DID_OK << 16);
 			// handle underflow
-			if(readl(reply+5) < cmd->underflow ) {
+			if (readl(reply+20) < cmd->underflow) {
 				cmd->result = (DID_ERROR <<16);
 				printk(KERN_WARNING"%s: SCSI CMD underflow\n",pHba->name);
 			}
@@ -2470,8 +2375,8 @@ static s32 adpt_i2o_to_scsi(void __iomem *reply, struct scsi_cmnd* cmd)
 		case I2O_SCSI_DSC_COMMAND_TIMEOUT:
 		case I2O_SCSI_DSC_NO_ADAPTER:
 		case I2O_SCSI_DSC_RESOURCE_UNAVAILABLE:
-			printk(KERN_WARNING"%s: SCSI Timeout-Device (%d,%d,%d) hba status=0x%x, dev status=0x%x, cmd=0x%x\n",
-				pHba->name, (u32)cmd->device->channel, (u32)cmd->device->id, (u32)cmd->device->lun, hba_status, dev_status, cmd->cmnd[0]);
+			printk(KERN_WARNING"%s: SCSI Timeout-Device (%d,%d,%llu) hba status=0x%x, dev status=0x%x, cmd=0x%x\n",
+				pHba->name, (u32)cmd->device->channel, (u32)cmd->device->id, cmd->device->lun, hba_status, dev_status, cmd->cmnd[0]);
 			cmd->result = (DID_TIME_OUT << 16);
 			break;
 		case I2O_SCSI_DSC_ADAPTER_BUSY:
@@ -2510,8 +2415,8 @@ static s32 adpt_i2o_to_scsi(void __iomem *reply, struct scsi_cmnd* cmd)
 		case I2O_SCSI_DSC_QUEUE_FROZEN:
 		case I2O_SCSI_DSC_REQUEST_INVALID:
 		default:
-			printk(KERN_WARNING"%s: SCSI error %0x-Device(%d,%d,%d) hba_status=0x%x, dev_status=0x%x, cmd=0x%x\n",
-				pHba->name, detailed_status & I2O_SCSI_DSC_MASK, (u32)cmd->device->channel, (u32)cmd->device->id, (u32)cmd->device->lun,
+			printk(KERN_WARNING"%s: SCSI error %0x-Device(%d,%d,%llu) hba_status=0x%x, dev_status=0x%x, cmd=0x%x\n",
+				pHba->name, detailed_status & I2O_SCSI_DSC_MASK, (u32)cmd->device->channel, (u32)cmd->device->id, cmd->device->lun,
 			       hba_status, dev_status, cmd->cmnd[0]);
 			cmd->result = (DID_ERROR << 16);
 			break;
@@ -2527,8 +2432,8 @@ static s32 adpt_i2o_to_scsi(void __iomem *reply, struct scsi_cmnd* cmd)
 			   cmd->sense_buffer[2] == DATA_PROTECT ){
 				/* This is to handle an array failed */
 				cmd->result = (DID_TIME_OUT << 16);
-				printk(KERN_WARNING"%s: SCSI Data Protect-Device (%d,%d,%d) hba_status=0x%x, dev_status=0x%x, cmd=0x%x\n",
-					pHba->name, (u32)cmd->device->channel, (u32)cmd->device->id, (u32)cmd->device->lun, 
+				printk(KERN_WARNING"%s: SCSI Data Protect-Device (%d,%d,%llu) hba_status=0x%x, dev_status=0x%x, cmd=0x%x\n",
+					pHba->name, (u32)cmd->device->channel, (u32)cmd->device->id, cmd->device->lun,
 					hba_status, dev_status, cmd->cmnd[0]);
 
 			}
@@ -2539,8 +2444,8 @@ static s32 adpt_i2o_to_scsi(void __iomem *reply, struct scsi_cmnd* cmd)
 		 * for a limitted number of retries.
 		 */
 		cmd->result = (DID_TIME_OUT << 16);
-		printk(KERN_WARNING"%s: I2O MSG_FAIL - Device (%d,%d,%d) tid=%d, cmd=0x%x\n",
-			pHba->name, (u32)cmd->device->channel, (u32)cmd->device->id, (u32)cmd->device->lun,
+		printk(KERN_WARNING"%s: I2O MSG_FAIL - Device (%d,%d,%llu) tid=%d, cmd=0x%x\n",
+			pHba->name, (u32)cmd->device->channel, (u32)cmd->device->id, cmd->device->lun,
 			((struct adpt_device*)(cmd->device->hostdata))->tid, cmd->cmnd[0]);
 	}
 
@@ -2549,7 +2454,6 @@ static s32 adpt_i2o_to_scsi(void __iomem *reply, struct scsi_cmnd* cmd)
 	if(cmd->scsi_done != NULL){
 		cmd->scsi_done(cmd);
 	} 
-	return cmd->result;
 }
 
 
@@ -2580,7 +2484,7 @@ static s32 adpt_i2o_reparse_lct(adpt_hba* pHba)
 	i2o_lct *lct = pHba->lct;
 	u8 bus_no = 0;
 	s16 scsi_id;
-	s16 scsi_lun;
+	u64 scsi_lun;
 	u32 buf[10]; // at least 8 u32's
 	struct adpt_device* pDev = NULL;
 	struct i2o_device* pI2o_dev = NULL;
@@ -2619,8 +2523,15 @@ static s32 adpt_i2o_reparse_lct(adpt_hba* pHba)
 				continue;
 			}
 			bus_no = buf[0]>>16;
+			if (bus_no >= MAX_CHANNEL) {	/* Something wrong skip it */
+				printk(KERN_WARNING
+					"%s: Channel number %d out of range\n",
+					pHba->name, bus_no);
+				continue;
+			}
+
 			scsi_id = buf[1];
-			scsi_lun = (buf[2]>>8 )&0xff;
+			scsi_lun = scsilun_to_int((struct scsi_lun *)&buf[2]);
 			pDev = pHba->channel[bus_no].device[scsi_id];
 			/* da lun */
 			while(pDev) {
@@ -2630,7 +2541,8 @@ static s32 adpt_i2o_reparse_lct(adpt_hba* pHba)
 				pDev = pDev->next_lun;
 			}
 			if(!pDev ) { // Something new add it
-				d = kmalloc(sizeof(struct i2o_device), GFP_KERNEL);
+				d = kmalloc(sizeof(struct i2o_device),
+					    GFP_ATOMIC);
 				if(d==NULL)
 				{
 					printk(KERN_CRIT "Out of memory for I2O device data.\n");
@@ -2646,13 +2558,11 @@ static s32 adpt_i2o_reparse_lct(adpt_hba* pHba)
 				adpt_i2o_report_hba_unit(pHba, d);
 				adpt_i2o_install_device(pHba, d);
 	
-				if(bus_no >= MAX_CHANNEL) {	// Something wrong skip it
-					printk(KERN_WARNING"%s: Channel number %d out of range \n", pHba->name, bus_no);
-					continue;
-				}
 				pDev = pHba->channel[bus_no].device[scsi_id];	
 				if( pDev == NULL){
-					pDev =  kzalloc(sizeof(struct adpt_device),GFP_KERNEL);
+					pDev =
+					  kzalloc(sizeof(struct adpt_device),
+						  GFP_ATOMIC);
 					if(pDev == NULL) {
 						return -ENOMEM;
 					}
@@ -2661,7 +2571,9 @@ static s32 adpt_i2o_reparse_lct(adpt_hba* pHba)
 					while (pDev->next_lun) {
 						pDev = pDev->next_lun;
 					}
-					pDev = pDev->next_lun = kzalloc(sizeof(struct adpt_device),GFP_KERNEL);
+					pDev = pDev->next_lun =
+					  kzalloc(sizeof(struct adpt_device),
+						  GFP_ATOMIC);
 					if(pDev == NULL) {
 						return -ENOMEM;
 					}
@@ -2688,7 +2600,7 @@ static s32 adpt_i2o_reparse_lct(adpt_hba* pHba)
 			while(pDev) {
 				if(pDev->scsi_lun == scsi_lun) {
 					if(!scsi_device_online(pDev->pScsi_dev)) {
-						printk(KERN_WARNING"%s: Setting device (%d,%d,%d) back online\n",
+						printk(KERN_WARNING"%s: Setting device (%d,%d,%llu) back online\n",
 								pHba->name,bus_no,scsi_id,scsi_lun);
 						if (pDev->pScsi_dev) {
 							scsi_device_set_state(pDev->pScsi_dev, SDEV_RUNNING);
@@ -2720,7 +2632,7 @@ static s32 adpt_i2o_reparse_lct(adpt_hba* pHba)
 		// in the LCT table
 		if (pDev->state & DPTI_DEV_UNSCANNED){
 			pDev->state = DPTI_DEV_OFFLINE;
-			printk(KERN_WARNING"%s: Device (%d,%d,%d) offline\n",pHba->name,pDev->scsi_channel,pDev->scsi_id,pDev->scsi_lun);
+			printk(KERN_WARNING"%s: Device (%d,%d,%llu) offline\n",pHba->name,pDev->scsi_channel,pDev->scsi_id,pDev->scsi_lun);
 			if (pDev->pScsi_dev) {
 				scsi_device_set_state(pDev->pScsi_dev, SDEV_OFFLINE);
 			}
@@ -2728,26 +2640,6 @@ static s32 adpt_i2o_reparse_lct(adpt_hba* pHba)
 	}
 	return 0;
 }
-
-static void adpt_fail_posted_scbs(adpt_hba* pHba)
-{
-	struct scsi_cmnd* 	cmd = NULL;
-	struct scsi_device* 	d = NULL;
-
-	shost_for_each_device(d, pHba->host) {
-		unsigned long flags;
-		spin_lock_irqsave(&d->list_lock, flags);
-		list_for_each_entry(cmd, &d->cmd_list, list) {
-			if(cmd->serial_number == 0){
-				continue;
-			}
-			cmd->result = (DID_OK << 16) | (QUEUE_FULL <<1);
-			cmd->scsi_done(cmd);
-		}
-		spin_unlock_irqrestore(&d->list_lock, flags);
-	}
-}
-
 
 /*============================================================================
  *  Routines from i2o subsystem
@@ -2817,16 +2709,12 @@ static int adpt_i2o_activate_hba(adpt_hba* pHba)
  
 static int adpt_i2o_online_hba(adpt_hba* pHba)
 {
-	if (adpt_i2o_systab_send(pHba) < 0) {
-		adpt_i2o_delete_hba(pHba);
+	if (adpt_i2o_systab_send(pHba) < 0)
 		return -1;
-	}
 	/* In READY state */
 
-	if (adpt_i2o_enable_hba(pHba) < 0) {
-		adpt_i2o_delete_hba(pHba);
+	if (adpt_i2o_enable_hba(pHba) < 0)
 		return -1;
-	}
 
 	/* In OPERATIONAL state  */
 	return 0;
@@ -2892,7 +2780,6 @@ static s32 adpt_i2o_init_outbound_q(adpt_hba* pHba)
 			pHba->name);
 		return -ENOMEM;
 	}
-	memset(status, 0, 4);
 
 	writel(EIGHT_WORD_MSG_SIZE| SGL_OFFSET_6, &msg[0]);
 	writel(I2O_CMD_OUTBOUND_INIT<<24 | HOST_TID<<12 | ADAPTER_TID, &msg[1]);
@@ -2946,7 +2833,6 @@ static s32 adpt_i2o_init_outbound_q(adpt_hba* pHba)
 		printk(KERN_ERR "%s: Could not allocate reply pool\n", pHba->name);
 		return -ENOMEM;
 	}
-	memset(pHba->reply_pool, 0 , pHba->reply_fifo_size * REPLY_FRAME_SIZE * 4);
 
 	for(i = 0; i < pHba->reply_fifo_size; i++) {
 		writel(pHba->reply_pool_pa + (i * REPLY_FRAME_SIZE * 4),
@@ -3106,7 +2992,7 @@ static int adpt_i2o_lct_get(adpt_hba* pHba)
 		if (pHba->lct == NULL) {
 			pHba->lct = dma_alloc_coherent(&pHba->pDev->dev,
 					pHba->lct_size, &pHba->lct_pa,
-					GFP_KERNEL);
+					GFP_ATOMIC);
 			if(pHba->lct == NULL) {
 				printk(KERN_CRIT "%s: Lct Get failed. Out of memory.\n",
 					pHba->name);
@@ -3181,7 +3067,6 @@ static int adpt_i2o_build_sys_table(void)
 		printk(KERN_WARNING "SysTab Set failed. Out of memory.\n");	
 		return -ENOMEM;
 	}
-	memset(sys_tbl, 0, sys_tbl_len);
 
 	sys_tbl->num_entries = hba_count;
 	sys_tbl->version = I2OVERSION;
@@ -3400,7 +3285,7 @@ static int adpt_i2o_query_scalar(adpt_hba* pHba, int tid,
 	if (opblk_va == NULL) {
 		dma_free_coherent(&pHba->pDev->dev, sizeof(u8) * (8+buflen),
 			resblk_va, resblk_pa);
-		printk(KERN_CRIT "%s: query operatio failed; Out of memory.\n",
+		printk(KERN_CRIT "%s: query operation failed; Out of memory.\n",
 			pHba->name);
 		return -ENOMEM;
 	}
@@ -3476,7 +3361,7 @@ static int adpt_i2o_issue_params(int cmd, adpt_hba* pHba, int tid,
 		return -((res[1] >> 16) & 0xFF); /* -BlockStatus */
 	}
 
-	 return 4 + ((res[1] & 0x0000FFFF) << 2); /* bytes used in resblk */ 
+	return 4 + ((res[1] & 0x0000FFFF) << 2); /* bytes used in resblk */
 }
 
 
@@ -3549,8 +3434,8 @@ static int adpt_i2o_enable_hba(adpt_hba* pHba)
 
 static int adpt_i2o_systab_send(adpt_hba* pHba)
 {
-	 u32 msg[12];
-	 int ret;
+	u32 msg[12];
+	int ret;
 
 	msg[0] = I2O_MESSAGE_SIZE(12) | SGL_OFFSET_6;
 	msg[1] = I2O_CMD_SYS_TAB_SET<<24 | HOST_TID<<12 | ADAPTER_TID;
@@ -3582,7 +3467,7 @@ static int adpt_i2o_systab_send(adpt_hba* pHba)
 #endif
 
 	return ret;	
- }
+}
 
 
 /*============================================================================
@@ -3607,7 +3492,7 @@ static struct scsi_host_template driver_template = {
 	.module			= THIS_MODULE,
 	.name			= "dpt_i2o",
 	.proc_name		= "dpt_i2o",
-	.proc_info		= adpt_proc_info,
+	.show_info		= adpt_show_info,
 	.info			= adpt_info,
 	.queuecommand		= adpt_queue,
 	.eh_abort_handler	= adpt_abort,
@@ -3618,8 +3503,6 @@ static struct scsi_host_template driver_template = {
 	.slave_configure	= adpt_slave_configure,
 	.can_queue		= MAX_TO_IOP_MESSAGES,
 	.this_id		= 7,
-	.cmd_per_lun		= 1,
-	.use_clustering		= ENABLE_CLUSTERING,
 };
 
 static int __init adpt_init(void)
@@ -3654,11 +3537,9 @@ static void __exit adpt_exit(void)
 {
 	adpt_hba	*pHba, *next;
 
-	for (pHba = hba_chain; pHba; pHba = pHba->next)
-		scsi_remove_host(pHba->host);
 	for (pHba = hba_chain; pHba; pHba = next) {
 		next = pHba->next;
-		adpt_release(pHba->host);
+		adpt_release(pHba);
 	}
 }
 

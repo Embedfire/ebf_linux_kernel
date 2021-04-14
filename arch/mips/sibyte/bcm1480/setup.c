@@ -1,27 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2000,2001,2002,2003,2004 Broadcom Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/reboot.h>
 #include <linux/string.h>
 
 #include <asm/bootinfo.h>
+#include <asm/cpu.h>
 #include <asm/mipsregs.h>
 #include <asm/io.h>
 #include <asm/sibyte/sb1250.h>
@@ -35,6 +23,7 @@ unsigned int soc_pass;
 unsigned int soc_type;
 EXPORT_SYMBOL(soc_type);
 unsigned int periph_rev;
+EXPORT_SYMBOL_GPL(periph_rev);
 unsigned int zbbus_mhz;
 EXPORT_SYMBOL(zbbus_mhz);
 
@@ -119,7 +108,7 @@ void __init bcm1480_setup(void)
 	uint64_t sys_rev;
 	int plldiv;
 
-	sb1_pass = read_c0_prid() & 0xff;
+	sb1_pass = read_c0_prid() & PRID_REV_MASK;
 	sys_rev = __raw_readq(IOADDR(A_SCD_SYSTEM_REVISION));
 	soc_type = SYS_SOC_TYPE(sys_rev);
 	part_type = G_SYS_PART(sys_rev);

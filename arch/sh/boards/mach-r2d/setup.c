@@ -1,15 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Renesas Technology Sales RTS7751R2D Support.
  *
  * Copyright (C) 2002 - 2006 Atom Create Engineering Co., Ltd.
  * Copyright (C) 2004 - 2007 Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/platform_device.h>
+#include <linux/mtd/mtd.h>
+#include <linux/mtd/partitions.h>
+#include <linux/mtd/physmap.h>
 #include <linux/ata_platform.h>
 #include <linux/sm501.h>
 #include <linux/sm501-regs.h>
@@ -18,7 +18,7 @@
 #include <linux/spi/spi.h>
 #include <linux/spi/spi_bitbang.h>
 #include <asm/machvec.h>
-#include <asm/rts7751r2d.h>
+#include <mach/r2d.h>
 #include <asm/io.h>
 #include <asm/io_trapped.h>
 #include <asm/spi.h>
@@ -67,7 +67,7 @@ static struct spi_board_info spi_bus[] = {
 static void r2d_chip_select(struct sh_spi_info *spi, int cs, int state)
 {
 	BUG_ON(cs != 0);  /* Single Epson RTC-9701JE attached on CS0 */
-	ctrl_outw(state == BITBANG_CS_ACTIVE, PA_RTCCE);
+	__raw_writew(state == BITBANG_CS_ACTIVE, PA_RTCCE);
 }
 
 static struct sh_spi_info spi_info = {
@@ -181,6 +181,50 @@ static struct platform_device sm501_device = {
 	.resource	= sm501_resources,
 };
 
+static struct mtd_partition r2d_partitions[] = {
+	{
+		.name		= "U-Boot",
+		.offset		= 0x00000000,
+		.size		= 0x00040000,
+		.mask_flags	= MTD_WRITEABLE,
+	}, {
+		.name		= "Environment",
+		.offset		= MTDPART_OFS_NXTBLK,
+		.size		= 0x00040000,
+		.mask_flags	= MTD_WRITEABLE,
+	}, {
+		.name		= "Kernel",
+		.offset		= MTDPART_OFS_NXTBLK,
+		.size		= 0x001c0000,
+	}, {
+		.name		= "Flash_FS",
+		.offset		= MTDPART_OFS_NXTBLK,
+		.size		= MTDPART_SIZ_FULL,
+	}
+};
+
+static struct physmap_flash_data flash_data = {
+	.width		= 2,
+	.nr_parts	= ARRAY_SIZE(r2d_partitions),
+	.parts		= r2d_partitions,
+};
+
+static struct resource flash_resource = {
+	.start		= 0x00000000,
+	.end		= 0x02000000,
+	.flags		= IORESOURCE_MEM,
+};
+
+static struct platform_device flash_device = {
+	.name		= "physmap-flash",
+	.id		= -1,
+	.resource	= &flash_resource,
+	.num_resources	= 1,
+	.dev		= {
+		.platform_data = &flash_data,
+	},
+};
+
 static struct platform_device *rts7751r2d_devices[] __initdata = {
 	&sm501_device,
 	&heartbeat_device,
@@ -203,16 +247,19 @@ static int __init rts7751r2d_devices_setup(void)
 	if (register_trapped_io(&cf_trapped_io) == 0)
 		platform_device_register(&cf_ide_device);
 
+	if (mach_is_r2d_plus())
+		platform_device_register(&flash_device);
+
 	spi_register_board_info(spi_bus, ARRAY_SIZE(spi_bus));
 
 	return platform_add_devices(rts7751r2d_devices,
 				    ARRAY_SIZE(rts7751r2d_devices));
 }
-__initcall(rts7751r2d_devices_setup);
+device_initcall(rts7751r2d_devices_setup);
 
 static void rts7751r2d_power_off(void)
 {
-	ctrl_outw(0x0001, PA_POWOFF);
+	__raw_writew(0x0001, PA_POWOFF);
 }
 
 /*
@@ -221,14 +268,14 @@ static void rts7751r2d_power_off(void)
 static void __init rts7751r2d_setup(char **cmdline_p)
 {
 	void __iomem *sm501_reg;
-	u16 ver = ctrl_inw(PA_VERREG);
+	u16 ver = __raw_readw(PA_VERREG);
 
 	printk(KERN_INFO "Renesas Technology Sales RTS7751R2D support.\n");
 
 	printk(KERN_INFO "FPGA version:%d (revision:%d)\n",
 					(ver >> 4) & 0xf, ver & 0xf);
 
-	ctrl_outw(0x0000, PA_OUTPORT);
+	__raw_writew(0x0000, PA_OUTPORT);
 	pm_power_off = rts7751r2d_power_off;
 
 	/* sm501 dram configuration:

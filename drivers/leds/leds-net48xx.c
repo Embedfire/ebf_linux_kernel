@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * LEDs driver for Soekris net48xx
  *
  * Copyright (C) 2006 Chris Boot <bootc@bootc.net>
  *
  * Based on leds-ams-delta.c
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -15,9 +12,10 @@
 #include <linux/platform_device.h>
 #include <linux/leds.h>
 #include <linux/err.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <linux/nsc_gpio.h>
 #include <linux/scx200_gpio.h>
+#include <linux/module.h>
 
 #define DRVNAME "net48xx-led"
 #define NET48XX_ERROR_LED_GPIO	20
@@ -33,45 +31,18 @@ static void net48xx_error_led_set(struct led_classdev *led_cdev,
 static struct led_classdev net48xx_error_led = {
 	.name		= "net48xx::error",
 	.brightness_set	= net48xx_error_led_set,
+	.flags		= LED_CORE_SUSPENDRESUME,
 };
-
-#ifdef CONFIG_PM
-static int net48xx_led_suspend(struct platform_device *dev,
-		pm_message_t state)
-{
-	led_classdev_suspend(&net48xx_error_led);
-	return 0;
-}
-
-static int net48xx_led_resume(struct platform_device *dev)
-{
-	led_classdev_resume(&net48xx_error_led);
-	return 0;
-}
-#else
-#define net48xx_led_suspend NULL
-#define net48xx_led_resume NULL
-#endif
 
 static int net48xx_led_probe(struct platform_device *pdev)
 {
-	return led_classdev_register(&pdev->dev, &net48xx_error_led);
-}
-
-static int net48xx_led_remove(struct platform_device *pdev)
-{
-	led_classdev_unregister(&net48xx_error_led);
-	return 0;
+	return devm_led_classdev_register(&pdev->dev, &net48xx_error_led);
 }
 
 static struct platform_driver net48xx_led_driver = {
 	.probe		= net48xx_led_probe,
-	.remove		= net48xx_led_remove,
-	.suspend	= net48xx_led_suspend,
-	.resume		= net48xx_led_resume,
 	.driver		= {
 		.name		= DRVNAME,
-		.owner		= THIS_MODULE,
 	},
 };
 

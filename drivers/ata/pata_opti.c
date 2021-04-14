@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * pata_opti.c 	- ATI PATA for new ATA layer
  *			  (C) 2005 Red Hat Inc
- *			  Alan Cox <alan@redhat.com>
  *
  * Based on
  *  linux/drivers/ide/pci/opti621.c		Version 0.7	Sept 10, 2002
@@ -27,7 +27,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <scsi/scsi_host.h>
@@ -164,16 +163,14 @@ static int opti_init_one(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	static const struct ata_port_info info = {
 		.flags = ATA_FLAG_SLAVE_POSS,
-		.pio_mask = 0x1f,
+		.pio_mask = ATA_PIO4,
 		.port_ops = &opti_port_ops
 	};
 	const struct ata_port_info *ppi[] = { &info, NULL };
-	static int printed_version;
 
-	if (!printed_version++)
-		dev_printk(KERN_DEBUG, &dev->dev, "version " DRV_VERSION "\n");
+	ata_print_version_once(&dev->dev, DRV_VERSION);
 
-	return ata_pci_sff_init_one(dev, ppi, &opti_sht, NULL);
+	return ata_pci_sff_init_one(dev, ppi, &opti_sht, NULL, 0);
 }
 
 static const struct pci_device_id opti[] = {
@@ -188,28 +185,16 @@ static struct pci_driver opti_pci_driver = {
 	.id_table	= opti,
 	.probe 		= opti_init_one,
 	.remove		= ata_pci_remove_one,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	.suspend	= ata_pci_device_suspend,
 	.resume		= ata_pci_device_resume,
 #endif
 };
 
-static int __init opti_init(void)
-{
-	return pci_register_driver(&opti_pci_driver);
-}
-
-static void __exit opti_exit(void)
-{
-	pci_unregister_driver(&opti_pci_driver);
-}
-
+module_pci_driver(opti_pci_driver);
 
 MODULE_AUTHOR("Alan Cox");
 MODULE_DESCRIPTION("low-level driver for Opti 621/621X");
 MODULE_LICENSE("GPL");
 MODULE_DEVICE_TABLE(pci, opti);
 MODULE_VERSION(DRV_VERSION);
-
-module_init(opti_init);
-module_exit(opti_exit);

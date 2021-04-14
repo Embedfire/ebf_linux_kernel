@@ -1,15 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * (c) Copyright 2003, 2006 Hewlett-Packard Development Company, L.P.
  *	Alex Williamson <alex.williamson@hp.com>
  *	Bjorn Helgaas <bjorn.helgaas@hp.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
 #include <linux/types.h>
+#include <linux/slab.h>
 #include <linux/acpi.h>
 
 #include <asm/acpi-ext.h>
@@ -68,10 +66,10 @@ static acpi_status find_csr_space(struct acpi_resource *resource, void *data)
 	status = acpi_resource_to_address64(resource, &addr);
 	if (ACPI_SUCCESS(status) &&
 	    addr.resource_type == ACPI_MEMORY_RANGE &&
-	    addr.address_length &&
+	    addr.address.address_length &&
 	    addr.producer_consumer == ACPI_CONSUMER) {
-		space->base = addr.minimum;
-		space->length = addr.address_length;
+		space->base = addr.address.minimum;
+		space->length = addr.address.address_length;
 		return AE_CTRL_TERMINATE;
 	}
 	return AE_OK;		/* keep looking */

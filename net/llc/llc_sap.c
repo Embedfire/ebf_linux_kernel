@@ -23,6 +23,7 @@
 #include <net/sock.h>
 #include <net/tcp_states.h>
 #include <linux/llc.h>
+#include <linux/slab.h>
 
 static int llc_mac_header_len(unsigned short devtype)
 {
@@ -30,16 +31,13 @@ static int llc_mac_header_len(unsigned short devtype)
 	case ARPHRD_ETHER:
 	case ARPHRD_LOOPBACK:
 		return sizeof(struct ethhdr);
-#ifdef CONFIG_TR
-	case ARPHRD_IEEE802_TR:
-		return sizeof(struct trh_hdr);
-#endif
 	}
 	return 0;
 }
 
 /**
  *	llc_alloc_frame - allocates sk_buff for frame
+ *	@sk:  socket to allocate frame to
  *	@dev: network device this skb will be sent over
  *	@type: pdu type to allocate
  *	@data_size: data size to allocate
@@ -69,7 +67,7 @@ struct sk_buff *llc_alloc_frame(struct sock *sk, struct net_device *dev,
 	return skb;
 }
 
-void llc_save_primitive(struct sock *sk, struct sk_buff* skb, u8 prim)
+void llc_save_primitive(struct sock *sk, struct sk_buff *skb, u8 prim)
 {
 	struct sockaddr_llc *addr;
 
@@ -117,7 +115,7 @@ void llc_sap_rtn_pdu(struct llc_sap *sap, struct sk_buff *skb)
  *	failure.
  */
 static struct llc_sap_state_trans *llc_find_sap_trans(struct llc_sap *sap,
-						      struct sk_buff* skb)
+						      struct sk_buff *skb)
 {
 	int i = 0;
 	struct llc_sap_state_trans *rc = NULL;
@@ -149,7 +147,7 @@ static int llc_exec_sap_trans_actions(struct llc_sap *sap,
 				      struct sk_buff *skb)
 {
 	int rc = 0;
-	llc_sap_action_t *next_action = trans->ev_actions;
+	const llc_sap_action_t *next_action = trans->ev_actions;
 
 	for (; next_action && *next_action; next_action++)
 		if ((*next_action)(sap, skb))
@@ -200,29 +198,22 @@ out:
  *	After executing actions of the event, upper layer will be indicated
  *	if needed(on receiving an UI frame). sk can be null for the
  *	datalink_proto case.
+ *
+ *	This function always consumes a reference to the skb.
  */
 static void llc_sap_state_process(struct llc_sap *sap, struct sk_buff *skb)
 {
 	struct llc_sap_state_ev *ev = llc_sap_ev(skb);
 
-	/*
-	 * We have to hold the skb, because llc_sap_next_state
-	 * will kfree it in the sending path and we need to
-	 * look at the skb->cb, where we encode llc_sap_state_ev.
-	 */
-	skb_get(skb);
 	ev->ind_cfm_flag = 0;
 	llc_sap_next_state(sap, skb);
-	if (ev->ind_cfm_flag == LLC_IND) {
-		if (skb->sk->sk_state == TCP_LISTEN)
-			kfree_skb(skb);
-		else {
-			llc_save_primitive(skb->sk, skb, ev->prim);
 
-			/* queue skb to the user. */
-			if (sock_queue_rcv_skb(skb->sk, skb))
-				kfree_skb(skb);
-		}
+	if (ev->ind_cfm_flag == LLC_IND && skb->sk->sk_state != TCP_LISTEN) {
+		llc_save_primitive(skb->sk, skb, ev->prim);
+
+		/* queue skb to the user. */
+		if (sock_queue_rcv_skb(skb->sk, skb) == 0)
+			return;
 	}
 	kfree_skb(skb);
 }
@@ -283,6 +274,7 @@ void llc_build_and_send_xid_pkt(struct llc_sap *sap, struct sk_buff *skb,
  *	llc_sap_rcv - sends received pdus to the sap state machine
  *	@sap: current sap component structure.
  *	@skb: received frame.
+ *	@sk:  socket to associate to frame
  *
  *	Sends received pdus to the sap state machine.
  */
@@ -293,8 +285,22 @@ static void llc_sap_rcv(struct llc_sap *sap, struct sk_buff *skb,
 
 	ev->type   = LLC_SAP_EV_TYPE_PDU;
 	ev->reason = 0;
+	skb_orphan(skb);
+	sock_hold(sk);
 	skb->sk = sk;
+	skb->destructor = sock_efree;
 	llc_sap_state_process(sap, skb);
+}
+
+static inline bool llc_dgram_match(const struct llc_sap *sap,
+				   const struct llc_addr *laddr,
+				   const struct sock *sk)
+{
+     struct llc_sock *llc = llc_sk(sk);
+
+     return sk->sk_type == SOCK_DGRAM &&
+	  llc->laddr.lsap == laddr->lsap &&
+	  ether_addr_equal(llc->laddr.mac, laddr->mac);
 }
 
 /**
@@ -309,29 +315,73 @@ static struct sock *llc_lookup_dgram(struct llc_sap *sap,
 				     const struct llc_addr *laddr)
 {
 	struct sock *rc;
-	struct hlist_node *node;
+	struct hlist_nulls_node *node;
+	int slot = llc_sk_laddr_hashfn(sap, laddr);
+	struct hlist_nulls_head *laddr_hb = &sap->sk_laddr_hash[slot];
 
-	read_lock_bh(&sap->sk_list.lock);
-	sk_for_each(rc, node, &sap->sk_list.list) {
-		struct llc_sock *llc = llc_sk(rc);
-
-		if (rc->sk_type == SOCK_DGRAM &&
-		    llc->laddr.lsap == laddr->lsap &&
-		    llc_mac_match(llc->laddr.mac, laddr->mac)) {
-			sock_hold(rc);
+	rcu_read_lock_bh();
+again:
+	sk_nulls_for_each_rcu(rc, node, laddr_hb) {
+		if (llc_dgram_match(sap, laddr, rc)) {
+			/* Extra checks required by SLAB_TYPESAFE_BY_RCU */
+			if (unlikely(!refcount_inc_not_zero(&rc->sk_refcnt)))
+				goto again;
+			if (unlikely(llc_sk(rc)->sap != sap ||
+				     !llc_dgram_match(sap, laddr, rc))) {
+				sock_put(rc);
+				continue;
+			}
 			goto found;
 		}
 	}
 	rc = NULL;
+	/*
+	 * if the nulls value we got at the end of this lookup is
+	 * not the expected one, we must restart lookup.
+	 * We probably met an item that was moved to another chain.
+	 */
+	if (unlikely(get_nulls_value(node) != slot))
+		goto again;
 found:
-	read_unlock_bh(&sap->sk_list.lock);
+	rcu_read_unlock_bh();
 	return rc;
+}
+
+static inline bool llc_mcast_match(const struct llc_sap *sap,
+				   const struct llc_addr *laddr,
+				   const struct sk_buff *skb,
+				   const struct sock *sk)
+{
+     struct llc_sock *llc = llc_sk(sk);
+
+     return sk->sk_type == SOCK_DGRAM &&
+	  llc->laddr.lsap == laddr->lsap &&
+	  llc->dev == skb->dev;
+}
+
+static void llc_do_mcast(struct llc_sap *sap, struct sk_buff *skb,
+			 struct sock **stack, int count)
+{
+	struct sk_buff *skb1;
+	int i;
+
+	for (i = 0; i < count; i++) {
+		skb1 = skb_clone(skb, GFP_ATOMIC);
+		if (!skb1) {
+			sock_put(stack[i]);
+			continue;
+		}
+
+		llc_sap_rcv(sap, skb1, stack[i]);
+		sock_put(stack[i]);
+	}
 }
 
 /**
  * 	llc_sap_mcast - Deliver multicast PDU's to all matching datagram sockets.
  *	@sap: SAP
  *	@laddr: address of local LLC (MAC + SAP)
+ *	@skb: PDU to deliver
  *
  *	Search socket list of the SAP and finds connections with same sap.
  *	Deliver clone to each.
@@ -340,32 +390,31 @@ static void llc_sap_mcast(struct llc_sap *sap,
 			  const struct llc_addr *laddr,
 			  struct sk_buff *skb)
 {
+	int i = 0;
 	struct sock *sk;
-	struct hlist_node *node;
+	struct sock *stack[256 / sizeof(struct sock *)];
+	struct llc_sock *llc;
+	struct hlist_head *dev_hb = llc_sk_dev_hash(sap, skb->dev->ifindex);
 
-	read_lock_bh(&sap->sk_list.lock);
-	sk_for_each(sk, node, &sap->sk_list.list) {
-		struct llc_sock *llc = llc_sk(sk);
-		struct sk_buff *skb1;
+	spin_lock_bh(&sap->sk_lock);
+	hlist_for_each_entry(llc, dev_hb, dev_hash_node) {
 
-		if (sk->sk_type != SOCK_DGRAM)
+		sk = &llc->sk;
+
+		if (!llc_mcast_match(sap, laddr, skb, sk))
 			continue;
-
-		if (llc->laddr.lsap != laddr->lsap)
-			continue;
-
-		if (llc->dev != skb->dev)
-			continue;
-
-		skb1 = skb_clone(skb, GFP_ATOMIC);
-		if (!skb1)
-			break;
 
 		sock_hold(sk);
-		llc_sap_rcv(sap, skb1, sk);
-		sock_put(sk);
+		if (i < ARRAY_SIZE(stack))
+			stack[i++] = sk;
+		else {
+			llc_do_mcast(sap, skb, stack, i);
+			i = 0;
+		}
 	}
-	read_unlock_bh(&sap->sk_list.lock);
+	spin_unlock_bh(&sap->sk_lock);
+
+	llc_do_mcast(sap, skb, stack, i);
 }
 
 
@@ -376,7 +425,7 @@ void llc_sap_handler(struct llc_sap *sap, struct sk_buff *skb)
 	llc_pdu_decode_da(skb, laddr.mac);
 	llc_pdu_decode_dsap(skb, &laddr.lsap);
 
-	if (llc_mac_multicast(laddr.mac)) {
+	if (is_multicast_ether_addr(laddr.mac)) {
 		llc_sap_mcast(sap, &laddr, skb);
 		kfree_skb(skb);
 	} else {

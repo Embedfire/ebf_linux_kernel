@@ -1,18 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Renesas Solutions Highlander R7785RP Support.
  *
  * Copyright (C) 2002  Atom Create Engineering Co., Ltd.
  * Copyright (C) 2006 - 2008  Paul Mundt
  * Copyright (C) 2007  Magnus Damm
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/io.h>
-#include <asm/r7780rp.h>
+#include <mach/highlander.h>
 
 enum {
 	UNUSED = 0,
@@ -66,20 +63,20 @@ static DECLARE_INTC_DESC(intc_desc, "r7785rp", vectors,
 
 unsigned char * __init highlander_plat_irq_setup(void)
 {
-	if ((ctrl_inw(0xa4000158) & 0xf000) != 0x1000)
+	if ((__raw_readw(0xa4000158) & 0xf000) != 0x1000)
 		return NULL;
 
 	printk(KERN_INFO "Using r7785rp interrupt controller.\n");
 
-	ctrl_outw(0x0000, PA_IRLSSR1);	/* FPGA IRLSSR1(CF_CD clear) */
+	__raw_writew(0x0000, PA_IRLSSR1);	/* FPGA IRLSSR1(CF_CD clear) */
 
 	/* Setup the FPGA IRL */
-	ctrl_outw(0x0000, PA_IRLPRA);	/* FPGA IRLA */
-	ctrl_outw(0xe598, PA_IRLPRB);	/* FPGA IRLB */
-	ctrl_outw(0x7060, PA_IRLPRC);	/* FPGA IRLC */
-	ctrl_outw(0x0000, PA_IRLPRD);	/* FPGA IRLD */
-	ctrl_outw(0x4321, PA_IRLPRE);	/* FPGA IRLE */
-	ctrl_outw(0xdcba, PA_IRLPRF);	/* FPGA IRLF */
+	__raw_writew(0x0000, PA_IRLPRA);	/* FPGA IRLA */
+	__raw_writew(0xe598, PA_IRLPRB);	/* FPGA IRLB */
+	__raw_writew(0x7060, PA_IRLPRC);	/* FPGA IRLC */
+	__raw_writew(0x0000, PA_IRLPRD);	/* FPGA IRLD */
+	__raw_writew(0x4321, PA_IRLPRE);	/* FPGA IRLE */
+	__raw_writew(0xdcba, PA_IRLPRF);	/* FPGA IRLF */
 
 	register_intc_controller(&intc_desc);
 	return irl2irq;

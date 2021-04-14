@@ -26,6 +26,12 @@
 #ifndef __SAVAGE_DRV_H__
 #define __SAVAGE_DRV_H__
 
+#include <linux/io.h>
+
+#include <drm/drm_ioctl.h>
+#include <drm/drm_legacy.h>
+#include <drm/savage_drm.h>
+
 #define DRIVER_AUTHOR	"Felix Kuehling"
 
 #define DRIVER_NAME	"savage"
@@ -104,7 +110,7 @@ enum savage_family {
 	S3_LAST
 };
 
-extern struct drm_ioctl_desc savage_ioctls[];
+extern const struct drm_ioctl_desc savage_ioctls[];
 extern int savage_max_ioctl;
 
 #define S3_SAVAGE3D_SERIES(chip)  ((chip>=S3_SAVAGE3D) && (chip<=S3_SAVAGE_MX))
@@ -160,10 +166,7 @@ typedef struct drm_savage_private {
 	drm_local_map_t *cmd_dma;
 	drm_local_map_t fake_dma;
 
-	struct {
-		int handle;
-		unsigned long base, size;
-	} mtrr[3];
+	int mtrr_handles[3];
 
 	/* BCI and status-related stuff */
 	volatile uint32_t *status_ptr, *bci_ptr;
@@ -211,7 +214,7 @@ extern uint32_t *savage_dma_alloc(drm_savage_private_t * dev_priv,
 extern int savage_driver_load(struct drm_device *dev, unsigned long chipset);
 extern int savage_driver_firstopen(struct drm_device *dev);
 extern void savage_driver_lastclose(struct drm_device *dev);
-extern int savage_driver_unload(struct drm_device *dev);
+extern void savage_driver_unload(struct drm_device *dev);
 extern void savage_reclaim_buffers(struct drm_device *dev,
 				   struct drm_file *file_priv);
 
@@ -485,8 +488,10 @@ extern void savage_emit_clip_rect_s4(drm_savage_private_t * dev_priv,
 /*
  * access to MMIO
  */
-#define SAVAGE_READ(reg)	DRM_READ32(  dev_priv->mmio, (reg) )
-#define SAVAGE_WRITE(reg)	DRM_WRITE32( dev_priv->mmio, (reg) )
+#define SAVAGE_READ(reg) \
+       readl(((void __iomem *)dev_priv->mmio->handle) + (reg))
+#define SAVAGE_WRITE(reg) \
+	writel(val, ((void __iomem *)dev_priv->mmio->handle) + (reg))
 
 /*
  * access to the burst command interface (BCI)

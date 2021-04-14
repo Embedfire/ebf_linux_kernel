@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Fujitsu Lifebook Application Panel button drive
  *
  *  Copyright (C) 2007 Stephen Hemminger <shemminger@linux-foundation.org>
  *  Copyright (C) 2001-2003 Jochen Eisinger <jochen@penguin-breeder.org>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  *
  * Many Fujitsu Lifebook laptops have a small panel of buttons that are
  * accessible via the i2c/smbus interface. This driver polls those
@@ -20,13 +17,11 @@
 #include <linux/module.h>
 #include <linux/ioport.h>
 #include <linux/io.h>
-#include <linux/input-polldev.h>
+#include <linux/input.h>
 #include <linux/i2c.h>
-#include <linux/workqueue.h>
 #include <linux/leds.h>
 
 #define APANEL_NAME	"Fujitsu Application Panel"
-#define APANEL_VERSION	"1.3.1"
 #define APANEL		"apanel"
 
 /* How often we poll keys - msecs */
@@ -56,30 +51,28 @@ static enum apanel_chip device_chip[APANEL_DEV_MAX];
 #define MAX_PANEL_KEYS	12
 
 struct apanel {
-	struct input_polled_dev *ipdev;
-	struct i2c_client client;
+	struct input_dev *idev;
+	struct i2c_client *client;
 	unsigned short keymap[MAX_PANEL_KEYS];
-	u16    nkeys;
-	u16    led_bits;
-	struct work_struct led_work;
+	u16 nkeys;
 	struct led_classdev mail_led;
 };
 
+static const unsigned short apanel_keymap[MAX_PANEL_KEYS] = {
+	[0] = KEY_MAIL,
+	[1] = KEY_WWW,
+	[2] = KEY_PROG2,
+	[3] = KEY_PROG1,
 
-static int apanel_probe(struct i2c_adapter *, int, int);
-
-/* for now, we only support one address */
-static unsigned short normal_i2c[] = {0, I2C_CLIENT_END};
-static unsigned short ignore = I2C_CLIENT_END;
-static struct i2c_client_address_data addr_data = {
-	.normal_i2c	= normal_i2c,
-	.probe		= &ignore,
-	.ignore		= &ignore,
+	[8] = KEY_FORWARD,
+	[9] = KEY_REWIND,
+	[10] = KEY_STOPCD,
+	[11] = KEY_PLAYPAUSE,
 };
 
 static void report_key(struct input_dev *input, unsigned keycode)
 {
-	pr_debug(APANEL ": report key %#x\n", keycode);
+	dev_dbg(input->dev.parent, "report key %#x\n", keycode);
 	input_report_key(input, keycode, 1);
 	input_sync(input);
 
@@ -95,20 +88,19 @@ static void report_key(struct input_dev *input, unsigned keycode)
  * CD keys:
  * Forward (0x100), Rewind (0x200), Stop (0x400), Pause (0x800)
  */
-static void apanel_poll(struct input_polled_dev *ipdev)
+static void apanel_poll(struct input_dev *idev)
 {
-	struct apanel *ap = ipdev->private;
-	struct input_dev *idev = ipdev->input;
+	struct apanel *ap = input_get_drvdata(idev);
 	u8 cmd = device_chip[APANEL_DEV_APPBTN] == CHIP_OZ992C ? 0 : 8;
 	s32 data;
 	int i;
 
-	data = i2c_smbus_read_word_data(&ap->client, cmd);
+	data = i2c_smbus_read_word_data(ap->client, cmd);
 	if (data < 0)
 		return;	/* ignore errors (due to ACPI??) */
 
 	/* write back to clear latch */
-	i2c_smbus_write_word_data(&ap->client, cmd, 0);
+	i2c_smbus_write_word_data(ap->client, cmd, 0);
 
 	if (!data)
 		return;
@@ -119,166 +111,101 @@ static void apanel_poll(struct input_polled_dev *ipdev)
 			report_key(idev, ap->keymap[i]);
 }
 
-/* Track state changes of LED */
-static void led_update(struct work_struct *work)
-{
-	struct apanel *ap = container_of(work, struct apanel, led_work);
-
-	i2c_smbus_write_word_data(&ap->client, 0x10, ap->led_bits);
-}
-
-static void mail_led_set(struct led_classdev *led,
+static int mail_led_set(struct led_classdev *led,
 			 enum led_brightness value)
 {
 	struct apanel *ap = container_of(led, struct apanel, mail_led);
+	u16 led_bits = value != LED_OFF ? 0x8000 : 0x0000;
 
-	if (value != LED_OFF)
-		ap->led_bits |= 0x8000;
-	else
-		ap->led_bits &= ~0x8000;
-
-	schedule_work(&ap->led_work);
+	return i2c_smbus_write_word_data(ap->client, 0x10, led_bits);
 }
 
-static int apanel_detach_client(struct i2c_client *client)
+static int apanel_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
-	struct apanel *ap = i2c_get_clientdata(client);
+	struct apanel *ap;
+	struct input_dev *idev;
+	u8 cmd = device_chip[APANEL_DEV_APPBTN] == CHIP_OZ992C ? 0 : 8;
+	int i, err;
 
-	if (device_chip[APANEL_DEV_LED] != CHIP_NONE)
-		led_classdev_unregister(&ap->mail_led);
+	ap = devm_kzalloc(&client->dev, sizeof(*ap), GFP_KERNEL);
+	if (!ap)
+		return -ENOMEM;
 
-	input_unregister_polled_device(ap->ipdev);
-	i2c_detach_client(&ap->client);
-	input_free_polled_device(ap->ipdev);
+	idev = devm_input_allocate_device(&client->dev);
+	if (!idev)
+		return -ENOMEM;
+
+	ap->idev = idev;
+	ap->client = client;
+
+	i2c_set_clientdata(client, ap);
+
+	err = i2c_smbus_write_word_data(client, cmd, 0);
+	if (err) {
+		dev_warn(&client->dev, "smbus write error %d\n", err);
+		return err;
+	}
+
+	input_set_drvdata(idev, ap);
+
+	idev->name = APANEL_NAME " buttons";
+	idev->phys = "apanel/input0";
+	idev->id.bustype = BUS_HOST;
+
+	memcpy(ap->keymap, apanel_keymap, sizeof(apanel_keymap));
+	idev->keycode = ap->keymap;
+	idev->keycodesize = sizeof(ap->keymap[0]);
+	idev->keycodemax = (device_chip[APANEL_DEV_CDBTN] != CHIP_NONE) ? 12 : 4;
+
+	set_bit(EV_KEY, idev->evbit);
+	for (i = 0; i < idev->keycodemax; i++)
+		if (ap->keymap[i])
+			set_bit(ap->keymap[i], idev->keybit);
+
+	err = input_setup_polling(idev, apanel_poll);
+	if (err)
+		return err;
+
+	input_set_poll_interval(idev, POLL_INTERVAL_DEFAULT);
+
+	err = input_register_device(idev);
+	if (err)
+		return err;
+
+	if (device_chip[APANEL_DEV_LED] != CHIP_NONE) {
+		ap->mail_led.name = "mail:blue";
+		ap->mail_led.brightness_set_blocking = mail_led_set;
+		err = devm_led_classdev_register(&client->dev, &ap->mail_led);
+		if (err)
+			return err;
+	}
 
 	return 0;
 }
 
-/* Function is invoked for every i2c adapter. */
-static int apanel_attach_adapter(struct i2c_adapter *adap)
-{
-	dev_dbg(&adap->dev, APANEL ": attach adapter id=%d\n", adap->id);
-
-	/* Our device is connected only to i801 on laptop */
-	if (adap->id != I2C_HW_SMBUS_I801)
-		return -ENODEV;
-
-	return i2c_probe(adap, &addr_data, apanel_probe);
-}
-
 static void apanel_shutdown(struct i2c_client *client)
 {
-	apanel_detach_client(client);
+	struct apanel *ap = i2c_get_clientdata(client);
+
+	if (device_chip[APANEL_DEV_LED] != CHIP_NONE)
+		led_set_brightness(&ap->mail_led, LED_OFF);
 }
+
+static const struct i2c_device_id apanel_id[] = {
+	{ "fujitsu_apanel", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, apanel_id);
 
 static struct i2c_driver apanel_driver = {
 	.driver = {
 		.name = APANEL,
 	},
-	.attach_adapter = &apanel_attach_adapter,
-	.detach_client  = &apanel_detach_client,
-	.shutdown	= &apanel_shutdown,
+	.probe		= apanel_probe,
+	.shutdown	= apanel_shutdown,
+	.id_table	= apanel_id,
 };
-
-static struct apanel apanel = {
-	.client = {
-		.driver = &apanel_driver,
-		.name   = APANEL,
-	},
-	.keymap = {
-		[0] = KEY_MAIL,
-		[1] = KEY_WWW,
-		[2] = KEY_PROG2,
-		[3] = KEY_PROG1,
-
-		[8] = KEY_FORWARD,
-		[9] = KEY_REWIND,
-		[10] = KEY_STOPCD,
-		[11] = KEY_PLAYPAUSE,
-
-	},
-	.mail_led = {
-		.name = "mail:blue",
-		.brightness_set = mail_led_set,
-	},
-};
-
-/* NB: Only one panel on the i2c. */
-static int apanel_probe(struct i2c_adapter *bus, int address, int kind)
-{
-	struct apanel *ap;
-	struct input_polled_dev *ipdev;
-	struct input_dev *idev;
-	u8 cmd = device_chip[APANEL_DEV_APPBTN] == CHIP_OZ992C ? 0 : 8;
-	int i, err = -ENOMEM;
-
-	dev_dbg(&bus->dev, APANEL ": probe adapter %p addr %d kind %d\n",
-		bus, address, kind);
-
-	ap = &apanel;
-
-	ipdev = input_allocate_polled_device();
-	if (!ipdev)
-		goto out1;
-
-	ap->ipdev = ipdev;
-	ap->client.adapter = bus;
-	ap->client.addr = address;
-
-	i2c_set_clientdata(&ap->client, ap);
-
-	err = i2c_attach_client(&ap->client);
-	if (err)
-		goto out2;
-
-	err = i2c_smbus_write_word_data(&ap->client, cmd, 0);
-	if (err) {
-		dev_warn(&ap->client.dev, APANEL ": smbus write error %d\n",
-			 err);
-		goto out3;
-	}
-
-	ipdev->poll = apanel_poll;
-	ipdev->poll_interval = POLL_INTERVAL_DEFAULT;
-	ipdev->private = ap;
-
-	idev = ipdev->input;
-	idev->name = APANEL_NAME " buttons";
-	idev->phys = "apanel/input0";
-	idev->id.bustype = BUS_HOST;
-	idev->dev.parent = &ap->client.dev;
-
-	set_bit(EV_KEY, idev->evbit);
-
-	idev->keycode = ap->keymap;
-	idev->keycodesize = sizeof(ap->keymap[0]);
-	idev->keycodemax = (device_chip[APANEL_DEV_CDBTN] != CHIP_NONE) ? 12 : 4;
-
-	for (i = 0; i < idev->keycodemax; i++)
-		if (ap->keymap[i])
-			set_bit(ap->keymap[i], idev->keybit);
-
-	err = input_register_polled_device(ipdev);
-	if (err)
-		goto out3;
-
-	INIT_WORK(&ap->led_work, led_update);
-	if (device_chip[APANEL_DEV_LED] != CHIP_NONE) {
-		err = led_classdev_register(&ap->client.dev, &ap->mail_led);
-		if (err)
-			goto out4;
-	}
-
-	return 0;
-out4:
-	input_unregister_polled_device(ipdev);
-out3:
-	i2c_detach_client(&ap->client);
-out2:
-	input_free_polled_device(ipdev);
-out1:
-	return err;
-}
 
 /* Scan the system ROM for the signature "FJKEYINF" */
 static __init const void __iomem *bios_signature(const void __iomem *bios)
@@ -301,6 +228,7 @@ static int __init apanel_init(void)
 	void __iomem *bios;
 	const void __iomem *p;
 	u8 devno;
+	unsigned char i2c_addr;
 	int found = 0;
 
 	bios = ioremap(0xF0000, 0x10000); /* Can't fail */
@@ -313,7 +241,7 @@ static int __init apanel_init(void)
 
 	/* just use the first address */
 	p += 8;
-	normal_i2c[0] = readb(p+3) >> 1;
+	i2c_addr = readb(p + 3) >> 1;
 
 	for ( ; (devno = readb(p)) & 0x7f; p += 4) {
 		unsigned char method, slave, chip;
@@ -322,9 +250,9 @@ static int __init apanel_init(void)
 		chip = readb(p + 2);
 		slave = readb(p + 3) >> 1;
 
-		if (slave != normal_i2c[0]) {
+		if (slave != i2c_addr) {
 			pr_notice(APANEL ": only one SMBus slave "
-				  "address supported, skiping device...\n");
+				  "address supported, skipping device...\n");
 			continue;
 		}
 
@@ -341,7 +269,8 @@ static int __init apanel_init(void)
 		if (devno >= APANEL_DEV_MAX)
 			pr_notice(APANEL ": unknown device %u found\n", devno);
 		else if (device_chip[devno] != CHIP_NONE)
-			pr_warning(APANEL ": duplicate entry for devno %u\n", devno);
+			pr_warn(APANEL ": duplicate entry for devno %u\n",
+				devno);
 
 		else if (method != 1 && method != 2 && method != 4) {
 			pr_notice(APANEL ": unknown method %u for devno %u\n",
@@ -371,7 +300,6 @@ module_exit(apanel_cleanup);
 MODULE_AUTHOR("Stephen Hemminger <shemminger@linux-foundation.org>");
 MODULE_DESCRIPTION(APANEL_NAME " driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION(APANEL_VERSION);
 
 MODULE_ALIAS("dmi:*:svnFUJITSU:pnLifeBook*:pvr*:rvnFUJITSU:*");
 MODULE_ALIAS("dmi:*:svnFUJITSU:pnLifebook*:pvr*:rvnFUJITSU:*");

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/arm/mach-ebsa110/isamem.c
  *
@@ -23,9 +24,9 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
+#include <linux/io.h>
 
 #include <mach/hardware.h>
-#include <asm/io.h>
 #include <asm/page.h>
 
 static void __iomem *__isamem_convert_addr(const volatile void __iomem *addr)
@@ -102,7 +103,7 @@ EXPORT_SYMBOL(__readb);
 EXPORT_SYMBOL(__readw);
 EXPORT_SYMBOL(__readl);
 
-void readsw(const void __iomem *addr, void *data, int len)
+void readsw(const volatile void __iomem *addr, void *data, int len)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 
@@ -112,7 +113,7 @@ void readsw(const void __iomem *addr, void *data, int len)
 }
 EXPORT_SYMBOL(readsw);
 
-void readsl(const void __iomem *addr, void *data, int len)
+void readsl(const volatile void __iomem *addr, void *data, int len)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 
@@ -122,7 +123,7 @@ void readsl(const void __iomem *addr, void *data, int len)
 }
 EXPORT_SYMBOL(readsl);
 
-void __writeb(u8 val, void __iomem *addr)
+void __writeb(u8 val, volatile void __iomem *addr)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 
@@ -132,7 +133,7 @@ void __writeb(u8 val, void __iomem *addr)
 		__raw_writeb(val, a);
 }
 
-void __writew(u16 val, void __iomem *addr)
+void __writew(u16 val, volatile void __iomem *addr)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 
@@ -142,7 +143,7 @@ void __writew(u16 val, void __iomem *addr)
 	__raw_writew(val, a);
 }
 
-void __writel(u32 val, void __iomem *addr)
+void __writel(u32 val, volatile void __iomem *addr)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 
@@ -157,7 +158,7 @@ EXPORT_SYMBOL(__writeb);
 EXPORT_SYMBOL(__writew);
 EXPORT_SYMBOL(__writel);
 
-void writesw(void __iomem *addr, const void *data, int len)
+void writesw(volatile void __iomem *addr, const void *data, int len)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 
@@ -167,7 +168,7 @@ void writesw(void __iomem *addr, const void *data, int len)
 }
 EXPORT_SYMBOL(writesw);
 
-void writesl(void __iomem *addr, const void *data, int len)
+void writesl(volatile void __iomem *addr, const void *data, int len)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 
@@ -177,6 +178,26 @@ void writesl(void __iomem *addr, const void *data, int len)
 }
 EXPORT_SYMBOL(writesl);
 
+/*
+ * The EBSA110 has a weird "ISA IO" region:
+ *
+ * Region 0 (addr = 0xf0000000 + io << 2)
+ * --------------------------------------------------------
+ * Physical region	IO region
+ * f0000fe0 - f0000ffc	3f8 - 3ff  ttyS0
+ * f0000e60 - f0000e64	398 - 399
+ * f0000de0 - f0000dfc	378 - 37f  lp0
+ * f0000be0 - f0000bfc	2f8 - 2ff  ttyS1
+ *
+ * Region 1 (addr = 0xf0000000 + (io & ~1) << 1 + (io & 1))
+ * --------------------------------------------------------
+ * Physical region	IO region
+ * f00014f1             a79        pnp write data
+ * f00007c0 - f00007c1	3e0 - 3e1  pcmcia
+ * f00004f1		279        pnp address
+ * f0000440 - f000046c  220 - 236  eth0
+ * f0000405		203        pnp read data
+ */
 #define SUPERIO_PORT(p) \
 	(((p) >> 3) == (0x3f8 >> 3) || \
 	 ((p) >> 3) == (0x2f8 >> 3) || \

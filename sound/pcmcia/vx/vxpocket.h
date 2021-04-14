@@ -1,21 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Driver for Digigram VXpocket soundcards
  *
  * Copyright (c) 2002 by Takashi Iwai <tiwai@suse.de>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef __VXPOCKET_H
@@ -23,8 +10,6 @@
 
 #include <sound/vx_core.h>
 
-#include <pcmcia/cs_types.h>
-#include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
 
@@ -43,10 +28,11 @@ struct snd_vxpocket {
 
 	/* pcmcia stuff */
 	struct pcmcia_device	*p_dev;
-	dev_node_t node;
 };
 
-extern struct snd_vx_ops snd_vxpocket_ops;
+#define to_vxpocket(x)	container_of(x, struct snd_vxpocket, core)
+
+extern const struct snd_vx_ops snd_vxpocket_ops;
 
 void vx_set_mic_boost(struct vx_core *chip, int boost);
 void vx_set_mic_level(struct vx_core *chip, int level);

@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for AT73C213 16-bit stereo DAC connected to Atmel SSC
  *
  * Copyright (C) 2006-2007 Atmel Norway
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 /*#define DEBUG*/
@@ -39,7 +36,7 @@
 #define BITRATE_MAX	50000 /* Hardware limit. */
 
 /* Initial (hardware reset) AT73C213 register values. */
-static u8 snd_at73c213_original_image[18] =
+static const u8 snd_at73c213_original_image[18] =
 {
 	0x00,	/* 00 - CTRL    */
 	0x05,	/* 01 - LLIG    */
@@ -69,7 +66,6 @@ struct snd_at73c213 {
 	int				irq;
 	int				period;
 	unsigned long			bitrate;
-	struct clk			*bitclk;
 	struct ssc_device		*ssc;
 	struct spi_device		*spi;
 	u8				spi_wbuffer[2];
@@ -156,7 +152,7 @@ static int snd_at73c213_set_bitrate(struct snd_at73c213 *chip)
 	if (max_tries < 1)
 		max_tries = 1;
 
-	/* ssc_div must be a power of 2. */
+	/* ssc_div must be even. */
 	ssc_div = (ssc_div + 1) & ~1UL;
 
 	if ((ssc_rate / (ssc_div * 2 * 16)) < BITRATE_MIN) {
@@ -175,7 +171,7 @@ static int snd_at73c213_set_bitrate(struct snd_at73c213 *chip)
 		dac_rate_new = 8 * (ssc_rate / ssc_div);
 
 		status = clk_round_rate(chip->board->dac_clk, dac_rate_new);
-		if (status < 0)
+		if (status <= 0)
 			return status;
 
 		/* Ignore difference smaller than 256 Hz. */
@@ -222,6 +218,8 @@ static int snd_at73c213_pcm_open(struct snd_pcm_substream *substream)
 	runtime->hw = snd_at73c213_playback_hw;
 	chip->substream = substream;
 
+	clk_enable(chip->ssc->clk);
+
 	return 0;
 }
 
@@ -229,6 +227,7 @@ static int snd_at73c213_pcm_close(struct snd_pcm_substream *substream)
 {
 	struct snd_at73c213 *chip = snd_pcm_substream_chip(substream);
 	chip->substream = NULL;
+	clk_disable(chip->ssc->clk);
 	return 0;
 }
 
@@ -243,13 +242,7 @@ static int snd_at73c213_pcm_hw_params(struct snd_pcm_substream *substream,
 	val = SSC_BFINS(TFMR_DATNB, channels - 1, val);
 	ssc_writel(chip->ssc->regs, TFMR, val);
 
-	return snd_pcm_lib_malloc_pages(substream,
-					params_buffer_bytes(hw_params));
-}
-
-static int snd_at73c213_pcm_hw_free(struct snd_pcm_substream *substream)
-{
-	return snd_pcm_lib_free_pages(substream);
+	return 0;
 }
 
 static int snd_at73c213_pcm_prepare(struct snd_pcm_substream *substream)
@@ -320,18 +313,16 @@ snd_at73c213_pcm_pointer(struct snd_pcm_substream *substream)
 	return pos;
 }
 
-static struct snd_pcm_ops at73c213_playback_ops = {
+static const struct snd_pcm_ops at73c213_playback_ops = {
 	.open		= snd_at73c213_pcm_open,
 	.close		= snd_at73c213_pcm_close,
-	.ioctl		= snd_pcm_lib_ioctl,
 	.hw_params	= snd_at73c213_pcm_hw_params,
-	.hw_free	= snd_at73c213_pcm_hw_free,
 	.prepare	= snd_at73c213_pcm_prepare,
 	.trigger	= snd_at73c213_pcm_trigger,
 	.pointer	= snd_at73c213_pcm_pointer,
 };
 
-static int __devinit snd_at73c213_pcm_new(struct snd_at73c213 *chip, int device)
+static int snd_at73c213_pcm_new(struct snd_at73c213 *chip, int device)
 {
 	struct snd_pcm *pcm;
 	int retval;
@@ -348,7 +339,7 @@ static int __devinit snd_at73c213_pcm_new(struct snd_at73c213 *chip, int device)
 
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &at73c213_playback_ops);
 
-	retval = snd_pcm_lib_preallocate_pages_for_all(chip->pcm,
+	snd_pcm_set_managed_buffer_all(chip->pcm,
 			SNDRV_DMA_TYPE_DEV, &chip->ssc->pdev->dev,
 			64 * 1024, 64 * 1024);
 out:
@@ -666,7 +657,7 @@ static int snd_at73c213_aux_capture_volume_info(
 			| (mask << 24) | (invert << 22))		\
 }
 
-static struct snd_kcontrol_new snd_at73c213_controls[] __devinitdata = {
+static const struct snd_kcontrol_new snd_at73c213_controls[] = {
 AT73C213_STEREO("Master Playback Volume", 0, DAC_LMPG, DAC_RMPG, 0, 0, 0x1f, 1),
 AT73C213_STEREO("Master Playback Switch", 0, DAC_LMPG, DAC_RMPG, 5, 5, 1, 1),
 AT73C213_STEREO("PCM Playback Volume", 0, DAC_LLOG, DAC_RLOG, 0, 0, 0x1f, 1),
@@ -710,7 +701,7 @@ AT73C213_MONO_SWITCH("Aux Capture Switch", 0, DAC_CTRL, DAC_CTRL_ONAUXIN,
 AT73C213_MONO_SWITCH("Line Capture Switch", 0, DAC_CTRL, 0, 0x03, 0),
 };
 
-static int __devinit snd_at73c213_mixer(struct snd_at73c213 *chip)
+static int snd_at73c213_mixer(struct snd_at73c213 *chip)
 {
 	struct snd_card *card;
 	int errval, idx;
@@ -745,7 +736,7 @@ cleanup:
 /*
  * Device functions
  */
-static int __devinit snd_at73c213_ssc_init(struct snd_at73c213 *chip)
+static int snd_at73c213_ssc_init(struct snd_at73c213 *chip)
 {
 	/*
 	 * Continuous clock output.
@@ -775,7 +766,7 @@ static int __devinit snd_at73c213_ssc_init(struct snd_at73c213 *chip)
 	return 0;
 }
 
-static int __devinit snd_at73c213_chip_init(struct snd_at73c213 *chip)
+static int snd_at73c213_chip_init(struct snd_at73c213 *chip)
 {
 	int retval;
 	unsigned char dac_ctrl = 0;
@@ -880,10 +871,10 @@ static int snd_at73c213_dev_free(struct snd_device *device)
 	return 0;
 }
 
-static int __devinit snd_at73c213_dev_init(struct snd_card *card,
-					 struct spi_device *spi)
+static int snd_at73c213_dev_init(struct snd_card *card,
+				 struct spi_device *spi)
 {
-	static struct snd_device_ops ops = {
+	static const struct snd_device_ops ops = {
 		.dev_free	= snd_at73c213_dev_free,
 	};
 	struct snd_at73c213 *chip = get_chip(card);
@@ -897,6 +888,8 @@ static int __devinit snd_at73c213_dev_init(struct snd_card *card,
 	mutex_init(&chip->mixer_lock);
 	chip->card = card;
 	chip->irq = -1;
+
+	clk_enable(chip->ssc->clk);
 
 	retval = request_irq(irq, snd_at73c213_interrupt, 0, "at73c213", chip);
 	if (retval) {
@@ -928,8 +921,6 @@ static int __devinit snd_at73c213_dev_init(struct snd_card *card,
 	if (retval)
 		goto out_snd_dev;
 
-	snd_card_set_dev(card, &spi->dev);
-
 	goto out;
 
 out_snd_dev:
@@ -938,10 +929,12 @@ out_irq:
 	free_irq(chip->irq, chip);
 	chip->irq = -1;
 out:
+	clk_disable(chip->ssc->clk);
+
 	return retval;
 }
 
-static int __devinit snd_at73c213_probe(struct spi_device *spi)
+static int snd_at73c213_probe(struct spi_device *spi)
 {
 	struct snd_card			*card;
 	struct snd_at73c213		*chip;
@@ -965,12 +958,11 @@ static int __devinit snd_at73c213_probe(struct spi_device *spi)
 		return PTR_ERR(board->dac_clk);
 	}
 
-	retval = -ENOMEM;
-
 	/* Allocate "card" using some unused identifiers. */
 	snprintf(id, sizeof id, "at73c213_%d", board->ssc_id);
-	card = snd_card_new(-1, id, THIS_MODULE, sizeof(struct snd_at73c213));
-	if (!card)
+	retval = snd_card_new(&spi->dev, -1, id, THIS_MODULE,
+			      sizeof(struct snd_at73c213), &card);
+	if (retval < 0)
 		goto out;
 
 	chip = card->private_data;
@@ -1009,14 +1001,16 @@ out:
 	return retval;
 }
 
-static int __devexit snd_at73c213_remove(struct spi_device *spi)
+static int snd_at73c213_remove(struct spi_device *spi)
 {
 	struct snd_card *card = dev_get_drvdata(&spi->dev);
 	struct snd_at73c213 *chip = card->private_data;
 	int retval;
 
 	/* Stop playback. */
+	clk_enable(chip->ssc->clk);
 	ssc_writel(chip->ssc->regs, CR, SSC_BIT(CR_TXDIS));
+	clk_disable(chip->ssc->clk);
 
 	/* Mute sound. */
 	retval = snd_at73c213_write_reg(chip, DAC_LMPG, 0x3f);
@@ -1072,60 +1066,55 @@ out:
 
 	ssc_free(chip->ssc);
 	snd_card_free(card);
-	dev_set_drvdata(&spi->dev, NULL);
 
 	return 0;
 }
 
-#ifdef CONFIG_PM
-static int snd_at73c213_suspend(struct spi_device *spi, pm_message_t msg)
+#ifdef CONFIG_PM_SLEEP
+
+static int snd_at73c213_suspend(struct device *dev)
 {
-	struct snd_card *card = dev_get_drvdata(&spi->dev);
+	struct snd_card *card = dev_get_drvdata(dev);
 	struct snd_at73c213 *chip = card->private_data;
 
 	ssc_writel(chip->ssc->regs, CR, SSC_BIT(CR_TXDIS));
+	clk_disable(chip->ssc->clk);
 	clk_disable(chip->board->dac_clk);
 
 	return 0;
 }
 
-static int snd_at73c213_resume(struct spi_device *spi)
+static int snd_at73c213_resume(struct device *dev)
 {
-	struct snd_card *card = dev_get_drvdata(&spi->dev);
+	struct snd_card *card = dev_get_drvdata(dev);
 	struct snd_at73c213 *chip = card->private_data;
 
 	clk_enable(chip->board->dac_clk);
+	clk_enable(chip->ssc->clk);
 	ssc_writel(chip->ssc->regs, CR, SSC_BIT(CR_TXEN));
 
 	return 0;
 }
+
+static SIMPLE_DEV_PM_OPS(at73c213_pm_ops, snd_at73c213_suspend,
+		snd_at73c213_resume);
+#define AT73C213_PM_OPS (&at73c213_pm_ops)
+
 #else
-#define snd_at73c213_suspend NULL
-#define snd_at73c213_resume NULL
+#define AT73C213_PM_OPS NULL
 #endif
 
 static struct spi_driver at73c213_driver = {
 	.driver		= {
 		.name	= "at73c213",
+		.pm	= AT73C213_PM_OPS,
 	},
 	.probe		= snd_at73c213_probe,
-	.suspend	= snd_at73c213_suspend,
-	.resume		= snd_at73c213_resume,
-	.remove		= __devexit_p(snd_at73c213_remove),
+	.remove		= snd_at73c213_remove,
 };
 
-static int __init at73c213_init(void)
-{
-	return spi_register_driver(&at73c213_driver);
-}
-module_init(at73c213_init);
+module_spi_driver(at73c213_driver);
 
-static void __exit at73c213_exit(void)
-{
-	spi_unregister_driver(&at73c213_driver);
-}
-module_exit(at73c213_exit);
-
-MODULE_AUTHOR("Hans-Christian Egtvedt <hcegtvedt@atmel.com>");
+MODULE_AUTHOR("Hans-Christian Egtvedt <egtvedt@samfundet.no>");
 MODULE_DESCRIPTION("Sound driver for AT73C213 with Atmel SSC");
 MODULE_LICENSE("GPL");

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/minix/bitmap.c
  *
@@ -12,41 +13,30 @@
 /* bitmap.c contains the code that handles the inode and block bitmaps */
 
 #include "minix.h"
-#include <linux/smp_lock.h>
 #include <linux/buffer_head.h>
 #include <linux/bitops.h>
 #include <linux/sched.h>
 
-static const int nibblemap[] = { 4,3,3,2,3,2,2,1,3,2,2,1,2,1,1,0 };
+static DEFINE_SPINLOCK(bitmap_lock);
 
-static unsigned long count_free(struct buffer_head *map[], unsigned numblocks, __u32 numbits)
+/*
+ * bitmap consists of blocks filled with 16bit words
+ * bit set == busy, bit clear == free
+ * endianness is a mess, but for counting zero bits it really doesn't matter...
+ */
+static __u32 count_free(struct buffer_head *map[], unsigned blocksize, __u32 numbits)
 {
-	unsigned i, j, sum = 0;
-	struct buffer_head *bh;
-  
-	for (i=0; i<numblocks-1; i++) {
-		if (!(bh=map[i])) 
-			return(0);
-		for (j=0; j<bh->b_size; j++)
-			sum += nibblemap[bh->b_data[j] & 0xf]
-				+ nibblemap[(bh->b_data[j]>>4) & 0xf];
+	__u32 sum = 0;
+	unsigned blocks = DIV_ROUND_UP(numbits, blocksize * 8);
+
+	while (blocks--) {
+		unsigned words = blocksize / 2;
+		__u16 *p = (__u16 *)(*map++)->b_data;
+		while (words--)
+			sum += 16 - hweight16(*p++);
 	}
 
-	if (numblocks==0 || !(bh=map[numblocks-1]))
-		return(0);
-	i = ((numbits - (numblocks-1) * bh->b_size * 8) / 16) * 2;
-	for (j=0; j<i; j++) {
-		sum += nibblemap[bh->b_data[j] & 0xf]
-			+ nibblemap[(bh->b_data[j]>>4) & 0xf];
-	}
-
-	i = numbits%16;
-	if (i!=0) {
-		i = *(__u16 *)(&bh->b_data[j]) | ~((1<<i) - 1);
-		sum += nibblemap[i & 0xf] + nibblemap[(i>>4) & 0xf];
-		sum += nibblemap[(i>>8) & 0xf] + nibblemap[(i>>12) & 0xf];
-	}
-	return(sum);
+	return sum;
 }
 
 void minix_free_block(struct inode *inode, unsigned long block)
@@ -69,11 +59,11 @@ void minix_free_block(struct inode *inode, unsigned long block)
 		return;
 	}
 	bh = sbi->s_zmap[zone];
-	lock_kernel();
+	spin_lock(&bitmap_lock);
 	if (!minix_test_and_clear_bit(bit, bh->b_data))
 		printk("minix_free_block (%s:%lu): bit already cleared\n",
 		       sb->s_id, block);
-	unlock_kernel();
+	spin_unlock(&bitmap_lock);
 	mark_buffer_dirty(bh);
 	return;
 }
@@ -88,26 +78,28 @@ int minix_new_block(struct inode * inode)
 		struct buffer_head *bh = sbi->s_zmap[i];
 		int j;
 
-		lock_kernel();
+		spin_lock(&bitmap_lock);
 		j = minix_find_first_zero_bit(bh->b_data, bits_per_zone);
 		if (j < bits_per_zone) {
 			minix_set_bit(j, bh->b_data);
-			unlock_kernel();
+			spin_unlock(&bitmap_lock);
 			mark_buffer_dirty(bh);
 			j += i * bits_per_zone + sbi->s_firstdatazone-1;
 			if (j < sbi->s_firstdatazone || j >= sbi->s_nzones)
 				break;
 			return j;
 		}
-		unlock_kernel();
+		spin_unlock(&bitmap_lock);
 	}
 	return 0;
 }
 
-unsigned long minix_count_free_blocks(struct minix_sb_info *sbi)
+unsigned long minix_count_free_blocks(struct super_block *sb)
 {
-	return (count_free(sbi->s_zmap, sbi->s_zmap_blocks,
-		sbi->s_nzones - sbi->s_firstdatazone + 1)
+	struct minix_sb_info *sbi = minix_sb(sb);
+	u32 bits = sbi->s_nzones - sbi->s_firstdatazone + 1;
+
+	return (count_free(sbi->s_zmap, sb->s_blocksize, bits)
 		<< sbi->s_log_zone_size);
 }
 
@@ -199,28 +191,26 @@ void minix_free_inode(struct inode * inode)
 	ino = inode->i_ino;
 	if (ino < 1 || ino > sbi->s_ninodes) {
 		printk("minix_free_inode: inode 0 or nonexistent inode\n");
-		goto out;
+		return;
 	}
 	bit = ino & ((1<<k) - 1);
 	ino >>= k;
 	if (ino >= sbi->s_imap_blocks) {
 		printk("minix_free_inode: nonexistent imap in superblock\n");
-		goto out;
+		return;
 	}
 
 	minix_clear_inode(inode);	/* clear on-disk copy */
 
 	bh = sbi->s_imap[ino];
-	lock_kernel();
+	spin_lock(&bitmap_lock);
 	if (!minix_test_and_clear_bit(bit, bh->b_data))
 		printk("minix_free_inode: bit %lu already cleared\n", bit);
-	unlock_kernel();
+	spin_unlock(&bitmap_lock);
 	mark_buffer_dirty(bh);
- out:
-	clear_inode(inode);		/* clear in-memory copy */
 }
 
-struct inode * minix_new_inode(const struct inode * dir, int * error)
+struct inode *minix_new_inode(const struct inode *dir, umode_t mode, int *error)
 {
 	struct super_block *sb = dir->i_sb;
 	struct minix_sb_info *sbi = minix_sb(sb);
@@ -237,7 +227,7 @@ struct inode * minix_new_inode(const struct inode * dir, int * error)
 	j = bits_per_zone;
 	bh = NULL;
 	*error = -ENOSPC;
-	lock_kernel();
+	spin_lock(&bitmap_lock);
 	for (i = 0; i < sbi->s_imap_blocks; i++) {
 		bh = sbi->s_imap[i];
 		j = minix_find_first_zero_bit(bh->b_data, bits_per_zone);
@@ -245,27 +235,26 @@ struct inode * minix_new_inode(const struct inode * dir, int * error)
 			break;
 	}
 	if (!bh || j >= bits_per_zone) {
-		unlock_kernel();
+		spin_unlock(&bitmap_lock);
 		iput(inode);
 		return NULL;
 	}
 	if (minix_test_and_set_bit(j, bh->b_data)) {	/* shouldn't happen */
-		unlock_kernel();
+		spin_unlock(&bitmap_lock);
 		printk("minix_new_inode: bit already set\n");
 		iput(inode);
 		return NULL;
 	}
-	unlock_kernel();
+	spin_unlock(&bitmap_lock);
 	mark_buffer_dirty(bh);
 	j += i * bits_per_zone;
 	if (!j || j > sbi->s_ninodes) {
 		iput(inode);
 		return NULL;
 	}
-	inode->i_uid = current->fsuid;
-	inode->i_gid = (dir->i_mode & S_ISGID) ? dir->i_gid : current->fsgid;
+	inode_init_owner(inode, dir, mode);
 	inode->i_ino = j;
-	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME_SEC;
+	inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
 	inode->i_blocks = 0;
 	memset(&minix_i(inode)->u, 0, sizeof(minix_i(inode)->u));
 	insert_inode_hash(inode);
@@ -275,7 +264,10 @@ struct inode * minix_new_inode(const struct inode * dir, int * error)
 	return inode;
 }
 
-unsigned long minix_count_free_inodes(struct minix_sb_info *sbi)
+unsigned long minix_count_free_inodes(struct super_block *sb)
 {
-	return count_free(sbi->s_imap, sbi->s_imap_blocks, sbi->s_ninodes + 1);
+	struct minix_sb_info *sbi = minix_sb(sb);
+	u32 bits = sbi->s_ninodes + 1;
+
+	return count_free(sbi->s_imap, sb->s_blocksize, bits);
 }

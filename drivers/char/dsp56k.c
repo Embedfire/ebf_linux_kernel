@@ -24,7 +24,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/slab.h>	/* for kmalloc() and kfree() */
 #include <linux/major.h>
 #include <linux/types.h>
 #include <linux/errno.h>
@@ -33,7 +32,7 @@
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/device.h>
-#include <linux/smp_lock.h>
+#include <linux/mutex.h>
 #include <linux/firmware.h>
 #include <linux/platform_device.h>
 #include <linux/uaccess.h>	/* For put_user and get_user */
@@ -95,6 +94,7 @@
 	} \
 }
 
+static DEFINE_MUTEX(dsp56k_mutex);
 static struct dsp56k_device {
 	unsigned long in_use;
 	long maxio, timeout;
@@ -181,7 +181,7 @@ static int dsp56k_upload(u_char __user *bin, int len)
 static ssize_t dsp56k_read(struct file *file, char __user *buf, size_t count,
 			   loff_t *ppos)
 {
-	struct inode *inode = file->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(file);
 	int dev = iminor(inode) & 0x0f;
 
 	switch(dev)
@@ -244,7 +244,7 @@ static ssize_t dsp56k_read(struct file *file, char __user *buf, size_t count,
 static ssize_t dsp56k_write(struct file *file, const char __user *buf, size_t count,
 			    loff_t *ppos)
 {
-	struct inode *inode = file->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(file);
 	int dev = iminor(inode) & 0x0f;
 
 	switch(dev)
@@ -306,7 +306,7 @@ static ssize_t dsp56k_write(struct file *file, const char __user *buf, size_t co
 static long dsp56k_ioctl(struct file *file, unsigned int cmd,
 			 unsigned long arg)
 {
-	int dev = iminor(file->f_path.dentry->d_inode) & 0x0f;
+	int dev = iminor(file_inode(file)) & 0x0f;
 	void __user *argp = (void __user *)arg;
 
 	switch(dev)
@@ -325,15 +325,15 @@ static long dsp56k_ioctl(struct file *file, unsigned int cmd,
 			if(get_user(bin, &binary->bin) < 0)
 				return -EFAULT;
 		
-			if (len == 0) {
+			if (len <= 0) {
 				return -EINVAL;      /* nothing to upload?!? */
 			}
 			if (len > DSP56K_MAX_BINARY_LENGTH) {
 				return -EINVAL;
 			}
-			lock_kernel();
+			mutex_lock(&dsp56k_mutex);
 			r = dsp56k_upload(bin, len);
-			unlock_kernel();
+			mutex_unlock(&dsp56k_mutex);
 			if (r < 0) {
 				return r;
 			}
@@ -343,16 +343,16 @@ static long dsp56k_ioctl(struct file *file, unsigned int cmd,
 		case DSP56K_SET_TX_WSIZE:
 			if (arg > 4 || arg < 1)
 				return -EINVAL;
-			lock_kernel();
+			mutex_lock(&dsp56k_mutex);
 			dsp56k.tx_wsize = (int) arg;
-			unlock_kernel();
+			mutex_unlock(&dsp56k_mutex);
 			break;
 		case DSP56K_SET_RX_WSIZE:
 			if (arg > 4 || arg < 1)
 				return -EINVAL;
-			lock_kernel();
+			mutex_lock(&dsp56k_mutex);
 			dsp56k.rx_wsize = (int) arg;
-			unlock_kernel();
+			mutex_unlock(&dsp56k_mutex);
 			break;
 		case DSP56K_HOST_FLAGS:
 		{
@@ -364,7 +364,7 @@ static long dsp56k_ioctl(struct file *file, unsigned int cmd,
 			if(get_user(out, &hf->out) < 0)
 				return -EFAULT;
 
-			lock_kernel();
+			mutex_lock(&dsp56k_mutex);
 			if ((dir & 0x1) && (out & 0x1))
 				dsp56k_host_interface.icr |= DSP56K_ICR_HF0;
 			else if (dir & 0x1)
@@ -379,16 +379,16 @@ static long dsp56k_ioctl(struct file *file, unsigned int cmd,
 			if (dsp56k_host_interface.icr & DSP56K_ICR_HF1) status |= 0x2;
 			if (dsp56k_host_interface.isr & DSP56K_ISR_HF2) status |= 0x4;
 			if (dsp56k_host_interface.isr & DSP56K_ISR_HF3) status |= 0x8;
-			unlock_kernel();
+			mutex_unlock(&dsp56k_mutex);
 			return put_user(status, &hf->status);
 		}
 		case DSP56K_HOST_CMD:
-			if (arg > 31 || arg < 0)
+			if (arg > 31)
 				return -EINVAL;
-			lock_kernel();
+			mutex_lock(&dsp56k_mutex);
 			dsp56k_host_interface.cvr = (u_char)((arg & DSP56K_CVR_HV_MASK) |
 							     DSP56K_CVR_HC);
-			unlock_kernel();
+			mutex_unlock(&dsp56k_mutex);
 			break;
 		default:
 			return -EINVAL;
@@ -406,15 +406,15 @@ static long dsp56k_ioctl(struct file *file, unsigned int cmd,
  * Do I need this function at all???
  */
 #if 0
-static unsigned int dsp56k_poll(struct file *file, poll_table *wait)
+static __poll_t dsp56k_poll(struct file *file, poll_table *wait)
 {
-	int dev = iminor(file->f_path.dentry->d_inode) & 0x0f;
+	int dev = iminor(file_inode(file)) & 0x0f;
 
 	switch(dev)
 	{
 	case DSP56K_DEV_56001:
 		/* poll_wait(file, ???, wait); */
-		return POLLIN | POLLRDNORM | POLLOUT;
+		return EPOLLIN | EPOLLRDNORM | EPOLLOUT;
 
 	default:
 		printk("DSP56k driver: Unknown minor device: %d\n", dev);
@@ -428,7 +428,7 @@ static int dsp56k_open(struct inode *inode, struct file *file)
 	int dev = iminor(inode) & 0x0f;
 	int ret = 0;
 
-	lock_kernel();
+	mutex_lock(&dsp56k_mutex);
 	switch(dev)
 	{
 	case DSP56K_DEV_56001:
@@ -455,7 +455,7 @@ static int dsp56k_open(struct inode *inode, struct file *file)
 		ret = -ENODEV;
 	}
 out:
-	unlock_kernel();
+	mutex_unlock(&dsp56k_mutex);
 	return ret;
 }
 
@@ -483,12 +483,13 @@ static const struct file_operations dsp56k_fops = {
 	.unlocked_ioctl	= dsp56k_ioctl,
 	.open		= dsp56k_open,
 	.release	= dsp56k_release,
+	.llseek		= noop_llseek,
 };
 
 
 /****** Init and module functions ******/
 
-static char banner[] __initdata = KERN_INFO "DSP56k driver installed\n";
+static const char banner[] __initconst = KERN_INFO "DSP56k driver installed\n";
 
 static int __init dsp56k_init_driver(void)
 {
@@ -508,8 +509,8 @@ static int __init dsp56k_init_driver(void)
 		err = PTR_ERR(dsp56k_class);
 		goto out_chrdev;
 	}
-	device_create_drvdata(dsp56k_class, NULL, MKDEV(DSP56K_MAJOR, 0),
-			      NULL, "dsp56k");
+	device_create(dsp56k_class, NULL, MKDEV(DSP56K_MAJOR, 0), NULL,
+		      "dsp56k");
 
 	printk(banner);
 	goto out;

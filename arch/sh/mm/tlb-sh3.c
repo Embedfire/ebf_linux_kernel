@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/sh/mm/tlb-sh3.c
  *
@@ -5,8 +6,6 @@
  *
  * Copyright (C) 1999  Niibe Yutaka
  * Copyright (C) 2002  Paul Mundt
- *
- * Released under the terms of the GNU GPL v2.0.
  */
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -18,54 +17,35 @@
 #include <linux/mman.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 
-#include <asm/system.h>
 #include <asm/io.h>
-#include <asm/uaccess.h>
-#include <asm/pgalloc.h>
+#include <linux/uaccess.h>
 #include <asm/mmu_context.h>
 #include <asm/cacheflush.h>
 
-void update_mmu_cache(struct vm_area_struct * vma,
-		      unsigned long address, pte_t pte)
+void __update_tlb(struct vm_area_struct *vma, unsigned long address, pte_t pte)
 {
-	unsigned long flags;
-	unsigned long pteval;
-	unsigned long vpn;
+	unsigned long flags, pteval, vpn;
 
-	/* Ptrace may call this routine. */
+	/*
+	 * Handle debugger faulting in for debugee.
+	 */
 	if (vma && current->active_mm != vma->vm_mm)
 		return;
-
-#if defined(CONFIG_SH7705_CACHE_32KB)
-	{
-		struct page *page = pte_page(pte);
-		unsigned long pfn = pte_pfn(pte);
-
-		if (pfn_valid(pfn) && !test_bit(PG_mapped, &page->flags)) {
-			unsigned long phys = pte_val(pte) & PTE_PHYS_MASK;
-
-			__flush_wback_region((void *)P1SEGADDR(phys),
-					     PAGE_SIZE);
-			__set_bit(PG_mapped, &page->flags);
-		}
-	}
-#endif
 
 	local_irq_save(flags);
 
 	/* Set PTEH register */
 	vpn = (address & MMU_VPN_MASK) | get_asid();
-	ctrl_outl(vpn, MMU_PTEH);
+	__raw_writel(vpn, MMU_PTEH);
 
 	pteval = pte_val(pte);
 
 	/* Set PTEL register */
 	pteval &= _PAGE_FLAGS_HARDWARE_MASK; /* drop software flags */
 	/* conveniently, we want all the software flags to be 0 anyway */
-	ctrl_outl(pteval, MMU_PTEL);
+	__raw_writel(pteval, MMU_PTEL);
 
 	/* Load the TLB */
 	asm volatile("ldtlb": /* no output */ : /* no input */ : "memory");
@@ -92,6 +72,24 @@ void local_flush_tlb_one(unsigned long asid, unsigned long page)
 	}
 
 	for (i = 0; i < ways; i++)
-		ctrl_outl(data, addr + (i << 8));
+		__raw_writel(data, addr + (i << 8));
 }
 
+void local_flush_tlb_all(void)
+{
+	unsigned long flags, status;
+
+	/*
+	 * Flush all the TLB.
+	 *
+	 * Write to the MMU control register's bit:
+	 *	TF-bit for SH-3, TI-bit for SH-4.
+	 *      It's same position, bit #2.
+	 */
+	local_irq_save(flags);
+	status = __raw_readl(MMUCR);
+	status |= 0x04;
+	__raw_writel(status, MMUCR);
+	ctrl_barrier();
+	local_irq_restore(flags);
+}

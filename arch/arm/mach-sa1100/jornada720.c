@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-sa1100/jornada720.c
  *
@@ -6,32 +7,30 @@
  * Copyright (C) 2007 Kristoffer Ericson <Kristoffer.Ericson@gmail.com>
  * Copyright (C) 2006 Filip Zyzniewski <filip.zyzniewski@tefnet.pl>
  *  Copyright (C) 2005 Michael Gernoth <michael@gernoth.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/tty.h>
 #include <linux/delay.h>
+#include <linux/gpio/machine.h>
+#include <linux/platform_data/sa11x0-serial.h>
 #include <linux/platform_device.h>
 #include <linux/ioport.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
 #include <video/s1d13xxxfb.h>
 
-#include <mach/hardware.h>
 #include <asm/hardware/sa1111.h>
-#include <asm/irq.h>
+#include <asm/page.h>
 #include <asm/mach-types.h>
 #include <asm/setup.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
 #include <asm/mach/map.h>
-#include <asm/mach/serial_sa1100.h>
+
+#include <mach/hardware.h>
+#include <mach/irqs.h>
 
 #include "generic.h"
 
@@ -45,7 +44,7 @@
 
 /* memory space (line 52 of HP's doc) */
 #define SA1111REGSTART	0x40000000
-#define SA1111REGLEN	0x00001fff
+#define SA1111REGLEN	0x00002000
 #define EPSONREGSTART	0x48000000
 #define EPSONREGLEN	0x00100000
 #define EPSONFBSTART	0x48200000
@@ -173,16 +172,8 @@ static struct s1d13xxxfb_pdata s1d13xxxfb_data = {
 };
 
 static struct resource s1d13xxxfb_resources[] = {
-	[0] = {
-		.start	= EPSONFBSTART,
-		.end	= EPSONFBSTART + EPSONFBLEN,
-		.flags	= IORESOURCE_MEM,
-	},
-	[1] = {
-		.start	= EPSONREGSTART,
-		.end	= EPSONREGSTART + EPSONREGLEN,
-		.flags	= IORESOURCE_MEM,
-	}
+	[0] = DEFINE_RES_MEM(EPSONFBSTART, EPSONFBLEN),
+	[1] = DEFINE_RES_MEM(EPSONREGSTART, EPSONREGLEN),
 };
 
 static struct platform_device s1d13xxxfb_device = {
@@ -195,17 +186,24 @@ static struct platform_device s1d13xxxfb_device = {
 	.resource	= s1d13xxxfb_resources,
 };
 
+static struct gpiod_lookup_table jornada_pcmcia_gpiod_table = {
+	.dev_id = "1800",
+	.table = {
+		GPIO_LOOKUP("sa1111", 0, "s0-power", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("sa1111", 1, "s1-power", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("sa1111", 2, "s0-3v", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("sa1111", 3, "s1-3v", GPIO_ACTIVE_HIGH),
+		{ },
+	},
+};
+
 static struct resource sa1111_resources[] = {
-	[0] = {
-		.start		= SA1111REGSTART,
-		.end		= SA1111REGSTART + SA1111REGLEN,
-		.flags		= IORESOURCE_MEM,
-	},
-	[1] = {
-		.start		= IRQ_GPIO1,
-		.end		= IRQ_GPIO1,
-		.flags		= IORESOURCE_IRQ,
-	},
+	[0] = DEFINE_RES_MEM(SA1111REGSTART, SA1111REGLEN),
+	[1] = DEFINE_RES_IRQ(IRQ_GPIO1),
+};
+
+static struct sa1111_platform_data sa1111_info = {
+	.disable_devs	= SA1111_DEVID_PS2_MSE,
 };
 
 static u64 sa1111_dmamask = 0xffffffffUL;
@@ -216,6 +214,7 @@ static struct platform_device sa1111_device = {
 	.dev		= {
 		.dma_mask = &sa1111_dmamask,
 		.coherent_dma_mask = 0xffffffff,
+		.platform_data = &sa1111_info,
 	},
 	.num_resources	= ARRAY_SIZE(sa1111_resources),
 	.resource	= sa1111_resources,
@@ -226,12 +225,35 @@ static struct platform_device jornada_ssp_device = {
 	.id             = -1,
 };
 
+static struct resource jornada_kbd_resources[] = {
+	DEFINE_RES_IRQ(IRQ_GPIO0),
+};
+
+static struct platform_device jornada_kbd_device = {
+	.name		= "jornada720_kbd",
+	.id		= -1,
+	.num_resources	= ARRAY_SIZE(jornada_kbd_resources),
+	.resource	= jornada_kbd_resources,
+};
+
+static struct gpiod_lookup_table jornada_ts_gpiod_table = {
+	.dev_id		= "jornada_ts",
+	.table		= {
+		GPIO_LOOKUP("gpio", 9, "penup", GPIO_ACTIVE_HIGH),
+	},
+};
+
+static struct platform_device jornada_ts_device = {
+	.name		= "jornada_ts",
+	.id		= -1,
+};
+
 static struct platform_device *devices[] __initdata = {
 	&sa1111_device,
-#ifdef CONFIG_SA1100_JORNADA720_SSP
 	&jornada_ssp_device,
-#endif
 	&s1d13xxxfb_device,
+	&jornada_kbd_device,
+	&jornada_ts_device,
 };
 
 static int __init jornada720_init(void)
@@ -248,6 +270,9 @@ static int __init jornada720_init(void)
 		udelay(1);
 		GPSR = GPIO_GPIO20;	/* restart gpio20 */
 		udelay(20);		/* give it some time to restart */
+
+		gpiod_add_lookup_table(&jornada_ts_gpiod_table);
+		gpiod_add_lookup_table(&jornada_pcmcia_gpiod_table);
 
 		ret = platform_add_devices(devices, ARRAY_SIZE(devices));
 	}
@@ -267,11 +292,6 @@ static struct map_desc jornada720_io_desc[] __initdata = {
 		.virtual	= 0xf1000000,
 		.pfn		= __phys_to_pfn(EPSONFBSTART),
 		.length		= EPSONFBLEN,
-		.type		= MT_DEVICE
-	}, {	/* SA-1111 */
-		.virtual	= 0xf4000000,
-		.pfn		= __phys_to_pfn(SA1111REGSTART),
-		.length		= SA1111REGLEN,
 		.type		= MT_DEVICE
 	}
 };
@@ -336,24 +356,25 @@ static struct flash_platform_data jornada720_flash_data = {
 	.nr_parts	= ARRAY_SIZE(jornada720_partitions),
 };
 
-static struct resource jornada720_flash_resource = {
-	.start		= SA1100_CS0_PHYS,
-	.end		= SA1100_CS0_PHYS + SZ_32M - 1,
-	.flags		= IORESOURCE_MEM,
-};
+static struct resource jornada720_flash_resource =
+	DEFINE_RES_MEM(SA1100_CS0_PHYS, SZ_32M);
 
 static void __init jornada720_mach_init(void)
 {
-	sa11x0_set_flash_data(&jornada720_flash_data, &jornada720_flash_resource, 1);
+	sa11x0_register_mtd(&jornada720_flash_data, &jornada720_flash_resource, 1);
 }
 
 MACHINE_START(JORNADA720, "HP Jornada 720")
 	/* Maintainer: Kristoffer Ericson <Kristoffer.Ericson@gmail.com> */
-	.phys_io	= 0x80000000,
-	.io_pg_offst	= ((0xf8000000) >> 18) & 0xfffc,
-	.boot_params	= 0xc0000100,
+	.atag_offset	= 0x100,
 	.map_io		= jornada720_map_io,
+	.nr_irqs	= SA1100_NR_IRQS,
 	.init_irq	= sa1100_init_irq,
-	.timer		= &sa1100_timer,
+	.init_time	= sa1100_timer_init,
 	.init_machine	= jornada720_mach_init,
+	.init_late	= sa11x0_init_late,
+#ifdef CONFIG_SA1111
+	.dma_zone_size	= SZ_1M,
+#endif
+	.restart	= sa11x0_restart,
 MACHINE_END

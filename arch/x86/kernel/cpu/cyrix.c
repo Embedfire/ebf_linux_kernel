@@ -1,21 +1,24 @@
-#include <linux/init.h>
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/pci.h>
 #include <asm/dma.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <asm/processor-cyrix.h>
 #include <asm/processor-flags.h>
-#include <asm/timer.h>
+#include <linux/timer.h>
 #include <asm/pci-direct.h>
 #include <asm/tsc.h>
+#include <asm/cpufeature.h>
+#include <linux/sched.h>
+#include <linux/sched/clock.h>
 
 #include "cpu.h"
 
 /*
  * Read NSC/Cyrix DEVID registers (DIR) to get more detailed info. about the CPU
  */
-static void __cpuinit __do_cyrix_devid(unsigned char *dir0, unsigned char *dir1)
+static void __do_cyrix_devid(unsigned char *dir0, unsigned char *dir1)
 {
 	unsigned char ccr2, ccr3;
 
@@ -44,7 +47,7 @@ static void __cpuinit __do_cyrix_devid(unsigned char *dir0, unsigned char *dir1)
 	}
 }
 
-static void __cpuinit do_cyrix_devid(unsigned char *dir0, unsigned char *dir1)
+static void do_cyrix_devid(unsigned char *dir0, unsigned char *dir1)
 {
 	unsigned long flags;
 
@@ -59,25 +62,25 @@ static void __cpuinit do_cyrix_devid(unsigned char *dir0, unsigned char *dir1)
  * Actually since bugs.h doesn't even reference this perhaps someone should
  * fix the documentation ???
  */
-static unsigned char Cx86_dir0_msb __cpuinitdata = 0;
+static unsigned char Cx86_dir0_msb = 0;
 
-static char Cx86_model[][9] __cpuinitdata = {
+static const char Cx86_model[][9] = {
 	"Cx486", "Cx486", "5x86 ", "6x86", "MediaGX ", "6x86MX ",
 	"M II ", "Unknown"
 };
-static char Cx486_name[][5] __cpuinitdata = {
+static const char Cx486_name[][5] = {
 	"SLC", "DLC", "SLC2", "DLC2", "SRx", "DRx",
 	"SRx2", "DRx2"
 };
-static char Cx486S_name[][4] __cpuinitdata = {
+static const char Cx486S_name[][4] = {
 	"S", "S2", "Se", "S2e"
 };
-static char Cx486D_name[][4] __cpuinitdata = {
+static const char Cx486D_name[][4] = {
 	"DX", "DX2", "?", "?", "?", "DX4"
 };
-static char Cx86_cb[] __cpuinitdata = "?.5x Core/Bus Clock";
-static char cyrix_model_mult1[] __cpuinitdata = "12??43";
-static char cyrix_model_mult2[] __cpuinitdata = "12233445";
+static char Cx86_cb[] = "?.5x Core/Bus Clock";
+static const char cyrix_model_mult1[] = "12??43";
+static const char cyrix_model_mult2[] = "12233445";
 
 /*
  * Reset the slow-loop (SLOP) bit on the 686(L) which is set by some old
@@ -87,7 +90,7 @@ static char cyrix_model_mult2[] __cpuinitdata = "12233445";
  * FIXME: our newer udelay uses the tsc. We don't need to frob with SLOP
  */
 
-static void __cpuinit check_cx686_slop(struct cpuinfo_x86 *c)
+static void check_cx686_slop(struct cpuinfo_x86 *c)
 {
 	unsigned long flags;
 
@@ -104,7 +107,7 @@ static void __cpuinit check_cx686_slop(struct cpuinfo_x86 *c)
 		local_irq_restore(flags);
 
 		if (ccr5 & 2) { /* possible wrong calibration done */
-			printk(KERN_INFO "Recalibrating delay loop with SLOP bit reset\n");
+			pr_info("Recalibrating delay loop with SLOP bit reset\n");
 			calibrate_delay();
 			c->loops_per_jiffy = loops_per_jiffy;
 		}
@@ -112,11 +115,11 @@ static void __cpuinit check_cx686_slop(struct cpuinfo_x86 *c)
 }
 
 
-static void __cpuinit set_cx86_reorder(void)
+static void set_cx86_reorder(void)
 {
 	u8 ccr3;
 
-	printk(KERN_INFO "Enable Memory access reorder on Cyrix/NSC processor.\n");
+	pr_info("Enable Memory access reorder on Cyrix/NSC processor.\n");
 	ccr3 = getCx86(CX86_CCR3);
 	setCx86(CX86_CCR3, (ccr3 & 0x0f) | 0x10); /* enable MAPEN */
 
@@ -127,9 +130,9 @@ static void __cpuinit set_cx86_reorder(void)
 	setCx86(CX86_CCR3, ccr3);
 }
 
-static void __cpuinit set_cx86_memwb(void)
+static void set_cx86_memwb(void)
 {
-	printk(KERN_INFO "Enable Memory-Write-back mode on Cyrix/NSC processor.\n");
+	pr_info("Enable Memory-Write-back mode on Cyrix/NSC processor.\n");
 
 	/* CCR2 bit 2: unlock NW bit */
 	setCx86(CX86_CCR2, getCx86(CX86_CCR2) & ~0x04);
@@ -143,7 +146,7 @@ static void __cpuinit set_cx86_memwb(void)
  *	Configure later MediaGX and/or Geode processor.
  */
 
-static void __cpuinit geode_configure(void)
+static void geode_configure(void)
 {
 	unsigned long flags;
 	u8 ccr3;
@@ -166,7 +169,7 @@ static void __cpuinit geode_configure(void)
 	local_irq_restore(flags);
 }
 
-static void __cpuinit early_init_cyrix(struct cpuinfo_x86 *c)
+static void early_init_cyrix(struct cpuinfo_x86 *c)
 {
 	unsigned char dir0, dir0_msn, dir1 = 0;
 
@@ -185,7 +188,7 @@ static void __cpuinit early_init_cyrix(struct cpuinfo_x86 *c)
 	}
 }
 
-static void __cpuinit init_cyrix(struct cpuinfo_x86 *c)
+static void init_cyrix(struct cpuinfo_x86 *c)
 {
 	unsigned char dir0, dir0_msn, dir0_lsn, dir1 = 0;
 	char *buf = c->x86_model_id;
@@ -212,7 +215,7 @@ static void __cpuinit init_cyrix(struct cpuinfo_x86 *c)
 
 	/* common case step number/rev -- exceptions handled below */
 	c->x86_model = (dir1 >> 4) + 1;
-	c->x86_mask = dir1 & 0xf;
+	c->x86_stepping = dir1 & 0xf;
 
 	/* Now cook; the original recipe is by Channing Corn, from Cyrix.
 	 * We do the same thing for each generation: we work out
@@ -249,10 +252,11 @@ static void __cpuinit init_cyrix(struct cpuinfo_x86 *c)
 		/* Emulate MTRRs using Cyrix's ARRs. */
 		set_cpu_cap(c, X86_FEATURE_CYRIX_ARR);
 		/* 6x86's contain this bug */
-		c->coma_bug = 1;
+		set_cpu_bug(c, X86_BUG_COMA);
 		break;
 
 	case 4: /* MediaGX/GXm or Geode GXM/GXLV/GX1 */
+	case 11: /* GX1 with inverted Device ID */
 #ifdef CONFIG_PCI
 	{
 		u32 vendor, device;
@@ -269,7 +273,7 @@ static void __cpuinit init_cyrix(struct cpuinfo_x86 *c)
 		 *  VSA1 we work around however.
 		 */
 
-		printk(KERN_INFO "Working around Cyrix MediaGX virtual DMA bugs.\n");
+		pr_info("Working around Cyrix MediaGX virtual DMA bugs.\n");
 		isa_dma_bridge_buggy = 2;
 
 		/* We do this before the PCI layer is running. However we
@@ -282,7 +286,8 @@ static void __cpuinit init_cyrix(struct cpuinfo_x86 *c)
 		 *  The 5510/5520 companion chips have a funky PIT.
 		 */
 		if (vendor == PCI_VENDOR_ID_CYRIX &&
-	 (device == PCI_DEVICE_ID_CYRIX_5510 || device == PCI_DEVICE_ID_CYRIX_5520))
+			(device == PCI_DEVICE_ID_CYRIX_5510 ||
+					device == PCI_DEVICE_ID_CYRIX_5520))
 			mark_tsc_unstable("cyrix 5510/5520 detected");
 	}
 #endif
@@ -299,9 +304,9 @@ static void __cpuinit init_cyrix(struct cpuinfo_x86 *c)
 			 *  ?  : 0x7x
 			 * GX1 : 0x8x          GX1  datasheet 56
 			 */
-			if ((0x30 <= dir1 && dir1 <= 0x6f) || (0x80 <= dir1 && dir1 <= 0x8f))
+			if ((0x30 <= dir1 && dir1 <= 0x6f) ||
+					(0x80 <= dir1 && dir1 <= 0x8f))
 				geode_configure();
-			get_model_name(c);  /* get CPU marketing name */
 			return;
 		} else { /* MediaGX */
 			Cx86_cb[2] = (dir0_lsn & 1) ? '3' : '4';
@@ -316,7 +321,8 @@ static void __cpuinit init_cyrix(struct cpuinfo_x86 *c)
 			/* Enable MMX extensions (App note 108) */
 			setCx86(CX86_CCR7, getCx86(CX86_CCR7)|1);
 		} else {
-			c->coma_bug = 1;      /* 6x86MX, it has the bug. */
+			/* A 6x86MX - it has the bug. */
+			set_cpu_bug(c, X86_BUG_COMA);
 		}
 		tmp = (!(dir0_lsn & 7) || dir0_lsn & 1) ? 2 : 0;
 		Cx86_cb[tmp] = cyrix_model_mult2[dir0_lsn & 7];
@@ -331,7 +337,7 @@ static void __cpuinit init_cyrix(struct cpuinfo_x86 *c)
 		switch (dir0_lsn) {
 		case 0xd:  /* either a 486SLC or DLC w/o DEVID */
 			dir0_msn = 0;
-			p = Cx486_name[(c->hard_math) ? 1 : 0];
+			p = Cx486_name[!!boot_cpu_has(X86_FEATURE_FPU)];
 			break;
 
 		case 0xe:  /* a 486S A step */
@@ -354,7 +360,7 @@ static void __cpuinit init_cyrix(struct cpuinfo_x86 *c)
 /*
  * Handle National Semiconductor branded processors
  */
-static void __cpuinit init_nsc(struct cpuinfo_x86 *c)
+static void init_nsc(struct cpuinfo_x86 *c)
 {
 	/*
 	 * There may be GX1 processors in the wild that are branded
@@ -372,7 +378,7 @@ static void __cpuinit init_nsc(struct cpuinfo_x86 *c)
 	/* Handle the GX (Formally known as the GX2) */
 
 	if (c->x86 == 5 && c->x86_model == 5)
-		display_cacheinfo(c);
+		cpu_detect_cache_sizes(c);
 	else
 		init_cyrix(c);
 }
@@ -403,7 +409,7 @@ static inline int test_cyrix_52div(void)
 	return (unsigned char) (test >> 8) == 0x02;
 }
 
-static void __cpuinit cyrix_identify(struct cpuinfo_x86 *c)
+static void cyrix_identify(struct cpuinfo_x86 *c)
 {
 	/* Detect Cyrix with disabled CPUID */
 	if (c->x86 == 4 && test_cyrix_52div()) {
@@ -425,31 +431,36 @@ static void __cpuinit cyrix_identify(struct cpuinfo_x86 *c)
 		if (dir0 == 5 || dir0 == 3) {
 			unsigned char ccr3;
 			unsigned long flags;
-			printk(KERN_INFO "Enabling CPUID on Cyrix processor.\n");
+			pr_info("Enabling CPUID on Cyrix processor.\n");
 			local_irq_save(flags);
 			ccr3 = getCx86(CX86_CCR3);
-			setCx86(CX86_CCR3, (ccr3 & 0x0f) | 0x10);       /* enable MAPEN  */
-			setCx86(CX86_CCR4, getCx86(CX86_CCR4) | 0x80);  /* enable cpuid  */
-			setCx86(CX86_CCR3, ccr3);                       /* disable MAPEN */
+			/* enable MAPEN  */
+			setCx86(CX86_CCR3, (ccr3 & 0x0f) | 0x10);
+			/* enable cpuid  */
+			setCx86(CX86_CCR4, getCx86(CX86_CCR4) | 0x80);
+			/* disable MAPEN */
+			setCx86(CX86_CCR3, ccr3);
 			local_irq_restore(flags);
 		}
 	}
 }
 
-static struct cpu_dev cyrix_cpu_dev __cpuinitdata = {
+static const struct cpu_dev cyrix_cpu_dev = {
 	.c_vendor	= "Cyrix",
 	.c_ident	= { "CyrixInstead" },
 	.c_early_init	= early_init_cyrix,
 	.c_init		= init_cyrix,
 	.c_identify	= cyrix_identify,
+	.c_x86_vendor	= X86_VENDOR_CYRIX,
 };
 
-cpu_vendor_dev_register(X86_VENDOR_CYRIX, &cyrix_cpu_dev);
+cpu_dev_register(cyrix_cpu_dev);
 
-static struct cpu_dev nsc_cpu_dev __cpuinitdata = {
+static const struct cpu_dev nsc_cpu_dev = {
 	.c_vendor	= "NSC",
 	.c_ident	= { "Geode by NSC" },
 	.c_init		= init_nsc,
+	.c_x86_vendor	= X86_VENDOR_NSC,
 };
 
-cpu_vendor_dev_register(X86_VENDOR_NSC, &nsc_cpu_dev);
+cpu_dev_register(nsc_cpu_dev);

@@ -1,40 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 1998-2001 Vojtech Pavlik
  */
 
 /*
- * FP-Gaming Assasin 3D joystick driver for Linux
+ * FP-Gaming Assassin 3D joystick driver for Linux
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
- * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/init.h>
 #include <linux/gameport.h>
 #include <linux/input.h>
 #include <linux/jiffies.h>
 
-#define DRIVER_DESC	"FP-Gaming Assasin 3D joystick driver"
+#define DRIVER_DESC	"FP-Gaming Assassin 3D joystick driver"
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
 MODULE_DESCRIPTION(DRIVER_DESC);
@@ -342,7 +325,8 @@ static int a3d_connect(struct gameport *gameport, struct gameport_driver *drv)
 
 		for (i = 0; i < 4; i++) {
 			if (i < 2)
-				input_set_abs_params(input_dev, axes[i], 48, input_dev->abs[axes[i]] * 2 - 48, 0, 8);
+				input_set_abs_params(input_dev, axes[i],
+					48, input_abs_get_val(input_dev, axes[i]) * 2 - 48, 0, 8);
 			else
 				input_set_abs_params(input_dev, axes[i], 2, 253, 0, 0);
 			input_set_abs_params(input_dev, ABS_HAT0X + i, -1, 1, 0, 0);
@@ -412,16 +396,4 @@ static struct gameport_driver a3d_drv = {
 	.disconnect	= a3d_disconnect,
 };
 
-static int __init a3d_init(void)
-{
-	gameport_register_driver(&a3d_drv);
-	return 0;
-}
-
-static void __exit a3d_exit(void)
-{
-	gameport_unregister_driver(&a3d_drv);
-}
-
-module_init(a3d_init);
-module_exit(a3d_exit);
+module_gameport_driver(a3d_drv);

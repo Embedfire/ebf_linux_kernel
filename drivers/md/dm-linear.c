@@ -5,12 +5,13 @@
  */
 
 #include "dm.h"
-
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/bio.h>
+#include <linux/dax.h>
 #include <linux/slab.h>
+#include <linux/device-mapper.h>
 
 #define DM_MSG_PREFIX "linear"
 
@@ -29,6 +30,8 @@ static int linear_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
 	struct linear_c *lc;
 	unsigned long long tmp;
+	char dummy;
+	int ret;
 
 	if (argc != 2) {
 		ti->error = "Invalid argument count";
@@ -37,28 +40,34 @@ static int linear_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	lc = kmalloc(sizeof(*lc), GFP_KERNEL);
 	if (lc == NULL) {
-		ti->error = "dm-linear: Cannot allocate linear context";
+		ti->error = "Cannot allocate linear context";
 		return -ENOMEM;
 	}
 
-	if (sscanf(argv[1], "%llu", &tmp) != 1) {
-		ti->error = "dm-linear: Invalid device sector";
+	ret = -EINVAL;
+	if (sscanf(argv[1], "%llu%c", &tmp, &dummy) != 1 || tmp != (sector_t)tmp) {
+		ti->error = "Invalid device sector";
 		goto bad;
 	}
 	lc->start = tmp;
 
-	if (dm_get_device(ti, argv[0], lc->start, ti->len,
-			  dm_table_get_mode(ti->table), &lc->dev)) {
-		ti->error = "dm-linear: Device lookup failed";
+	ret = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &lc->dev);
+	if (ret) {
+		ti->error = "Device lookup failed";
 		goto bad;
 	}
 
+	ti->num_flush_bios = 1;
+	ti->num_discard_bios = 1;
+	ti->num_secure_erase_bios = 1;
+	ti->num_write_same_bios = 1;
+	ti->num_write_zeroes_bios = 1;
 	ti->private = lc;
 	return 0;
 
       bad:
 	kfree(lc);
-	return -EINVAL;
+	return ret;
 }
 
 static void linear_dtr(struct dm_target *ti)
@@ -73,27 +82,28 @@ static sector_t linear_map_sector(struct dm_target *ti, sector_t bi_sector)
 {
 	struct linear_c *lc = ti->private;
 
-	return lc->start + (bi_sector - ti->begin);
+	return lc->start + dm_target_offset(ti, bi_sector);
 }
 
 static void linear_map_bio(struct dm_target *ti, struct bio *bio)
 {
 	struct linear_c *lc = ti->private;
 
-	bio->bi_bdev = lc->dev->bdev;
-	bio->bi_sector = linear_map_sector(ti, bio->bi_sector);
+	bio_set_dev(bio, lc->dev->bdev);
+	if (bio_sectors(bio) || op_is_zone_mgmt(bio_op(bio)))
+		bio->bi_iter.bi_sector =
+			linear_map_sector(ti, bio->bi_iter.bi_sector);
 }
 
-static int linear_map(struct dm_target *ti, struct bio *bio,
-		      union map_info *map_context)
+static int linear_map(struct dm_target *ti, struct bio *bio)
 {
 	linear_map_bio(ti, bio);
 
 	return DM_MAPIO_REMAPPED;
 }
 
-static int linear_status(struct dm_target *ti, status_type_t type,
-			 char *result, unsigned int maxlen)
+static void linear_status(struct dm_target *ti, status_type_t type,
+			  unsigned status_flags, char *result, unsigned maxlen)
 {
 	struct linear_c *lc = (struct linear_c *) ti->private;
 
@@ -107,50 +117,134 @@ static int linear_status(struct dm_target *ti, status_type_t type,
 				(unsigned long long)lc->start);
 		break;
 	}
+}
+
+static int linear_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
+{
+	struct linear_c *lc = (struct linear_c *) ti->private;
+	struct dm_dev *dev = lc->dev;
+
+	*bdev = dev->bdev;
+
+	/*
+	 * Only pass ioctls through if the device sizes match exactly.
+	 */
+	if (lc->start ||
+	    ti->len != i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT)
+		return 1;
 	return 0;
 }
 
-static int linear_ioctl(struct dm_target *ti, struct inode *inode,
-			struct file *filp, unsigned int cmd,
-			unsigned long arg)
-{
-	struct linear_c *lc = (struct linear_c *) ti->private;
-	struct block_device *bdev = lc->dev->bdev;
-	struct file fake_file = {};
-	struct dentry fake_dentry = {};
-
-	fake_file.f_mode = lc->dev->mode;
-	fake_file.f_path.dentry = &fake_dentry;
-	fake_dentry.d_inode = bdev->bd_inode;
-
-	return blkdev_driver_ioctl(bdev->bd_inode, &fake_file, bdev->bd_disk, cmd, arg);
-}
-
-static int linear_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
-			struct bio_vec *biovec, int max_size)
+#ifdef CONFIG_BLK_DEV_ZONED
+static int linear_report_zones(struct dm_target *ti,
+		struct dm_report_zones_args *args, unsigned int nr_zones)
 {
 	struct linear_c *lc = ti->private;
-	struct request_queue *q = bdev_get_queue(lc->dev->bdev);
+	sector_t sector = linear_map_sector(ti, args->next_sector);
 
-	if (!q->merge_bvec_fn)
-		return max_size;
-
-	bvm->bi_bdev = lc->dev->bdev;
-	bvm->bi_sector = linear_map_sector(ti, bvm->bi_sector);
-
-	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
+	args->start = lc->start;
+	return blkdev_report_zones(lc->dev->bdev, sector, nr_zones,
+				   dm_report_zones_cb, args);
 }
+#endif
+
+static int linear_iterate_devices(struct dm_target *ti,
+				  iterate_devices_callout_fn fn, void *data)
+{
+	struct linear_c *lc = ti->private;
+
+	return fn(ti, lc->dev, lc->start, ti->len, data);
+}
+
+#if IS_ENABLED(CONFIG_DAX_DRIVER)
+static long linear_dax_direct_access(struct dm_target *ti, pgoff_t pgoff,
+		long nr_pages, void **kaddr, pfn_t *pfn)
+{
+	long ret;
+	struct linear_c *lc = ti->private;
+	struct block_device *bdev = lc->dev->bdev;
+	struct dax_device *dax_dev = lc->dev->dax_dev;
+	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
+
+	dev_sector = linear_map_sector(ti, sector);
+	ret = bdev_dax_pgoff(bdev, dev_sector, nr_pages * PAGE_SIZE, &pgoff);
+	if (ret)
+		return ret;
+	return dax_direct_access(dax_dev, pgoff, nr_pages, kaddr, pfn);
+}
+
+static size_t linear_dax_copy_from_iter(struct dm_target *ti, pgoff_t pgoff,
+		void *addr, size_t bytes, struct iov_iter *i)
+{
+	struct linear_c *lc = ti->private;
+	struct block_device *bdev = lc->dev->bdev;
+	struct dax_device *dax_dev = lc->dev->dax_dev;
+	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
+
+	dev_sector = linear_map_sector(ti, sector);
+	if (bdev_dax_pgoff(bdev, dev_sector, ALIGN(bytes, PAGE_SIZE), &pgoff))
+		return 0;
+	return dax_copy_from_iter(dax_dev, pgoff, addr, bytes, i);
+}
+
+static size_t linear_dax_copy_to_iter(struct dm_target *ti, pgoff_t pgoff,
+		void *addr, size_t bytes, struct iov_iter *i)
+{
+	struct linear_c *lc = ti->private;
+	struct block_device *bdev = lc->dev->bdev;
+	struct dax_device *dax_dev = lc->dev->dax_dev;
+	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
+
+	dev_sector = linear_map_sector(ti, sector);
+	if (bdev_dax_pgoff(bdev, dev_sector, ALIGN(bytes, PAGE_SIZE), &pgoff))
+		return 0;
+	return dax_copy_to_iter(dax_dev, pgoff, addr, bytes, i);
+}
+
+static int linear_dax_zero_page_range(struct dm_target *ti, pgoff_t pgoff,
+				      size_t nr_pages)
+{
+	int ret;
+	struct linear_c *lc = ti->private;
+	struct block_device *bdev = lc->dev->bdev;
+	struct dax_device *dax_dev = lc->dev->dax_dev;
+	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
+
+	dev_sector = linear_map_sector(ti, sector);
+	ret = bdev_dax_pgoff(bdev, dev_sector, nr_pages << PAGE_SHIFT, &pgoff);
+	if (ret)
+		return ret;
+	return dax_zero_page_range(dax_dev, pgoff, nr_pages);
+}
+
+#else
+#define linear_dax_direct_access NULL
+#define linear_dax_copy_from_iter NULL
+#define linear_dax_copy_to_iter NULL
+#define linear_dax_zero_page_range NULL
+#endif
 
 static struct target_type linear_target = {
 	.name   = "linear",
-	.version= {1, 0, 3},
+	.version = {1, 4, 0},
+#ifdef CONFIG_BLK_DEV_ZONED
+	.features = DM_TARGET_PASSES_INTEGRITY | DM_TARGET_NOWAIT |
+		    DM_TARGET_ZONED_HM,
+	.report_zones = linear_report_zones,
+#else
+	.features = DM_TARGET_PASSES_INTEGRITY | DM_TARGET_NOWAIT,
+#endif
 	.module = THIS_MODULE,
 	.ctr    = linear_ctr,
 	.dtr    = linear_dtr,
 	.map    = linear_map,
 	.status = linear_status,
-	.ioctl  = linear_ioctl,
-	.merge  = linear_merge,
+	.prepare_ioctl = linear_prepare_ioctl,
+	.iterate_devices = linear_iterate_devices,
+	.direct_access = linear_dax_direct_access,
+	.dax_copy_from_iter = linear_dax_copy_from_iter,
+	.dax_copy_to_iter = linear_dax_copy_to_iter,
+	.dax_zero_page_range = linear_dax_zero_page_range,
 };
 
 int __init dm_linear_init(void)
@@ -165,8 +259,5 @@ int __init dm_linear_init(void)
 
 void dm_linear_exit(void)
 {
-	int r = dm_unregister_target(&linear_target);
-
-	if (r < 0)
-		DMERR("unregister failed %d", r);
+	dm_unregister_target(&linear_target);
 }

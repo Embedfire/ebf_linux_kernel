@@ -1,12 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Copyright (C) 2001 Lennert Buytenhek (buytenh@gnu.org) and
  * James Leu (jleu@mindspring.net).
  * Copyright (C) 2001 by various other people who didn't put their name here.
- * Licensed under the GPL.
  */
 
 #include <stdint.h>
+#include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/types.h>
@@ -14,10 +15,9 @@
 #include <sys/time.h>
 #include <sys/un.h>
 #include "daemon.h"
-#include "net_user.h"
-#include "os.h"
-#include "um_malloc.h"
-#include "user.h"
+#include <net_user.h>
+#include <os.h>
+#include <um_malloc.h>
 
 enum request_type { REQ_NEW_CONTROL };
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/sh/kernel/irq.c
  *
@@ -11,9 +12,12 @@
 #include <linux/module.h>
 #include <linux/kernel_stat.h>
 #include <linux/seq_file.h>
+#include <linux/ftrace.h>
+#include <linux/delay.h>
+#include <linux/ratelimit.h>
 #include <asm/processor.h>
 #include <asm/machvec.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/thread_info.h>
 #include <cpu/mmu_context.h>
 
@@ -31,38 +35,19 @@ void ack_bad_irq(unsigned int irq)
 }
 
 #if defined(CONFIG_PROC_FS)
-int show_interrupts(struct seq_file *p, void *v)
+/*
+ * /proc/interrupts printing for arch specific interrupts
+ */
+int arch_show_interrupts(struct seq_file *p, int prec)
 {
-	int i = *(loff_t *) v, j;
-	struct irqaction * action;
-	unsigned long flags;
+	int j;
 
-	if (i == 0) {
-		seq_puts(p, "           ");
-		for_each_online_cpu(j)
-			seq_printf(p, "CPU%d       ",j);
-		seq_putc(p, '\n');
-	}
+	seq_printf(p, "%*s: ", prec, "NMI");
+	for_each_online_cpu(j)
+		seq_printf(p, "%10u ", nmi_count(j));
+	seq_printf(p, "  Non-maskable interrupts\n");
 
-	if (i < sh_mv.mv_nr_irqs) {
-		spin_lock_irqsave(&irq_desc[i].lock, flags);
-		action = irq_desc[i].action;
-		if (!action)
-			goto unlock;
-		seq_printf(p, "%3d: ",i);
-		for_each_online_cpu(j)
-			seq_printf(p, "%10u ", kstat_cpu(j).irqs[i]);
-		seq_printf(p, " %14s", irq_desc[i].chip->name);
-		seq_printf(p, "-%-8s", irq_desc[i].name);
-		seq_printf(p, "  %s", action->name);
-
-		for (action=action->next; action; action = action->next)
-			seq_printf(p, ", %s", action->name);
-		seq_putc(p, '\n');
-unlock:
-		spin_unlock_irqrestore(&irq_desc[i].lock, flags);
-	} else if (i == sh_mv.mv_nr_irqs)
-		seq_printf(p, "Err: %10u\n", atomic_read(&irq_err_count));
+	seq_printf(p, "%*s: %10u\n", prec, "ERR", atomic_read(&irq_err_count));
 
 	return 0;
 }
@@ -79,36 +64,14 @@ union irq_ctx {
 
 static union irq_ctx *hardirq_ctx[NR_CPUS] __read_mostly;
 static union irq_ctx *softirq_ctx[NR_CPUS] __read_mostly;
-#endif
 
-asmlinkage int do_IRQ(unsigned int irq, struct pt_regs *regs)
+static char softirq_stack[NR_CPUS * THREAD_SIZE] __page_aligned_bss;
+static char hardirq_stack[NR_CPUS * THREAD_SIZE] __page_aligned_bss;
+
+static inline void handle_one_irq(unsigned int irq)
 {
-	struct pt_regs *old_regs = set_irq_regs(regs);
-#ifdef CONFIG_IRQSTACKS
 	union irq_ctx *curctx, *irqctx;
-#endif
 
-	irq_enter();
-
-#ifdef CONFIG_DEBUG_STACKOVERFLOW
-	/* Debugging check for stack overflow: is there less than 1KB free? */
-	{
-		long sp;
-
-		__asm__ __volatile__ ("and r15, %0" :
-					"=r" (sp) : "0" (THREAD_SIZE - 1));
-
-		if (unlikely(sp < (sizeof(struct thread_info) + STACK_WARN))) {
-			printk("do_IRQ: stack overflow: %ld\n",
-			       sp - sizeof(struct thread_info));
-			dump_stack();
-		}
-	}
-#endif
-
-	irq = irq_demux(evt2irq(irq));
-
-#ifdef CONFIG_IRQSTACKS
 	curctx = (union irq_ctx *)current_thread_info();
 	irqctx = hardirq_ctx[smp_processor_id()];
 
@@ -137,7 +100,7 @@ asmlinkage int do_IRQ(unsigned int irq, struct pt_regs *regs)
 			"mov	%0, r4		\n"
 			"mov	r15, r8		\n"
 			"jsr	@%1		\n"
-			/* swith to the irq stack */
+			/* switch to the irq stack */
 			" mov	%2, r15		\n"
 			/* restore the stack (ring zero) */
 			"mov	r8, r15		\n"
@@ -147,21 +110,8 @@ asmlinkage int do_IRQ(unsigned int irq, struct pt_regs *regs)
 			  "r5", "r6", "r7", "r8", "t", "pr"
 		);
 	} else
-#endif
 		generic_handle_irq(irq);
-
-	irq_exit();
-
-	set_irq_regs(old_regs);
-	return 1;
 }
-
-#ifdef CONFIG_IRQSTACKS
-static char softirq_stack[NR_CPUS * THREAD_SIZE]
-		__attribute__((__section__(".bss.page_aligned")));
-
-static char hardirq_stack[NR_CPUS * THREAD_SIZE]
-		__attribute__((__section__(".bss.page_aligned")));
 
 /*
  * allocate per-cpu stacks for hardirq and for softirq processing
@@ -175,7 +125,6 @@ void irq_ctx_init(int cpu)
 
 	irqctx = (union irq_ctx *)&hardirq_stack[cpu * THREAD_SIZE];
 	irqctx->tinfo.task		= NULL;
-	irqctx->tinfo.exec_domain	= NULL;
 	irqctx->tinfo.cpu		= cpu;
 	irqctx->tinfo.preempt_count	= HARDIRQ_OFFSET;
 	irqctx->tinfo.addr_limit	= MAKE_MM_SEG(0);
@@ -184,7 +133,6 @@ void irq_ctx_init(int cpu)
 
 	irqctx = (union irq_ctx *)&softirq_stack[cpu * THREAD_SIZE];
 	irqctx->tinfo.task		= NULL;
-	irqctx->tinfo.exec_domain	= NULL;
 	irqctx->tinfo.cpu		= cpu;
 	irqctx->tinfo.preempt_count	= 0;
 	irqctx->tinfo.addr_limit	= MAKE_MM_SEG(0);
@@ -200,49 +148,59 @@ void irq_ctx_exit(int cpu)
 	hardirq_ctx[cpu] = NULL;
 }
 
-asmlinkage void do_softirq(void)
+void do_softirq_own_stack(void)
 {
-	unsigned long flags;
 	struct thread_info *curctx;
 	union irq_ctx *irqctx;
 	u32 *isp;
 
-	if (in_interrupt())
-		return;
+	curctx = current_thread_info();
+	irqctx = softirq_ctx[smp_processor_id()];
+	irqctx->tinfo.task = curctx->task;
+	irqctx->tinfo.previous_sp = current_stack_pointer;
 
-	local_irq_save(flags);
+	/* build the stack frame on the softirq stack */
+	isp = (u32 *)((char *)irqctx + sizeof(*irqctx));
 
-	if (local_softirq_pending()) {
-		curctx = current_thread_info();
-		irqctx = softirq_ctx[smp_processor_id()];
-		irqctx->tinfo.task = curctx->task;
-		irqctx->tinfo.previous_sp = current_stack_pointer;
-
-		/* build the stack frame on the softirq stack */
-		isp = (u32 *)((char *)irqctx + sizeof(*irqctx));
-
-		__asm__ __volatile__ (
-			"mov	r15, r9		\n"
-			"jsr	@%0		\n"
-			/* switch to the softirq stack */
-			" mov	%1, r15		\n"
-			/* restore the thread stack */
-			"mov	r9, r15		\n"
-			: /* no outputs */
-			: "r" (__do_softirq), "r" (isp)
-			: "memory", "r0", "r1", "r2", "r3", "r4",
-			  "r5", "r6", "r7", "r8", "r9", "r15", "t", "pr"
-		);
-
-		/*
-		 * Shouldnt happen, we returned above if in_interrupt():
-		 */
-		WARN_ON_ONCE(softirq_count());
-	}
-
-	local_irq_restore(flags);
+	__asm__ __volatile__ (
+		"mov	r15, r9		\n"
+		"jsr	@%0		\n"
+		/* switch to the softirq stack */
+		" mov	%1, r15		\n"
+		/* restore the thread stack */
+		"mov	r9, r15		\n"
+		: /* no outputs */
+		: "r" (__do_softirq), "r" (isp)
+		: "memory", "r0", "r1", "r2", "r3", "r4",
+		  "r5", "r6", "r7", "r8", "r9", "r15", "t", "pr"
+	);
+}
+#else
+static inline void handle_one_irq(unsigned int irq)
+{
+	generic_handle_irq(irq);
 }
 #endif
+
+asmlinkage __irq_entry int do_IRQ(unsigned int irq, struct pt_regs *regs)
+{
+	struct pt_regs *old_regs = set_irq_regs(regs);
+
+	irq_enter();
+
+	irq = irq_demux(irq_lookup(irq));
+
+	if (irq != NO_IRQ_IGNORE) {
+		handle_one_irq(irq);
+		irq_finish(irq);
+	}
+
+	irq_exit();
+
+	set_irq_regs(old_regs);
+
+	return IRQ_HANDLED;
+}
 
 void __init init_IRQ(void)
 {
@@ -252,5 +210,36 @@ void __init init_IRQ(void)
 	if (sh_mv.mv_init_irq)
 		sh_mv.mv_init_irq();
 
+	intc_finalize();
+
 	irq_ctx_init(smp_processor_id());
 }
+
+#ifdef CONFIG_HOTPLUG_CPU
+/*
+ * The CPU has been marked offline.  Migrate IRQs off this CPU.  If
+ * the affinity settings do not allow other CPUs, force them onto any
+ * available CPU.
+ */
+void migrate_irqs(void)
+{
+	unsigned int irq, cpu = smp_processor_id();
+
+	for_each_active_irq(irq) {
+		struct irq_data *data = irq_get_irq_data(irq);
+
+		if (irq_data_get_node(data) == cpu) {
+			struct cpumask *mask = irq_data_get_affinity_mask(data);
+			unsigned int newcpu = cpumask_any_and(mask,
+							      cpu_online_mask);
+			if (newcpu >= nr_cpu_ids) {
+				pr_info_ratelimited("IRQ%u no longer affine to CPU%u\n",
+						    irq, cpu);
+
+				cpumask_setall(mask);
+			}
+			irq_set_affinity(irq, mask);
+		}
+	}
+}
+#endif

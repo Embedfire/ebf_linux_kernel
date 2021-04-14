@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Low-level PCI config space access for OLPC systems who lack the VSA
  * PCI virtualization software.
  *
  * Copyright © 2006  Advanced Micro Devices, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * The AMD Geode chipset (ie: GX2 processor, cs5536 I/O companion device)
  * has some I/O functions (display, southbridge, sound, USB HCIs, etc)
@@ -29,7 +25,7 @@
 #include <linux/init.h>
 #include <asm/olpc.h>
 #include <asm/geode.h>
-#include "pci.h"
+#include <asm/pci_x86.h>
 
 /*
  * In the tables below, the first two line (8 longwords) are the
@@ -206,6 +202,8 @@ static int pci_olpc_read(unsigned int seg, unsigned int bus,
 {
 	uint32_t *addr;
 
+	WARN_ON(seg);
+
 	/* Use the hardware mechanism for non-simulated devices */
 	if (!is_simulated(bus, devfn))
 		return pci_direct_conf1.read(seg, bus, devfn, reg, len, value);
@@ -264,6 +262,8 @@ static int pci_olpc_read(unsigned int seg, unsigned int bus,
 static int pci_olpc_write(unsigned int seg, unsigned int bus,
 		unsigned int devfn, int reg, int len, uint32_t value)
 {
+	WARN_ON(seg);
+
 	/* Use the hardware mechanism for non-simulated devices */
 	if (!is_simulated(bus, devfn))
 		return pci_direct_conf1.write(seg, bus, devfn, reg, len, value);
@@ -297,17 +297,14 @@ static int pci_olpc_write(unsigned int seg, unsigned int bus,
 	return 0;
 }
 
-static struct pci_raw_ops pci_olpc_conf = {
+static const struct pci_raw_ops pci_olpc_conf = {
 	.read =	pci_olpc_read,
 	.write = pci_olpc_write,
 };
 
 int __init pci_olpc_init(void)
 {
-	if (!machine_is_olpc() || olpc_has_vsa())
-		return -ENODEV;
-
-	printk(KERN_INFO "PCI: Using configuration type OLPC\n");
+	printk(KERN_INFO "PCI: Using configuration type OLPC XO-1\n");
 	raw_pci_ops = &pci_olpc_conf;
 	is_lx = is_geode_lx();
 	return 0;

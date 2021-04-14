@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/sysv/itree.c
  *
@@ -178,7 +179,7 @@ static inline int splice_branch(struct inode *inode,
 	*where->p = where->key;
 	write_unlock(&pointers_lock);
 
-	inode->i_ctime = CURRENT_TIME_SEC;
+	inode->i_ctime = current_time(inode);
 
 	/* had we spliced it onto indirect block? */
 	if (where->bh)
@@ -418,7 +419,7 @@ do_indirects:
 		}
 		n++;
 	}
-	inode->i_mtime = inode->i_ctime = CURRENT_TIME_SEC;
+	inode->i_mtime = inode->i_ctime = current_time(inode);
 	if (IS_SYNC(inode))
 		sysv_sync_inode (inode);
 	else
@@ -440,10 +441,11 @@ static unsigned sysv_nblocks(struct super_block *s, loff_t size)
 	return blocks;
 }
 
-int sysv_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
+int sysv_getattr(const struct path *path, struct kstat *stat,
+		 u32 request_mask, unsigned int flags)
 {
-	struct super_block *s = mnt->mnt_sb;
-	generic_fillattr(dentry->d_inode, stat);
+	struct super_block *s = path->dentry->d_sb;
+	generic_fillattr(d_inode(path->dentry), stat);
 	stat->blocks = (s->s_blocksize / 512) * sysv_nblocks(s, stat->size);
 	stat->blksize = s->s_blocksize;
 	return 0;
@@ -459,20 +461,32 @@ static int sysv_readpage(struct file *file, struct page *page)
 	return block_read_full_page(page,get_block);
 }
 
-int __sysv_write_begin(struct file *file, struct address_space *mapping,
-			loff_t pos, unsigned len, unsigned flags,
-			struct page **pagep, void **fsdata)
+int sysv_prepare_chunk(struct page *page, loff_t pos, unsigned len)
 {
-	return block_write_begin(file, mapping, pos, len, flags, pagep, fsdata,
-				get_block);
+	return __block_write_begin(page, pos, len, get_block);
+}
+
+static void sysv_write_failed(struct address_space *mapping, loff_t to)
+{
+	struct inode *inode = mapping->host;
+
+	if (to > inode->i_size) {
+		truncate_pagecache(inode, inode->i_size);
+		sysv_truncate(inode);
+	}
 }
 
 static int sysv_write_begin(struct file *file, struct address_space *mapping,
 			loff_t pos, unsigned len, unsigned flags,
 			struct page **pagep, void **fsdata)
 {
-	*pagep = NULL;
-	return __sysv_write_begin(file, mapping, pos, len, flags, pagep, fsdata);
+	int ret;
+
+	ret = block_write_begin(mapping, pos, len, flags, pagep, get_block);
+	if (unlikely(ret))
+		sysv_write_failed(mapping, pos + len);
+
+	return ret;
 }
 
 static sector_t sysv_bmap(struct address_space *mapping, sector_t block)
@@ -483,7 +497,6 @@ static sector_t sysv_bmap(struct address_space *mapping, sector_t block)
 const struct address_space_operations sysv_aops = {
 	.readpage = sysv_readpage,
 	.writepage = sysv_writepage,
-	.sync_page = block_sync_page,
 	.write_begin = sysv_write_begin,
 	.write_end = generic_write_end,
 	.bmap = sysv_bmap

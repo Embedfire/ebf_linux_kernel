@@ -1,22 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* -*- mode: c; c-basic-offset: 8; -*-
  * vim: noexpandtab sw=8 ts=8 sts=0:
  *
  * Copyright (C) 2004, 2005 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  */
 
 #include <linux/module.h>
@@ -24,13 +10,13 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/string.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "masklog.h"
 
 struct mlog_bits mlog_and_bits = MLOG_BITS_RHS(MLOG_INITIAL_AND_MASK);
 EXPORT_SYMBOL_GPL(mlog_and_bits);
-struct mlog_bits mlog_not_bits = MLOG_BITS_RHS(MLOG_INITIAL_NOT_MASK);
+struct mlog_bits mlog_not_bits = MLOG_BITS_RHS(0);
 EXPORT_SYMBOL_GPL(mlog_not_bits);
 
 static ssize_t mlog_mask_show(u64 mask, char *buf)
@@ -49,13 +35,13 @@ static ssize_t mlog_mask_show(u64 mask, char *buf)
 
 static ssize_t mlog_mask_store(u64 mask, const char *buf, size_t count)
 {
-	if (!strnicmp(buf, "allow", 5)) {
+	if (!strncasecmp(buf, "allow", 5)) {
 		__mlog_set_u64(mask, mlog_and_bits);
 		__mlog_clear_u64(mask, mlog_not_bits);
-	} else if (!strnicmp(buf, "deny", 4)) {
+	} else if (!strncasecmp(buf, "deny", 4)) {
 		__mlog_set_u64(mask, mlog_not_bits);
 		__mlog_clear_u64(mask, mlog_and_bits);
-	} else if (!strnicmp(buf, "off", 3)) {
+	} else if (!strncasecmp(buf, "off", 3)) {
 		__mlog_clear_u64(mask, mlog_not_bits);
 		__mlog_clear_u64(mask, mlog_and_bits);
 	} else
@@ -63,6 +49,40 @@ static ssize_t mlog_mask_store(u64 mask, const char *buf, size_t count)
 
 	return count;
 }
+
+void __mlog_printk(const u64 *mask, const char *func, int line,
+		   const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list args;
+	const char *level;
+	const char *prefix = "";
+
+	if (!__mlog_test_u64(*mask, mlog_and_bits) ||
+	    __mlog_test_u64(*mask, mlog_not_bits))
+		return;
+
+	if (*mask & ML_ERROR) {
+		level = KERN_ERR;
+		prefix = "ERROR: ";
+	} else if (*mask & ML_NOTICE) {
+		level = KERN_NOTICE;
+	} else {
+		level = KERN_INFO;
+	}
+
+	va_start(args, fmt);
+
+	vaf.fmt = fmt;
+	vaf.va = &args;
+
+	printk("%s(%s,%u,%u):%s:%d %s%pV",
+	       level, current->comm, task_pid_nr(current),
+	       raw_smp_processor_id(), func, line, prefix, &vaf);
+
+	va_end(args);
+}
+EXPORT_SYMBOL_GPL(__mlog_printk);
 
 struct mlog_attribute {
 	struct attribute attr;
@@ -80,8 +100,6 @@ struct mlog_attribute {
 }
 
 static struct mlog_attribute mlog_attrs[MLOG_MAX_BITS] = {
-	define_mask(ENTRY),
-	define_mask(EXIT),
 	define_mask(TCP),
 	define_mask(MSG),
 	define_mask(SOCKET),
@@ -93,22 +111,12 @@ static struct mlog_attribute mlog_attrs[MLOG_MAX_BITS] = {
 	define_mask(DLM_THREAD),
 	define_mask(DLM_MASTER),
 	define_mask(DLM_RECOVERY),
-	define_mask(AIO),
-	define_mask(JOURNAL),
-	define_mask(DISK_ALLOC),
-	define_mask(SUPER),
-	define_mask(FILE_IO),
-	define_mask(EXTENT_MAP),
 	define_mask(DLM_GLUE),
-	define_mask(BH_IO),
-	define_mask(UPTODATE),
-	define_mask(NAMEI),
-	define_mask(INODE),
 	define_mask(VOTE),
-	define_mask(DCACHE),
 	define_mask(CONN),
 	define_mask(QUORUM),
-	define_mask(EXPORT),
+	define_mask(BASTS),
+	define_mask(CLUSTER),
 	define_mask(ERROR),
 	define_mask(NOTICE),
 	define_mask(KTHREAD),
@@ -132,7 +140,7 @@ static ssize_t mlog_store(struct kobject *obj, struct attribute *attr,
 	return mlog_mask_store(mlog_attr->mask, buf, count);
 }
 
-static struct sysfs_ops mlog_attr_ops = {
+static const struct sysfs_ops mlog_attr_ops = {
 	.show  = mlog_show,
 	.store = mlog_store,
 };

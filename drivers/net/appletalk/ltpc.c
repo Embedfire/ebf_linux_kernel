@@ -215,7 +215,6 @@ static int dma;
 #include <linux/ioport.h>
 #include <linux/spinlock.h>
 #include <linux/in.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -228,8 +227,10 @@ static int dma;
 #include <linux/timer.h>
 #include <linux/atalk.h>
 #include <linux/bitops.h>
+#include <linux/gfp.h>
 
-#include <asm/system.h>
+#include <net/Space.h>
+
 #include <asm/dma.h>
 #include <asm/io.h>
 
@@ -261,7 +262,6 @@ static unsigned char *ltdmacbuf;
 
 struct ltpc_private
 {
-	struct net_device_stats stats;
 	struct atalk_addr my_addr;
 };
 
@@ -642,7 +642,6 @@ done:
 		inb_p(base+7);
 		inb_p(base+7);
 	}
-	return;
 }
 
 
@@ -654,9 +653,9 @@ static int do_write(struct net_device *dev, void *cbuf, int cbuflen,
 	int ret;
 
 	if(i) {
-		qels[i].cbuf = (unsigned char *) cbuf;
+		qels[i].cbuf = cbuf;
 		qels[i].cbuflen = cbuflen;
-		qels[i].dbuf = (unsigned char *) dbuf;
+		qels[i].dbuf = dbuf;
 		qels[i].dbuflen = dbuflen;
 		qels[i].QWrite = 1;
 		qels[i].mailbox = i;  /* this should be initted rather */
@@ -678,9 +677,9 @@ static int do_read(struct net_device *dev, void *cbuf, int cbuflen,
 	int ret;
 
 	if(i) {
-		qels[i].cbuf = (unsigned char *) cbuf;
+		qels[i].cbuf = cbuf;
 		qels[i].cbuflen = cbuflen;
-		qels[i].dbuf = (unsigned char *) dbuf;
+		qels[i].dbuf = dbuf;
 		qels[i].dbuflen = dbuflen;
 		qels[i].QWrite = 0;
 		qels[i].mailbox = i;  /* this should be initted rather */
@@ -697,9 +696,9 @@ static int do_read(struct net_device *dev, void *cbuf, int cbuflen,
 /* end of idle handlers -- what should be seen is do_read, do_write */
 
 static struct timer_list ltpc_timer;
+static struct net_device *ltpc_timer_dev;
 
-static int ltpc_xmit(struct sk_buff *skb, struct net_device *dev);
-static struct net_device_stats *ltpc_get_stats(struct net_device *dev);
+static netdev_tx_t ltpc_xmit(struct sk_buff *skb, struct net_device *dev);
 
 static int read_30 ( struct net_device *dev)
 {
@@ -726,12 +725,11 @@ static int sendup_buffer (struct net_device *dev)
 	int dnode, snode, llaptype, len; 
 	int sklen;
 	struct sk_buff *skb;
-	struct net_device_stats *stats = &((struct ltpc_private *)dev->priv)->stats;
 	struct lt_rcvlap *ltc = (struct lt_rcvlap *) ltdmacbuf;
 
 	if (ltc->command != LT_RCVLAP) {
 		printk("unknown command 0x%02x from ltpc card\n",ltc->command);
-		return(-1);
+		return -1;
 	}
 	dnode = ltc->dnode;
 	snode = ltc->snode;
@@ -778,12 +776,11 @@ static int sendup_buffer (struct net_device *dev)
 
 	skb_reset_transport_header(skb);
 
-	stats->rx_packets++;
-	stats->rx_bytes+=skb->len;
+	dev->stats.rx_packets++;
+	dev->stats.rx_bytes += skb->len;
 
 	/* toss it onwards */
 	netif_rx(skb);
-	dev->last_rx = jiffies;
 	return 0;
 }
 
@@ -823,7 +820,8 @@ static int ltpc_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
 	struct sockaddr_at *sa = (struct sockaddr_at *) &ifr->ifr_addr;
 	/* we'll keep the localtalk node address in dev->pa_addr */
-	struct atalk_addr *aa = &((struct ltpc_private *)dev->priv)->my_addr;
+	struct ltpc_private *ltpc_priv = netdev_priv(dev);
+	struct atalk_addr *aa = &ltpc_priv->my_addr;
 	struct lt_init c;
 	int ltflags;
 
@@ -872,10 +870,8 @@ static void set_multicast_list(struct net_device *dev)
 
 static int ltpc_poll_counter;
 
-static void ltpc_poll(unsigned long l)
+static void ltpc_poll(struct timer_list *unused)
 {
-	struct net_device *dev = (struct net_device *) l;
-
 	del_timer(&ltpc_timer);
 
 	if(debug & DEBUG_VERBOSE) {
@@ -885,27 +881,20 @@ static void ltpc_poll(unsigned long l)
 		}
 		ltpc_poll_counter--;
 	}
-  
-	if (!dev)
-		return;  /* we've been downed */
 
 	/* poll 20 times per second */
-	idle(dev);
+	idle(ltpc_timer_dev);
 	ltpc_timer.expires = jiffies + HZ/20;
-	
 	add_timer(&ltpc_timer);
 }
 
 /* DDP to LLAP translation */
 
-static int ltpc_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t ltpc_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	/* in kernel 1.3.xx, on entry skb->data points to ddp header,
 	 * and skb->len is the length of the ddp data + ddp header
 	 */
-
-	struct net_device_stats *stats = &((struct ltpc_private *)dev->priv)->stats;
-
 	int i;
 	struct lt_sendlap cbuf;
 	unsigned char *hdr;
@@ -934,17 +923,11 @@ static int ltpc_xmit(struct sk_buff *skb, struct net_device *dev)
 		printk("\n");
 	}
 
-	stats->tx_packets++;
-	stats->tx_bytes+=skb->len;
+	dev->stats.tx_packets++;
+	dev->stats.tx_bytes += skb->len;
 
 	dev_kfree_skb(skb);
-	return 0;
-}
-
-static struct net_device_stats *ltpc_get_stats(struct net_device *dev)
-{
-	struct net_device_stats *stats = &((struct ltpc_private *) dev->priv)->stats;
-	return stats;
+	return NETDEV_TX_OK;
 }
 
 /* initialization stuff */
@@ -1023,6 +1006,12 @@ static int __init ltpc_probe_dma(int base, int dma)
 
 	return (want & 2) ? 3 : 1;
 }
+
+static const struct net_device_ops ltpc_netdev = {
+	.ndo_start_xmit		= ltpc_xmit,
+	.ndo_do_ioctl		= ltpc_ioctl,
+	.ndo_set_rx_mode	= set_multicast_list,
+};
 
 struct net_device * __init ltpc_probe(void)
 {
@@ -1130,15 +1119,7 @@ struct net_device * __init ltpc_probe(void)
 	else
 		printk(KERN_INFO "Apple/Farallon LocalTalk-PC card at %03x, DMA%d.  Using polled mode.\n",io,dma);
 
-	/* Fill in the fields of the device structure with ethernet-generic values. */
-	dev->hard_start_xmit = ltpc_xmit;
-	dev->get_stats = ltpc_get_stats;
-
-	/* add the ltpc-specific things */
-	dev->do_ioctl = &ltpc_ioctl;
-
-	dev->set_multicast_list = &set_multicast_list;
-	dev->mc_list = NULL;
+	dev->netdev_ops = &ltpc_netdev;
 	dev->base_addr = io;
 	dev->irq = irq;
 	dev->dma = dma;
@@ -1171,7 +1152,7 @@ struct net_device * __init ltpc_probe(void)
 	}
 
 	/* grab it and don't let go :-) */
-	if (irq && request_irq( irq, &ltpc_interrupt, 0, "ltpc", dev) >= 0)
+	if (irq && request_irq( irq, ltpc_interrupt, 0, "ltpc", dev) >= 0)
 	{
 		(void) inb_p(io+7);  /* enable interrupts from board */
 		(void) inb_p(io+7);  /* and reset irq line */
@@ -1181,9 +1162,8 @@ struct net_device * __init ltpc_probe(void)
 		dev->irq = 0;
 		/* polled mode -- 20 times per second */
 		/* this is really, really slow... should it poll more often? */
-		init_timer(&ltpc_timer);
-		ltpc_timer.function=ltpc_poll;
-		ltpc_timer.data = (unsigned long) dev;
+		ltpc_timer_dev = dev;
+		timer_setup(&ltpc_timer, ltpc_poll, 0);
 
 		ltpc_timer.expires = jiffies + HZ/20;
 		add_timer(&ltpc_timer);
@@ -1233,7 +1213,7 @@ static int __init ltpc_setup(char *str)
 		if (ints[0] > 2) {
 			dma = ints[3];
 		}
-		/* ignore any other paramters */
+		/* ignore any other parameters */
 	}
 	return 1;
 }
@@ -1247,9 +1227,9 @@ static struct net_device *dev_ltpc;
 
 MODULE_LICENSE("GPL");
 module_param(debug, int, 0);
-module_param(io, int, 0);
-module_param(irq, int, 0);
-module_param(dma, int, 0);
+module_param_hw(io, int, ioport, 0);
+module_param_hw(irq, int, irq, 0);
+module_param_hw(dma, int, dma, 0);
 
 
 static int __init ltpc_module_init(void)
@@ -1259,9 +1239,7 @@ static int __init ltpc_module_init(void)
 		       "ltpc: Autoprobing is not recommended for modules\n");
 
 	dev_ltpc = ltpc_probe();
-	if (IS_ERR(dev_ltpc))
-		return PTR_ERR(dev_ltpc);
-	return 0;
+	return PTR_ERR_OR_ZERO(dev_ltpc);
 }
 module_init(ltpc_module_init);
 #endif
@@ -1271,8 +1249,6 @@ static void __exit ltpc_cleanup(void)
 
 	if(debug & DEBUG_VERBOSE) printk("unregister_netdev\n");
 	unregister_netdev(dev_ltpc);
-
-	ltpc_timer.data = 0;  /* signal the poll routine that we're done */
 
 	del_timer_sync(&ltpc_timer);
 

@@ -40,6 +40,8 @@ int hfs_mac2asc(struct super_block *sb, char *out, const struct hfs_name *in)
 
 	src = in->name;
 	srclen = in->len;
+	if (srclen > HFS_NAMELEN)
+		srclen = HFS_NAMELEN;
 	dst = out;
 	dstlen = HFS_MAX_NAMELEN;
 	if (nls_io) {
@@ -92,7 +94,7 @@ out:
  * This routine is a inverse to hfs_mac2triv().
  * A ':' is replaced by a '/'.
  */
-void hfs_asc2mac(struct super_block *sb, struct hfs_name *out, struct qstr *in)
+void hfs_asc2mac(struct super_block *sb, struct hfs_name *out, const struct qstr *in)
 {
 	struct nls_table *nls_disk = HFS_SB(sb)->nls_disk;
 	struct nls_table *nls_io = HFS_SB(sb)->nls_io;

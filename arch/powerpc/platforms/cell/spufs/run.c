@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #define DEBUG
 
 #include <linux/wait.h>
@@ -116,6 +117,9 @@ static int spu_setup_isolated(struct spu_context *ctx)
 		}
 		cond_resched();
 	}
+
+	/* clear purge status */
+	out_be64(mfc_cntl, 0);
 
 	/* put the SPE in kernel mode to allow access to the loader */
 	sr1 = spu_mfc_sr1_get(ctx->spu);
@@ -249,6 +253,7 @@ static int spu_run_fini(struct spu_context *ctx, u32 *npc,
 
 	spuctx_switch_state(ctx, SPU_UTIL_IDLE_LOADED);
 	clear_bit(SPU_SCHED_SPU_RUN, &ctx->sched_flags);
+	spu_switch_log_notify(NULL, ctx, SWITCH_LOG_EXIT, *status);
 	spu_release(ctx);
 
 	if (signal_pending(current))
@@ -322,7 +327,7 @@ static int spu_process_callback(struct spu_context *ctx)
 	spu_ret = -ENOSYS;
 	npc += 4;
 
-	if (s.nr_ret < __NR_syscalls) {
+	if (s.nr_ret < NR_syscalls) {
 		spu_release(ctx);
 		/* do actual system call from here */
 		spu_ret = spu_sys_callback(&s);
@@ -417,8 +422,6 @@ long spufs_run_spu(struct spu_context *ctx, u32 *npc, u32 *event)
 	ret = spu_run_fini(ctx, npc, &status);
 	spu_yield(ctx);
 
-	spu_switch_log_notify(NULL, ctx, SWITCH_LOG_EXIT, status);
-
 	if ((status & SPU_STATUS_STOPPED_BY_STOP) &&
 	    (((status >> SPU_STOP_STATUS_SHIFT) & 0x3f00) == 0x2100))
 		ctx->stats.libassist++;
@@ -433,14 +436,14 @@ long spufs_run_spu(struct spu_context *ctx, u32 *npc, u32 *event)
 
 	/* Note: we don't need to force_sig SIGTRAP on single-step
 	 * since we have TIF_SINGLESTEP set, thus the kernel will do
-	 * it upon return from the syscall anyawy
+	 * it upon return from the syscall anyway.
 	 */
 	if (unlikely(status & SPU_STATUS_SINGLE_STEP))
 		ret = -ERESTARTSYS;
 
 	else if (unlikely((status & SPU_STATUS_STOPPED_BY_STOP)
 	    && (status >> SPU_STOP_STATUS_SHIFT) == 0x3fff)) {
-		force_sig(SIGTRAP, current);
+		force_sig(SIGTRAP);
 		ret = -ERESTARTSYS;
 	}
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * I/O string operations
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
@@ -10,20 +11,18 @@
  * PPC64 updates by Dave Engebretsen (engebret@us.ibm.com)
  *
  * Rewritten in C by Stephen Rothwell.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/compiler.h>
-#include <linux/module.h>
+#include <linux/export.h>
 
 #include <asm/io.h>
 #include <asm/firmware.h>
 #include <asm/bug.h>
+
+/* See definition in io.h */
+bool isa_io_special;
 
 void _insb(const volatile u8 __iomem *port, void *buf, long count)
 {
@@ -161,7 +160,7 @@ void _memcpy_fromio(void *dest, const volatile void __iomem *src,
 		dest++;
 		n--;
 	}
-	while(n > 4) {
+	while(n >= 4) {
 		*((u32 *)dest) = *((volatile u32 *)vsrc);
 		eieio();
 		vsrc += 4;
@@ -190,7 +189,7 @@ void _memcpy_toio(volatile void __iomem *dest, const void *src, unsigned long n)
 		vdest++;
 		n--;
 	}
-	while(n > 4) {
+	while(n >= 4) {
 		*((volatile u32 *)vdest) = *((volatile u32 *)src);
 		src += 4;
 		vdest += 4;

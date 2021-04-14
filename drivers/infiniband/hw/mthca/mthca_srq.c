@@ -36,6 +36,8 @@
 
 #include <asm/io.h>
 
+#include <rdma/uverbs_ioctl.h>
+
 #include "mthca_dev.h"
 #include "mthca_cmd.h"
 #include "mthca_memfree.h"
@@ -95,17 +97,20 @@ static inline int *wqe_to_link(void *wqe)
 static void mthca_tavor_init_srq_context(struct mthca_dev *dev,
 					 struct mthca_pd *pd,
 					 struct mthca_srq *srq,
-					 struct mthca_tavor_srq_context *context)
+					 struct mthca_tavor_srq_context *context,
+					 struct ib_udata *udata)
 {
+	struct mthca_ucontext *ucontext = rdma_udata_to_drv_context(
+		udata, struct mthca_ucontext, ibucontext);
+
 	memset(context, 0, sizeof *context);
 
 	context->wqe_base_ds = cpu_to_be64(1 << (srq->wqe_shift - 4));
 	context->state_pd    = cpu_to_be32(pd->pd_num);
 	context->lkey        = cpu_to_be32(srq->mr.ibmr.lkey);
 
-	if (pd->ibpd.uobject)
-		context->uar =
-			cpu_to_be32(to_mucontext(pd->ibpd.uobject->context)->uar.index);
+	if (udata)
+		context->uar = cpu_to_be32(ucontext->uar.index);
 	else
 		context->uar = cpu_to_be32(dev->driver_uar.index);
 }
@@ -113,8 +118,11 @@ static void mthca_tavor_init_srq_context(struct mthca_dev *dev,
 static void mthca_arbel_init_srq_context(struct mthca_dev *dev,
 					 struct mthca_pd *pd,
 					 struct mthca_srq *srq,
-					 struct mthca_arbel_srq_context *context)
+					 struct mthca_arbel_srq_context *context,
+					 struct ib_udata *udata)
 {
+	struct mthca_ucontext *ucontext = rdma_udata_to_drv_context(
+		udata, struct mthca_ucontext, ibucontext);
 	int logsize, max;
 
 	memset(context, 0, sizeof *context);
@@ -129,9 +137,8 @@ static void mthca_arbel_init_srq_context(struct mthca_dev *dev,
 	context->lkey = cpu_to_be32(srq->mr.ibmr.lkey);
 	context->db_index = cpu_to_be32(srq->db_index);
 	context->logstride_usrpage = cpu_to_be32((srq->wqe_shift - 4) << 29);
-	if (pd->ibpd.uobject)
-		context->logstride_usrpage |=
-			cpu_to_be32(to_mucontext(pd->ibpd.uobject->context)->uar.index);
+	if (udata)
+		context->logstride_usrpage |= cpu_to_be32(ucontext->uar.index);
 	else
 		context->logstride_usrpage |= cpu_to_be32(dev->driver_uar.index);
 	context->eq_pd = cpu_to_be32(MTHCA_EQ_ASYNC << 24 | pd->pd_num);
@@ -145,17 +152,17 @@ static void mthca_free_srq_buf(struct mthca_dev *dev, struct mthca_srq *srq)
 }
 
 static int mthca_alloc_srq_buf(struct mthca_dev *dev, struct mthca_pd *pd,
-			       struct mthca_srq *srq)
+			       struct mthca_srq *srq, struct ib_udata *udata)
 {
 	struct mthca_data_seg *scatter;
 	void *wqe;
 	int err;
 	int i;
 
-	if (pd->ibpd.uobject)
+	if (udata)
 		return 0;
 
-	srq->wrid = kmalloc(srq->max * sizeof (u64), GFP_KERNEL);
+	srq->wrid = kmalloc_array(srq->max, sizeof(u64), GFP_KERNEL);
 	if (!srq->wrid)
 		return -ENOMEM;
 
@@ -197,10 +204,10 @@ static int mthca_alloc_srq_buf(struct mthca_dev *dev, struct mthca_pd *pd,
 }
 
 int mthca_alloc_srq(struct mthca_dev *dev, struct mthca_pd *pd,
-		    struct ib_srq_attr *attr, struct mthca_srq *srq)
+		    struct ib_srq_attr *attr, struct mthca_srq *srq,
+		    struct ib_udata *udata)
 {
 	struct mthca_mailbox *mailbox;
-	u8 status;
 	int ds;
 	int err;
 
@@ -236,7 +243,7 @@ int mthca_alloc_srq(struct mthca_dev *dev, struct mthca_pd *pd,
 		if (err)
 			goto err_out;
 
-		if (!pd->ibpd.uobject) {
+		if (!udata) {
 			srq->db_index = mthca_alloc_db(dev, MTHCA_DB_TYPE_SRQ,
 						       srq->srqn, &srq->db);
 			if (srq->db_index < 0) {
@@ -252,7 +259,7 @@ int mthca_alloc_srq(struct mthca_dev *dev, struct mthca_pd *pd,
 		goto err_out_db;
 	}
 
-	err = mthca_alloc_srq_buf(dev, pd, srq);
+	err = mthca_alloc_srq_buf(dev, pd, srq, udata);
 	if (err)
 		goto err_out_mailbox;
 
@@ -262,20 +269,14 @@ int mthca_alloc_srq(struct mthca_dev *dev, struct mthca_pd *pd,
 	mutex_init(&srq->mutex);
 
 	if (mthca_is_memfree(dev))
-		mthca_arbel_init_srq_context(dev, pd, srq, mailbox->buf);
+		mthca_arbel_init_srq_context(dev, pd, srq, mailbox->buf, udata);
 	else
-		mthca_tavor_init_srq_context(dev, pd, srq, mailbox->buf);
+		mthca_tavor_init_srq_context(dev, pd, srq, mailbox->buf, udata);
 
-	err = mthca_SW2HW_SRQ(dev, mailbox, srq->srqn, &status);
+	err = mthca_SW2HW_SRQ(dev, mailbox, srq->srqn);
 
 	if (err) {
 		mthca_warn(dev, "SW2HW_SRQ failed (%d)\n", err);
-		goto err_out_free_buf;
-	}
-	if (status) {
-		mthca_warn(dev, "SW2HW_SRQ returned status 0x%02x\n",
-			   status);
-		err = -EINVAL;
 		goto err_out_free_buf;
 	}
 
@@ -299,21 +300,19 @@ int mthca_alloc_srq(struct mthca_dev *dev, struct mthca_pd *pd,
 	return 0;
 
 err_out_free_srq:
-	err = mthca_HW2SW_SRQ(dev, mailbox, srq->srqn, &status);
+	err = mthca_HW2SW_SRQ(dev, mailbox, srq->srqn);
 	if (err)
 		mthca_warn(dev, "HW2SW_SRQ failed (%d)\n", err);
-	else if (status)
-		mthca_warn(dev, "HW2SW_SRQ returned status 0x%02x\n", status);
 
 err_out_free_buf:
-	if (!pd->ibpd.uobject)
+	if (!udata)
 		mthca_free_srq_buf(dev, srq);
 
 err_out_mailbox:
 	mthca_free_mailbox(dev, mailbox);
 
 err_out_db:
-	if (!pd->ibpd.uobject && mthca_is_memfree(dev))
+	if (!udata && mthca_is_memfree(dev))
 		mthca_free_db(dev, MTHCA_DB_TYPE_SRQ, srq->db_index);
 
 err_out_icm:
@@ -340,7 +339,6 @@ void mthca_free_srq(struct mthca_dev *dev, struct mthca_srq *srq)
 {
 	struct mthca_mailbox *mailbox;
 	int err;
-	u8 status;
 
 	mailbox = mthca_alloc_mailbox(dev, GFP_KERNEL);
 	if (IS_ERR(mailbox)) {
@@ -348,11 +346,9 @@ void mthca_free_srq(struct mthca_dev *dev, struct mthca_srq *srq)
 		return;
 	}
 
-	err = mthca_HW2SW_SRQ(dev, mailbox, srq->srqn, &status);
+	err = mthca_HW2SW_SRQ(dev, mailbox, srq->srqn);
 	if (err)
 		mthca_warn(dev, "HW2SW_SRQ failed (%d)\n", err);
-	else if (status)
-		mthca_warn(dev, "HW2SW_SRQ returned status 0x%02x\n", status);
 
 	spin_lock_irq(&dev->srq_table.lock);
 	mthca_array_clear(&dev->srq_table.srq,
@@ -378,8 +374,7 @@ int mthca_modify_srq(struct ib_srq *ibsrq, struct ib_srq_attr *attr,
 {
 	struct mthca_dev *dev = to_mdev(ibsrq->device);
 	struct mthca_srq *srq = to_msrq(ibsrq);
-	int ret;
-	u8 status;
+	int ret = 0;
 
 	/* We don't support resizing SRQs (yet?) */
 	if (attr_mask & IB_SRQ_MAX_WR)
@@ -391,16 +386,11 @@ int mthca_modify_srq(struct ib_srq *ibsrq, struct ib_srq_attr *attr,
 			return -EINVAL;
 
 		mutex_lock(&srq->mutex);
-		ret = mthca_ARM_SRQ(dev, srq->srqn, attr->srq_limit, &status);
+		ret = mthca_ARM_SRQ(dev, srq->srqn, attr->srq_limit);
 		mutex_unlock(&srq->mutex);
-
-		if (ret)
-			return ret;
-		if (status)
-			return -EINVAL;
 	}
 
-	return 0;
+	return ret;
 }
 
 int mthca_query_srq(struct ib_srq *ibsrq, struct ib_srq_attr *srq_attr)
@@ -410,14 +400,13 @@ int mthca_query_srq(struct ib_srq *ibsrq, struct ib_srq_attr *srq_attr)
 	struct mthca_mailbox *mailbox;
 	struct mthca_arbel_srq_context *arbel_ctx;
 	struct mthca_tavor_srq_context *tavor_ctx;
-	u8 status;
 	int err;
 
 	mailbox = mthca_alloc_mailbox(dev, GFP_KERNEL);
 	if (IS_ERR(mailbox))
 		return PTR_ERR(mailbox);
 
-	err = mthca_QUERY_SRQ(dev, srq->srqn, mailbox, &status);
+	err = mthca_QUERY_SRQ(dev, srq->srqn, mailbox);
 	if (err)
 		goto out;
 
@@ -491,8 +480,8 @@ void mthca_free_srq_wqe(struct mthca_srq *srq, u32 wqe_addr)
 	spin_unlock(&srq->lock);
 }
 
-int mthca_tavor_post_srq_recv(struct ib_srq *ibsrq, struct ib_recv_wr *wr,
-			      struct ib_recv_wr **bad_wr)
+int mthca_tavor_post_srq_recv(struct ib_srq *ibsrq, const struct ib_recv_wr *wr,
+			      const struct ib_recv_wr **bad_wr)
 {
 	struct mthca_dev *dev = to_mdev(ibsrq->device);
 	struct mthca_srq *srq = to_msrq(ibsrq);
@@ -581,18 +570,12 @@ int mthca_tavor_post_srq_recv(struct ib_srq *ibsrq, struct ib_recv_wr *wr,
 			      MTHCA_GET_DOORBELL_LOCK(&dev->doorbell_lock));
 	}
 
-	/*
-	 * Make sure doorbells don't leak out of SRQ spinlock and
-	 * reach the HCA out of order:
-	 */
-	mmiowb();
-
 	spin_unlock_irqrestore(&srq->lock, flags);
 	return err;
 }
 
-int mthca_arbel_post_srq_recv(struct ib_srq *ibsrq, struct ib_recv_wr *wr,
-			      struct ib_recv_wr **bad_wr)
+int mthca_arbel_post_srq_recv(struct ib_srq *ibsrq, const struct ib_recv_wr *wr,
+			      const struct ib_recv_wr **bad_wr)
 {
 	struct mthca_dev *dev = to_mdev(ibsrq->device);
 	struct mthca_srq *srq = to_msrq(ibsrq);

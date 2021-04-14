@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* Code to support devices on the DIO and DIO-II bus
  * Copyright (C) 05/1998 Peter Maydell <pmaydell@chiark.greenend.org.uk>
  * Copyright (C) 2004 Jochen Friedrich <jochen@scram.de>
@@ -31,7 +32,7 @@
 #include <linux/init.h>
 #include <linux/dio.h>
 #include <linux/slab.h>                         /* kmalloc() */
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/io.h>                             /* readb() */
 
 struct dio_bus dio_bus = {
@@ -88,8 +89,8 @@ static struct dioname names[] =
 #undef DIONAME
 #undef DIOFBNAME
 
-static const char *unknowndioname 
-        = "unknown DIO board -- please email <linux-m68k@lists.linux-m68k.org>!";
+static const char unknowndioname[]
+	= "unknown DIO board, please email linux-m68k@lists.linux-m68k.org";
 
 static const char *dio_getname(int id)
 {
@@ -116,7 +117,6 @@ int __init dio_find(int deviceid)
 	 */
 	int scode, id;
 	u_char prid, secid, i;
-	mm_segment_t fs;
 
 	for (scode = 0; scode < DIO_SCMAX; scode++) {
 		void *va;
@@ -135,17 +135,13 @@ int __init dio_find(int deviceid)
 		else
 			va = ioremap(pa, PAGE_SIZE);
 
-		fs = get_fs();
-		set_fs(KERNEL_DS);
-
-                if (get_user(i, (unsigned char *)va + DIO_IDOFF)) {
-			set_fs(fs);
+		if (copy_from_kernel_nofault(&i,
+				(unsigned char *)va + DIO_IDOFF, 1)) {
 			if (scode >= DIOII_SCBASE)
 				iounmap(va);
                         continue;             /* no board present at that select code */
 		}
 
-		set_fs(fs);
 		prid = DIO_ID(va);
 
                 if (DIO_NEEDSSECID(prid)) {
@@ -170,9 +166,9 @@ int __init dio_find(int deviceid)
 static int __init dio_init(void)
 {
 	int scode;
-	mm_segment_t fs;
 	int i;
 	struct dio_dev *dev;
+	int error;
 
 	if (!MACH_IS_HP300)
 		return 0;
@@ -181,8 +177,12 @@ static int __init dio_init(void)
 
 	/* Initialize the DIO bus */ 
 	INIT_LIST_HEAD(&dio_bus.devices);
-	strcpy(dio_bus.dev.bus_id, "dio");
-	device_register(&dio_bus.dev);
+	dev_set_name(&dio_bus.dev, "dio");
+	error = device_register(&dio_bus.dev);
+	if (error) {
+		pr_err("DIO: Error registering dio_bus\n");
+		return error;
+	}
 
 	/* Request all resources */
 	dio_bus.num_resources = (hp300_model == HP_320 ? 1 : 2);
@@ -209,17 +209,12 @@ static int __init dio_init(void)
 		else
 			va = ioremap(pa, PAGE_SIZE);
 
-		fs = get_fs();
-		set_fs(KERNEL_DS);
-
-                if (get_user(i, (unsigned char *)va + DIO_IDOFF)) {
-			set_fs(fs);
+		if (copy_from_kernel_nofault(&i,
+				(unsigned char *)va + DIO_IDOFF, 1)) {
 			if (scode >= DIOII_SCBASE)
 				iounmap(va);
                         continue;              /* no board present at that select code */
 		}
-
-		set_fs(fs);
 
                 /* Found a board, allocate it an entry in the list */
 		dev = kzalloc(sizeof(struct dio_dev), GFP_KERNEL);
@@ -232,7 +227,7 @@ static int __init dio_init(void)
 		dev->scode = scode;
 		dev->resource.start = pa;
 		dev->resource.end = pa + DIO_SIZE(scode, va);
-		sprintf(dev->dev.bus_id,"%02x", scode);
+		dev_set_name(&dev->dev, "%02x", scode);
 
                 /* read the ID byte(s) and encode if necessary. */
 		prid = DIO_ID(va);
@@ -252,8 +247,15 @@ static int __init dio_init(void)
 
 		if (scode >= DIOII_SCBASE)
 			iounmap(va);
-		device_register(&dev->dev);
-		dio_create_sysfs_dev_files(dev);
+		error = device_register(&dev->dev);
+		if (error) {
+			pr_err("DIO: Error registering device %s\n",
+			       dev->name);
+			continue;
+		}
+		error = dio_create_sysfs_dev_files(dev);
+		if (error)
+			dev_err(&dev->dev, "Error creating sysfs files\n");
         }
 	return 0;
 }

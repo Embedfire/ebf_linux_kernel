@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Cryptographic API.
  *
@@ -8,7 +9,7 @@
  * implementation written by Steve Reid.
  *
  * s390 Version:
- *   Copyright IBM Corp. 2003,2007
+ *   Copyright IBM Corp. 2003, 2007
  *   Author(s): Thomas Spatzier
  *		Jan Glauber (jan.glauber@de.ibm.com)
  *
@@ -16,24 +17,19 @@
  *   Copyright (c) Alan Smithee.
  *   Copyright (c) Andrew McDonald <andrew@mcdonald.org.uk>
  *   Copyright (c) Jean-Francois Dive <jef@linuxbe.org>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
  */
+#include <crypto/internal/hash.h>
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/crypto.h>
+#include <linux/cpufeature.h>
 #include <crypto/sha.h>
+#include <asm/cpacf.h>
 
-#include "crypt_s390.h"
 #include "sha.h"
 
-static void sha1_init(struct crypto_tfm *tfm)
+static int s390_sha1_init(struct shash_desc *desc)
 {
-	struct s390_sha_ctx *sctx = crypto_tfm_ctx(tfm);
+	struct s390_sha_ctx *sctx = shash_desc_ctx(desc);
 
 	sctx->state[0] = SHA1_H0;
 	sctx->state[1] = SHA1_H1;
@@ -41,40 +37,67 @@ static void sha1_init(struct crypto_tfm *tfm)
 	sctx->state[3] = SHA1_H3;
 	sctx->state[4] = SHA1_H4;
 	sctx->count = 0;
-	sctx->func = KIMD_SHA_1;
+	sctx->func = CPACF_KIMD_SHA_1;
+
+	return 0;
 }
 
-static struct crypto_alg alg = {
-	.cra_name	=	"sha1",
-	.cra_driver_name=	"sha1-s390",
-	.cra_priority	=	CRYPT_S390_PRIORITY,
-	.cra_flags	=	CRYPTO_ALG_TYPE_DIGEST,
-	.cra_blocksize	=	SHA1_BLOCK_SIZE,
-	.cra_ctxsize	=	sizeof(struct s390_sha_ctx),
-	.cra_module	=	THIS_MODULE,
-	.cra_list	=	LIST_HEAD_INIT(alg.cra_list),
-	.cra_u		=	{ .digest = {
-	.dia_digestsize	=	SHA1_DIGEST_SIZE,
-	.dia_init	=	sha1_init,
-	.dia_update	=	s390_sha_update,
-	.dia_final	=	s390_sha_final } }
+static int s390_sha1_export(struct shash_desc *desc, void *out)
+{
+	struct s390_sha_ctx *sctx = shash_desc_ctx(desc);
+	struct sha1_state *octx = out;
+
+	octx->count = sctx->count;
+	memcpy(octx->state, sctx->state, sizeof(octx->state));
+	memcpy(octx->buffer, sctx->buf, sizeof(octx->buffer));
+	return 0;
+}
+
+static int s390_sha1_import(struct shash_desc *desc, const void *in)
+{
+	struct s390_sha_ctx *sctx = shash_desc_ctx(desc);
+	const struct sha1_state *ictx = in;
+
+	sctx->count = ictx->count;
+	memcpy(sctx->state, ictx->state, sizeof(ictx->state));
+	memcpy(sctx->buf, ictx->buffer, sizeof(ictx->buffer));
+	sctx->func = CPACF_KIMD_SHA_1;
+	return 0;
+}
+
+static struct shash_alg alg = {
+	.digestsize	=	SHA1_DIGEST_SIZE,
+	.init		=	s390_sha1_init,
+	.update		=	s390_sha_update,
+	.final		=	s390_sha_final,
+	.export		=	s390_sha1_export,
+	.import		=	s390_sha1_import,
+	.descsize	=	sizeof(struct s390_sha_ctx),
+	.statesize	=	sizeof(struct sha1_state),
+	.base		=	{
+		.cra_name	=	"sha1",
+		.cra_driver_name=	"sha1-s390",
+		.cra_priority	=	300,
+		.cra_blocksize	=	SHA1_BLOCK_SIZE,
+		.cra_module	=	THIS_MODULE,
+	}
 };
 
 static int __init sha1_s390_init(void)
 {
-	if (!crypt_s390_func_available(KIMD_SHA_1))
-		return -EOPNOTSUPP;
-	return crypto_register_alg(&alg);
+	if (!cpacf_query_func(CPACF_KIMD, CPACF_KIMD_SHA_1))
+		return -ENODEV;
+	return crypto_register_shash(&alg);
 }
 
 static void __exit sha1_s390_fini(void)
 {
-	crypto_unregister_alg(&alg);
+	crypto_unregister_shash(&alg);
 }
 
-module_init(sha1_s390_init);
+module_cpu_feature_match(MSA, sha1_s390_init);
 module_exit(sha1_s390_fini);
 
-MODULE_ALIAS("sha1");
+MODULE_ALIAS_CRYPTO("sha1");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("SHA1 Secure Hash Algorithm");

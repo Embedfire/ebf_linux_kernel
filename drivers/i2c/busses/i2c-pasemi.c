@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2006-2007 PA Semi, Inc
  *
  * SMBus host driver for PA Semi PWRficient
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/module.h>
@@ -24,7 +12,8 @@
 #include <linux/sched.h>
 #include <linux/i2c.h>
 #include <linux/delay.h>
-#include <asm/io.h>
+#include <linux/slab.h>
+#include <linux/io.h>
 
 static struct pci_driver pasemi_smb_driver;
 
@@ -87,7 +76,7 @@ static void pasemi_smb_clear(struct pasemi_smbus *smbus)
 	reg_write(smbus, REG_SMSTA, status);
 }
 
-static unsigned int pasemi_smb_waitready(struct pasemi_smbus *smbus)
+static int pasemi_smb_waitready(struct pasemi_smbus *smbus)
 {
 	int timeout = 10;
 	unsigned int status;
@@ -124,7 +113,7 @@ static int pasemi_i2c_xfer_msg(struct i2c_adapter *adapter,
 
 	read = msg->flags & I2C_M_RD ? 1 : 0;
 
-	TXFIFO_WR(smbus, MTXFIFO_START | (msg->addr << 1) | read);
+	TXFIFO_WR(smbus, MTXFIFO_START | i2c_8bit_addr_from_msg(msg));
 
 	if (read) {
 		TXFIFO_WR(smbus, msg->len | MTXFIFO_READ |
@@ -339,7 +328,7 @@ static const struct i2c_algorithm smbus_algorithm = {
 	.functionality	= pasemi_smb_func,
 };
 
-static int __devinit pasemi_smb_probe(struct pci_dev *dev,
+static int pasemi_smb_probe(struct pci_dev *dev,
 				      const struct pci_device_id *id)
 {
 	struct pasemi_smbus *smbus;
@@ -368,7 +357,6 @@ static int __devinit pasemi_smb_probe(struct pci_dev *dev,
 	smbus->adapter.class = I2C_CLASS_HWMON | I2C_CLASS_SPD;
 	smbus->adapter.algo = &smbus_algorithm;
 	smbus->adapter.algo_data = smbus;
-	smbus->adapter.nr = PCI_FUNC(dev->devfn);
 
 	/* set up the sysfs linkage to our parent device */
 	smbus->adapter.dev.parent = &dev->dev;
@@ -376,7 +364,7 @@ static int __devinit pasemi_smb_probe(struct pci_dev *dev,
 	reg_write(smbus, REG_CTL, (CTL_MTR | CTL_MRR |
 		  (CLK_100K_DIV & CTL_CLK_M)));
 
-	error = i2c_add_numbered_adapter(&smbus->adapter);
+	error = i2c_add_adapter(&smbus->adapter);
 	if (error)
 		goto out_release_region;
 
@@ -391,7 +379,7 @@ static int __devinit pasemi_smb_probe(struct pci_dev *dev,
 	return error;
 }
 
-static void __devexit pasemi_smb_remove(struct pci_dev *dev)
+static void pasemi_smb_remove(struct pci_dev *dev)
 {
 	struct pasemi_smbus *smbus = pci_get_drvdata(dev);
 
@@ -400,7 +388,7 @@ static void __devexit pasemi_smb_remove(struct pci_dev *dev)
 	kfree(smbus);
 }
 
-static struct pci_device_id pasemi_smb_ids[] = {
+static const struct pci_device_id pasemi_smb_ids[] = {
 	{ PCI_DEVICE(0x1959, 0xa003) },
 	{ 0, }
 };
@@ -411,22 +399,11 @@ static struct pci_driver pasemi_smb_driver = {
 	.name		= "i2c-pasemi",
 	.id_table	= pasemi_smb_ids,
 	.probe		= pasemi_smb_probe,
-	.remove		= __devexit_p(pasemi_smb_remove),
+	.remove		= pasemi_smb_remove,
 };
 
-static int __init pasemi_smb_init(void)
-{
-	return pci_register_driver(&pasemi_smb_driver);
-}
-
-static void __exit pasemi_smb_exit(void)
-{
-	pci_unregister_driver(&pasemi_smb_driver);
-}
+module_pci_driver(pasemi_smb_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR ("Olof Johansson <olof@lixom.net>");
 MODULE_DESCRIPTION("PA Semi PWRficient SMBus driver");
-
-module_init(pasemi_smb_init);
-module_exit(pasemi_smb_exit);

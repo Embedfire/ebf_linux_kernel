@@ -17,12 +17,12 @@
 #include <asm/pdc.h>
 	
 #include <asm/assembly.h>
-#include <asm/pgtable.h>
 
 #include <linux/linkage.h>
 #include <linux/init.h>
+#include <linux/pgtable.h>
 
-	.level	LEVEL
+	.level	PA_ASM_LEVEL
 
 	__INITDATA
 ENTRY(boot_args)
@@ -41,9 +41,7 @@ END(boot_args)
         .import fault_vector_11,code    /* IVA parisc 1.1 32 bit */
 	.import	$global$		/* forward declaration */
 #endif /*!CONFIG_64BIT*/
-	.export _stext,data		/* Kernel want it this way! */
-_stext:
-ENTRY(stext)
+ENTRY(parisc_kernel_start)
 	.proc
 	.callinfo
 
@@ -71,12 +69,12 @@ $bss_loop:
 	stw,ma          %arg2,4(%r1)
 	stw,ma          %arg3,4(%r1)
 
-	/* Initialize startup VM. Just map first 8/16 MB of memory */
+	/* Initialize startup VM. Just map first 16/32 MB of memory */
 	load32		PA(swapper_pg_dir),%r4
 	mtctl		%r4,%cr24	/* Initialize kernel root pointer */
 	mtctl		%r4,%cr25	/* Initialize user root pointer */
 
-#if PT_NLEVELS == 3
+#if CONFIG_PGTABLE_LEVELS == 3
 	/* Set pmd in pgd */
 	load32		PA(pmd0),%r5
 	shrd            %r5,PxD_VALUE_SHIFT,%r3	
@@ -99,16 +97,17 @@ $bss_loop:
 	stw		%r3,0(%r4)
 	ldo		(PAGE_SIZE >> PxD_VALUE_SHIFT)(%r3),%r3
 	addib,>		-1,%r1,1b
-#if PT_NLEVELS == 3
+#if CONFIG_PGTABLE_LEVELS == 3
 	ldo             ASM_PMD_ENTRY_SIZE(%r4),%r4
 #else
 	ldo             ASM_PGD_ENTRY_SIZE(%r4),%r4
 #endif
 
 
-	/* Now initialize the PTEs themselves */
-	ldo		0+_PAGE_KERNEL(%r0),%r3 /* Hardwired 0 phys addr start */
-	ldi		(1<<(KERNEL_INITIAL_ORDER-PAGE_SHIFT)),%r11 /* PFN count */
+	/* Now initialize the PTEs themselves.  We use RWX for
+	 * everything ... it will get remapped correctly later */
+	ldo		0+_PAGE_KERNEL_RWX(%r0),%r3 /* Hardwired 0 phys addr start */
+	load32		(1<<(KERNEL_INITIAL_ORDER-PAGE_SHIFT)),%r11 /* PFN count */
 	load32		PA(pg0),%r1
 
 $pgt_fill_loop:
@@ -121,7 +120,7 @@ $pgt_fill_loop:
 	copy		%r0,%r2
 
 	/* And the RFI Target address too */
-	load32		start_kernel,%r11
+	load32		start_parisc,%r11
 
 	/* And the initial task pointer */
 	load32		init_thread_union,%r6
@@ -130,8 +129,27 @@ $pgt_fill_loop:
 	/* And the stack pointer too */
 	ldo             THREAD_SZ_ALGN(%r6),%sp
 
+#if defined(CONFIG_64BIT) && defined(CONFIG_FUNCTION_TRACER)
+	.import _mcount,data
+	/* initialize mcount FPTR */
+	/* Get the global data pointer */
+	loadgp
+	load32		PA(_mcount), %r10
+	std		%dp,0x18(%r10)
+#endif
+
+#ifdef CONFIG_64BIT
+	/* Get PDCE_PROC for monarch CPU. */
+#define MEM_PDC_LO 0x388
+#define MEM_PDC_HI 0x35C
+	ldw             MEM_PDC_LO(%r0),%r3
+	ldw             MEM_PDC_HI(%r0),%r10
+	depd            %r10, 31, 32, %r3        /* move to upper word */
+#endif
+
+
 #ifdef CONFIG_SMP
-	/* Set the smp rendevous address into page zero.
+	/* Set the smp rendezvous address into page zero.
 	** It would be safer to do this in init_smp_config() but
 	** it's just way easier to deal with here because
 	** of 64-bit function ptrs and the address is local to this file.
@@ -188,11 +206,7 @@ common_stext:
         ** Someday, palo might not do this for the Monarch either.
         */
 2:
-#define MEM_PDC_LO 0x388
-#define MEM_PDC_HI 0x35C
-	ldw             MEM_PDC_LO(%r0),%r3
-	ldw             MEM_PDC_HI(%r0),%r6
-	depd            %r6, 31, 32, %r3        /* move to upper word */
+	mfctl		%cr30,%r6		/* PCX-W2 firmware bug */
 
 	ldo             PDC_PSW(%r0),%arg0              /* 21 */
 	ldo             PDC_PSW_SET_DEFAULTS(%r0),%arg1 /* 2 */
@@ -202,6 +216,8 @@ common_stext:
 	copy            %r0,%arg3
 
 stext_pdc_ret:
+	mtctl		%r6,%cr30		/* restore task thread info */
+
 	/* restore rfi target address*/
 	ldd             TI_TASK-THREAD_SZ_ALGN(%sp), %r10
 	tophys_r1       %r10
@@ -242,7 +258,7 @@ stext_pdc_ret:
 	ldo		R%PA(fault_vector_11)(%r10),%r10
 
 $is_pa20:
-	.level		LEVEL /* restore 1.1 || 2.0w */
+	.level		PA_ASM_LEVEL /* restore 1.1 || 2.0w */
 #endif /*!CONFIG_64BIT*/
 	load32		PA(fault_vector_20),%r10
 
@@ -255,6 +271,8 @@ $install_iva:
 	.align 128
 aligned_rfi:
 	pcxt_ssm_bug
+
+	copy		%r3, %arg0	/* PDCE_PROC for smp_callin() */
 
 	rsm		PSW_SM_QUIET,%r0	/* off troublesome PSW bits */
 	/* Don't need NOPs, have 8 compliant insn before rfi */
@@ -311,6 +329,19 @@ smp_slave_stext:
 	mtsp	   %r0,%sr6
 	mtsp	   %r0,%sr7
 
+#ifdef CONFIG_64BIT
+	/*
+	 *  Enable Wide mode early, in case the task_struct for the idle
+	 *  task in smp_init_current_idle_task was allocated above 4GB.
+	 */
+1:	mfia            %rp             /* clear upper part of pcoq */
+	ldo             2f-1b(%rp),%rp
+	depdi           0,31,32,%rp
+	bv              (%rp)
+	ssm             PSW_SM_W,%r0
+2:
+#endif
+
 	/*  Initialize the SP - monarch sets up smp_init_current_idle_task */
 	load32		PA(smp_init_current_idle_task),%sp
 	LDREG		0(%sp),%sp	/* load task address */
@@ -342,10 +373,10 @@ smp_slave_stext:
 	.procend
 #endif /* CONFIG_SMP */
 
-ENDPROC(stext)
+ENDPROC(parisc_kernel_start)
 
 #ifndef CONFIG_64BIT
-	.section .data.read_mostly
+	.section .data..ro_after_init
 
 	.align	4
 	.export	$global$,data

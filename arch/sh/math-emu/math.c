@@ -10,11 +10,11 @@
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/types.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/signal.h>
+#include <linux/perf_event.h>
 
-#include <asm/system.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/processor.h>
 #include <asm/io.h>
 
@@ -471,10 +471,10 @@ static int fpu_emulate(u16 code, struct sh_fpu_soft_struct *fregs, struct pt_reg
  *	denormal_to_double - Given denormalized float number,
  *	                     store double float
  *
- *	@fpu: Pointer to sh_fpu_hard structure
+ *	@fpu: Pointer to sh_fpu_soft structure
  *	@n: Index to FP register
  */
-static void denormal_to_double(struct sh_fpu_hard_struct *fpu, int n)
+static void denormal_to_double(struct sh_fpu_soft_struct *fpu, int n)
 {
 	unsigned long du, dl;
 	unsigned long x = fpu->fpul;
@@ -507,7 +507,6 @@ static int ieee_fpe_handler(struct pt_regs *regs)
 	unsigned short insn = *(unsigned short *)regs->pc;
 	unsigned short finsn;
 	unsigned long nextpc;
-	siginfo_t info;
 	int nib[4] = {
 		(insn >> 12) & 0xf,
 		(insn >> 8) & 0xf,
@@ -552,19 +551,16 @@ static int ieee_fpe_handler(struct pt_regs *regs)
 	if ((finsn & 0xf1ff) == 0xf0ad) { /* fcnvsd */
 		struct task_struct *tsk = current;
 
-		if ((tsk->thread.fpu.hard.fpscr & (1 << 17))) {
+		if ((tsk->thread.xstate->softfpu.fpscr & (1 << 17))) {
 			/* FPU error */
-			denormal_to_double (&tsk->thread.fpu.hard,
+			denormal_to_double (&tsk->thread.xstate->softfpu,
 					    (finsn >> 8) & 0xf);
-			tsk->thread.fpu.hard.fpscr &=
+			tsk->thread.xstate->softfpu.fpscr &=
 				~(FPSCR_CAUSE_MASK | FPSCR_FLAG_MASK);
-			set_tsk_thread_flag(tsk, TIF_USEDFPU);
+			task_thread_info(tsk)->status |= TS_USEDFPU;
 		} else {
-			info.si_signo = SIGFPE;
-			info.si_errno = 0;
-			info.si_code = FPE_FLTINV;
-			info.si_addr = (void __user *)regs->pc;
-			force_sig_info(SIGFPE, &info, tsk);
+			force_sig_fault(SIGFPE, FPE_FLTINV,
+					(void __user *)regs->pc);
 		}
 
 		regs->pc = nextpc;
@@ -572,24 +568,6 @@ static int ieee_fpe_handler(struct pt_regs *regs)
 	}
 
 	return 0;
-}
-
-asmlinkage void do_fpu_error(unsigned long r4, unsigned long r5,
-			     unsigned long r6, unsigned long r7,
-			     struct pt_regs regs)
-{
-	struct task_struct *tsk = current;
-	siginfo_t info;
-
-	if (ieee_fpe_handler (&regs))
-		return;
-
-	regs.pc += 2;
-	info.si_signo = SIGFPE;
-	info.si_errno = 0;
-	info.si_code = FPE_FLTINV;
-	info.si_addr = (void __user *)regs.pc;
-	force_sig_info(SIGFPE, &info, tsk);
 }
 
 /**
@@ -617,12 +595,14 @@ static void fpu_init(struct sh_fpu_soft_struct *fpu)
 int do_fpu_inst(unsigned short inst, struct pt_regs *regs)
 {
 	struct task_struct *tsk = current;
-	struct sh_fpu_soft_struct *fpu = &(tsk->thread.fpu.soft);
+	struct sh_fpu_soft_struct *fpu = &(tsk->thread.xstate->softfpu);
 
-	if (!test_tsk_thread_flag(tsk, TIF_USEDFPU)) {
+	perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS, 1, regs, 0);
+
+	if (!(task_thread_info(tsk)->status & TS_USEDFPU)) {
 		/* initialize once. */
 		fpu_init(fpu);
-		set_tsk_thread_flag(tsk, TIF_USEDFPU);
+		task_thread_info(tsk)->status |= TS_USEDFPU;
 	}
 
 	return fpu_emulate(inst, fpu, regs);

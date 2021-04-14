@@ -108,7 +108,7 @@ struct uv_hub_info_s {
 	unsigned char	n_val;
 };
 DECLARE_PER_CPU(struct uv_hub_info_s, __uv_hub_info);
-#define uv_hub_info 		(&__get_cpu_var(__uv_hub_info))
+#define uv_hub_info 		this_cpu_ptr(&__uv_hub_info)
 #define uv_cpu_hub_info(cpu)	(&per_cpu(__uv_hub_info, cpu))
 
 /*
@@ -304,6 +304,12 @@ static inline int uv_num_possible_blades(void)
 {
 	return 1;
 }
+
+static inline void uv_hub_send_ipi(int pnode, int apicid, int vector)
+{
+	/* not currently needed on ia64 */
+}
+
 
 #endif /* __ASM_IA64_UV_HUB__ */
 

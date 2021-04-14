@@ -1,25 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef __SOUND_MINORS_H
 #define __SOUND_MINORS_H
 
 /*
  *  MINOR numbers
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
+
+#define SNDRV_OS_MINORS			256
 
 #define SNDRV_MINOR_DEVICES		32
 #define SNDRV_MINOR_CARD(minor)		((minor) >> 5)
@@ -29,11 +16,11 @@
 /* these minors can still be used for autoloading devices (/dev/aload*) */
 #define SNDRV_MINOR_CONTROL		0	/* 0 */
 #define SNDRV_MINOR_GLOBAL		1	/* 1 */
-#define SNDRV_MINOR_SEQUENCER		(SNDRV_MINOR_GLOBAL + 0 * 32)
-#define SNDRV_MINOR_TIMER		(SNDRV_MINOR_GLOBAL + 1 * 32)
+#define SNDRV_MINOR_SEQUENCER		1	/* SNDRV_MINOR_GLOBAL + 0 * 32 */
+#define SNDRV_MINOR_TIMER		33	/* SNDRV_MINOR_GLOBAL + 1 * 32 */
 
 #ifndef CONFIG_SND_DYNAMIC_MINORS
-						/* 2 - 3 (reserved) */
+#define SNDRV_MINOR_COMPRESS		2	/* 2 - 3 */
 #define SNDRV_MINOR_HWDEP		4	/* 4 - 7 */
 #define SNDRV_MINOR_RAWMIDI		8	/* 8 - 15 */
 #define SNDRV_MINOR_PCM_PLAYBACK	16	/* 16 - 23 */
@@ -47,6 +34,7 @@
 #define SNDRV_DEVICE_TYPE_PCM_CAPTURE	SNDRV_MINOR_PCM_CAPTURE
 #define SNDRV_DEVICE_TYPE_SEQUENCER	SNDRV_MINOR_SEQUENCER
 #define SNDRV_DEVICE_TYPE_TIMER		SNDRV_MINOR_TIMER
+#define SNDRV_DEVICE_TYPE_COMPRESS	SNDRV_MINOR_COMPRESS
 
 #else /* CONFIG_SND_DYNAMIC_MINORS */
 
@@ -58,6 +46,7 @@ enum {
 	SNDRV_DEVICE_TYPE_RAWMIDI,
 	SNDRV_DEVICE_TYPE_PCM_PLAYBACK,
 	SNDRV_DEVICE_TYPE_PCM_CAPTURE,
+	SNDRV_DEVICE_TYPE_COMPRESS,
 };
 
 #endif /* CONFIG_SND_DYNAMIC_MINORS */

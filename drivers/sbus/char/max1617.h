@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* $Id: max1617.h,v 1.1 2001/04/02 09:59:08 davem Exp $ */
 #ifndef _MAX1617_H
 #define _MAX1617_H
@@ -6,7 +7,7 @@
 #define MAX1617_CPU_TEMP	0x01 /* Processor die temp in C	*/
 #define MAX1617_STATUS		0x02 /* Chip status bits	*/
 
-/* Read-only versions of changable registers. */
+/* Read-only versions of changeable registers. */
 #define MAX1617_RD_CFG_BYTE	0x03 /* Config register		*/
 #define MAX1617_RD_CVRATE_BYTE	0x04 /* Temp conversion rate	*/
 #define MAX1617_RD_AMB_HIGHLIM	0x05 /* Ambient high limit	*/

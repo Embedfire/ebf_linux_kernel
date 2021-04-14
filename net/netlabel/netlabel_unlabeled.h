@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * NetLabel Unlabeled Support
  *
@@ -5,27 +6,11 @@
  * NetLabel system.  The NetLabel system manages static and dynamic label
  * mappings for network protocols such as CIPSO and RIPSO.
  *
- * Author: Paul Moore <paul.moore@hp.com>
- *
+ * Author: Paul Moore <paul@paul-moore.com>
  */
 
 /*
  * (c) Copyright Hewlett-Packard Development Company, L.P., 2006
- *
- * This program is free software;  you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY;  without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
- * the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program;  if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
  */
 
 #ifndef _NETLABEL_UNLABELED_H
@@ -180,7 +165,6 @@ enum {
 	NLBL_UNLABEL_C_STATICLISTDEF,
 	__NLBL_UNLABEL_C_MAX,
 };
-#define NLBL_UNLABEL_C_MAX (__NLBL_UNLABEL_C_MAX - 1)
 
 /* NetLabel Unlabeled attributes */
 enum {
@@ -220,6 +204,21 @@ int netlbl_unlabel_genl_init(void);
 
 /* General Unlabeled init function */
 int netlbl_unlabel_init(u32 size);
+
+/* Static/Fallback label management functions */
+int netlbl_unlhsh_add(struct net *net,
+		      const char *dev_name,
+		      const void *addr,
+		      const void *mask,
+		      u32 addr_len,
+		      u32 secid,
+		      struct netlbl_audit *audit_info);
+int netlbl_unlhsh_remove(struct net *net,
+			 const char *dev_name,
+			 const void *addr,
+			 const void *mask,
+			 u32 addr_len,
+			 struct netlbl_audit *audit_info);
 
 /* Process Unlabeled incoming network packets */
 int netlbl_unlabel_getattr(const struct sk_buff *skb,

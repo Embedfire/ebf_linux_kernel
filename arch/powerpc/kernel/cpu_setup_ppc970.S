@@ -1,12 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * This file contains low level CPU setup functions.
  *    Copyright (C) 2003 Benjamin Herrenschmidt (benh@kernel.crashing.org)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
- *
  */
 
 #include <asm/processor.h>
@@ -76,7 +71,7 @@ _GLOBAL(__setup_cpu_ppc970)
 	/* Do nothing if not running in HV mode */
 	mfmsr	r0
 	rldicl.	r0,r0,4,63
-	beqlr
+	beq	no_hv_mode
 
 	mfspr	r0,SPRN_HID0
 	li	r11,5			/* clear DOZE and SLEEP */
@@ -90,7 +85,7 @@ _GLOBAL(__setup_cpu_ppc970MP)
 	/* Do nothing if not running in HV mode */
 	mfmsr	r0
 	rldicl.	r0,r0,4,63
-	beqlr
+	beq	no_hv_mode
 
 	mfspr	r0,SPRN_HID0
 	li	r11,0x15		/* clear DOZE and SLEEP */
@@ -109,19 +104,37 @@ load_hids:
 	sync
 	isync
 
+	/* Try to set LPES = 01 in HID4 */
+	mfspr	r0,SPRN_HID4
+	clrldi	r0,r0,1			/* clear LPES0 */
+	ori	r0,r0,HID4_LPES1	/* set LPES1 */
+	sync
+	mtspr	SPRN_HID4,r0
+	isync
+
 	/* Save away cpu state */
-	LOAD_REG_IMMEDIATE(r5,cpu_state_storage)
+	LOAD_REG_ADDR(r5,cpu_state_storage)
 
 	/* Save HID0,1,4 and 5 */
 	mfspr	r3,SPRN_HID0
 	std	r3,CS_HID0(r5)
 	mfspr	r3,SPRN_HID1
 	std	r3,CS_HID1(r5)
-	mfspr	r3,SPRN_HID4
-	std	r3,CS_HID4(r5)
+	mfspr	r4,SPRN_HID4
+	std	r4,CS_HID4(r5)
 	mfspr	r3,SPRN_HID5
 	std	r3,CS_HID5(r5)
 
+	/* See if we successfully set LPES1 to 1; if not we are in Apple mode */
+	andi.	r4,r4,HID4_LPES1
+	bnelr
+
+no_hv_mode:
+	/* Disable CPU_FTR_HVMODE and exit, since we don't have HV mode */
+	ld	r5,CPU_SPEC_FEATURES(r4)
+	LOAD_REG_IMMEDIATE(r6,CPU_FTR_HVMODE)
+	andc	r5,r5,r6
+	std	r5,CPU_SPEC_FEATURES(r4)
 	blr
 
 /* Called with no MMU context (typically MSR:IR/DR off) to
@@ -134,7 +147,7 @@ _GLOBAL(__restore_cpu_ppc970)
 	rldicl.	r0,r0,4,63
 	beqlr
 
-	LOAD_REG_IMMEDIATE(r5,cpu_state_storage)
+	LOAD_REG_ADDR(r5,cpu_state_storage)
 	/* Before accessing memory, we make sure rm_ci is clear */
 	li	r0,0
 	mfspr	r3,SPRN_HID4

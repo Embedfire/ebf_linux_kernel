@@ -1,22 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * SuperTrak EX Series Storage Controller driver for Linux
  *
- *	Copyright (C) 2005, 2006 Promise Technology Inc.
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
+ *	Copyright (C) 2005-2015 Promise Technology Inc.
  *
  *	Written By:
  *		Ed Lin <promise_linux@promise.com>
- *
  */
 
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
+#include <linux/slab.h>
 #include <linux/time.h>
 #include <linux/pci.h>
 #include <linux/blkdev.h>
@@ -24,6 +20,8 @@
 #include <linux/types.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
+#include <linux/ktime.h>
+#include <linux/reboot.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/byteorder.h>
@@ -36,11 +34,11 @@
 #include <scsi/scsi_eh.h>
 
 #define DRV_NAME "stex"
-#define ST_DRIVER_VERSION "3.6.0000.1"
-#define ST_VER_MAJOR 		3
-#define ST_VER_MINOR 		6
-#define ST_OEM 			0
-#define ST_BUILD_VER 		1
+#define ST_DRIVER_VERSION	"6.02.0000.01"
+#define ST_VER_MAJOR		6
+#define ST_VER_MINOR		02
+#define ST_OEM				0000
+#define ST_BUILD_VER		01
 
 enum {
 	/* MU register offset */
@@ -55,27 +53,44 @@ enum {
 	OIS	= 0x30,	/* MU_OUTBOUND_INTERRUPT_STATUS */
 	OIM	= 0x3c,	/* MU_OUTBOUND_INTERRUPT_MASK */
 
-	/* MU register value */
-	MU_INBOUND_DOORBELL_HANDSHAKE		= 1,
-	MU_INBOUND_DOORBELL_REQHEADCHANGED	= 2,
-	MU_INBOUND_DOORBELL_STATUSTAILCHANGED	= 4,
-	MU_INBOUND_DOORBELL_HMUSTOPPED		= 8,
-	MU_INBOUND_DOORBELL_RESET		= 16,
+	YIOA_STATUS				= 0x00,
+	YH2I_INT				= 0x20,
+	YINT_EN					= 0x34,
+	YI2H_INT				= 0x9c,
+	YI2H_INT_C				= 0xa0,
+	YH2I_REQ				= 0xc0,
+	YH2I_REQ_HI				= 0xc4,
+	PSCRATCH0				= 0xb0,
+	PSCRATCH1				= 0xb4,
+	PSCRATCH2				= 0xb8,
+	PSCRATCH3				= 0xbc,
+	PSCRATCH4				= 0xc8,
+	MAILBOX_BASE			= 0x1000,
+	MAILBOX_HNDSHK_STS		= 0x0,
 
-	MU_OUTBOUND_DOORBELL_HANDSHAKE		= 1,
-	MU_OUTBOUND_DOORBELL_REQUESTTAILCHANGED	= 2,
-	MU_OUTBOUND_DOORBELL_STATUSHEADCHANGED	= 4,
-	MU_OUTBOUND_DOORBELL_BUSCHANGE		= 8,
-	MU_OUTBOUND_DOORBELL_HASEVENT		= 16,
+	/* MU register value */
+	MU_INBOUND_DOORBELL_HANDSHAKE		= (1 << 0),
+	MU_INBOUND_DOORBELL_REQHEADCHANGED	= (1 << 1),
+	MU_INBOUND_DOORBELL_STATUSTAILCHANGED	= (1 << 2),
+	MU_INBOUND_DOORBELL_HMUSTOPPED		= (1 << 3),
+	MU_INBOUND_DOORBELL_RESET		= (1 << 4),
+
+	MU_OUTBOUND_DOORBELL_HANDSHAKE		= (1 << 0),
+	MU_OUTBOUND_DOORBELL_REQUESTTAILCHANGED	= (1 << 1),
+	MU_OUTBOUND_DOORBELL_STATUSHEADCHANGED	= (1 << 2),
+	MU_OUTBOUND_DOORBELL_BUSCHANGE		= (1 << 3),
+	MU_OUTBOUND_DOORBELL_HASEVENT		= (1 << 4),
+	MU_OUTBOUND_DOORBELL_REQUEST_RESET	= (1 << 27),
 
 	/* MU status code */
 	MU_STATE_STARTING			= 1,
-	MU_STATE_FMU_READY_FOR_HANDSHAKE	= 2,
-	MU_STATE_SEND_HANDSHAKE_FRAME		= 3,
-	MU_STATE_STARTED			= 4,
-	MU_STATE_RESETTING			= 5,
+	MU_STATE_STARTED			= 2,
+	MU_STATE_RESETTING			= 3,
+	MU_STATE_FAILED				= 4,
+	MU_STATE_STOP				= 5,
+	MU_STATE_NOCONNECT			= 6,
 
-	MU_MAX_DELAY				= 120,
+	MU_MAX_DELAY				= 50,
 	MU_HANDSHAKE_SIGNATURE			= 0x55aaaa55,
 	MU_HANDSHAKE_SIGNATURE_HALF		= 0x5a5a0000,
 	MU_HARD_RESET_WAIT			= 30000,
@@ -95,34 +110,39 @@ enum {
 	TASK_ATTRIBUTE_ORDERED			= 0x2,
 	TASK_ATTRIBUTE_ACA			= 0x4,
 
-	/* request count, etc. */
-	MU_MAX_REQUEST				= 32,
+	SS_STS_NORMAL				= 0x80000000,
+	SS_STS_DONE				= 0x40000000,
+	SS_STS_HANDSHAKE			= 0x20000000,
 
-	/* one message wasted, use MU_MAX_REQUEST+1
-		to handle MU_MAX_REQUEST messages */
-	MU_REQ_COUNT				= (MU_MAX_REQUEST + 1),
-	MU_STATUS_COUNT				= (MU_MAX_REQUEST + 1),
+	SS_HEAD_HANDSHAKE			= 0x80,
 
-	STEX_CDB_LENGTH				= MAX_COMMAND_SIZE,
-	REQ_VARIABLE_LEN			= 1024,
+	SS_H2I_INT_RESET			= 0x100,
+
+	SS_I2H_REQUEST_RESET			= 0x2000,
+
+	SS_MU_OPERATIONAL			= 0x80000000,
+
+	STEX_CDB_LENGTH				= 16,
 	STATUS_VAR_LEN				= 128,
-	ST_CAN_QUEUE				= MU_MAX_REQUEST,
-	ST_CMD_PER_LUN				= MU_MAX_REQUEST,
-	ST_MAX_SG				= 32,
 
 	/* sg flags */
 	SG_CF_EOT				= 0x80,	/* end of table */
 	SG_CF_64B				= 0x40,	/* 64 bit item */
 	SG_CF_HOST				= 0x20,	/* sg in host memory */
+	MSG_DATA_DIR_ND				= 0,
+	MSG_DATA_DIR_IN				= 1,
+	MSG_DATA_DIR_OUT			= 2,
 
 	st_shasta				= 0,
 	st_vsc					= 1,
-	st_vsc1					= 2,
-	st_yosemite				= 3,
+	st_yosemite				= 2,
+	st_seq					= 3,
+	st_yel					= 4,
+	st_P3					= 5,
 
 	PASSTHRU_REQ_TYPE			= 0x00000001,
 	PASSTHRU_REQ_NO_WAKEUP			= 0x00000100,
-	ST_INTERNAL_TIMEOUT			= 30,
+	ST_INTERNAL_TIMEOUT			= 180,
 
 	ST_TO_CMD				= 0,
 	ST_FROM_CMD				= 1,
@@ -150,61 +170,51 @@ enum {
 	INQUIRY_EVPD				= 0x01,
 
 	ST_ADDITIONAL_MEM			= 0x200000,
+	ST_ADDITIONAL_MEM_MIN			= 0x80000,
+	PMIC_SHUTDOWN				= 0x0D,
+	PMIC_REUMSE					= 0x10,
+	ST_IGNORED					= -1,
+	ST_NOTHANDLED				= 7,
+	ST_S3						= 3,
+	ST_S4						= 4,
+	ST_S5						= 5,
+	ST_S6						= 6,
 };
-
-/* SCSI inquiry data */
-typedef struct st_inq {
-	u8 DeviceType			:5;
-	u8 DeviceTypeQualifier		:3;
-	u8 DeviceTypeModifier		:7;
-	u8 RemovableMedia		:1;
-	u8 Versions;
-	u8 ResponseDataFormat		:4;
-	u8 HiSupport			:1;
-	u8 NormACA			:1;
-	u8 ReservedBit			:1;
-	u8 AERC				:1;
-	u8 AdditionalLength;
-	u8 Reserved[2];
-	u8 SoftReset			:1;
-	u8 CommandQueue			:1;
-	u8 Reserved2			:1;
-	u8 LinkedCommands		:1;
-	u8 Synchronous			:1;
-	u8 Wide16Bit			:1;
-	u8 Wide32Bit			:1;
-	u8 RelativeAddressing		:1;
-	u8 VendorId[8];
-	u8 ProductId[16];
-	u8 ProductRevisionLevel[4];
-	u8 VendorSpecific[20];
-	u8 Reserved3[40];
-} ST_INQ;
 
 struct st_sgitem {
 	u8 ctrl;	/* SG_CF_xxx */
 	u8 reserved[3];
 	__le32 count;
+	__le64 addr;
+};
+
+struct st_ss_sgitem {
 	__le32 addr;
 	__le32 addr_hi;
+	__le32 count;
 };
 
 struct st_sgtable {
 	__le16 sg_count;
 	__le16 max_sg_count;
 	__le32 sz_in_byte;
-	struct st_sgitem table[ST_MAX_SG];
+};
+
+struct st_msg_header {
+	__le64 handle;
+	u8 flag;
+	u8 channel;
+	__le16 timeout;
+	u32 reserved;
 };
 
 struct handshake_frame {
-	__le32 rb_phy;		/* request payload queue physical address */
-	__le32 rb_phy_hi;
+	__le64 rb_phy;		/* request payload queue physical address */
 	__le16 req_sz;		/* size of each request payload */
 	__le16 req_cnt;		/* count of reqs the buffer can hold */
 	__le16 status_sz;	/* size of each status payload */
 	__le16 status_cnt;	/* count of status the buffer can hold */
-	__le32 hosttime;	/* seconds from Jan 1, 1970 (GMT) */
-	__le32 hosttime_hi;
+	__le64 hosttime;	/* seconds from Jan 1, 1970 (GMT) */
 	u8 partner_type;	/* who sends this frame */
 	u8 reserved0[7];
 	__le32 partner_ver_major;
@@ -213,7 +223,8 @@ struct handshake_frame {
 	__le32 partner_ver_build;
 	__le32 extra_offset;	/* NEW */
 	__le32 extra_size;	/* NEW */
-	u32 reserved1[2];
+	__le32 scratch_size;
+	u32 reserved1;
 };
 
 struct req_msg {
@@ -222,10 +233,10 @@ struct req_msg {
 	u8 target;
 	u8 task_attr;
 	u8 task_manage;
-	u8 prd_entry;
+	u8 data_dir;
 	u8 payload_sz;		/* payload size in 4-byte, not used */
 	u8 cdb[STEX_CDB_LENGTH];
-	u8 variable[REQ_VARIABLE_LEN];
+	u32 variable[];
 };
 
 struct status_msg {
@@ -281,12 +292,6 @@ struct st_drvver {
 	u32 reserved[3];
 };
 
-#define MU_REQ_BUFFER_SIZE	(MU_REQ_COUNT * sizeof(struct req_msg))
-#define MU_STATUS_BUFFER_SIZE	(MU_STATUS_COUNT * sizeof(struct status_msg))
-#define MU_BUFFER_SIZE		(MU_REQ_BUFFER_SIZE + MU_STATUS_BUFFER_SIZE)
-#define STEX_EXTRA_SIZE		max(sizeof(struct st_frame), sizeof(ST_INQ))
-#define STEX_BUFFER_SIZE	(MU_BUFFER_SIZE + STEX_EXTRA_SIZE)
-
 struct st_ccb {
 	struct req_msg *req;
 	struct scsi_cmnd *cmd;
@@ -298,6 +303,7 @@ struct st_ccb {
 	u32 req_type;
 	u8 srb_status;
 	u8 scsi_status;
+	u8 reserved[2];
 };
 
 struct st_hba {
@@ -309,6 +315,10 @@ struct st_hba {
 	struct Scsi_Host *host;
 	struct pci_dev *pdev;
 
+	struct req_msg * (*alloc_rq) (struct st_hba *);
+	int (*map_sg)(struct st_hba *, struct req_msg *, struct st_ccb *);
+	void (*send) (struct st_hba *, struct req_msg *, u16);
+
 	u32 req_head;
 	u32 req_tail;
 	u32 status_head;
@@ -316,15 +326,47 @@ struct st_hba {
 
 	struct status_msg *status_buffer;
 	void *copy_buffer; /* temp buffer for driver-handled commands */
-	struct st_ccb ccb[MU_MAX_REQUEST];
+	struct st_ccb *ccb;
 	struct st_ccb *wait_ccb;
-	wait_queue_head_t waitq;
+	__le32 *scratch;
 
+	char work_q_name[20];
+	struct workqueue_struct *work_q;
+	struct work_struct reset_work;
+	wait_queue_head_t reset_waitq;
 	unsigned int mu_status;
-	int out_req_cnt;
-
 	unsigned int cardtype;
+	int msi_enabled;
+	int out_req_cnt;
+	u32 extra_offset;
+	u16 rq_count;
+	u16 rq_size;
+	u16 sts_count;
+	u8  supports_pm;
+	int msi_lock;
 };
+
+struct st_card_info {
+	struct req_msg * (*alloc_rq) (struct st_hba *);
+	int (*map_sg)(struct st_hba *, struct req_msg *, struct st_ccb *);
+	void (*send) (struct st_hba *, struct req_msg *, u16);
+	unsigned int max_id;
+	unsigned int max_lun;
+	unsigned int max_channel;
+	u16 rq_count;
+	u16 rq_size;
+	u16 sts_count;
+};
+
+static int S6flag;
+static int stex_halt(struct notifier_block *nb, ulong event, void *buf);
+static struct notifier_block stex_notifier = {
+	stex_halt, NULL, 0
+};
+
+static int msi;
+module_param(msi, int, 0);
+MODULE_PARM_DESC(msi, "Enable Message Signaled Interrupts(0=off, 1=on)");
 
 static const char console_inq_page[] =
 {
@@ -343,22 +385,12 @@ MODULE_DESCRIPTION("Promise Technology SuperTrak EX Controllers");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(ST_DRIVER_VERSION);
 
-static void stex_gettime(__le32 *time)
-{
-	struct timeval tv;
-	do_gettimeofday(&tv);
-
-	*time = cpu_to_le32(tv.tv_sec & 0xffffffff);
-	*(time + 1) = cpu_to_le32((tv.tv_sec >> 16) >> 16);
-}
-
 static struct status_msg *stex_get_status(struct st_hba *hba)
 {
-	struct status_msg *status =
-		hba->status_buffer + hba->status_tail;
+	struct status_msg *status = hba->status_buffer + hba->status_tail;
 
 	++hba->status_tail;
-	hba->status_tail %= MU_STATUS_COUNT;
+	hba->status_tail %= hba->sts_count+1;
 
 	return status;
 }
@@ -368,7 +400,7 @@ static void stex_invalid_field(struct scsi_cmnd *cmd,
 {
 	cmd->result = (DRIVER_SENSE << 24) | SAM_STAT_CHECK_CONDITION;
 
-	/* "Invalid field in cbd" */
+	/* "Invalid field in cdb" */
 	scsi_build_sense_buffer(0, cmd->sense_buffer, ILLEGAL_REQUEST, 0x24,
 				0x0);
 	done(cmd);
@@ -376,13 +408,18 @@ static void stex_invalid_field(struct scsi_cmnd *cmd,
 
 static struct req_msg *stex_alloc_req(struct st_hba *hba)
 {
-	struct req_msg *req = ((struct req_msg *)hba->dma_mem) +
-		hba->req_head;
+	struct req_msg *req = hba->dma_mem + hba->req_head * hba->rq_size;
 
 	++hba->req_head;
-	hba->req_head %= MU_REQ_COUNT;
+	hba->req_head %= hba->rq_count+1;
 
 	return req;
+}
+
+static struct req_msg *stex_ss_alloc_req(struct st_hba *hba)
+{
+	return (struct req_msg *)(hba->dma_mem +
+		hba->req_head * hba->rq_size + sizeof(struct st_msg_header));
 }
 
 static int stex_map_sg(struct st_hba *hba,
@@ -391,32 +428,63 @@ static int stex_map_sg(struct st_hba *hba,
 	struct scsi_cmnd *cmd;
 	struct scatterlist *sg;
 	struct st_sgtable *dst;
+	struct st_sgitem *table;
 	int i, nseg;
 
 	cmd = ccb->cmd;
-	dst = (struct st_sgtable *)req->variable;
-	dst->max_sg_count = cpu_to_le16(ST_MAX_SG);
-	dst->sz_in_byte = cpu_to_le32(scsi_bufflen(cmd));
-
 	nseg = scsi_dma_map(cmd);
-	if (nseg < 0)
-		return -EIO;
+	BUG_ON(nseg < 0);
 	if (nseg) {
+		dst = (struct st_sgtable *)req->variable;
+
 		ccb->sg_count = nseg;
 		dst->sg_count = cpu_to_le16((u16)nseg);
+		dst->max_sg_count = cpu_to_le16(hba->host->sg_tablesize);
+		dst->sz_in_byte = cpu_to_le32(scsi_bufflen(cmd));
 
+		table = (struct st_sgitem *)(dst + 1);
 		scsi_for_each_sg(cmd, sg, nseg, i) {
-			dst->table[i].count = cpu_to_le32((u32)sg_dma_len(sg));
-			dst->table[i].addr =
-				cpu_to_le32(sg_dma_address(sg) & 0xffffffff);
-			dst->table[i].addr_hi =
-				cpu_to_le32((sg_dma_address(sg) >> 16) >> 16);
-			dst->table[i].ctrl = SG_CF_64B | SG_CF_HOST;
+			table[i].count = cpu_to_le32((u32)sg_dma_len(sg));
+			table[i].addr = cpu_to_le64(sg_dma_address(sg));
+			table[i].ctrl = SG_CF_64B | SG_CF_HOST;
 		}
-		dst->table[--i].ctrl |= SG_CF_EOT;
+		table[--i].ctrl |= SG_CF_EOT;
 	}
 
-	return 0;
+	return nseg;
+}
+
+static int stex_ss_map_sg(struct st_hba *hba,
+	struct req_msg *req, struct st_ccb *ccb)
+{
+	struct scsi_cmnd *cmd;
+	struct scatterlist *sg;
+	struct st_sgtable *dst;
+	struct st_ss_sgitem *table;
+	int i, nseg;
+
+	cmd = ccb->cmd;
+	nseg = scsi_dma_map(cmd);
+	BUG_ON(nseg < 0);
+	if (nseg) {
+		dst = (struct st_sgtable *)req->variable;
+
+		ccb->sg_count = nseg;
+		dst->sg_count = cpu_to_le16((u16)nseg);
+		dst->max_sg_count = cpu_to_le16(hba->host->sg_tablesize);
+		dst->sz_in_byte = cpu_to_le32(scsi_bufflen(cmd));
+
+		table = (struct st_ss_sgitem *)(dst + 1);
+		scsi_for_each_sg(cmd, sg, nseg, i) {
+			table[i].count = cpu_to_le32((u32)sg_dma_len(sg));
+			table[i].addr =
+				cpu_to_le32(sg_dma_address(sg) & 0xffffffff);
+			table[i].addr_hi =
+				cpu_to_le32((sg_dma_address(sg) >> 16) >> 16);
+		}
+	}
+
+	return nseg;
 }
 
 static void stex_controller_info(struct st_hba *hba, struct st_ccb *ccb)
@@ -425,7 +493,7 @@ static void stex_controller_info(struct st_hba *hba, struct st_ccb *ccb)
 	size_t count = sizeof(struct st_frame);
 
 	p = hba->copy_buffer;
-	count = scsi_sg_copy_to_buffer(ccb->cmd, p, count);
+	scsi_sg_copy_to_buffer(ccb->cmd, p, count);
 	memset(p->base, 0, sizeof(u32)*6);
 	*(unsigned long *)(p->base) = pci_resource_start(hba->pdev, 0);
 	p->rom_addr = 0;
@@ -443,15 +511,13 @@ static void stex_controller_info(struct st_hba *hba, struct st_ccb *ccb)
 	p->subid =
 		hba->pdev->subsystem_vendor << 16 | hba->pdev->subsystem_device;
 
-	count = scsi_sg_copy_from_buffer(ccb->cmd, p, count);
+	scsi_sg_copy_from_buffer(ccb->cmd, p, count);
 }
 
 static void
 stex_send_cmd(struct st_hba *hba, struct req_msg *req, u16 tag)
 {
 	req->tag = cpu_to_le16(tag);
-	req->task_attr = TASK_ATTRIBUTE_SIMPLE;
-	req->task_manage = 0; /* not supported yet */
 
 	hba->ccb[tag].req = req;
 	hba->out_req_cnt++;
@@ -461,46 +527,92 @@ stex_send_cmd(struct st_hba *hba, struct req_msg *req, u16 tag)
 	readl(hba->mmio_base + IDBL); /* flush */
 }
 
-static int
-stex_slave_alloc(struct scsi_device *sdev)
+static void
+stex_ss_send_cmd(struct st_hba *hba, struct req_msg *req, u16 tag)
 {
-	/* Cheat: usually extracted from Inquiry data */
-	sdev->tagged_supported = 1;
+	struct scsi_cmnd *cmd;
+	struct st_msg_header *msg_h;
+	dma_addr_t addr;
 
-	scsi_activate_tcq(sdev, ST_CMD_PER_LUN);
+	req->tag = cpu_to_le16(tag);
 
-	return 0;
+	hba->ccb[tag].req = req;
+	hba->out_req_cnt++;
+
+	cmd = hba->ccb[tag].cmd;
+	msg_h = (struct st_msg_header *)req - 1;
+	if (likely(cmd)) {
+		msg_h->channel = (u8)cmd->device->channel;
+		msg_h->timeout = cpu_to_le16(cmd->request->timeout/HZ);
+	}
+	addr = hba->dma_handle + hba->req_head * hba->rq_size;
+	addr += (hba->ccb[tag].sg_count+4)/11;
+	msg_h->handle = cpu_to_le64(addr);
+
+	++hba->req_head;
+	hba->req_head %= hba->rq_count+1;
+	if (hba->cardtype == st_P3) {
+		writel((addr >> 16) >> 16, hba->mmio_base + YH2I_REQ_HI);
+		writel(addr, hba->mmio_base + YH2I_REQ);
+	} else {
+		writel((addr >> 16) >> 16, hba->mmio_base + YH2I_REQ_HI);
+		readl(hba->mmio_base + YH2I_REQ_HI); /* flush */
+		writel(addr, hba->mmio_base + YH2I_REQ);
+		readl(hba->mmio_base + YH2I_REQ); /* flush */
+	}
 }
 
+static void return_abnormal_state(struct st_hba *hba, int status)
+{
+	struct st_ccb *ccb;
+	unsigned long flags;
+	u16 tag;
+
+	spin_lock_irqsave(hba->host->host_lock, flags);
+	for (tag = 0; tag < hba->host->can_queue; tag++) {
+		ccb = &hba->ccb[tag];
+		if (ccb->req == NULL)
+			continue;
+		ccb->req = NULL;
+		if (ccb->cmd) {
+			scsi_dma_unmap(ccb->cmd);
+			ccb->cmd->result = status << 16;
+			ccb->cmd->scsi_done(ccb->cmd);
+			ccb->cmd = NULL;
+		}
+	}
+	spin_unlock_irqrestore(hba->host->host_lock, flags);
+}
 static int
 stex_slave_config(struct scsi_device *sdev)
 {
 	sdev->use_10_for_rw = 1;
 	sdev->use_10_for_ms = 1;
-	sdev->timeout = 60 * HZ;
-	sdev->tagged_supported = 1;
+	blk_queue_rq_timeout(sdev->request_queue, 60 * HZ);
 
 	return 0;
 }
 
-static void
-stex_slave_destroy(struct scsi_device *sdev)
-{
-	scsi_deactivate_tcq(sdev, 1);
-}
-
 static int
-stex_queuecommand(struct scsi_cmnd *cmd, void (* done)(struct scsi_cmnd *))
+stex_queuecommand_lck(struct scsi_cmnd *cmd, void (*done)(struct scsi_cmnd *))
 {
 	struct st_hba *hba;
 	struct Scsi_Host *host;
-	unsigned int id,lun;
+	unsigned int id, lun;
 	struct req_msg *req;
 	u16 tag;
+
 	host = cmd->device->host;
 	id = cmd->device->id;
 	lun = cmd->device->lun;
 	hba = (struct st_hba *) &host->hostdata[0];
+	if (hba->mu_status == MU_STATE_NOCONNECT) {
+		cmd->result = DID_NO_CONNECT;
+		done(cmd);
+		return 0;
+	}
+	if (unlikely(hba->mu_status != MU_STATE_STARTED))
+		return SCSI_MLQUEUE_HOST_BUSY;
 
 	switch (cmd->cmnd[0]) {
 	case MODE_SENSE_10:
@@ -508,6 +620,7 @@ stex_queuecommand(struct scsi_cmnd *cmd, void (* done)(struct scsi_cmnd *))
 		static char ms10_caching_page[12] =
 			{ 0, 0x12, 0, 0, 0, 0, 0, 0, 0x8, 0xa, 0x4, 0 };
 		unsigned char page;
+
 		page = cmd->cmnd[2] & 0x3f;
 		if (page == 0x8 || page == 0x3f) {
 			scsi_sg_copy_from_buffer(cmd, ms10_caching_page,
@@ -537,9 +650,15 @@ stex_queuecommand(struct scsi_cmnd *cmd, void (* done)(struct scsi_cmnd *))
 		}
 		break;
 	case INQUIRY:
+		if (lun >= host->max_lun) {
+			cmd->result = DID_NO_CONNECT << 16;
+			done(cmd);
+			return 0;
+		}
 		if (id != host->max_id - 1)
 			break;
-		if (lun == 0 && (cmd->cmnd[1] & INQUIRY_EVPD) == 0) {
+		if (!lun && !cmd->device->channel &&
+			(cmd->cmnd[1] & INQUIRY_EVPD) == 0) {
 			scsi_sg_copy_from_buffer(cmd, (void *)console_inq_page,
 						 sizeof(console_inq_page));
 			cmd->result = DID_OK << 16 | COMMAND_COMPLETE << 8;
@@ -551,6 +670,7 @@ stex_queuecommand(struct scsi_cmnd *cmd, void (* done)(struct scsi_cmnd *))
 		if (cmd->cmnd[1] == PASSTHRU_GET_DRVVER) {
 			struct st_drvver ver;
 			size_t cp_len = sizeof(ver);
+
 			ver.major = ST_VER_MAJOR;
 			ver.minor = ST_VER_MINOR;
 			ver.oem = ST_OEM;
@@ -576,7 +696,7 @@ stex_queuecommand(struct scsi_cmnd *cmd, void (* done)(struct scsi_cmnd *))
 	if (unlikely(tag >= host->can_queue))
 		return SCSI_MLQUEUE_HOST_BUSY;
 
-	req = stex_alloc_req(hba);
+	req = hba->alloc_rq(hba);
 
 	req->lun = lun;
 	req->target = id;
@@ -584,24 +704,34 @@ stex_queuecommand(struct scsi_cmnd *cmd, void (* done)(struct scsi_cmnd *))
 	/* cdb */
 	memcpy(req->cdb, cmd->cmnd, STEX_CDB_LENGTH);
 
+	if (cmd->sc_data_direction == DMA_FROM_DEVICE)
+		req->data_dir = MSG_DATA_DIR_IN;
+	else if (cmd->sc_data_direction == DMA_TO_DEVICE)
+		req->data_dir = MSG_DATA_DIR_OUT;
+	else
+		req->data_dir = MSG_DATA_DIR_ND;
+
 	hba->ccb[tag].cmd = cmd;
 	hba->ccb[tag].sense_bufflen = SCSI_SENSE_BUFFERSIZE;
 	hba->ccb[tag].sense_buffer = cmd->sense_buffer;
-	hba->ccb[tag].req_type = 0;
 
-	if (cmd->sc_data_direction != DMA_NONE)
-		stex_map_sg(hba, req, &hba->ccb[tag]);
+	if (!hba->map_sg(hba, req, &hba->ccb[tag])) {
+		hba->ccb[tag].sg_count = 0;
+		memset(&req->variable[0], 0, 8);
+	}
 
-	stex_send_cmd(hba, req, tag);
+	hba->send(hba, req, tag);
 	return 0;
 }
+
+static DEF_SCSI_QCMD(stex_queuecommand)
 
 static void stex_scsi_done(struct st_ccb *ccb)
 {
 	struct scsi_cmnd *cmd = ccb->cmd;
 	int result;
 
-	if (ccb->srb_status == SRB_STATUS_SUCCESS ||  ccb->srb_status == 0) {
+	if (ccb->srb_status == SRB_STATUS_SUCCESS || ccb->srb_status == 0) {
 		result = ccb->scsi_status;
 		switch (ccb->scsi_status) {
 		case SAM_STAT_GOOD:
@@ -641,7 +771,6 @@ static void stex_scsi_done(struct st_ccb *ccb)
 static void stex_copy_data(struct st_ccb *ccb,
 	struct status_msg *resp, unsigned int variable)
 {
-	size_t count = variable;
 	if (resp->scsi_status != SAM_STAT_GOOD) {
 		if (ccb->sense_buffer != NULL)
 			memcpy(ccb->sense_buffer, resp->variable,
@@ -651,35 +780,16 @@ static void stex_copy_data(struct st_ccb *ccb,
 
 	if (ccb->cmd == NULL)
 		return;
-	count = scsi_sg_copy_from_buffer(ccb->cmd, resp->variable, count);
+	scsi_sg_copy_from_buffer(ccb->cmd, resp->variable, variable);
 }
 
-static void stex_ys_commands(struct st_hba *hba,
+static void stex_check_cmd(struct st_hba *hba,
 	struct st_ccb *ccb, struct status_msg *resp)
 {
 	if (ccb->cmd->cmnd[0] == MGT_CMD &&
-		resp->scsi_status != SAM_STAT_CHECK_CONDITION) {
+		resp->scsi_status != SAM_STAT_CHECK_CONDITION)
 		scsi_set_resid(ccb->cmd, scsi_bufflen(ccb->cmd) -
 			le32_to_cpu(*(__le32 *)&resp->variable[0]));
-		return;
-	}
-
-	if (resp->srb_status != 0)
-		return;
-
-	/* determine inquiry command status by DeviceTypeQualifier */
-	if (ccb->cmd->cmnd[0] == INQUIRY &&
-		resp->scsi_status == SAM_STAT_GOOD) {
-		ST_INQ *inq_data;
-
-		scsi_sg_copy_to_buffer(ccb->cmd, hba->copy_buffer,
-				       STEX_EXTRA_SIZE);
-		inq_data = (ST_INQ *)hba->copy_buffer;
-		if (inq_data->DeviceTypeQualifier != 0)
-			ccb->srb_status = SRB_STATUS_SELECTION_TIMEOUT;
-		else
-			ccb->srb_status = SRB_STATUS_SUCCESS;
-	}
 }
 
 static void stex_mu_intr(struct st_hba *hba, u32 doorbell)
@@ -690,12 +800,12 @@ static void stex_mu_intr(struct st_hba *hba, u32 doorbell)
 	unsigned int size;
 	u16 tag;
 
-	if (!(doorbell & MU_OUTBOUND_DOORBELL_STATUSHEADCHANGED))
+	if (unlikely(!(doorbell & MU_OUTBOUND_DOORBELL_STATUSHEADCHANGED)))
 		return;
 
 	/* status payloads */
 	hba->status_head = readl(base + OMR1);
-	if (unlikely(hba->status_head >= MU_STATUS_COUNT)) {
+	if (unlikely(hba->status_head > hba->sts_count)) {
 		printk(KERN_WARNING DRV_NAME "(%s): invalid status head\n",
 			pci_name(hba->pdev));
 		return;
@@ -725,13 +835,13 @@ static void stex_mu_intr(struct st_hba *hba, u32 doorbell)
 			continue;
 		}
 
+		hba->out_req_cnt--;
 		ccb = &hba->ccb[tag];
-		if (hba->wait_ccb == ccb)
+		if (unlikely(hba->wait_ccb == ccb))
 			hba->wait_ccb = NULL;
 		if (unlikely(ccb->req == NULL)) {
 			printk(KERN_WARNING DRV_NAME
 				"(%s): lagging req\n", pci_name(hba->pdev));
-			hba->out_req_cnt--;
 			continue;
 		}
 
@@ -746,12 +856,13 @@ static void stex_mu_intr(struct st_hba *hba, u32 doorbell)
 				stex_copy_data(ccb, resp, size);
 		}
 
+		ccb->req = NULL;
 		ccb->srb_status = resp->srb_status;
 		ccb->scsi_status = resp->scsi_status;
 
 		if (likely(ccb->cmd != NULL)) {
 			if (hba->cardtype == st_yosemite)
-				stex_ys_commands(hba, ccb, resp);
+				stex_check_cmd(hba, ccb, resp);
 
 			if (unlikely(ccb->cmd->cmnd[0] == PASSTHRU_CMD &&
 				ccb->cmd->cmnd[1] == PASSTHRU_GET_ADAPTER))
@@ -759,17 +870,8 @@ static void stex_mu_intr(struct st_hba *hba, u32 doorbell)
 
 			scsi_dma_unmap(ccb->cmd);
 			stex_scsi_done(ccb);
-			hba->out_req_cnt--;
-		} else if (ccb->req_type & PASSTHRU_REQ_TYPE) {
-			hba->out_req_cnt--;
-			if (ccb->req_type & PASSTHRU_REQ_NO_WAKEUP) {
-				ccb->req_type = 0;
-				continue;
-			}
+		} else
 			ccb->req_type = 0;
-			if (waitqueue_active(&hba->waitq))
-				wake_up(&hba->waitq);
-		}
 	}
 
 update_status:
@@ -783,7 +885,6 @@ static irqreturn_t stex_intr(int irq, void *__hba)
 	void __iomem *base = hba->mmio_base;
 	u32 data;
 	unsigned long flags;
-	int handled = 0;
 
 	spin_lock_irqsave(hba->host->host_lock, flags);
 
@@ -794,15 +895,133 @@ static irqreturn_t stex_intr(int irq, void *__hba)
 		writel(data, base + ODBL);
 		readl(base + ODBL); /* flush */
 		stex_mu_intr(hba, data);
-		handled = 1;
+		spin_unlock_irqrestore(hba->host->host_lock, flags);
+		if (unlikely(data & MU_OUTBOUND_DOORBELL_REQUEST_RESET &&
+			hba->cardtype == st_shasta))
+			queue_work(hba->work_q, &hba->reset_work);
+		return IRQ_HANDLED;
 	}
 
 	spin_unlock_irqrestore(hba->host->host_lock, flags);
 
-	return IRQ_RETVAL(handled);
+	return IRQ_NONE;
 }
 
-static int stex_handshake(struct st_hba *hba)
+static void stex_ss_mu_intr(struct st_hba *hba)
+{
+	struct status_msg *resp;
+	struct st_ccb *ccb;
+	__le32 *scratch;
+	unsigned int size;
+	int count = 0;
+	u32 value;
+	u16 tag;
+
+	if (unlikely(hba->out_req_cnt <= 0 ||
+			hba->mu_status == MU_STATE_RESETTING))
+		return;
+
+	while (count < hba->sts_count) {
+		scratch = hba->scratch + hba->status_tail;
+		value = le32_to_cpu(*scratch);
+		if (unlikely(!(value & SS_STS_NORMAL)))
+			return;
+
+		resp = hba->status_buffer + hba->status_tail;
+		*scratch = 0;
+		++count;
+		++hba->status_tail;
+		hba->status_tail %= hba->sts_count+1;
+
+		tag = (u16)value;
+		if (unlikely(tag >= hba->host->can_queue)) {
+			printk(KERN_WARNING DRV_NAME
+				"(%s): invalid tag\n", pci_name(hba->pdev));
+			continue;
+		}
+
+		hba->out_req_cnt--;
+		ccb = &hba->ccb[tag];
+		if (unlikely(hba->wait_ccb == ccb))
+			hba->wait_ccb = NULL;
+		if (unlikely(ccb->req == NULL)) {
+			printk(KERN_WARNING DRV_NAME
+				"(%s): lagging req\n", pci_name(hba->pdev));
+			continue;
+		}
+
+		ccb->req = NULL;
+		if (likely(value & SS_STS_DONE)) { /* normal case */
+			ccb->srb_status = SRB_STATUS_SUCCESS;
+			ccb->scsi_status = SAM_STAT_GOOD;
+		} else {
+			ccb->srb_status = resp->srb_status;
+			ccb->scsi_status = resp->scsi_status;
+			size = resp->payload_sz * sizeof(u32);
+			if (unlikely(size < sizeof(*resp) - STATUS_VAR_LEN ||
+				size > sizeof(*resp))) {
+				printk(KERN_WARNING DRV_NAME
+					"(%s): bad status size\n",
+					pci_name(hba->pdev));
+			} else {
+				size -= sizeof(*resp) - STATUS_VAR_LEN;
+				if (size)
+					stex_copy_data(ccb, resp, size);
+			}
+			if (likely(ccb->cmd != NULL))
+				stex_check_cmd(hba, ccb, resp);
+		}
+
+		if (likely(ccb->cmd != NULL)) {
+			scsi_dma_unmap(ccb->cmd);
+			stex_scsi_done(ccb);
+		} else
+			ccb->req_type = 0;
+	}
+}
+
+static irqreturn_t stex_ss_intr(int irq, void *__hba)
+{
+	struct st_hba *hba = __hba;
+	void __iomem *base = hba->mmio_base;
+	u32 data;
+	unsigned long flags;
+
+	spin_lock_irqsave(hba->host->host_lock, flags);
+
+	if (hba->cardtype == st_yel) {
+		data = readl(base + YI2H_INT);
+		if (data && data != 0xffffffff) {
+			/* clear the interrupt */
+			writel(data, base + YI2H_INT_C);
+			stex_ss_mu_intr(hba);
+			spin_unlock_irqrestore(hba->host->host_lock, flags);
+			if (unlikely(data & SS_I2H_REQUEST_RESET))
+				queue_work(hba->work_q, &hba->reset_work);
+			return IRQ_HANDLED;
+		}
+	} else {
+		data = readl(base + PSCRATCH4);
+		if (data != 0xffffffff) {
+			if (data != 0) {
+				/* clear the interrupt */
+				writel(data, base + PSCRATCH1);
+				writel((1 << 22), base + YH2I_INT);
+			}
+			stex_ss_mu_intr(hba);
+			spin_unlock_irqrestore(hba->host->host_lock, flags);
+			if (unlikely(data & SS_I2H_REQUEST_RESET))
+				queue_work(hba->work_q, &hba->reset_work);
+			return IRQ_HANDLED;
+		}
+	}
+
+	spin_unlock_irqrestore(hba->host->host_lock, flags);
+
+	return IRQ_NONE;
+}
+
+static int stex_common_handshake(struct st_hba *hba)
 {
 	void __iomem *base = hba->mmio_base;
 	struct handshake_frame *h;
@@ -831,26 +1050,27 @@ static int stex_handshake(struct st_hba *hba)
 	data = readl(base + OMR1);
 	if ((data & 0xffff0000) == MU_HANDSHAKE_SIGNATURE_HALF) {
 		data &= 0x0000ffff;
-		if (hba->host->can_queue > data)
+		if (hba->host->can_queue > data) {
 			hba->host->can_queue = data;
+			hba->host->cmd_per_lun = data;
+		}
 	}
 
-	h = (struct handshake_frame *)(hba->dma_mem + MU_REQ_BUFFER_SIZE);
-	h->rb_phy = cpu_to_le32(hba->dma_handle);
-	h->rb_phy_hi = cpu_to_le32((hba->dma_handle >> 16) >> 16);
-	h->req_sz = cpu_to_le16(sizeof(struct req_msg));
-	h->req_cnt = cpu_to_le16(MU_REQ_COUNT);
+	h = (struct handshake_frame *)hba->status_buffer;
+	h->rb_phy = cpu_to_le64(hba->dma_handle);
+	h->req_sz = cpu_to_le16(hba->rq_size);
+	h->req_cnt = cpu_to_le16(hba->rq_count+1);
 	h->status_sz = cpu_to_le16(sizeof(struct status_msg));
-	h->status_cnt = cpu_to_le16(MU_STATUS_COUNT);
-	stex_gettime(&h->hosttime);
+	h->status_cnt = cpu_to_le16(hba->sts_count+1);
+	h->hosttime = cpu_to_le64(ktime_get_real_seconds());
 	h->partner_type = HMU_PARTNER_TYPE;
-	if (hba->dma_size > STEX_BUFFER_SIZE) {
-		h->extra_offset = cpu_to_le32(STEX_BUFFER_SIZE);
-		h->extra_size = cpu_to_le32(ST_ADDITIONAL_MEM);
+	if (hba->extra_offset) {
+		h->extra_offset = cpu_to_le32(hba->extra_offset);
+		h->extra_size = cpu_to_le32(hba->dma_size - hba->extra_offset);
 	} else
 		h->extra_offset = h->extra_size = 0;
 
-	status_phys = hba->dma_handle + MU_REQ_BUFFER_SIZE;
+	status_phys = hba->dma_handle + (hba->rq_count+1) * hba->rq_size;
 	writel(status_phys, base + IMR0);
 	readl(base + IMR0);
 	writel((status_phys >> 16) >> 16, base + IMR1);
@@ -882,8 +1102,145 @@ static int stex_handshake(struct st_hba *hba)
 	readl(base + IMR1);
 	writel(0, base + OMR1);
 	readl(base + OMR1); /* flush */
-	hba->mu_status = MU_STATE_STARTED;
 	return 0;
+}
+
+static int stex_ss_handshake(struct st_hba *hba)
+{
+	void __iomem *base = hba->mmio_base;
+	struct st_msg_header *msg_h;
+	struct handshake_frame *h;
+	__le32 *scratch;
+	u32 data, scratch_size, mailboxdata, operationaldata;
+	unsigned long before;
+	int ret = 0;
+
+	before = jiffies;
+
+	if (hba->cardtype == st_yel) {
+		operationaldata = readl(base + YIOA_STATUS);
+		while (operationaldata != SS_MU_OPERATIONAL) {
+			if (time_after(jiffies, before + MU_MAX_DELAY * HZ)) {
+				printk(KERN_ERR DRV_NAME
+					"(%s): firmware not operational\n",
+					pci_name(hba->pdev));
+				return -1;
+			}
+			msleep(1);
+			operationaldata = readl(base + YIOA_STATUS);
+		}
+	} else {
+		operationaldata = readl(base + PSCRATCH3);
+		while (operationaldata != SS_MU_OPERATIONAL) {
+			if (time_after(jiffies, before + MU_MAX_DELAY * HZ)) {
+				printk(KERN_ERR DRV_NAME
+					"(%s): firmware not operational\n",
+					pci_name(hba->pdev));
+				return -1;
+			}
+			msleep(1);
+			operationaldata = readl(base + PSCRATCH3);
+		}
+	}
+
+	msg_h = (struct st_msg_header *)hba->dma_mem;
+	msg_h->handle = cpu_to_le64(hba->dma_handle);
+	msg_h->flag = SS_HEAD_HANDSHAKE;
+
+	h = (struct handshake_frame *)(msg_h + 1);
+	h->rb_phy = cpu_to_le64(hba->dma_handle);
+	h->req_sz = cpu_to_le16(hba->rq_size);
+	h->req_cnt = cpu_to_le16(hba->rq_count+1);
+	h->status_sz = cpu_to_le16(sizeof(struct status_msg));
+	h->status_cnt = cpu_to_le16(hba->sts_count+1);
+	h->hosttime = cpu_to_le64(ktime_get_real_seconds());
+	h->partner_type = HMU_PARTNER_TYPE;
+	h->extra_offset = h->extra_size = 0;
+	scratch_size = (hba->sts_count+1)*sizeof(u32);
+	h->scratch_size = cpu_to_le32(scratch_size);
+
+	if (hba->cardtype == st_yel) {
+		data = readl(base + YINT_EN);
+		data &= ~4;
+		writel(data, base + YINT_EN);
+		writel((hba->dma_handle >> 16) >> 16, base + YH2I_REQ_HI);
+		readl(base + YH2I_REQ_HI);
+		writel(hba->dma_handle, base + YH2I_REQ);
+		readl(base + YH2I_REQ); /* flush */
+	} else {
+		data = readl(base + YINT_EN);
+		data &= ~(1 << 0);
+		data &= ~(1 << 2);
+		writel(data, base + YINT_EN);
+		if (hba->msi_lock == 0) {
+			/* P3 MSI Register cannot access twice */
+			writel((1 << 6), base + YH2I_INT);
+			hba->msi_lock  = 1;
+		}
+		writel((hba->dma_handle >> 16) >> 16, base + YH2I_REQ_HI);
+		writel(hba->dma_handle, base + YH2I_REQ);
+	}
+
+	before = jiffies;
+	scratch = hba->scratch;
+	if (hba->cardtype == st_yel) {
+		while (!(le32_to_cpu(*scratch) & SS_STS_HANDSHAKE)) {
+			if (time_after(jiffies, before + MU_MAX_DELAY * HZ)) {
+				printk(KERN_ERR DRV_NAME
+					"(%s): no signature after handshake frame\n",
+					pci_name(hba->pdev));
+				ret = -1;
+				break;
+			}
+			rmb();
+			msleep(1);
+		}
+	} else {
+		mailboxdata = readl(base + MAILBOX_BASE + MAILBOX_HNDSHK_STS);
+		while (mailboxdata != SS_STS_HANDSHAKE) {
+			if (time_after(jiffies, before + MU_MAX_DELAY * HZ)) {
+				printk(KERN_ERR DRV_NAME
+					"(%s): no signature after handshake frame\n",
+					pci_name(hba->pdev));
+				ret = -1;
+				break;
+			}
+			rmb();
+			msleep(1);
+			mailboxdata = readl(base + MAILBOX_BASE + MAILBOX_HNDSHK_STS);
+		}
+	}
+	memset(scratch, 0, scratch_size);
+	msg_h->flag = 0;
+
+	return ret;
+}
+
+static int stex_handshake(struct st_hba *hba)
+{
+	int err;
+	unsigned long flags;
+	unsigned int mu_status;
+
+	if (hba->cardtype == st_yel || hba->cardtype == st_P3)
+		err = stex_ss_handshake(hba);
+	else
+		err = stex_common_handshake(hba);
+	spin_lock_irqsave(hba->host->host_lock, flags);
+	mu_status = hba->mu_status;
+	if (err == 0) {
+		hba->req_head = 0;
+		hba->req_tail = 0;
+		hba->status_head = 0;
+		hba->status_tail = 0;
+		hba->out_req_cnt = 0;
+		hba->mu_status = MU_STATE_STARTED;
+	} else
+		hba->mu_status = MU_STATE_FAILED;
+	if (mu_status == MU_STATE_RESETTING)
+		wake_up_all(&hba->reset_waitq);
+	spin_unlock_irqrestore(hba->host->host_lock, flags);
+	return err;
 }
 
 static int stex_abort(struct scsi_cmnd *cmd)
@@ -896,33 +1253,41 @@ static int stex_abort(struct scsi_cmnd *cmd)
 	int result = SUCCESS;
 	unsigned long flags;
 
-	printk(KERN_INFO DRV_NAME
-		"(%s): aborting command\n", pci_name(hba->pdev));
-	scsi_print_command(cmd);
+	scmd_printk(KERN_INFO, cmd, "aborting command\n");
 
 	base = hba->mmio_base;
 	spin_lock_irqsave(host->host_lock, flags);
-	if (tag < host->can_queue && hba->ccb[tag].cmd == cmd)
+	if (tag < host->can_queue &&
+		hba->ccb[tag].req && hba->ccb[tag].cmd == cmd)
 		hba->wait_ccb = &hba->ccb[tag];
-	else {
-		for (tag = 0; tag < host->can_queue; tag++)
-			if (hba->ccb[tag].cmd == cmd) {
-				hba->wait_ccb = &hba->ccb[tag];
-				break;
-			}
-		if (tag >= host->can_queue)
-			goto out;
+	else
+		goto out;
+
+	if (hba->cardtype == st_yel) {
+		data = readl(base + YI2H_INT);
+		if (data == 0 || data == 0xffffffff)
+			goto fail_out;
+
+		writel(data, base + YI2H_INT_C);
+		stex_ss_mu_intr(hba);
+	} else if (hba->cardtype == st_P3) {
+		data = readl(base + PSCRATCH4);
+		if (data == 0xffffffff)
+			goto fail_out;
+		if (data != 0) {
+			writel(data, base + PSCRATCH1);
+			writel((1 << 22), base + YH2I_INT);
+		}
+		stex_ss_mu_intr(hba);
+	} else {
+		data = readl(base + ODBL);
+		if (data == 0 || data == 0xffffffff)
+			goto fail_out;
+
+		writel(data, base + ODBL);
+		readl(base + ODBL); /* flush */
+		stex_mu_intr(hba, data);
 	}
-
-	data = readl(base + ODBL);
-	if (data == 0 || data == 0xffffffff)
-		goto fail_out;
-
-	writel(data, base + ODBL);
-	readl(base + ODBL); /* flush */
-
-	stex_mu_intr(hba, data);
-
 	if (hba->wait_ccb == NULL) {
 		printk(KERN_WARNING DRV_NAME
 			"(%s): lost interrupt\n", pci_name(hba->pdev));
@@ -978,54 +1343,116 @@ static void stex_hard_reset(struct st_hba *hba)
 			hba->pdev->saved_config_space[i]);
 }
 
-static int stex_reset(struct scsi_cmnd *cmd)
+static int stex_yos_reset(struct st_hba *hba)
 {
-	struct st_hba *hba;
-	unsigned long flags;
-	unsigned long before;
-	hba = (struct st_hba *) &cmd->device->host->hostdata[0];
+	void __iomem *base;
+	unsigned long flags, before;
+	int ret = 0;
 
-	printk(KERN_INFO DRV_NAME
-		"(%s): resetting host\n", pci_name(hba->pdev));
-	scsi_print_command(cmd);
-
-	hba->mu_status = MU_STATE_RESETTING;
-
-	if (hba->cardtype == st_shasta)
-		stex_hard_reset(hba);
-
-	if (hba->cardtype != st_yosemite) {
-		if (stex_handshake(hba)) {
-			printk(KERN_WARNING DRV_NAME
-				"(%s): resetting: handshake failed\n",
-				pci_name(hba->pdev));
-			return FAILED;
-		}
-		spin_lock_irqsave(hba->host->host_lock, flags);
-		hba->req_head = 0;
-		hba->req_tail = 0;
-		hba->status_head = 0;
-		hba->status_tail = 0;
-		hba->out_req_cnt = 0;
-		spin_unlock_irqrestore(hba->host->host_lock, flags);
-		return SUCCESS;
-	}
-
-	/* st_yosemite */
-	writel(MU_INBOUND_DOORBELL_RESET, hba->mmio_base + IDBL);
-	readl(hba->mmio_base + IDBL); /* flush */
+	base = hba->mmio_base;
+	writel(MU_INBOUND_DOORBELL_RESET, base + IDBL);
+	readl(base + IDBL); /* flush */
 	before = jiffies;
 	while (hba->out_req_cnt > 0) {
 		if (time_after(jiffies, before + ST_INTERNAL_TIMEOUT * HZ)) {
 			printk(KERN_WARNING DRV_NAME
 				"(%s): reset timeout\n", pci_name(hba->pdev));
-			return FAILED;
+			ret = -1;
+			break;
 		}
 		msleep(1);
 	}
 
-	hba->mu_status = MU_STATE_STARTED;
-	return SUCCESS;
+	spin_lock_irqsave(hba->host->host_lock, flags);
+	if (ret == -1)
+		hba->mu_status = MU_STATE_FAILED;
+	else
+		hba->mu_status = MU_STATE_STARTED;
+	wake_up_all(&hba->reset_waitq);
+	spin_unlock_irqrestore(hba->host->host_lock, flags);
+
+	return ret;
+}
+
+static void stex_ss_reset(struct st_hba *hba)
+{
+	writel(SS_H2I_INT_RESET, hba->mmio_base + YH2I_INT);
+	readl(hba->mmio_base + YH2I_INT);
+	ssleep(5);
+}
+
+static void stex_p3_reset(struct st_hba *hba)
+{
+	writel(SS_H2I_INT_RESET, hba->mmio_base + YH2I_INT);
+	ssleep(5);
+}
+
+static int stex_do_reset(struct st_hba *hba)
+{
+	unsigned long flags;
+	unsigned int mu_status = MU_STATE_RESETTING;
+
+	spin_lock_irqsave(hba->host->host_lock, flags);
+	if (hba->mu_status == MU_STATE_STARTING) {
+		spin_unlock_irqrestore(hba->host->host_lock, flags);
+		printk(KERN_INFO DRV_NAME "(%s): request reset during init\n",
+			pci_name(hba->pdev));
+		return 0;
+	}
+	while (hba->mu_status == MU_STATE_RESETTING) {
+		spin_unlock_irqrestore(hba->host->host_lock, flags);
+		wait_event_timeout(hba->reset_waitq,
+				   hba->mu_status != MU_STATE_RESETTING,
+				   MU_MAX_DELAY * HZ);
+		spin_lock_irqsave(hba->host->host_lock, flags);
+		mu_status = hba->mu_status;
+	}
+
+	if (mu_status != MU_STATE_RESETTING) {
+		spin_unlock_irqrestore(hba->host->host_lock, flags);
+		return (mu_status == MU_STATE_STARTED) ? 0 : -1;
+	}
+
+	hba->mu_status = MU_STATE_RESETTING;
+	spin_unlock_irqrestore(hba->host->host_lock, flags);
+
+	if (hba->cardtype == st_yosemite)
+		return stex_yos_reset(hba);
+
+	if (hba->cardtype == st_shasta)
+		stex_hard_reset(hba);
+	else if (hba->cardtype == st_yel)
+		stex_ss_reset(hba);
+	else if (hba->cardtype == st_P3)
+		stex_p3_reset(hba);
+
+	return_abnormal_state(hba, DID_RESET);
+
+	if (stex_handshake(hba) == 0)
+		return 0;
+
+	printk(KERN_WARNING DRV_NAME "(%s): resetting: handshake failed\n",
+		pci_name(hba->pdev));
+	return -1;
+}
+
+static int stex_reset(struct scsi_cmnd *cmd)
+{
+	struct st_hba *hba;
+
+	hba = (struct st_hba *) &cmd->device->host->hostdata[0];
+
+	shost_printk(KERN_INFO, cmd->device->host,
+		     "resetting host\n");
+
+	return stex_do_reset(hba) ? FAILED : SUCCESS;
+}
+
+static void stex_reset_work(struct work_struct *work)
+{
+	struct st_hba *hba = container_of(work, struct st_hba, reset_work);
+
+	stex_do_reset(hba);
 }
 
 static int stex_biosparam(struct scsi_device *sdev,
@@ -1053,34 +1480,181 @@ static struct scsi_host_template driver_template = {
 	.proc_name			= DRV_NAME,
 	.bios_param			= stex_biosparam,
 	.queuecommand			= stex_queuecommand,
-	.slave_alloc			= stex_slave_alloc,
 	.slave_configure		= stex_slave_config,
-	.slave_destroy			= stex_slave_destroy,
 	.eh_abort_handler		= stex_abort,
 	.eh_host_reset_handler		= stex_reset,
-	.can_queue			= ST_CAN_QUEUE,
 	.this_id			= -1,
-	.sg_tablesize			= ST_MAX_SG,
-	.cmd_per_lun			= ST_CMD_PER_LUN,
+	.dma_boundary			= PAGE_SIZE - 1,
 };
 
-static int stex_set_dma_mask(struct pci_dev * pdev)
+static struct pci_device_id stex_pci_tbl[] = {
+	/* st_shasta */
+	{ 0x105a, 0x8350, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		st_shasta }, /* SuperTrak EX8350/8300/16350/16300 */
+	{ 0x105a, 0xc350, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		st_shasta }, /* SuperTrak EX12350 */
+	{ 0x105a, 0x4302, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		st_shasta }, /* SuperTrak EX4350 */
+	{ 0x105a, 0xe350, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		st_shasta }, /* SuperTrak EX24350 */
+
+	/* st_vsc */
+	{ 0x105a, 0x7250, PCI_ANY_ID, PCI_ANY_ID, 0, 0, st_vsc },
+
+	/* st_yosemite */
+	{ 0x105a, 0x8650, 0x105a, PCI_ANY_ID, 0, 0, st_yosemite },
+
+	/* st_seq */
+	{ 0x105a, 0x3360, PCI_ANY_ID, PCI_ANY_ID, 0, 0, st_seq },
+
+	/* st_yel */
+	{ 0x105a, 0x8650, 0x1033, PCI_ANY_ID, 0, 0, st_yel },
+	{ 0x105a, 0x8760, PCI_ANY_ID, PCI_ANY_ID, 0, 0, st_yel },
+
+	/* st_P3, pluto */
+	{ PCI_VENDOR_ID_PROMISE, 0x8870, PCI_VENDOR_ID_PROMISE,
+		0x8870, 0, 0, st_P3 },
+	/* st_P3, p3 */
+	{ PCI_VENDOR_ID_PROMISE, 0x8870, PCI_VENDOR_ID_PROMISE,
+		0x4300, 0, 0, st_P3 },
+
+	/* st_P3, SymplyStor4E */
+	{ PCI_VENDOR_ID_PROMISE, 0x8871, PCI_VENDOR_ID_PROMISE,
+		0x4311, 0, 0, st_P3 },
+	/* st_P3, SymplyStor8E */
+	{ PCI_VENDOR_ID_PROMISE, 0x8871, PCI_VENDOR_ID_PROMISE,
+		0x4312, 0, 0, st_P3 },
+	/* st_P3, SymplyStor4 */
+	{ PCI_VENDOR_ID_PROMISE, 0x8871, PCI_VENDOR_ID_PROMISE,
+		0x4321, 0, 0, st_P3 },
+	/* st_P3, SymplyStor8 */
+	{ PCI_VENDOR_ID_PROMISE, 0x8871, PCI_VENDOR_ID_PROMISE,
+		0x4322, 0, 0, st_P3 },
+	{ }	/* terminate list */
+};
+
+static struct st_card_info stex_card_info[] = {
+	/* st_shasta */
+	{
+		.max_id		= 17,
+		.max_lun	= 8,
+		.max_channel	= 0,
+		.rq_count	= 32,
+		.rq_size	= 1048,
+		.sts_count	= 32,
+		.alloc_rq	= stex_alloc_req,
+		.map_sg		= stex_map_sg,
+		.send		= stex_send_cmd,
+	},
+
+	/* st_vsc */
+	{
+		.max_id		= 129,
+		.max_lun	= 1,
+		.max_channel	= 0,
+		.rq_count	= 32,
+		.rq_size	= 1048,
+		.sts_count	= 32,
+		.alloc_rq	= stex_alloc_req,
+		.map_sg		= stex_map_sg,
+		.send		= stex_send_cmd,
+	},
+
+	/* st_yosemite */
+	{
+		.max_id		= 2,
+		.max_lun	= 256,
+		.max_channel	= 0,
+		.rq_count	= 256,
+		.rq_size	= 1048,
+		.sts_count	= 256,
+		.alloc_rq	= stex_alloc_req,
+		.map_sg		= stex_map_sg,
+		.send		= stex_send_cmd,
+	},
+
+	/* st_seq */
+	{
+		.max_id		= 129,
+		.max_lun	= 1,
+		.max_channel	= 0,
+		.rq_count	= 32,
+		.rq_size	= 1048,
+		.sts_count	= 32,
+		.alloc_rq	= stex_alloc_req,
+		.map_sg		= stex_map_sg,
+		.send		= stex_send_cmd,
+	},
+
+	/* st_yel */
+	{
+		.max_id		= 129,
+		.max_lun	= 256,
+		.max_channel	= 3,
+		.rq_count	= 801,
+		.rq_size	= 512,
+		.sts_count	= 801,
+		.alloc_rq	= stex_ss_alloc_req,
+		.map_sg		= stex_ss_map_sg,
+		.send		= stex_ss_send_cmd,
+	},
+
+	/* st_P3 */
+	{
+		.max_id		= 129,
+		.max_lun	= 256,
+		.max_channel	= 0,
+		.rq_count	= 801,
+		.rq_size	= 512,
+		.sts_count	= 801,
+		.alloc_rq	= stex_ss_alloc_req,
+		.map_sg		= stex_ss_map_sg,
+		.send		= stex_ss_send_cmd,
+	},
+};
+
+static int stex_request_irq(struct st_hba *hba)
 {
-	int ret;
-	if (!pci_set_dma_mask(pdev, DMA_64BIT_MASK)
-		&& !pci_set_consistent_dma_mask(pdev, DMA_64BIT_MASK))
-		return 0;
-	ret = pci_set_dma_mask(pdev, DMA_32BIT_MASK);
-	if (!ret)
-		ret = pci_set_consistent_dma_mask(pdev, DMA_32BIT_MASK);
-	return ret;
+	struct pci_dev *pdev = hba->pdev;
+	int status;
+
+	if (msi || hba->cardtype == st_P3) {
+		status = pci_enable_msi(pdev);
+		if (status != 0)
+			printk(KERN_ERR DRV_NAME
+				"(%s): error %d setting up MSI\n",
+				pci_name(pdev), status);
+		else
+			hba->msi_enabled = 1;
+	} else
+		hba->msi_enabled = 0;
+
+	status = request_irq(pdev->irq,
+		(hba->cardtype == st_yel || hba->cardtype == st_P3) ?
+		stex_ss_intr : stex_intr, IRQF_SHARED, DRV_NAME, hba);
+
+	if (status != 0) {
+		if (hba->msi_enabled)
+			pci_disable_msi(pdev);
+	}
+	return status;
 }
 
-static int __devinit
-stex_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+static void stex_free_irq(struct st_hba *hba)
+{
+	struct pci_dev *pdev = hba->pdev;
+
+	free_irq(pdev->irq, hba);
+	if (hba->msi_enabled)
+		pci_disable_msi(pdev);
+}
+
+static int stex_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct st_hba *hba;
 	struct Scsi_Host *host;
+	const struct st_card_info *ci = NULL;
+	u32 sts_offset, cp_offset, scratch_offset;
 	int err;
 
 	err = pci_enable_device(pdev);
@@ -1088,6 +1662,9 @@ stex_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return err;
 
 	pci_set_master(pdev);
+
+	S6flag = 0;
+	register_reboot_notifier(&stex_notifier);
 
 	host = scsi_host_alloc(&driver_template, sizeof(struct st_hba));
 
@@ -1108,8 +1685,7 @@ stex_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto out_scsi_host_put;
 	}
 
-	hba->mmio_base = ioremap_nocache(pci_resource_start(pdev, 0),
-		pci_resource_len(pdev, 0));
+	hba->mmio_base = pci_ioremap_bar(pdev, 0);
 	if ( !hba->mmio_base) {
 		printk(KERN_ERR DRV_NAME "(%s): memory map failed\n",
 			pci_name(pdev));
@@ -1117,7 +1693,9 @@ stex_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto out_release_regions;
 	}
 
-	err = stex_set_dma_mask(pdev);
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	if (err)
+		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (err) {
 		printk(KERN_ERR DRV_NAME "(%s): set dma mask failed\n",
 			pci_name(pdev));
@@ -1125,60 +1703,117 @@ stex_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 
 	hba->cardtype = (unsigned int) id->driver_data;
-	if (hba->cardtype == st_vsc && (pdev->subsystem_device & 0xf) == 0x1)
-		hba->cardtype = st_vsc1;
-	hba->dma_size = (hba->cardtype == st_vsc1) ?
-		(STEX_BUFFER_SIZE + ST_ADDITIONAL_MEM) : (STEX_BUFFER_SIZE);
+	ci = &stex_card_info[hba->cardtype];
+	switch (id->subdevice) {
+	case 0x4221:
+	case 0x4222:
+	case 0x4223:
+	case 0x4224:
+	case 0x4225:
+	case 0x4226:
+	case 0x4227:
+	case 0x4261:
+	case 0x4262:
+	case 0x4263:
+	case 0x4264:
+	case 0x4265:
+		break;
+	default:
+		if (hba->cardtype == st_yel || hba->cardtype == st_P3)
+			hba->supports_pm = 1;
+	}
+
+	sts_offset = scratch_offset = (ci->rq_count+1) * ci->rq_size;
+	if (hba->cardtype == st_yel || hba->cardtype == st_P3)
+		sts_offset += (ci->sts_count+1) * sizeof(u32);
+	cp_offset = sts_offset + (ci->sts_count+1) * sizeof(struct status_msg);
+	hba->dma_size = cp_offset + sizeof(struct st_frame);
+	if (hba->cardtype == st_seq ||
+		(hba->cardtype == st_vsc && (pdev->subsystem_device & 1))) {
+		hba->extra_offset = hba->dma_size;
+		hba->dma_size += ST_ADDITIONAL_MEM;
+	}
 	hba->dma_mem = dma_alloc_coherent(&pdev->dev,
 		hba->dma_size, &hba->dma_handle, GFP_KERNEL);
 	if (!hba->dma_mem) {
+		/* Retry minimum coherent mapping for st_seq and st_vsc */
+		if (hba->cardtype == st_seq ||
+		    (hba->cardtype == st_vsc && (pdev->subsystem_device & 1))) {
+			printk(KERN_WARNING DRV_NAME
+				"(%s): allocating min buffer for controller\n",
+				pci_name(pdev));
+			hba->dma_size = hba->extra_offset
+				+ ST_ADDITIONAL_MEM_MIN;
+			hba->dma_mem = dma_alloc_coherent(&pdev->dev,
+				hba->dma_size, &hba->dma_handle, GFP_KERNEL);
+		}
+
+		if (!hba->dma_mem) {
+			err = -ENOMEM;
+			printk(KERN_ERR DRV_NAME "(%s): dma mem alloc failed\n",
+				pci_name(pdev));
+			goto out_iounmap;
+		}
+	}
+
+	hba->ccb = kcalloc(ci->rq_count, sizeof(struct st_ccb), GFP_KERNEL);
+	if (!hba->ccb) {
 		err = -ENOMEM;
-		printk(KERN_ERR DRV_NAME "(%s): dma mem alloc failed\n",
+		printk(KERN_ERR DRV_NAME "(%s): ccb alloc failed\n",
 			pci_name(pdev));
-		goto out_iounmap;
+		goto out_pci_free;
 	}
 
-	hba->status_buffer =
-		(struct status_msg *)(hba->dma_mem + MU_REQ_BUFFER_SIZE);
-	hba->copy_buffer = hba->dma_mem + MU_BUFFER_SIZE;
+	if (hba->cardtype == st_yel || hba->cardtype == st_P3)
+		hba->scratch = (__le32 *)(hba->dma_mem + scratch_offset);
+	hba->status_buffer = (struct status_msg *)(hba->dma_mem + sts_offset);
+	hba->copy_buffer = hba->dma_mem + cp_offset;
+	hba->rq_count = ci->rq_count;
+	hba->rq_size = ci->rq_size;
+	hba->sts_count = ci->sts_count;
+	hba->alloc_rq = ci->alloc_rq;
+	hba->map_sg = ci->map_sg;
+	hba->send = ci->send;
 	hba->mu_status = MU_STATE_STARTING;
+	hba->msi_lock = 0;
 
-	if (hba->cardtype == st_shasta) {
-		host->max_lun = 8;
-		host->max_id = 16 + 1;
-	} else if (hba->cardtype == st_yosemite) {
-		host->max_lun = 128;
-		host->max_id = 1 + 1;
-	} else {
-		/* st_vsc and st_vsc1 */
-		host->max_lun = 1;
-		host->max_id = 128 + 1;
-	}
-	host->max_channel = 0;
+	if (hba->cardtype == st_yel || hba->cardtype == st_P3)
+		host->sg_tablesize = 38;
+	else
+		host->sg_tablesize = 32;
+	host->can_queue = ci->rq_count;
+	host->cmd_per_lun = ci->rq_count;
+	host->max_id = ci->max_id;
+	host->max_lun = ci->max_lun;
+	host->max_channel = ci->max_channel;
 	host->unique_id = host->host_no;
 	host->max_cmd_len = STEX_CDB_LENGTH;
 
 	hba->host = host;
 	hba->pdev = pdev;
-	init_waitqueue_head(&hba->waitq);
+	init_waitqueue_head(&hba->reset_waitq);
 
-	err = request_irq(pdev->irq, stex_intr, IRQF_SHARED, DRV_NAME, hba);
+	snprintf(hba->work_q_name, sizeof(hba->work_q_name),
+		 "stex_wq_%d", host->host_no);
+	hba->work_q = create_singlethread_workqueue(hba->work_q_name);
+	if (!hba->work_q) {
+		printk(KERN_ERR DRV_NAME "(%s): create workqueue failed\n",
+			pci_name(pdev));
+		err = -ENOMEM;
+		goto out_ccb_free;
+	}
+	INIT_WORK(&hba->reset_work, stex_reset_work);
+
+	err = stex_request_irq(hba);
 	if (err) {
 		printk(KERN_ERR DRV_NAME "(%s): request irq failed\n",
 			pci_name(pdev));
-		goto out_pci_free;
+		goto out_free_wq;
 	}
 
 	err = stex_handshake(hba);
 	if (err)
 		goto out_free_irq;
-
-	err = scsi_init_shared_tag_map(host, host->can_queue);
-	if (err) {
-		printk(KERN_ERR DRV_NAME "(%s): init shared queue failed\n",
-			pci_name(pdev));
-		goto out_free_irq;
-	}
 
 	pci_set_drvdata(pdev, hba);
 
@@ -1194,7 +1829,11 @@ stex_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	return 0;
 
 out_free_irq:
-	free_irq(pdev->irq, hba);
+	stex_free_irq(hba);
+out_free_wq:
+	destroy_workqueue(hba->work_q);
+out_ccb_free:
+	kfree(hba->ccb);
 out_pci_free:
 	dma_free_coherent(&pdev->dev, hba->dma_size,
 			  hba->dma_mem, hba->dma_handle);
@@ -1210,52 +1849,79 @@ out_disable:
 	return err;
 }
 
-static void stex_hba_stop(struct st_hba *hba)
+static void stex_hba_stop(struct st_hba *hba, int st_sleep_mic)
 {
 	struct req_msg *req;
+	struct st_msg_header *msg_h;
 	unsigned long flags;
 	unsigned long before;
 	u16 tag = 0;
 
 	spin_lock_irqsave(hba->host->host_lock, flags);
-	req = stex_alloc_req(hba);
-	memset(req->cdb, 0, STEX_CDB_LENGTH);
 
-	if (hba->cardtype == st_yosemite) {
+	if ((hba->cardtype == st_yel || hba->cardtype == st_P3) &&
+		hba->supports_pm == 1) {
+		if (st_sleep_mic == ST_NOTHANDLED) {
+			spin_unlock_irqrestore(hba->host->host_lock, flags);
+			return;
+		}
+	}
+	req = hba->alloc_rq(hba);
+	if (hba->cardtype == st_yel || hba->cardtype == st_P3) {
+		msg_h = (struct st_msg_header *)req - 1;
+		memset(msg_h, 0, hba->rq_size);
+	} else
+		memset(req, 0, hba->rq_size);
+
+	if ((hba->cardtype == st_yosemite || hba->cardtype == st_yel
+		|| hba->cardtype == st_P3)
+		&& st_sleep_mic == ST_IGNORED) {
 		req->cdb[0] = MGT_CMD;
 		req->cdb[1] = MGT_CMD_SIGNATURE;
 		req->cdb[2] = CTLR_CONFIG_CMD;
 		req->cdb[3] = CTLR_SHUTDOWN;
+	} else if ((hba->cardtype == st_yel || hba->cardtype == st_P3)
+		&& st_sleep_mic != ST_IGNORED) {
+		req->cdb[0] = MGT_CMD;
+		req->cdb[1] = MGT_CMD_SIGNATURE;
+		req->cdb[2] = CTLR_CONFIG_CMD;
+		req->cdb[3] = PMIC_SHUTDOWN;
+		req->cdb[4] = st_sleep_mic;
 	} else {
 		req->cdb[0] = CONTROLLER_CMD;
 		req->cdb[1] = CTLR_POWER_STATE_CHANGE;
 		req->cdb[2] = CTLR_POWER_SAVING;
 	}
-
 	hba->ccb[tag].cmd = NULL;
 	hba->ccb[tag].sg_count = 0;
 	hba->ccb[tag].sense_bufflen = 0;
 	hba->ccb[tag].sense_buffer = NULL;
-	hba->ccb[tag].req_type |= PASSTHRU_REQ_TYPE;
-
-	stex_send_cmd(hba, req, tag);
+	hba->ccb[tag].req_type = PASSTHRU_REQ_TYPE;
+	hba->send(hba, req, tag);
 	spin_unlock_irqrestore(hba->host->host_lock, flags);
-
 	before = jiffies;
 	while (hba->ccb[tag].req_type & PASSTHRU_REQ_TYPE) {
-		if (time_after(jiffies, before + ST_INTERNAL_TIMEOUT * HZ))
+		if (time_after(jiffies, before + ST_INTERNAL_TIMEOUT * HZ)) {
+			hba->ccb[tag].req_type = 0;
+			hba->mu_status = MU_STATE_STOP;
 			return;
-		msleep(10);
+		}
+		msleep(1);
 	}
+	hba->mu_status = MU_STATE_STOP;
 }
 
 static void stex_hba_free(struct st_hba *hba)
 {
-	free_irq(hba->pdev->irq, hba);
+	stex_free_irq(hba);
+
+	destroy_workqueue(hba->work_q);
 
 	iounmap(hba->mmio_base);
 
 	pci_release_regions(hba->pdev);
+
+	kfree(hba->ccb);
 
 	dma_free_coherent(&hba->pdev->dev, hba->dma_size,
 			  hba->dma_mem, hba->dma_handle);
@@ -1265,63 +1931,83 @@ static void stex_remove(struct pci_dev *pdev)
 {
 	struct st_hba *hba = pci_get_drvdata(pdev);
 
+	hba->mu_status = MU_STATE_NOCONNECT;
+	return_abnormal_state(hba, DID_NO_CONNECT);
 	scsi_remove_host(hba->host);
 
-	pci_set_drvdata(pdev, NULL);
-
-	stex_hba_stop(hba);
+	scsi_block_requests(hba->host);
 
 	stex_hba_free(hba);
 
 	scsi_host_put(hba->host);
 
 	pci_disable_device(pdev);
+
+	unregister_reboot_notifier(&stex_notifier);
 }
 
 static void stex_shutdown(struct pci_dev *pdev)
 {
 	struct st_hba *hba = pci_get_drvdata(pdev);
 
-	stex_hba_stop(hba);
+	if (hba->supports_pm == 0) {
+		stex_hba_stop(hba, ST_IGNORED);
+	} else if (hba->supports_pm == 1 && S6flag) {
+		unregister_reboot_notifier(&stex_notifier);
+		stex_hba_stop(hba, ST_S6);
+	} else
+		stex_hba_stop(hba, ST_S5);
 }
 
-static struct pci_device_id stex_pci_tbl[] = {
-	/* st_shasta */
-	{ 0x105a, 0x8350, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
-		st_shasta }, /* SuperTrak EX8350/8300/16350/16300 */
-	{ 0x105a, 0xc350, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
-		st_shasta }, /* SuperTrak EX12350 */
-	{ 0x105a, 0x4302, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
-		st_shasta }, /* SuperTrak EX4350 */
-	{ 0x105a, 0xe350, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
-		st_shasta }, /* SuperTrak EX24350 */
+static int stex_choice_sleep_mic(struct st_hba *hba, pm_message_t state)
+{
+	switch (state.event) {
+	case PM_EVENT_SUSPEND:
+		return ST_S3;
+	case PM_EVENT_HIBERNATE:
+		hba->msi_lock = 0;
+		return ST_S4;
+	default:
+		return ST_NOTHANDLED;
+	}
+}
 
-	/* st_vsc */
-	{ 0x105a, 0x7250, PCI_ANY_ID, PCI_ANY_ID, 0, 0, st_vsc },
+static int stex_suspend(struct pci_dev *pdev, pm_message_t state)
+{
+	struct st_hba *hba = pci_get_drvdata(pdev);
 
-	/* st_yosemite */
-	{ 0x105a, 0x8650, PCI_ANY_ID, 0x4600, 0, 0,
-		st_yosemite }, /* SuperTrak EX4650 */
-	{ 0x105a, 0x8650, PCI_ANY_ID, 0x4610, 0, 0,
-		st_yosemite }, /* SuperTrak EX4650o */
-	{ 0x105a, 0x8650, PCI_ANY_ID, 0x8600, 0, 0,
-		st_yosemite }, /* SuperTrak EX8650EL */
-	{ 0x105a, 0x8650, PCI_ANY_ID, 0x8601, 0, 0,
-		st_yosemite }, /* SuperTrak EX8650 */
-	{ 0x105a, 0x8650, PCI_ANY_ID, 0x8602, 0, 0,
-		st_yosemite }, /* SuperTrak EX8654 */
-	{ 0x105a, 0x8650, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
-		st_yosemite }, /* generic st_yosemite */
-	{ }	/* terminate list */
-};
+	if ((hba->cardtype == st_yel || hba->cardtype == st_P3)
+		&& hba->supports_pm == 1)
+		stex_hba_stop(hba, stex_choice_sleep_mic(hba, state));
+	else
+		stex_hba_stop(hba, ST_IGNORED);
+	return 0;
+}
+
+static int stex_resume(struct pci_dev *pdev)
+{
+	struct st_hba *hba = pci_get_drvdata(pdev);
+
+	hba->mu_status = MU_STATE_STARTING;
+	stex_handshake(hba);
+	return 0;
+}
+
+static int stex_halt(struct notifier_block *nb, unsigned long event, void *buf)
+{
+	S6flag = 1;
+	return NOTIFY_OK;
+}
 MODULE_DEVICE_TABLE(pci, stex_pci_tbl);
 
 static struct pci_driver stex_pci_driver = {
 	.name		= DRV_NAME,
 	.id_table	= stex_pci_tbl,
 	.probe		= stex_probe,
-	.remove		= __devexit_p(stex_remove),
+	.remove		= stex_remove,
 	.shutdown	= stex_shutdown,
+	.suspend	= stex_suspend,
+	.resume		= stex_resume,
 };
 
 static int __init stex_init(void)

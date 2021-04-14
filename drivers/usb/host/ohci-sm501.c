@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-1.0+
 /*
  * OHCI HCD (Host Controller Driver) for USB.
  *
@@ -48,7 +49,7 @@ static const struct hc_driver ohci_sm501_hc_driver = {
 	 * generic hardware linkage
 	 */
 	.irq =			ohci_irq,
-	.flags =		HCD_USB11 | HCD_MEMORY | HCD_LOCAL_MEM,
+	.flags =		HCD_USB11 | HCD_MEMORY,
 
 	/*
 	 * basic lifecycle operations
@@ -103,35 +104,10 @@ static int ohci_hcd_sm501_drv_probe(struct platform_device *pdev)
 		goto err0;
 	}
 
-	if (!request_mem_region(mem->start, mem->end - mem->start + 1,
-				pdev->name)) {
+	if (!request_mem_region(mem->start, resource_size(mem), pdev->name)) {
 		dev_err(dev, "request_mem_region failed\n");
 		retval = -EBUSY;
 		goto err0;
-	}
-
-	/* The sm501 chip is equipped with local memory that may be used
-	 * by on-chip devices such as the video controller and the usb host.
-	 * This driver uses dma_declare_coherent_memory() to make sure
-	 * usb allocations with dma_alloc_coherent() allocate from
-	 * this local memory. The dma_handle returned by dma_alloc_coherent()
-	 * will be an offset starting from 0 for the first local memory byte.
-	 *
-	 * So as long as data is allocated using dma_alloc_coherent() all is
-	 * fine. This is however not always the case - buffers may be allocated
-	 * using kmalloc() - so the usb core needs to be told that it must copy
-	 * data into our local memory if the buffers happen to be placed in
-	 * regular memory. The HCD_LOCAL_MEM flag does just that.
-	 */
-
-	if (!dma_declare_coherent_memory(dev, mem->start,
-					 mem->start - mem->parent->start,
-					 (mem->end - mem->start) + 1,
-					 DMA_MEMORY_MAP |
-					 DMA_MEMORY_EXCLUSIVE)) {
-		dev_err(dev, "cannot declare coherent memory\n");
-		retval = -ENXIO;
-		goto err1;
 	}
 
 	/* allocate, reserve and remap resources for registers */
@@ -139,17 +115,17 @@ static int ohci_hcd_sm501_drv_probe(struct platform_device *pdev)
 	if (res == NULL) {
 		dev_err(dev, "no resource definition for registers\n");
 		retval = -ENOENT;
-		goto err2;
+		goto err1;
 	}
 
 	hcd = usb_create_hcd(driver, &pdev->dev, dev_name(&pdev->dev));
 	if (!hcd) {
 		retval = -ENOMEM;
-		goto err2;
+		goto err1;
 	}
 
 	hcd->rsrc_start = res->start;
-	hcd->rsrc_len = res->end - res->start + 1;
+	hcd->rsrc_len = resource_size(res);
 
 	if (!request_mem_region(hcd->rsrc_start, hcd->rsrc_len,	pdev->name)) {
 		dev_err(dev, "request_mem_region failed\n");
@@ -166,9 +142,30 @@ static int ohci_hcd_sm501_drv_probe(struct platform_device *pdev)
 
 	ohci_hcd_init(hcd_to_ohci(hcd));
 
-	retval = usb_add_hcd(hcd, irq, IRQF_DISABLED | IRQF_SHARED);
+	/* The sm501 chip is equipped with local memory that may be used
+	 * by on-chip devices such as the video controller and the usb host.
+	 * This driver uses genalloc so that usb allocations with
+	 * gen_pool_dma_alloc() allocate from this local memory. The dma_handle
+	 * returned by gen_pool_dma_alloc() will be an offset starting from 0
+	 * for the first local memory byte.
+	 *
+	 * So as long as data is allocated using gen_pool_dma_alloc() all is
+	 * fine. This is however not always the case - buffers may be allocated
+	 * using kmalloc() - so the usb core needs to be told that it must copy
+	 * data into our local memory if the buffers happen to be placed in
+	 * regular memory. A non-null hcd->localmem_pool initialized by the
+	 * the call to usb_hcd_setup_local_mem() below does just that.
+	 */
+
+	retval = usb_hcd_setup_local_mem(hcd, mem->start,
+					 mem->start - mem->parent->start,
+					 resource_size(mem));
+	if (retval < 0)
+		goto err5;
+	retval = usb_add_hcd(hcd, irq, IRQF_SHARED);
 	if (retval)
-		goto err4;
+		goto err5;
+	device_wakeup_enable(hcd->self.controller);
 
 	/* enable power and unmask interrupts */
 
@@ -176,14 +173,14 @@ static int ohci_hcd_sm501_drv_probe(struct platform_device *pdev)
 	sm501_modify_reg(dev->parent, SM501_IRQ_MASK, 1 << 6, 0);
 
 	return 0;
+err5:
+	iounmap(hcd->regs);
 err4:
 	release_mem_region(hcd->rsrc_start, hcd->rsrc_len);
 err3:
 	usb_put_hcd(hcd);
-err2:
-	dma_release_declared_memory(dev);
 err1:
-	release_mem_region(mem->start, mem->end - mem->start + 1);
+	release_mem_region(mem->start, resource_size(mem));
 err0:
 	return retval;
 }
@@ -194,19 +191,18 @@ static int ohci_hcd_sm501_drv_remove(struct platform_device *pdev)
 	struct resource	*mem;
 
 	usb_remove_hcd(hcd);
+	iounmap(hcd->regs);
 	release_mem_region(hcd->rsrc_start, hcd->rsrc_len);
 	usb_put_hcd(hcd);
-	dma_release_declared_memory(&pdev->dev);
 	mem = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	if (mem)
-		release_mem_region(mem->start, mem->end - mem->start + 1);
+		release_mem_region(mem->start, resource_size(mem));
 
 	/* mask interrupts and disable power */
 
 	sm501_modify_reg(pdev->dev.parent, SM501_IRQ_MASK, 0, 1 << 6);
 	sm501_unit_power(pdev->dev.parent, SM501_GATE_USB_HOST, 0);
 
-	platform_set_drvdata(pdev, NULL);
 	return 0;
 }
 
@@ -216,15 +212,21 @@ static int ohci_hcd_sm501_drv_remove(struct platform_device *pdev)
 static int ohci_sm501_suspend(struct platform_device *pdev, pm_message_t msg)
 {
 	struct device *dev = &pdev->dev;
-	struct ohci_hcd	*ohci = hcd_to_ohci(platform_get_drvdata(pdev));
+	struct usb_hcd  *hcd = platform_get_drvdata(pdev);
+	struct ohci_hcd	*ohci = hcd_to_ohci(hcd);
+	bool do_wakeup = device_may_wakeup(dev);
+	int ret;
 
 	if (time_before(jiffies, ohci->next_statechange))
 		msleep(5);
 	ohci->next_statechange = jiffies;
 
+	ret = ohci_suspend(hcd, do_wakeup);
+	if (ret)
+		return ret;
+
 	sm501_unit_power(dev->parent, SM501_GATE_USB_HOST, 0);
-	ohci_to_hcd(ohci)->state = HC_STATE_SUSPENDED;
-	return 0;
+	return ret;
 }
 
 static int ohci_sm501_resume(struct platform_device *pdev)
@@ -238,7 +240,7 @@ static int ohci_sm501_resume(struct platform_device *pdev)
 	ohci->next_statechange = jiffies;
 
 	sm501_unit_power(dev->parent, SM501_GATE_USB_HOST, 1);
-	ohci_finish_controller_resume(hcd);
+	ohci_resume(hcd, false);
 	return 0;
 }
 #else
@@ -258,7 +260,6 @@ static struct platform_driver ohci_hcd_sm501_driver = {
 	.suspend	= ohci_sm501_suspend,
 	.resume		= ohci_sm501_resume,
 	.driver		= {
-		.owner	= THIS_MODULE,
 		.name	= "sm501-usb",
 	},
 };

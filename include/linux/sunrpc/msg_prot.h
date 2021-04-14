@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/include/linux/sunrpc/msg_prot.h
  *
@@ -6,8 +7,6 @@
 
 #ifndef _LINUX_SUNRPC_MSGPROT_H_
 #define _LINUX_SUNRPC_MSGPROT_H_
-
-#ifdef __KERNEL__ /* user programs should get these from the rpc header files */
 
 #define RPC_VERSION 2
 
@@ -138,19 +137,29 @@ typedef __be32	rpc_fraghdr;
 #define RPC_MAX_HEADER_WITH_AUTH \
 	(RPC_CALLHDRSIZE + 2*(2+RPC_MAX_AUTH_SIZE/4))
 
+#define RPC_MAX_REPHEADER_WITH_AUTH \
+	(RPC_REPHDRSIZE + (2 + RPC_MAX_AUTH_SIZE/4))
+
 /*
- * RFC1833/RFC3530 rpcbind (v3+) well-known netid's.
+ * Well-known netids. See:
+ *
+ *   https://www.iana.org/assignments/rpc-netids/rpc-netids.xhtml
  */
 #define RPCBIND_NETID_UDP	"udp"
 #define RPCBIND_NETID_TCP	"tcp"
+#define RPCBIND_NETID_RDMA	"rdma"
+#define RPCBIND_NETID_SCTP	"sctp"
 #define RPCBIND_NETID_UDP6	"udp6"
 #define RPCBIND_NETID_TCP6	"tcp6"
+#define RPCBIND_NETID_RDMA6	"rdma6"
+#define RPCBIND_NETID_SCTP6	"sctp6"
+#define RPCBIND_NETID_LOCAL	"local"
 
 /*
  * Note that RFC 1833 does not put any size restrictions on the
- * netid string, but all currently defined netid's fit in 4 bytes.
+ * netid string, but all currently defined netid's fit in 5 bytes.
  */
-#define RPCBIND_MAXNETIDLEN	(4u)
+#define RPCBIND_MAXNETIDLEN	(5u)
 
 /*
  * Universal addresses are introduced in RFC 1833 and further spelled
@@ -189,7 +198,21 @@ typedef __be32	rpc_fraghdr;
  * Additionally, the two alternative forms specified in Section 2.2 of
  * [RFC2373] are also acceptable.
  */
-#define RPCBIND_MAXUADDRLEN	(56u)
 
-#endif /* __KERNEL__ */
+#include <linux/inet.h>
+
+/* Maximum size of the port number part of a universal address */
+#define RPCBIND_MAXUADDRPLEN	sizeof(".255.255")
+
+/* Maximum size of an IPv4 universal address */
+#define RPCBIND_MAXUADDR4LEN	\
+		(INET_ADDRSTRLEN + RPCBIND_MAXUADDRPLEN)
+
+/* Maximum size of an IPv6 universal address */
+#define RPCBIND_MAXUADDR6LEN	\
+		(INET6_ADDRSTRLEN + RPCBIND_MAXUADDRPLEN)
+
+/* Assume INET6_ADDRSTRLEN will always be larger than INET_ADDRSTRLEN... */
+#define RPCBIND_MAXUADDRLEN	RPCBIND_MAXUADDR6LEN
+
 #endif /* _LINUX_SUNRPC_MSGPROT_H_ */

@@ -1,25 +1,41 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  PS3 EHCI Host Controller driver
  *
  *  Copyright (C) 2006 Sony Computer Entertainment Inc.
  *  Copyright 2006 Sony Corp.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <asm/firmware.h>
 #include <asm/ps3.h>
+
+static void ps3_ehci_setup_insnreg(struct ehci_hcd *ehci)
+{
+	/* PS3 HC internal setup register offsets. */
+
+	enum ps3_ehci_hc_insnreg {
+		ps3_ehci_hc_insnreg01 = 0x084,
+		ps3_ehci_hc_insnreg02 = 0x088,
+		ps3_ehci_hc_insnreg03 = 0x08c,
+	};
+
+	/* PS3 EHCI HC errata fix 316 - The PS3 EHCI HC will reset its
+	 * internal INSNREGXX setup regs back to the chip default values
+	 * on Host Controller Reset (CMD_RESET) or Light Host Controller
+	 * Reset (CMD_LRESET).  The work-around for this is for the HC
+	 * driver to re-initialise these regs when ever the HC is reset.
+	 */
+
+	/* Set burst transfer counts to 256 out, 32 in. */
+
+	writel_be(0x01000020, (void __iomem *)ehci->regs +
+		ps3_ehci_hc_insnreg01);
+
+	/* Enable burst transfer counts. */
+
+	writel_be(0x00000001, (void __iomem *)ehci->regs +
+		ps3_ehci_hc_insnreg03);
+}
 
 static int ps3_ehci_hc_reset(struct usb_hcd *hcd)
 {
@@ -27,27 +43,13 @@ static int ps3_ehci_hc_reset(struct usb_hcd *hcd)
 	struct ehci_hcd *ehci = hcd_to_ehci(hcd);
 
 	ehci->big_endian_mmio = 1;
-
 	ehci->caps = hcd->regs;
-	ehci->regs = hcd->regs + HC_LENGTH(ehci_readl(ehci,
-		&ehci->caps->hc_capbase));
 
-	dbg_hcs_params(ehci, "reset");
-	dbg_hcc_params(ehci, "reset");
-
-	ehci->hcs_params = ehci_readl(ehci, &ehci->caps->hcs_params);
-
-	result = ehci_halt(ehci);
-
+	result = ehci_setup(hcd);
 	if (result)
 		return result;
 
-	result = ehci_init(hcd);
-
-	if (result)
-		return result;
-
-	ehci_reset(ehci);
+	ps3_ehci_setup_insnreg(ehci);
 
 	return result;
 }
@@ -57,7 +59,7 @@ static const struct hc_driver ps3_ehci_hc_driver = {
 	.product_desc		= "PS3 EHCI Host Controller",
 	.hcd_priv_size		= sizeof(struct ehci_hcd),
 	.irq			= ehci_irq,
-	.flags			= HCD_MEMORY | HCD_USB2,
+	.flags			= HCD_MEMORY | HCD_DMA | HCD_USB2 | HCD_BH,
 	.reset			= ps3_ehci_hc_reset,
 	.start			= ehci_run,
 	.stop			= ehci_stop,
@@ -65,6 +67,7 @@ static const struct hc_driver ps3_ehci_hc_driver = {
 	.urb_enqueue		= ehci_urb_enqueue,
 	.urb_dequeue		= ehci_urb_dequeue,
 	.endpoint_disable	= ehci_endpoint_disable,
+	.endpoint_reset		= ehci_endpoint_reset,
 	.get_frame_number	= ehci_get_frame,
 	.hub_status_data	= ehci_hub_status_data,
 	.hub_control		= ehci_hub_control,
@@ -74,6 +77,8 @@ static const struct hc_driver ps3_ehci_hc_driver = {
 #endif
 	.relinquish_port	= ehci_relinquish_port,
 	.port_handed_over	= ehci_port_handed_over,
+
+	.clear_tt_buffer_complete	= ehci_clear_tt_buffer_complete,
 };
 
 static int ps3_ehci_probe(struct ps3_system_bus_device *dev)
@@ -81,7 +86,7 @@ static int ps3_ehci_probe(struct ps3_system_bus_device *dev)
 	int result;
 	struct usb_hcd *hcd;
 	unsigned int virq;
-	static u64 dummy_mask = DMA_32BIT_MASK;
+	static u64 dummy_mask;
 
 	if (usb_disabled()) {
 		result = -ENODEV;
@@ -126,7 +131,9 @@ static int ps3_ehci_probe(struct ps3_system_bus_device *dev)
 		goto fail_irq;
 	}
 
-	dev->core.dma_mask = &dummy_mask; /* FIXME: for improper usb code */
+	dummy_mask = DMA_BIT_MASK(32);
+	dev->core.dma_mask = &dummy_mask;
+	dma_set_coherent_mask(&dev->core, dummy_mask);
 
 	hcd = usb_create_hcd(&ps3_ehci_hc_driver, &dev->core, dev_name(&dev->core));
 
@@ -162,9 +169,9 @@ static int ps3_ehci_probe(struct ps3_system_bus_device *dev)
 	dev_dbg(&dev->core, "%s:%d: virq            %lu\n", __func__, __LINE__,
 		(unsigned long)virq);
 
-	ps3_system_bus_set_driver_data(dev, hcd);
+	ps3_system_bus_set_drvdata(dev, hcd);
 
-	result = usb_add_hcd(hcd, virq, IRQF_DISABLED);
+	result = usb_add_hcd(hcd, virq, 0);
 
 	if (result) {
 		dev_dbg(&dev->core, "%s:%d: usb_add_hcd failed (%d)\n",
@@ -172,6 +179,7 @@ static int ps3_ehci_probe(struct ps3_system_bus_device *dev)
 		goto fail_add_hcd;
 	}
 
+	device_wakeup_enable(hcd->self.controller);
 	return result;
 
 fail_add_hcd:
@@ -195,8 +203,7 @@ fail_start:
 static int ps3_ehci_remove(struct ps3_system_bus_device *dev)
 {
 	unsigned int tmp;
-	struct usb_hcd *hcd =
-		(struct usb_hcd *)ps3_system_bus_get_driver_data(dev);
+	struct usb_hcd *hcd = ps3_system_bus_get_drvdata(dev);
 
 	BUG_ON(!hcd);
 
@@ -207,7 +214,7 @@ static int ps3_ehci_remove(struct ps3_system_bus_device *dev)
 
 	usb_remove_hcd(hcd);
 
-	ps3_system_bus_set_driver_data(dev, NULL);
+	ps3_system_bus_set_drvdata(dev, NULL);
 
 	BUG_ON(!hcd->regs);
 	iounmap(hcd->regs);
@@ -224,7 +231,7 @@ static int ps3_ehci_remove(struct ps3_system_bus_device *dev)
 	return 0;
 }
 
-static int ps3_ehci_driver_register(struct ps3_system_bus_driver *drv)
+static int __init ps3_ehci_driver_register(struct ps3_system_bus_driver *drv)
 {
 	return firmware_has_feature(FW_FEATURE_PS3_LV1)
 		? ps3_system_bus_driver_register(drv)

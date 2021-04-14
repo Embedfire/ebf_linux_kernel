@@ -1,12 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- *  Copyright (c) 2000-2007 LSI Corporation.
+ *  Copyright (c) 2000-2008 LSI Corporation.
  *
  *
  *           Name:  mpi_ioc.h
  *          Title:  MPI IOC, Port, Event, FW Download, and FW Upload messages
  *  Creation Date:  August 11, 2000
  *
- *    mpi_ioc.h Version:  01.05.14
+ *    mpi_ioc.h Version:  01.05.16
  *
  *  Version History
  *  ---------------
@@ -113,6 +114,16 @@
  *                      added _MULTI_PORT_DOMAIN.
  *  05-24-07  01.05.14  Added Common Boot Block type to FWDownload Request.
  *                      Added Common Boot Block type to FWUpload Request.
+ *  08-07-07  01.05.15  Added MPI_EVENT_SAS_INIT_RC_REMOVED define.
+ *                      Added MPI_EVENT_IR2_RC_DUAL_PORT_ADDED and
+ *                      MPI_EVENT_IR2_RC_DUAL_PORT_REMOVED for IR2 event data.
+ *                      Added SASAddress field to SAS Initiator Device Table
+ *                      Overflow event data structure.
+ *  03-28-08  01.05.16  Added two new ReasonCode values to SAS Device Status
+ *                      Change Event data to indicate completion of internally
+ *                      generated task management.
+ *                      Added MPI_EVENT_DSCVRY_ERR_DS_SATA_INIT_FAILURE define.
+ *                      Added MPI_EVENT_SAS_INIT_RC_INACCESSIBLE define.
  *  --------------------------------------------------------------------------
  */
 
@@ -612,6 +623,8 @@ typedef struct _EVENT_DATA_SAS_DEVICE_STATUS_CHANGE
 #define MPI_EVENT_SAS_DEV_STAT_RC_CLEAR_TASK_SET_INTERNAL   (0x0B)
 #define MPI_EVENT_SAS_DEV_STAT_RC_QUERY_TASK_INTERNAL       (0x0C)
 #define MPI_EVENT_SAS_DEV_STAT_RC_ASYNC_NOTIFICATION        (0x0D)
+#define MPI_EVENT_SAS_DEV_STAT_RC_CMPL_INTERNAL_DEV_RESET   (0x0E)
+#define MPI_EVENT_SAS_DEV_STAT_RC_CMPL_TASK_ABORT_INTERNAL  (0x0F)
 
 
 /* SCSI Event data for Queue Full event */
@@ -708,6 +721,8 @@ typedef struct _MPI_EVENT_DATA_IR2
 #define MPI_EVENT_IR2_RC_PD_REMOVED                 (0x05)
 #define MPI_EVENT_IR2_RC_FOREIGN_CFG_DETECTED       (0x06)
 #define MPI_EVENT_IR2_RC_REBUILD_MEDIUM_ERROR       (0x07)
+#define MPI_EVENT_IR2_RC_DUAL_PORT_ADDED            (0x08)
+#define MPI_EVENT_IR2_RC_DUAL_PORT_REMOVED          (0x09)
 
 /* defines for logical disk states */
 #define MPI_LD_STATE_OPTIMAL                        (0x00)
@@ -827,6 +842,7 @@ typedef struct _EVENT_DATA_SAS_PHY_LINK_STATUS
 #define MPI_EVENT_SAS_PLS_LR_RATE_SATA_OOB_COMPLETE         (0x03)
 #define MPI_EVENT_SAS_PLS_LR_RATE_1_5                       (0x08)
 #define MPI_EVENT_SAS_PLS_LR_RATE_3_0                       (0x09)
+#define MPI_EVENT_SAS_PLS_LR_RATE_6_0                       (0x0A)
 
 /* SAS Discovery Event data */
 
@@ -842,7 +858,7 @@ typedef struct _EVENT_DATA_SAS_DISCOVERY
 #define MPI_EVENT_SAS_DSCVRY_PHY_BITS_MASK                  (0xFFFF0000)
 #define MPI_EVENT_SAS_DSCVRY_PHY_BITS_SHIFT                 (16)
 
-/* SAS Discovery Errror Event data */
+/* SAS Discovery Error Event data */
 
 typedef struct _EVENT_DATA_DISCOVERY_ERROR
 {
@@ -867,6 +883,7 @@ typedef struct _EVENT_DATA_DISCOVERY_ERROR
 #define MPI_EVENT_DSCVRY_ERR_DS_UNSUPPORTED_DEVICE          (0x00000800)
 #define MPI_EVENT_DSCVRY_ERR_DS_MAX_SATA_TARGETS            (0x00001000)
 #define MPI_EVENT_DSCVRY_ERR_DS_MULTI_PORT_DOMAIN           (0x00002000)
+#define MPI_EVENT_DSCVRY_ERR_DS_SATA_INIT_FAILURE           (0x00004000)
 
 /* SAS SMP Error Event data */
 
@@ -902,6 +919,8 @@ typedef struct _EVENT_DATA_SAS_INIT_DEV_STATUS_CHANGE
 
 /* defines for the ReasonCode field of the SAS Initiator Device Status Change event */
 #define MPI_EVENT_SAS_INIT_RC_ADDED                 (0x01)
+#define MPI_EVENT_SAS_INIT_RC_REMOVED               (0x02)
+#define MPI_EVENT_SAS_INIT_RC_INACCESSIBLE          (0x03)
 
 /* SAS Initiator Device Table Overflow Event data */
 
@@ -910,6 +929,7 @@ typedef struct _EVENT_DATA_SAS_INIT_TABLE_OVERFLOW
     U8                      MaxInit;                    /* 00h */
     U8                      CurrentInit;                /* 01h */
     U16                     Reserved1;                  /* 02h */
+    U64                     SASAddress;                 /* 04h */
 } EVENT_DATA_SAS_INIT_TABLE_OVERFLOW,
   MPI_POINTER PTR_EVENT_DATA_SAS_INIT_TABLE_OVERFLOW,
   MpiEventDataSasInitTableOverflow_t,

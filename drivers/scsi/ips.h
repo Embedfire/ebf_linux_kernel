@@ -51,7 +51,7 @@
    #define _IPS_H_
 
 #include <linux/nmi.h>
-   #include <asm/uaccess.h>
+#include <linux/uaccess.h>
    #include <asm/io.h>
 
    /*
@@ -94,15 +94,6 @@
 
    #ifndef __iomem       /* For clean compiles in earlier kernels without __iomem annotations */
       #define __iomem
-   #endif
-
-   #define pci_dma_hi32(a)         ((a >> 16) >> 16)
-   #define pci_dma_lo32(a)         (a & 0xffffffff)
-
-   #if (BITS_PER_LONG > 32) || defined(CONFIG_HIGHMEM64G)
-      #define IPS_ENABLE_DMA64        (1)
-   #else
-      #define IPS_ENABLE_DMA64        (0)
    #endif
 
    /*
@@ -402,21 +393,11 @@
    #define IPS_BIOS_HEADER             0xC0
 
    /* time oriented stuff */
-   #define IPS_IS_LEAP_YEAR(y)           (((y % 4 == 0) && ((y % 100 != 0) || (y % 400 == 0))) ? 1 : 0)
-   #define IPS_NUM_LEAP_YEARS_THROUGH(y) ((y) / 4 - (y) / 100 + (y) / 400)
-
-   #define IPS_SECS_MIN                 60
-   #define IPS_SECS_HOUR                3600
    #define IPS_SECS_8HOURS              28800
-   #define IPS_SECS_DAY                 86400
-   #define IPS_DAYS_NORMAL_YEAR         365
-   #define IPS_DAYS_LEAP_YEAR           366
-   #define IPS_EPOCH_YEAR               1970
 
    /*
     * Scsi_Host Template
     */
-   static int ips_proc_info(struct Scsi_Host *, char *, char **, off_t, int, int);
    static int ips_biosparam(struct scsi_device *sdev, struct block_device *bdev,
 		sector_t capacity, int geom[]);
    static int ips_slave_configure(struct scsi_device *SDptr);
@@ -959,14 +940,6 @@ typedef union {
    IPS_ENH_SG_LIST  *enh_list;
 } IPS_SG_LIST;
 
-typedef struct _IPS_INFOSTR {
-   char *buffer;
-   int   length;
-   int   offset;
-   int   pos;
-   int   localpos;
-} IPS_INFOSTR;
-
 typedef struct {
    char *option_name;
    int  *option_flag;
@@ -998,7 +971,7 @@ typedef struct ips_wait_queue {
 	struct scsi_cmnd *head;
 	struct scsi_cmnd *tail;
 	int count;
-} ips_wait_queue_t;
+} ips_wait_queue_entry_t;
 
 typedef struct ips_copp_wait_item {
 	struct scsi_cmnd *scsi_cmd;
@@ -1044,7 +1017,7 @@ typedef struct ips_ha {
    ips_stat_t         sp;                 /* Status packer pointer      */
    struct ips_scb    *scbs;               /* Array of all CCBS          */
    struct ips_scb    *scb_freelist;       /* SCB free list              */
-   ips_wait_queue_t   scb_waitlist;       /* Pending SCB list           */
+   ips_wait_queue_entry_t   scb_waitlist;       /* Pending SCB list           */
    ips_copp_queue_t   copp_waitlist;      /* Pending PT list            */
    ips_scb_queue_t    scb_activelist;     /* Active SCB list            */
    IPS_IO_CMD        *dummy;              /* dummy command              */
@@ -1063,7 +1036,7 @@ typedef struct ips_ha {
    uint8_t            active;
    int                ioctl_reset;        /* IOCTL Requested Reset Flag */
    uint16_t           reset_count;        /* number of resets           */
-   time_t             last_ffdc;          /* last time we sent ffdc info*/
+   time64_t           last_ffdc;          /* last time we sent ffdc info*/
    uint8_t            slot_num;           /* PCI Slot Number            */
    int                ioctl_len;          /* size of ioctl buffer       */
    dma_addr_t         ioctl_busaddr;      /* dma address of ioctl buffer*/
@@ -1193,7 +1166,7 @@ typedef struct {
 #define IPS_VER_SEBRING "7.12.02"
 #define IPS_VER_KEYWEST "7.12.02"
 
-/* Compatability IDs for various adapters */
+/* Compatibility IDs for various adapters */
 #define IPS_COMPAT_UNKNOWN ""
 #define IPS_COMPAT_CURRENT "KW710"
 #define IPS_COMPAT_SERVERAID1 "2.25.01"

@@ -20,7 +20,6 @@
 
 #include "udfdecl.h"
 #include <linux/fs.h>
-#include <linux/quotaops.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 
@@ -31,138 +30,111 @@ void udf_free_inode(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
 	struct udf_sb_info *sbi = UDF_SB(sb);
+	struct logicalVolIntegrityDescImpUse *lvidiu = udf_sb_lvidiu(sb);
 
-	/*
-	 * Note: we must free any quota before locking the superblock,
-	 * as writing the quota to disk may need the lock as well.
-	 */
-	DQUOT_FREE_INODE(inode);
-	DQUOT_DROP(inode);
-
-	clear_inode(inode);
-
-	mutex_lock(&sbi->s_alloc_mutex);
-	if (sbi->s_lvid_bh) {
-		struct logicalVolIntegrityDescImpUse *lvidiu =
-							udf_sb_lvidiu(sbi);
+	if (lvidiu) {
+		mutex_lock(&sbi->s_alloc_mutex);
 		if (S_ISDIR(inode->i_mode))
 			le32_add_cpu(&lvidiu->numDirs, -1);
 		else
 			le32_add_cpu(&lvidiu->numFiles, -1);
-
-		mark_buffer_dirty(sbi->s_lvid_bh);
+		udf_updated_lvid(sb);
+		mutex_unlock(&sbi->s_alloc_mutex);
 	}
-	mutex_unlock(&sbi->s_alloc_mutex);
 
-	udf_free_blocks(sb, NULL, UDF_I(inode)->i_location, 0, 1);
+	udf_free_blocks(sb, NULL, &UDF_I(inode)->i_location, 0, 1);
 }
 
-struct inode *udf_new_inode(struct inode *dir, int mode, int *err)
+struct inode *udf_new_inode(struct inode *dir, umode_t mode)
 {
 	struct super_block *sb = dir->i_sb;
 	struct udf_sb_info *sbi = UDF_SB(sb);
 	struct inode *inode;
-	int block;
+	udf_pblk_t block;
 	uint32_t start = UDF_I(dir)->i_location.logicalBlockNum;
 	struct udf_inode_info *iinfo;
 	struct udf_inode_info *dinfo = UDF_I(dir);
+	struct logicalVolIntegrityDescImpUse *lvidiu;
+	int err;
 
 	inode = new_inode(sb);
 
-	if (!inode) {
-		*err = -ENOMEM;
-		return NULL;
-	}
-	*err = -ENOSPC;
+	if (!inode)
+		return ERR_PTR(-ENOMEM);
 
 	iinfo = UDF_I(inode);
 	if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_EXTENDED_FE)) {
 		iinfo->i_efe = 1;
 		if (UDF_VERS_USE_EXTENDED_FE > sbi->s_udfrev)
 			sbi->s_udfrev = UDF_VERS_USE_EXTENDED_FE;
-		iinfo->i_ext.i_data = kzalloc(inode->i_sb->s_blocksize -
-					    sizeof(struct extendedFileEntry),
-					    GFP_KERNEL);
+		iinfo->i_data = kzalloc(inode->i_sb->s_blocksize -
+					sizeof(struct extendedFileEntry),
+					GFP_KERNEL);
 	} else {
 		iinfo->i_efe = 0;
-		iinfo->i_ext.i_data = kzalloc(inode->i_sb->s_blocksize -
-					    sizeof(struct fileEntry),
-					    GFP_KERNEL);
+		iinfo->i_data = kzalloc(inode->i_sb->s_blocksize -
+					sizeof(struct fileEntry),
+					GFP_KERNEL);
 	}
-	if (!iinfo->i_ext.i_data) {
+	if (!iinfo->i_data) {
 		iput(inode);
-		*err = -ENOMEM;
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
+	err = -ENOSPC;
 	block = udf_new_block(dir->i_sb, NULL,
 			      dinfo->i_location.partitionReferenceNum,
-			      start, err);
-	if (*err) {
+			      start, &err);
+	if (err) {
 		iput(inode);
-		return NULL;
+		return ERR_PTR(err);
 	}
 
-	mutex_lock(&sbi->s_alloc_mutex);
-	if (sbi->s_lvid_bh) {
-		struct logicalVolIntegrityDesc *lvid =
-			(struct logicalVolIntegrityDesc *)
-			sbi->s_lvid_bh->b_data;
-		struct logicalVolIntegrityDescImpUse *lvidiu =
-							udf_sb_lvidiu(sbi);
-		struct logicalVolHeaderDesc *lvhd;
-		uint64_t uniqueID;
-		lvhd = (struct logicalVolHeaderDesc *)
-				(lvid->logicalVolContentsUse);
+	lvidiu = udf_sb_lvidiu(sb);
+	if (lvidiu) {
+		iinfo->i_unique = lvid_get_unique_id(sb);
+		inode->i_generation = iinfo->i_unique;
+		mutex_lock(&sbi->s_alloc_mutex);
 		if (S_ISDIR(mode))
 			le32_add_cpu(&lvidiu->numDirs, 1);
 		else
 			le32_add_cpu(&lvidiu->numFiles, 1);
-		iinfo->i_unique = uniqueID = le64_to_cpu(lvhd->uniqueID);
-		if (!(++uniqueID & 0x00000000FFFFFFFFUL))
-			uniqueID += 16;
-		lvhd->uniqueID = cpu_to_le64(uniqueID);
-		mark_buffer_dirty(sbi->s_lvid_bh);
+		udf_updated_lvid(sb);
+		mutex_unlock(&sbi->s_alloc_mutex);
 	}
-	mutex_unlock(&sbi->s_alloc_mutex);
-	inode->i_mode = mode;
-	inode->i_uid = current->fsuid;
-	if (dir->i_mode & S_ISGID) {
-		inode->i_gid = dir->i_gid;
-		if (S_ISDIR(mode))
-			mode |= S_ISGID;
-	} else {
-		inode->i_gid = current->fsgid;
-	}
+
+	inode_init_owner(inode, dir, mode);
+	if (UDF_QUERY_FLAG(sb, UDF_FLAG_UID_SET))
+		inode->i_uid = sbi->s_uid;
+	if (UDF_QUERY_FLAG(sb, UDF_FLAG_GID_SET))
+		inode->i_gid = sbi->s_gid;
 
 	iinfo->i_location.logicalBlockNum = block;
 	iinfo->i_location.partitionReferenceNum =
 				dinfo->i_location.partitionReferenceNum;
-	inode->i_ino = udf_get_lb_pblock(sb, iinfo->i_location, 0);
+	inode->i_ino = udf_get_lb_pblock(sb, &iinfo->i_location, 0);
 	inode->i_blocks = 0;
 	iinfo->i_lenEAttr = 0;
 	iinfo->i_lenAlloc = 0;
 	iinfo->i_use = 0;
+	iinfo->i_checkpoint = 1;
+	iinfo->i_extraPerms = FE_PERM_U_CHATTR;
+	udf_update_extra_perms(inode, mode);
+
 	if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_AD_IN_ICB))
 		iinfo->i_alloc_type = ICBTAG_FLAG_AD_IN_ICB;
 	else if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_SHORT_AD))
 		iinfo->i_alloc_type = ICBTAG_FLAG_AD_SHORT;
 	else
 		iinfo->i_alloc_type = ICBTAG_FLAG_AD_LONG;
-	inode->i_mtime = inode->i_atime = inode->i_ctime =
-		iinfo->i_crtime = current_fs_time(inode->i_sb);
-	insert_inode_hash(inode);
+	inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
+	iinfo->i_crtime = inode->i_mtime;
+	if (unlikely(insert_inode_locked(inode) < 0)) {
+		make_bad_inode(inode);
+		iput(inode);
+		return ERR_PTR(-EIO);
+	}
 	mark_inode_dirty(inode);
 
-	if (DQUOT_ALLOC_INODE(inode)) {
-		DQUOT_DROP(inode);
-		inode->i_flags |= S_NOQUOTA;
-		inode->i_nlink = 0;
-		iput(inode);
-		*err = -EDQUOT;
-		return NULL;
-	}
-
-	*err = 0;
 	return inode;
 }

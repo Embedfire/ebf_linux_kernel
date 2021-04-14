@@ -1,42 +1,41 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*    Kernel dynamically loadable module help for PARISC.
  *
  *    The best reference for this stuff is probably the Processor-
  *    Specific ELF Supplement for PA-RISC:
- *        http://ftp.parisc-linux.org/docs/arch/elf-pa-hp.pdf
+ *        https://parisc.wiki.kernel.org/index.php/File:Elf-pa-hp.pdf
  *
- *    Linux/PA-RISC Project (http://www.parisc-linux.org/)
+ *    Linux/PA-RISC Project
  *    Copyright (C) 2003 Randolph Chung <tausq at debian . org>
- *
- *
- *    This program is free software; you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation; either version 2 of the License, or
- *    (at your option) any later version.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU General Public License for more details.
- *
- *    You should have received a copy of the GNU General Public License
- *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
+ *    Copyright (C) 2008 Helge Deller <deller@gmx.de>
  *
  *    Notes:
+ *    - PLT stub handling
+ *      On 32bit (and sometimes 64bit) and with big kernel modules like xfs or
+ *      ipv6 the relocation types R_PARISC_PCREL17F and R_PARISC_PCREL22F may
+ *      fail to reach their PLT stub if we only create one big stub array for
+ *      all sections at the beginning of the core or init section.
+ *      Instead we now insert individual PLT stub entries directly in front of
+ *      of the code sections where the stubs are actually called.
+ *      This reduces the distance between the PCREL location and the stub entry
+ *      so that the relocations can be fulfilled.
+ *      While calculating the final layout of the kernel module in memory, the
+ *      kernel module loader calls arch_mod_section_prepend() to request the
+ *      to be reserved amount of memory in front of each individual section.
+ *
  *    - SEGREL32 handling
  *      We are not doing SEGREL32 handling correctly. According to the ABI, we
  *      should do a value offset, like this:
  *			if (in_init(me, (void *)val))
- *				val -= (uint32_t)me->module_init;
+ *				val -= (uint32_t)me->init_layout.base;
  *			else
- *				val -= (uint32_t)me->module_core;
+ *				val -= (uint32_t)me->core_layout.base;
  *	However, SEGREL32 is used only for PARISC unwind entries, and we want
  *	those entries to have an absolute address, and not just an offset.
  *
- *	The unwind table mechanism has the ability to specify an offset for 
+ *	The unwind table mechanism has the ability to specify an offset for
  *	the unwind table; however, because we split off the init functions into
- *	a different piece of memory, it is not possible to do this using a 
+ *	a different piece of memory, it is not possible to do this using a
  *	single offset. Instead, we use the above hack for now.
  */
 
@@ -44,23 +43,23 @@
 #include <linux/elf.h>
 #include <linux/vmalloc.h>
 #include <linux/fs.h>
+#include <linux/ftrace.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/bug.h>
-#include <linux/uaccess.h>
+#include <linux/mm.h>
+#include <linux/slab.h>
 
-#include <asm/sections.h>
 #include <asm/unwind.h>
+#include <asm/sections.h>
 
-#if 0
-#define DEBUGP printk
-#else
-#define DEBUGP(fmt...)
-#endif
+#define RELOC_REACHABLE(val, bits) \
+	(( ( !((val) & (1<<((bits)-1))) && ((val)>>(bits)) != 0 )  ||	\
+	     ( ((val) & (1<<((bits)-1))) && ((val)>>(bits)) != (((__typeof__(val))(~0))>>((bits)+2)))) ? \
+	0 : 1)
 
 #define CHECK_RELOC(val, bits) \
-	if ( ( !((val) & (1<<((bits)-1))) && ((val)>>(bits)) != 0 )  ||	\
-	     ( ((val) & (1<<((bits)-1))) && ((val)>>(bits)) != (((__typeof__(val))(~0))>>((bits)+2)))) { \
+	if (!RELOC_REACHABLE(val, bits)) { \
 		printk(KERN_ERR "module %s relocation of symbol %s is out of range (0x%lx in %d bits)\n", \
 		me->name, strtab + sym->st_name, (unsigned long)val, bits); \
 		return -ENOEXEC;			\
@@ -70,21 +69,25 @@
  * the bottom of the table, which has a maximum signed displacement of
  * 0x3fff; however, since we're only going forward, this becomes
  * 0x1fff, and thus, since each GOT entry is 8 bytes long we can have
- * at most 1023 entries */
-#define MAX_GOTS	1023
+ * at most 1023 entries.
+ * To overcome this 14bit displacement with some kernel modules, we'll
+ * use instead the unusal 16bit displacement method (see reassemble_16a)
+ * which gives us a maximum positive displacement of 0x7fff, and as such
+ * allows us to allocate up to 4095 GOT entries. */
+#define MAX_GOTS	4095
 
 /* three functions to determine where in the module core
  * or init pieces the location is */
 static inline int in_init(struct module *me, void *loc)
 {
-	return (loc >= me->module_init &&
-		loc <= (me->module_init + me->init_size));
+	return (loc >= me->init_layout.base &&
+		loc <= (me->init_layout.base + me->init_layout.size));
 }
 
 static inline int in_core(struct module *me, void *loc)
 {
-	return (loc >= me->module_core &&
-		loc <= (me->module_core + me->core_size));
+	return (loc >= me->core_layout.base &&
+		loc <= (me->core_layout.base + me->core_layout.size));
 }
 
 static inline int in_local(struct module *me, void *loc)
@@ -92,19 +95,10 @@ static inline int in_local(struct module *me, void *loc)
 	return in_init(me, loc) || in_core(me, loc);
 }
 
-static inline int in_local_section(struct module *me, void *loc, void *dot)
-{
-	return (in_init(me, loc) && in_init(me, dot)) ||
-		(in_core(me, loc) && in_core(me, dot));
-}
-
-
 #ifndef CONFIG_64BIT
 struct got_entry {
 	Elf32_Addr addr;
 };
-
-#define Elf_Fdesc	Elf32_Fdesc
 
 struct stub_entry {
 	Elf32_Word insns[2]; /* each stub entry has two insns */
@@ -113,8 +107,6 @@ struct stub_entry {
 struct got_entry {
 	Elf64_Addr addr;
 };
-
-#define Elf_Fdesc	Elf64_Fdesc
 
 struct stub_entry {
 	Elf64_Word insns[4]; /* each stub entry has four insns */
@@ -140,11 +132,39 @@ struct stub_entry {
 /* The reassemble_* functions prepare an immediate value for
    insertion into an opcode. pa-risc uses all sorts of weird bitfields
    in the instruction to hold the value.  */
+static inline int sign_unext(int x, int len)
+{
+	int len_ones;
+
+	len_ones = (1 << len) - 1;
+	return x & len_ones;
+}
+
+static inline int low_sign_unext(int x, int len)
+{
+	int sign, temp;
+
+	sign = (x >> (len-1)) & 1;
+	temp = sign_unext(x, len-1);
+	return (temp << 1) | sign;
+}
+
 static inline int reassemble_14(int as14)
 {
 	return (((as14 & 0x1fff) << 1) |
 		((as14 & 0x2000) >> 13));
 }
+
+static inline int reassemble_16a(int as16)
+{
+	int s, t;
+
+	/* Unusual 16-bit encoding, for wide mode only.  */
+	t = (as16 << 1) & 0xffff;
+	s = (as16 & 0x8000);
+	return (t ^ s ^ (s >> 1)) | (s >> 15);
+}
+
 
 static inline int reassemble_17(int as17)
 {
@@ -174,9 +194,13 @@ static inline int reassemble_22(int as22)
 
 void *module_alloc(unsigned long size)
 {
-	if (size == 0)
-		return NULL;
-	return vmalloc(size);
+	/* using RWX means less protection for modules, but it's
+	 * easier than trying to map the text, data, init_text and
+	 * init_data correctly */
+	return __vmalloc_node_range(size, 1, VMALLOC_START, VMALLOC_END,
+				    GFP_KERNEL,
+				    PAGE_KERNEL_RWX, 0, NUMA_NO_NODE,
+				    __builtin_return_address(0));
 }
 
 #ifndef CONFIG_64BIT
@@ -254,27 +278,40 @@ static inline unsigned long count_stubs(const Elf_Rela *rela, unsigned long n)
 }
 #endif
 
-
-/* Free memory returned from module_alloc */
-void module_free(struct module *mod, void *module_region)
+void module_arch_freeing_init(struct module *mod)
 {
-	vfree(module_region);
-	/* FIXME: If module_region == mod->init_region, trim exception
-           table entries. */
+	kfree(mod->arch.section);
+	mod->arch.section = NULL;
 }
 
-#define CONST 
+/* Additional bytes needed in front of individual sections */
+unsigned int arch_mod_section_prepend(struct module *mod,
+				      unsigned int section)
+{
+	/* size needed for all stubs of this section (including
+	 * one additional for correct alignment of the stubs) */
+	return (mod->arch.section[section].stub_entries + 1)
+		* sizeof(struct stub_entry);
+}
+
+#define CONST
 int module_frob_arch_sections(CONST Elf_Ehdr *hdr,
 			      CONST Elf_Shdr *sechdrs,
 			      CONST char *secstrings,
 			      struct module *me)
 {
-	unsigned long gots = 0, fdescs = 0, stubs = 0, init_stubs = 0;
+	unsigned long gots = 0, fdescs = 0, len;
 	unsigned int i;
 
+	len = hdr->e_shnum * sizeof(me->arch.section[0]);
+	me->arch.section = kzalloc(len, GFP_KERNEL);
+	if (!me->arch.section)
+		return -ENOMEM;
+
 	for (i = 1; i < hdr->e_shnum; i++) {
-		const Elf_Rela *rels = (void *)hdr + sechdrs[i].sh_offset;
+		const Elf_Rela *rels = (void *)sechdrs[i].sh_addr;
 		unsigned long nrels = sechdrs[i].sh_size / sizeof(*rels);
+		unsigned int count, s;
 
 		if (strncmp(secstrings + sechdrs[i].sh_name,
 			    ".PARISC.unwind", 14) == 0)
@@ -290,34 +327,36 @@ int module_frob_arch_sections(CONST Elf_Ehdr *hdr,
 		 */
 		gots += count_gots(rels, nrels);
 		fdescs += count_fdescs(rels, nrels);
-		if(strncmp(secstrings + sechdrs[i].sh_name,
-			   ".rela.init", 10) == 0)
-			init_stubs += count_stubs(rels, nrels);
-		else
-			stubs += count_stubs(rels, nrels);
+
+		/* XXX: By sorting the relocs and finding duplicate entries
+		 *  we could reduce the number of necessary stubs and save
+		 *  some memory. */
+		count = count_stubs(rels, nrels);
+		if (!count)
+			continue;
+
+		/* so we need relocation stubs. reserve necessary memory. */
+		/* sh_info gives the section for which we need to add stubs. */
+		s = sechdrs[i].sh_info;
+
+		/* each code section should only have one relocation section */
+		WARN_ON(me->arch.section[s].stub_entries);
+
+		/* store number of stubs we need for this section */
+		me->arch.section[s].stub_entries += count;
 	}
 
 	/* align things a bit */
-	me->core_size = ALIGN(me->core_size, 16);
-	me->arch.got_offset = me->core_size;
-	me->core_size += gots * sizeof(struct got_entry);
+	me->core_layout.size = ALIGN(me->core_layout.size, 16);
+	me->arch.got_offset = me->core_layout.size;
+	me->core_layout.size += gots * sizeof(struct got_entry);
 
-	me->core_size = ALIGN(me->core_size, 16);
-	me->arch.fdesc_offset = me->core_size;
-	me->core_size += fdescs * sizeof(Elf_Fdesc);
-
-	me->core_size = ALIGN(me->core_size, 16);
-	me->arch.stub_offset = me->core_size;
-	me->core_size += stubs * sizeof(struct stub_entry);
-
-	me->init_size = ALIGN(me->init_size, 16);
-	me->arch.init_stub_offset = me->init_size;
-	me->init_size += init_stubs * sizeof(struct stub_entry);
+	me->core_layout.size = ALIGN(me->core_layout.size, 16);
+	me->arch.fdesc_offset = me->core_layout.size;
+	me->core_layout.size += fdescs * sizeof(Elf_Fdesc);
 
 	me->arch.got_max = gots;
 	me->arch.fdesc_max = fdescs;
-	me->arch.stub_max = stubs;
-	me->arch.init_stub_max = init_stubs;
 
 	return 0;
 }
@@ -332,7 +371,7 @@ static Elf64_Word get_got(struct module *me, unsigned long value, long addend)
 
 	BUG_ON(value == 0);
 
-	got = me->module_core + me->arch.got_offset;
+	got = me->core_layout.base + me->arch.got_offset;
 	for (i = 0; got[i].addr; i++)
 		if (got[i].addr == value)
 			goto out;
@@ -341,7 +380,7 @@ static Elf64_Word get_got(struct module *me, unsigned long value, long addend)
 
 	got[i].addr = value;
  out:
-	DEBUGP("GOT ENTRY %d[%x] val %lx\n", i, i*sizeof(struct got_entry),
+	pr_debug("GOT ENTRY %d[%lx] val %lx\n", i, i*sizeof(struct got_entry),
 	       value);
 	return i * sizeof(struct got_entry);
 }
@@ -350,7 +389,7 @@ static Elf64_Word get_got(struct module *me, unsigned long value, long addend)
 #ifdef CONFIG_64BIT
 static Elf_Addr get_fdesc(struct module *me, unsigned long value)
 {
-	Elf_Fdesc *fdesc = me->module_core + me->arch.fdesc_offset;
+	Elf_Fdesc *fdesc = me->core_layout.base + me->arch.fdesc_offset;
 
 	if (!value) {
 		printk(KERN_ERR "%s: zero OPD requested!\n", me->name);
@@ -368,7 +407,7 @@ static Elf_Addr get_fdesc(struct module *me, unsigned long value)
 
 	/* Create new one */
 	fdesc->addr = value;
-	fdesc->gp = (Elf_Addr)me->module_core + me->arch.got_offset;
+	fdesc->gp = (Elf_Addr)me->core_layout.base + me->arch.got_offset;
 	return (Elf_Addr)fdesc;
 }
 #endif /* CONFIG_64BIT */
@@ -380,22 +419,27 @@ enum elf_stub_type {
 };
 
 static Elf_Addr get_stub(struct module *me, unsigned long value, long addend,
-	enum elf_stub_type stub_type, int init_section)
+	enum elf_stub_type stub_type, Elf_Addr loc0, unsigned int targetsec)
 {
-	unsigned long i;
 	struct stub_entry *stub;
+	int __maybe_unused d;
 
-	if(init_section) {
-		i = me->arch.init_stub_count++;
-		BUG_ON(me->arch.init_stub_count > me->arch.init_stub_max);
-		stub = me->module_init + me->arch.init_stub_offset + 
-			i * sizeof(struct stub_entry);
-	} else {
-		i = me->arch.stub_count++;
-		BUG_ON(me->arch.stub_count > me->arch.stub_max);
-		stub = me->module_core + me->arch.stub_offset + 
-			i * sizeof(struct stub_entry);
+	/* initialize stub_offset to point in front of the section */
+	if (!me->arch.section[targetsec].stub_offset) {
+		loc0 -= (me->arch.section[targetsec].stub_entries + 1) *
+				sizeof(struct stub_entry);
+		/* get correct alignment for the stubs */
+		loc0 = ALIGN(loc0, sizeof(struct stub_entry));
+		me->arch.section[targetsec].stub_offset = loc0;
 	}
+
+	/* get address of stub entry */
+	stub = (void *) me->arch.section[targetsec].stub_offset;
+	me->arch.section[targetsec].stub_offset += sizeof(struct stub_entry);
+
+	/* do not write outside available stub area */
+	BUG_ON(0 == me->arch.section[targetsec].stub_entries--);
+
 
 #ifndef CONFIG_64BIT
 /* for 32-bit the stub looks like this:
@@ -432,12 +476,19 @@ static Elf_Addr get_stub(struct module *me, unsigned long value, long addend,
  */
 	switch (stub_type) {
 	case ELF_STUB_GOT:
-		stub->insns[0] = 0x537b0000;	/* ldd 0(%dp),%dp	*/
+		d = get_got(me, value, addend);
+		if (d <= 15) {
+			/* Format 5 */
+			stub->insns[0] = 0x0f6010db; /* ldd 0(%dp),%dp	*/
+			stub->insns[0] |= low_sign_unext(d, 5) << 16;
+		} else {
+			/* Format 3 */
+			stub->insns[0] = 0x537b0000; /* ldd 0(%dp),%dp	*/
+			stub->insns[0] |= reassemble_16a(d);
+		}
 		stub->insns[1] = 0x53610020;	/* ldd 10(%dp),%r1	*/
 		stub->insns[2] = 0xe820d000;	/* bve (%r1)		*/
 		stub->insns[3] = 0x537b0030;	/* ldd 18(%dp),%dp	*/
-
-		stub->insns[0] |= reassemble_14(get_got(me, value, addend) & 0x3fff);
 		break;
 	case ELF_STUB_MILLI:
 		stub->insns[0] = 0x20200000;	/* ldil 0,%r1		*/
@@ -463,18 +514,6 @@ static Elf_Addr get_stub(struct module *me, unsigned long value, long addend,
 	return (Elf_Addr)stub;
 }
 
-int apply_relocate(Elf_Shdr *sechdrs,
-		   const char *strtab,
-		   unsigned int symindex,
-		   unsigned int relsec,
-		   struct module *me)
-{
-	/* parisc should not need this ... */
-	printk(KERN_ERR "module %s: RELOCATION unsupported\n",
-	       me->name);
-	return -ENOEXEC;
-}
-
 #ifndef CONFIG_64BIT
 int apply_relocate_add(Elf_Shdr *sechdrs,
 		       const char *strtab,
@@ -489,15 +528,19 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 	Elf32_Addr val;
 	Elf32_Sword addend;
 	Elf32_Addr dot;
+	Elf_Addr loc0;
+	unsigned int targetsec = sechdrs[relsec].sh_info;
 	//unsigned long dp = (unsigned long)$global$;
 	register unsigned long dp asm ("r27");
 
-	DEBUGP("Applying relocate section %u to %u\n", relsec,
-	       sechdrs[relsec].sh_info);
+	pr_debug("Applying relocate section %u to %u\n", relsec,
+	       targetsec);
 	for (i = 0; i < sechdrs[relsec].sh_size / sizeof(*rel); i++) {
 		/* This is where to make the change */
-		loc = (void *)sechdrs[sechdrs[relsec].sh_info].sh_addr
+		loc = (void *)sechdrs[targetsec].sh_addr
 		      + rel[i].r_offset;
+		/* This is the start of the target section */
+		loc0 = sechdrs[targetsec].sh_addr;
 		/* This is the symbol it is referring to */
 		sym = (Elf32_Sym *)sechdrs[symindex].sh_addr
 			+ ELF32_R_SYM(rel[i].r_info);
@@ -514,7 +557,7 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 
 #if 0
 #define r(t) ELF32_R_TYPE(rel[i].r_info)==t ? #t :
-		DEBUGP("Symbol %s loc 0x%x val 0x%x addend 0x%x: %s\n",
+		pr_debug("Symbol %s loc 0x%x val 0x%x addend 0x%x: %s\n",
 			strtab + sym->st_name,
 			(uint32_t)loc, val, addend,
 			r(R_PARISC_PLABEL32)
@@ -555,7 +598,11 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 			/* See note about special handling of SEGREL32 at
 			 * the beginning of this file.
 			 */
-			*loc = fsel(val, addend); 
+			*loc = fsel(val, addend);
+			break;
+		case R_PARISC_SECREL32:
+			/* 32-bit section relative address. */
+			*loc = fsel(val, addend);
 			break;
 		case R_PARISC_DPREL21L:
 			/* left 21 bit of relative address */
@@ -569,20 +616,37 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 			break;
 		case R_PARISC_PCREL17F:
 			/* 17-bit PC relative address */
-			val = get_stub(me, val, addend, ELF_STUB_GOT, in_init(me, loc));
+			/* calculate direct call offset */
+			val += addend;
 			val = (val - dot - 8)/4;
-			CHECK_RELOC(val, 17)
+			if (!RELOC_REACHABLE(val, 17)) {
+				/* direct distance too far, create
+				 * stub entry instead */
+				val = get_stub(me, sym->st_value, addend,
+					ELF_STUB_DIRECT, loc0, targetsec);
+				val = (val - dot - 8)/4;
+				CHECK_RELOC(val, 17);
+			}
 			*loc = (*loc & ~0x1f1ffd) | reassemble_17(val);
 			break;
 		case R_PARISC_PCREL22F:
 			/* 22-bit PC relative address; only defined for pa20 */
-			val = get_stub(me, val, addend, ELF_STUB_GOT, in_init(me, loc));
-			DEBUGP("STUB FOR %s loc %lx+%lx at %lx\n", 
-			       strtab + sym->st_name, (unsigned long)loc, addend, 
-			       val)
+			/* calculate direct call offset */
+			val += addend;
 			val = (val - dot - 8)/4;
-			CHECK_RELOC(val, 22);
+			if (!RELOC_REACHABLE(val, 22)) {
+				/* direct distance too far, create
+				 * stub entry instead */
+				val = get_stub(me, sym->st_value, addend,
+					ELF_STUB_DIRECT, loc0, targetsec);
+				val = (val - dot - 8)/4;
+				CHECK_RELOC(val, 22);
+			}
 			*loc = (*loc & ~0x3ff1ffd) | reassemble_22(val);
+			break;
+		case R_PARISC_PCREL32:
+			/* 32-bit PC relative address */
+			*loc = val - dot - 8 + addend;
 			break;
 
 		default:
@@ -610,13 +674,17 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 	Elf64_Addr val;
 	Elf64_Sxword addend;
 	Elf64_Addr dot;
+	Elf_Addr loc0;
+	unsigned int targetsec = sechdrs[relsec].sh_info;
 
-	DEBUGP("Applying relocate section %u to %u\n", relsec,
-	       sechdrs[relsec].sh_info);
+	pr_debug("Applying relocate section %u to %u\n", relsec,
+	       targetsec);
 	for (i = 0; i < sechdrs[relsec].sh_size / sizeof(*rel); i++) {
 		/* This is where to make the change */
-		loc = (void *)sechdrs[sechdrs[relsec].sh_info].sh_addr
+		loc = (void *)sechdrs[targetsec].sh_addr
 		      + rel[i].r_offset;
+		/* This is the start of the target section */
+		loc0 = sechdrs[targetsec].sh_addr;
 		/* This is the symbol it is referring to */
 		sym = (Elf64_Sym *)sechdrs[symindex].sh_addr
 			+ ELF64_R_SYM(rel[i].r_info);
@@ -651,7 +719,7 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 		case R_PARISC_LTOFF21L:
 			/* LT-relative; left 21 bits */
 			val = get_got(me, val, addend);
-			DEBUGP("LTOFF21L Symbol %s loc %p val %lx\n",
+			pr_debug("LTOFF21L Symbol %s loc %p val %llx\n",
 			       strtab + sym->st_name,
 			       loc, val);
 			val = lrsel(val, 0);
@@ -662,53 +730,59 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 			/* LT-relative; right 14 bits */
 			val = get_got(me, val, addend);
 			val = rrsel(val, 0);
-			DEBUGP("LTOFF14R Symbol %s loc %p val %lx\n",
+			pr_debug("LTOFF14R Symbol %s loc %p val %llx\n",
 			       strtab + sym->st_name,
 			       loc, val);
 			*loc = mask(*loc, 14) | reassemble_14(val);
 			break;
 		case R_PARISC_PCREL22F:
 			/* PC-relative; 22 bits */
-			DEBUGP("PCREL22F Symbol %s loc %p val %lx\n",
+			pr_debug("PCREL22F Symbol %s loc %p val %llx\n",
 			       strtab + sym->st_name,
 			       loc, val);
+			val += addend;
 			/* can we reach it locally? */
-			if(!in_local_section(me, (void *)val, (void *)dot)) {
-
-				if (in_local(me, (void *)val))
-					/* this is the case where the
-					 * symbol is local to the
-					 * module, but in a different
-					 * section, so stub the jump
-					 * in case it's more than 22
-					 * bits away */
-					val = get_stub(me, val, addend, ELF_STUB_DIRECT,
-						       in_init(me, loc));
-				else if (strncmp(strtab + sym->st_name, "$$", 2)
+			if (in_local(me, (void *)val)) {
+				/* this is the case where the symbol is local
+				 * to the module, but in a different section,
+				 * so stub the jump in case it's more than 22
+				 * bits away */
+				val = (val - dot - 8)/4;
+				if (!RELOC_REACHABLE(val, 22)) {
+					/* direct distance too far, create
+					 * stub entry instead */
+					val = get_stub(me, sym->st_value,
+						addend, ELF_STUB_DIRECT,
+						loc0, targetsec);
+				} else {
+					/* Ok, we can reach it directly. */
+					val = sym->st_value;
+					val += addend;
+				}
+			} else {
+				val = sym->st_value;
+				if (strncmp(strtab + sym->st_name, "$$", 2)
 				    == 0)
 					val = get_stub(me, val, addend, ELF_STUB_MILLI,
-						       in_init(me, loc));
+						       loc0, targetsec);
 				else
 					val = get_stub(me, val, addend, ELF_STUB_GOT,
-						       in_init(me, loc));
+						       loc0, targetsec);
 			}
-			DEBUGP("STUB FOR %s loc %lx, val %lx+%lx at %lx\n", 
+			pr_debug("STUB FOR %s loc %px, val %llx+%llx at %llx\n",
 			       strtab + sym->st_name, loc, sym->st_value,
 			       addend, val);
-			/* FIXME: local symbols work as long as the
-			 * core and init pieces aren't separated too
-			 * far.  If this is ever broken, you will trip
-			 * the check below.  The way to fix it would
-			 * be to generate local stubs to go between init
-			 * and core */
-			if((Elf64_Sxword)(val - dot - 8) > 0x800000 -1 ||
-			   (Elf64_Sxword)(val - dot - 8) < -0x800000) {
-				printk(KERN_ERR "Module %s, symbol %s is out of range for PCREL22F relocation\n",
-				       me->name, strtab + sym->st_name);
-				return -ENOEXEC;
-			}
 			val = (val - dot - 8)/4;
+			CHECK_RELOC(val, 22);
 			*loc = (*loc & ~0x3ff1ffd) | reassemble_22(val);
+			break;
+		case R_PARISC_PCREL32:
+			/* 32-bit PC relative address */
+			*loc = val - dot - 8 + addend;
+			break;
+		case R_PARISC_PCREL64:
+			/* 64-bit PC relative address */
+			*loc64 = val - dot - 8 + addend;
 			break;
 		case R_PARISC_DIR64:
 			/* 64-bit effective address */
@@ -719,20 +793,24 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 			/* See note about special handling of SEGREL32 at
 			 * the beginning of this file.
 			 */
-			*loc = fsel(val, addend); 
+			*loc = fsel(val, addend);
+			break;
+		case R_PARISC_SECREL32:
+			/* 32-bit section relative address. */
+			*loc = fsel(val, addend);
 			break;
 		case R_PARISC_FPTR64:
 			/* 64-bit function address */
 			if(in_local(me, (void *)(val + addend))) {
 				*loc64 = get_fdesc(me, val+addend);
-				DEBUGP("FDESC for %s at %p points to %lx\n",
+				pr_debug("FDESC for %s at %llx points to %llx\n",
 				       strtab + sym->st_name, *loc64,
 				       ((Elf_Fdesc *)*loc64)->addr);
 			} else {
 				/* if the symbol is not local to this
 				 * module then val+addend is a pointer
 				 * to the function descriptor */
-				DEBUGP("Non local FPTR64 Symbol %s loc %p val %lx\n",
+				pr_debug("Non local FPTR64 Symbol %s loc %p val %llx\n",
 				       strtab + sym->st_name,
 				       loc, val);
 				*loc64 = val + addend;
@@ -761,9 +839,9 @@ register_unwind_table(struct module *me,
 
 	table = (unsigned char *)sechdrs[me->arch.unwind_section].sh_addr;
 	end = table + sechdrs[me->arch.unwind_section].sh_size;
-	gp = (Elf_Addr)me->module_core + me->arch.got_offset;
+	gp = (Elf_Addr)me->core_layout.base + me->arch.got_offset;
 
-	DEBUGP("register_unwind_table(), sect = %d at 0x%p - 0x%p (gp=0x%lx)\n",
+	pr_debug("register_unwind_table(), sect = %d at 0x%p - 0x%p (gp=0x%lx)\n",
 	       me->arch.unwind_section, table, end, gp);
 	me->arch.unwind = unwind_table_add(me->name, 0, gp, table, end);
 }
@@ -782,6 +860,9 @@ int module_finalize(const Elf_Ehdr *hdr,
 	int i;
 	unsigned long nsyms;
 	const char *strtab = NULL;
+	const Elf_Shdr *s;
+	char *secstrings;
+	int symindex = -1;
 	Elf_Sym *newptr, *oldptr;
 	Elf_Shdr *symhdr = NULL;
 #ifdef DEBUG
@@ -794,12 +875,8 @@ int module_finalize(const Elf_Ehdr *hdr,
 	addr = (u32 *)entry->addr;
 	printk("INSNS: %x %x %x %x\n",
 	       addr[0], addr[1], addr[2], addr[3]);
-	printk("stubs used %ld, stubs max %ld\n"
-	       "init_stubs used %ld, init stubs max %ld\n"
-	       "got entries used %ld, gots max %ld\n"
+	printk("got entries used %ld, gots max %ld\n"
 	       "fdescs used %ld, fdescs max %ld\n",
-	       me->arch.stub_count, me->arch.stub_max,
-	       me->arch.init_stub_count, me->arch.init_stub_max,
 	       me->arch.got_count, me->arch.got_max,
 	       me->arch.fdesc_count, me->arch.fdesc_max);
 #endif
@@ -810,8 +887,9 @@ int module_finalize(const Elf_Ehdr *hdr,
 	 * ourselves */
 	for (i = 1; i < hdr->e_shnum; i++) {
 		if(sechdrs[i].sh_type == SHT_SYMTAB
-		   && (sechdrs[i].sh_type & SHF_ALLOC)) {
+		   && (sechdrs[i].sh_flags & SHF_ALLOC)) {
 			int strindex = sechdrs[i].sh_link;
+			symindex = i;
 			/* FIXME: AWFUL HACK
 			 * The cast is to drop the const from
 			 * the sechdrs pointer */
@@ -821,7 +899,7 @@ int module_finalize(const Elf_Ehdr *hdr,
 		}
 	}
 
-	DEBUGP("module %s: strtab %p, symhdr %p\n",
+	pr_debug("module %s: strtab %p, symhdr %p\n",
 	       me->name, strtab, symhdr);
 
 	if(me->arch.got_count > MAX_GOTS) {
@@ -829,7 +907,10 @@ int module_finalize(const Elf_Ehdr *hdr,
 				me->name, me->arch.got_count, MAX_GOTS);
 		return -EINVAL;
 	}
-	
+
+	kfree(me->arch.section);
+	me->arch.section = NULL;
+
 	/* no symbol table */
 	if(symhdr == NULL)
 		return 0;
@@ -837,7 +918,7 @@ int module_finalize(const Elf_Ehdr *hdr,
 	oldptr = (void *)symhdr->sh_addr;
 	newptr = oldptr + 1;	/* we start counting at 1 */
 	nsyms = symhdr->sh_size / sizeof(Elf_Sym);
-	DEBUGP("OLD num_symtab %lu\n", nsyms);
+	pr_debug("OLD num_symtab %lu\n", nsyms);
 
 	for (i = 1; i < nsyms; i++) {
 		oldptr++;	/* note, count starts at 1 so preincrement */
@@ -852,25 +933,58 @@ int module_finalize(const Elf_Ehdr *hdr,
 
 	}
 	nsyms = newptr - (Elf_Sym *)symhdr->sh_addr;
-	DEBUGP("NEW num_symtab %lu\n", nsyms);
+	pr_debug("NEW num_symtab %lu\n", nsyms);
 	symhdr->sh_size = nsyms * sizeof(Elf_Sym);
-	return module_bug_finalize(hdr, sechdrs, me);
+
+	/* find .altinstructions section */
+	secstrings = (void *)hdr + sechdrs[hdr->e_shstrndx].sh_offset;
+	for (s = sechdrs; s < sechdrs + hdr->e_shnum; s++) {
+		void *aseg = (void *) s->sh_addr;
+		char *secname = secstrings + s->sh_name;
+
+		if (!strcmp(".altinstructions", secname))
+			/* patch .altinstructions */
+			apply_alternatives(aseg, aseg + s->sh_size, me->name);
+
+#ifdef CONFIG_DYNAMIC_FTRACE
+		/* For 32 bit kernels we're compiling modules with
+		 * -ffunction-sections so we must relocate the addresses in the
+		 *  ftrace callsite section.
+		 */
+		if (symindex != -1 && !strcmp(secname, FTRACE_CALLSITE_SECTION)) {
+			int err;
+			if (s->sh_type == SHT_REL)
+				err = apply_relocate((Elf_Shdr *)sechdrs,
+							strtab, symindex,
+							s - sechdrs, me);
+			else if (s->sh_type == SHT_RELA)
+				err = apply_relocate_add((Elf_Shdr *)sechdrs,
+							strtab, symindex,
+							s - sechdrs, me);
+			if (err)
+				return err;
+		}
+#endif
+	}
+	return 0;
 }
 
 void module_arch_cleanup(struct module *mod)
 {
 	deregister_unwind_table(mod);
-	module_bug_cleanup(mod);
 }
 
 #ifdef CONFIG_64BIT
-void *dereference_function_descriptor(void *ptr)
+void *dereference_module_function_descriptor(struct module *mod, void *ptr)
 {
-	Elf64_Fdesc *desc = ptr;
-	void *p;
+	unsigned long start_opd = (Elf64_Addr)mod->core_layout.base +
+				   mod->arch.fdesc_offset;
+	unsigned long end_opd = start_opd +
+				mod->arch.fdesc_count * sizeof(Elf64_Fdesc);
 
-	if (!probe_kernel_address(&desc->addr, p))
-		ptr = p;
-	return ptr;
+	if (ptr < (void *)start_opd || ptr >= (void *)end_opd)
+		return ptr;
+
+	return dereference_function_descriptor(ptr);
 }
 #endif

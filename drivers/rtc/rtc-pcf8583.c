@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  drivers/rtc/rtc-pcf8583.c
  *
  *  Copyright (C) 2000 Russell King
  *  Copyright (C) 2008 Wolfram Sang & Juergen Beisert, Pengutronix
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  Driver for PCF8583 RTC & RAM chip
  *
@@ -17,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/rtc.h>
 #include <linux/init.h>
+#include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/bcd.h>
 
@@ -76,11 +74,11 @@ static int pcf8583_get_datetime(struct i2c_client *client, struct rtc_time *dt)
 		buf[4] &= 0x3f;
 		buf[5] &= 0x1f;
 
-		dt->tm_sec = BCD2BIN(buf[1]);
-		dt->tm_min = BCD2BIN(buf[2]);
-		dt->tm_hour = BCD2BIN(buf[3]);
-		dt->tm_mday = BCD2BIN(buf[4]);
-		dt->tm_mon = BCD2BIN(buf[5]) - 1;
+		dt->tm_sec = bcd2bin(buf[1]);
+		dt->tm_min = bcd2bin(buf[2]);
+		dt->tm_hour = bcd2bin(buf[3]);
+		dt->tm_mday = bcd2bin(buf[4]);
+		dt->tm_mon = bcd2bin(buf[5]) - 1;
 	}
 
 	return ret == 2 ? 0 : -EIO;
@@ -94,14 +92,14 @@ static int pcf8583_set_datetime(struct i2c_client *client, struct rtc_time *dt, 
 	buf[0] = 0;
 	buf[1] = get_ctrl(client) | 0x80;
 	buf[2] = 0;
-	buf[3] = BIN2BCD(dt->tm_sec);
-	buf[4] = BIN2BCD(dt->tm_min);
-	buf[5] = BIN2BCD(dt->tm_hour);
+	buf[3] = bin2bcd(dt->tm_sec);
+	buf[4] = bin2bcd(dt->tm_min);
+	buf[5] = bin2bcd(dt->tm_hour);
 
 	if (datetoo) {
 		len = 8;
-		buf[6] = BIN2BCD(dt->tm_mday) | (dt->tm_year << 6);
-		buf[7] = BIN2BCD(dt->tm_mon + 1)  | (dt->tm_wday << 5);
+		buf[6] = bin2bcd(dt->tm_mday) | (dt->tm_year << 6);
+		buf[7] = bin2bcd(dt->tm_mon + 1)  | (dt->tm_wday << 5);
 	}
 
 	ret = i2c_master_send(client, (char *)buf, len);
@@ -175,7 +173,11 @@ static int pcf8583_rtc_read_time(struct device *dev, struct rtc_time *tm)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	unsigned char ctrl, year[2];
-	struct rtc_mem mem = { CMOS_YEAR, sizeof(year), year };
+	struct rtc_mem mem = {
+		.loc = CMOS_YEAR,
+		.nr = sizeof(year),
+		.data = year
+	};
 	int real_year, year_offset, err;
 
 	/*
@@ -185,10 +187,11 @@ static int pcf8583_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	if (ctrl & (CTRL_STOP | CTRL_HOLD)) {
 		unsigned char new_ctrl = ctrl & ~(CTRL_STOP | CTRL_HOLD);
 
-		printk(KERN_WARNING "RTC: resetting control %02x -> %02x\n",
-		       ctrl, new_ctrl);
+		dev_warn(dev, "resetting control %02x -> %02x\n",
+			ctrl, new_ctrl);
 
-		if ((err = pcf8583_set_ctrl(client, &new_ctrl)) < 0)
+		err = pcf8583_set_ctrl(client, &new_ctrl);
+		if (err < 0)
 			return err;
 	}
 
@@ -220,8 +223,16 @@ static int pcf8583_rtc_set_time(struct device *dev, struct rtc_time *tm)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	unsigned char year[2], chk;
-	struct rtc_mem cmos_year  = { CMOS_YEAR, sizeof(year), year };
-	struct rtc_mem cmos_check = { CMOS_CHECKSUM, 1, &chk };
+	struct rtc_mem cmos_year  = {
+		.loc = CMOS_YEAR,
+		.nr = sizeof(year),
+		.data = year
+	};
+	struct rtc_mem cmos_check = {
+		.loc = CMOS_CHECKSUM,
+		.nr = 1,
+		.data = &chk
+	};
 	unsigned int proper_year = tm->tm_year + 1900;
 	int ret;
 
@@ -268,39 +279,22 @@ static int pcf8583_probe(struct i2c_client *client,
 				const struct i2c_device_id *id)
 {
 	struct pcf8583 *pcf8583;
-	int err;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
 		return -ENODEV;
 
-	pcf8583 = kzalloc(sizeof(struct pcf8583), GFP_KERNEL);
+	pcf8583 = devm_kzalloc(&client->dev, sizeof(struct pcf8583),
+				GFP_KERNEL);
 	if (!pcf8583)
 		return -ENOMEM;
 
-	pcf8583->rtc = rtc_device_register(pcf8583_driver.driver.name,
-			&client->dev, &pcf8583_rtc_ops, THIS_MODULE);
-
-	if (IS_ERR(pcf8583->rtc)) {
-		err = PTR_ERR(pcf8583->rtc);
-		goto exit_kfree;
-	}
-
 	i2c_set_clientdata(client, pcf8583);
-	return 0;
 
-exit_kfree:
-	kfree(pcf8583);
-	return err;
-}
+	pcf8583->rtc = devm_rtc_device_register(&client->dev,
+				pcf8583_driver.driver.name,
+				&pcf8583_rtc_ops, THIS_MODULE);
 
-static int __devexit pcf8583_remove(struct i2c_client *client)
-{
-	struct pcf8583 *pcf8583 = i2c_get_clientdata(client);
-
-	if (pcf8583->rtc)
-		rtc_device_unregister(pcf8583->rtc);
-	kfree(pcf8583);
-	return 0;
+	return PTR_ERR_OR_ZERO(pcf8583->rtc);
 }
 
 static const struct i2c_device_id pcf8583_id[] = {
@@ -312,25 +306,12 @@ MODULE_DEVICE_TABLE(i2c, pcf8583_id);
 static struct i2c_driver pcf8583_driver = {
 	.driver = {
 		.name	= "pcf8583",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= pcf8583_probe,
-	.remove		= __devexit_p(pcf8583_remove),
 	.id_table	= pcf8583_id,
 };
 
-static __init int pcf8583_init(void)
-{
-	return i2c_add_driver(&pcf8583_driver);
-}
-
-static __exit void pcf8583_exit(void)
-{
-	i2c_del_driver(&pcf8583_driver);
-}
-
-module_init(pcf8583_init);
-module_exit(pcf8583_exit);
+module_i2c_driver(pcf8583_driver);
 
 MODULE_AUTHOR("Russell King");
 MODULE_DESCRIPTION("PCF8583 I2C RTC driver");

@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  i2c-versatile.c
  *
  *  Copyright (C) 2006 ARM Ltd.
  *  written by Russell King, Deep Blue Solutions Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -14,8 +11,8 @@
 #include <linux/i2c-algo-bit.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
-
-#include <asm/io.h>
+#include <linux/slab.h>
+#include <linux/io.h>
 
 #define I2C_CONTROL	0x00
 #define I2C_CONTROLS	0x00
@@ -55,7 +52,7 @@ static int i2c_versatile_getscl(void *data)
 	return !!(readl(i2c->base + I2C_CONTROL) & SCL);
 }
 
-static struct i2c_algo_bit_data i2c_versatile_algo = {
+static const struct i2c_algo_bit_data i2c_versatile_algo = {
 	.setsda	= i2c_versatile_setsda,
 	.setscl = i2c_versatile_setscl,
 	.getsda	= i2c_versatile_getsda,
@@ -70,28 +67,14 @@ static int i2c_versatile_probe(struct platform_device *dev)
 	struct resource *r;
 	int ret;
 
+	i2c = devm_kzalloc(&dev->dev, sizeof(struct i2c_versatile), GFP_KERNEL);
+	if (!i2c)
+		return -ENOMEM;
+
 	r = platform_get_resource(dev, IORESOURCE_MEM, 0);
-	if (!r) {
-		ret = -EINVAL;
-		goto err_out;
-	}
-
-	if (!request_mem_region(r->start, r->end - r->start + 1, "versatile-i2c")) {
-		ret = -EBUSY;
-		goto err_out;
-	}
-
-	i2c = kzalloc(sizeof(struct i2c_versatile), GFP_KERNEL);
-	if (!i2c) {
-		ret = -ENOMEM;
-		goto err_release;
-	}
-
-	i2c->base = ioremap(r->start, r->end - r->start + 1);
-	if (!i2c->base) {
-		ret = -ENOMEM;
-		goto err_free;
-	}
+	i2c->base = devm_ioremap_resource(&dev->dev, r);
+	if (IS_ERR(i2c->base))
+		return PTR_ERR(i2c->base);
 
 	writel(SCL | SDA, i2c->base + I2C_CONTROLS);
 
@@ -99,40 +82,40 @@ static int i2c_versatile_probe(struct platform_device *dev)
 	strlcpy(i2c->adap.name, "Versatile I2C adapter", sizeof(i2c->adap.name));
 	i2c->adap.algo_data = &i2c->algo;
 	i2c->adap.dev.parent = &dev->dev;
+	i2c->adap.dev.of_node = dev->dev.of_node;
 	i2c->algo = i2c_versatile_algo;
 	i2c->algo.data = i2c;
 
-	ret = i2c_bit_add_bus(&i2c->adap);
-	if (ret >= 0) {
-		platform_set_drvdata(dev, i2c);
-		return 0;
-	}
+	i2c->adap.nr = dev->id;
+	ret = i2c_bit_add_numbered_bus(&i2c->adap);
+	if (ret < 0)
+		return ret;
 
-	iounmap(i2c->base);
- err_free:
-	kfree(i2c);
- err_release:
-	release_mem_region(r->start, r->end - r->start + 1);
- err_out:
-	return ret;
+	platform_set_drvdata(dev, i2c);
+
+	return 0;
 }
 
 static int i2c_versatile_remove(struct platform_device *dev)
 {
 	struct i2c_versatile *i2c = platform_get_drvdata(dev);
 
-	platform_set_drvdata(dev, NULL);
-
 	i2c_del_adapter(&i2c->adap);
 	return 0;
 }
+
+static const struct of_device_id i2c_versatile_match[] = {
+	{ .compatible = "arm,versatile-i2c", },
+	{},
+};
+MODULE_DEVICE_TABLE(of, i2c_versatile_match);
 
 static struct platform_driver i2c_versatile_driver = {
 	.probe		= i2c_versatile_probe,
 	.remove		= i2c_versatile_remove,
 	.driver		= {
 		.name	= "versatile-i2c",
-		.owner	= THIS_MODULE,
+		.of_match_table = i2c_versatile_match,
 	},
 };
 
@@ -146,7 +129,7 @@ static void __exit i2c_versatile_exit(void)
 	platform_driver_unregister(&i2c_versatile_driver);
 }
 
-module_init(i2c_versatile_init);
+subsys_initcall(i2c_versatile_init);
 module_exit(i2c_versatile_exit);
 
 MODULE_DESCRIPTION("ARM Versatile I2C bus driver");

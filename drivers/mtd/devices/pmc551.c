@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * PMC551 PCI Mezzanine Ram Device
  *
  * Author:
  *	Mark Ferrell <mferrell@mvista.com>
  *	Copyright 1999,2000 Nortel Networks
- *
- * License:
- *	As part of this driver was derived from the slram.c driver it
- *	falls under the same license, which is GNU General Public
- *	License v2
  *
  * Description:
  *	This driver is intended to support the PMC551 PCI Ram device
@@ -34,7 +30,7 @@
  *	aperture size, not the dram size, and the V370PDC supplies no
  *	other method for memory size discovery.  This problem is
  *	mostly only relevant when compiled as a module, as the
- *	unloading of the module with an aperture size smaller then
+ *	unloading of the module with an aperture size smaller than
  *	the ram will cause the driver to detect the onboard memory
  *	size to be equal to the aperture size when the module is
  *	reloaded.  Soooo, to help, the module supports an msize
@@ -82,7 +78,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/ptrace.h>
@@ -93,19 +89,53 @@
 #include <linux/fs.h>
 #include <linux/ioctl.h>
 #include <asm/io.h>
-#include <asm/system.h>
 #include <linux/pci.h>
-
 #include <linux/mtd/mtd.h>
-#include <linux/mtd/pmc551.h>
-#include <linux/mtd/compatmac.h>
+
+#define PMC551_VERSION \
+	"Ramix PMC551 PCI Mezzanine Ram Driver. (C) 1999,2000 Nortel Networks.\n"
+
+#define PCI_VENDOR_ID_V3_SEMI 0x11b0
+#define PCI_DEVICE_ID_V3_SEMI_V370PDC 0x0200
+
+#define PMC551_PCI_MEM_MAP0 0x50
+#define PMC551_PCI_MEM_MAP1 0x54
+#define PMC551_PCI_MEM_MAP_MAP_ADDR_MASK 0x3ff00000
+#define PMC551_PCI_MEM_MAP_APERTURE_MASK 0x000000f0
+#define PMC551_PCI_MEM_MAP_REG_EN 0x00000002
+#define PMC551_PCI_MEM_MAP_ENABLE 0x00000001
+
+#define PMC551_SDRAM_MA  0x60
+#define PMC551_SDRAM_CMD 0x62
+#define PMC551_DRAM_CFG  0x64
+#define PMC551_SYS_CTRL_REG 0x78
+
+#define PMC551_DRAM_BLK0 0x68
+#define PMC551_DRAM_BLK1 0x6c
+#define PMC551_DRAM_BLK2 0x70
+#define PMC551_DRAM_BLK3 0x74
+#define PMC551_DRAM_BLK_GET_SIZE(x) (524288 << ((x >> 4) & 0x0f))
+#define PMC551_DRAM_BLK_SET_COL_MUX(x, v) (((x) & ~0x00007000) | (((v) & 0x7) << 12))
+#define PMC551_DRAM_BLK_SET_ROW_MUX(x, v) (((x) & ~0x00000f00) | (((v) & 0xf) << 8))
+
+struct mypriv {
+	struct pci_dev *dev;
+	u_char *start;
+	u32 base_map0;
+	u32 curr_map0;
+	u32 asize;
+	struct mtd_info *nextpmc551;
+};
 
 static struct mtd_info *pmc551list;
+
+static int pmc551_point(struct mtd_info *mtd, loff_t from, size_t len,
+			size_t *retlen, void **virt, resource_size_t *phys);
 
 static int pmc551_erase(struct mtd_info *mtd, struct erase_info *instr)
 {
 	struct mypriv *priv = mtd->priv;
-	u32 soff_hi, soff_lo;	/* start address offset hi/lo */
+	u32 soff_hi;		/* start address offset hi */
 	u32 eoff_hi, eoff_lo;	/* end address offset hi/lo */
 	unsigned long end;
 	u_char *ptr;
@@ -117,20 +147,9 @@ static int pmc551_erase(struct mtd_info *mtd, struct erase_info *instr)
 #endif
 
 	end = instr->addr + instr->len - 1;
-
-	/* Is it past the end? */
-	if (end > mtd->size) {
-#ifdef CONFIG_MTD_PMC551_DEBUG
-		printk(KERN_DEBUG "pmc551_erase() out of bounds (%ld > %ld)\n",
-			(long)end, (long)mtd->size);
-#endif
-		return -EINVAL;
-	}
-
 	eoff_hi = end & ~(priv->asize - 1);
 	soff_hi = instr->addr & ~(priv->asize - 1);
 	eoff_lo = end & (priv->asize - 1);
-	soff_lo = instr->addr & (priv->asize - 1);
 
 	pmc551_point(mtd, instr->addr, instr->len, &retlen,
 		     (void **)&ptr, NULL);
@@ -160,12 +179,10 @@ static int pmc551_erase(struct mtd_info *mtd, struct erase_info *instr)
 	}
 
       out:
-	instr->state = MTD_ERASE_DONE;
 #ifdef CONFIG_MTD_PMC551_DEBUG
 	printk(KERN_DEBUG "pmc551_erase() done\n");
 #endif
 
-	mtd_erase_callback(instr);
 	return 0;
 }
 
@@ -179,18 +196,6 @@ static int pmc551_point(struct mtd_info *mtd, loff_t from, size_t len,
 #ifdef CONFIG_MTD_PMC551_DEBUG
 	printk(KERN_DEBUG "pmc551_point(%ld, %ld)\n", (long)from, (long)len);
 #endif
-
-	if (from + len > mtd->size) {
-#ifdef CONFIG_MTD_PMC551_DEBUG
-		printk(KERN_DEBUG "pmc551_point() out of bounds (%ld > %ld)\n",
-			(long)from + len, (long)mtd->size);
-#endif
-		return -EINVAL;
-	}
-
-	/* can we return a physical address with this driver? */
-	if (phys)
-		return -EINVAL;
 
 	soff_hi = from & ~(priv->asize - 1);
 	soff_lo = from & (priv->asize - 1);
@@ -207,18 +212,19 @@ static int pmc551_point(struct mtd_info *mtd, loff_t from, size_t len,
 	return 0;
 }
 
-static void pmc551_unpoint(struct mtd_info *mtd, loff_t from, size_t len)
+static int pmc551_unpoint(struct mtd_info *mtd, loff_t from, size_t len)
 {
 #ifdef CONFIG_MTD_PMC551_DEBUG
 	printk(KERN_DEBUG "pmc551_unpoint()\n");
 #endif
+	return 0;
 }
 
 static int pmc551_read(struct mtd_info *mtd, loff_t from, size_t len,
 			size_t * retlen, u_char * buf)
 {
 	struct mypriv *priv = mtd->priv;
-	u32 soff_hi, soff_lo;	/* start address offset hi/lo */
+	u32 soff_hi;		/* start address offset hi */
 	u32 eoff_hi, eoff_lo;	/* end address offset hi/lo */
 	unsigned long end;
 	u_char *ptr;
@@ -230,19 +236,8 @@ static int pmc551_read(struct mtd_info *mtd, loff_t from, size_t len,
 #endif
 
 	end = from + len - 1;
-
-	/* Is it past the end? */
-	if (end > mtd->size) {
-#ifdef CONFIG_MTD_PMC551_DEBUG
-		printk(KERN_DEBUG "pmc551_read() out of bounds (%ld > %ld)\n",
-			(long)end, (long)mtd->size);
-#endif
-		return -EINVAL;
-	}
-
 	soff_hi = from & ~(priv->asize - 1);
 	eoff_hi = end & ~(priv->asize - 1);
-	soff_lo = from & (priv->asize - 1);
 	eoff_lo = end & (priv->asize - 1);
 
 	pmc551_point(mtd, from, len, retlen, (void **)&ptr, NULL);
@@ -285,7 +280,7 @@ static int pmc551_write(struct mtd_info *mtd, loff_t to, size_t len,
 			size_t * retlen, const u_char * buf)
 {
 	struct mypriv *priv = mtd->priv;
-	u32 soff_hi, soff_lo;	/* start address offset hi/lo */
+	u32 soff_hi;		/* start address offset hi */
 	u32 eoff_hi, eoff_lo;	/* end address offset hi/lo */
 	unsigned long end;
 	u_char *ptr;
@@ -297,19 +292,8 @@ static int pmc551_write(struct mtd_info *mtd, loff_t to, size_t len,
 #endif
 
 	end = to + len - 1;
-	/* Is it past the end?  or did the u32 wrap? */
-	if (end > mtd->size) {
-#ifdef CONFIG_MTD_PMC551_DEBUG
-		printk(KERN_DEBUG "pmc551_write() out of bounds (end: %ld, "
-			"size: %ld, to: %ld)\n", (long)end, (long)mtd->size,
-			(long)to);
-#endif
-		return -EINVAL;
-	}
-
 	soff_hi = to & ~(priv->asize - 1);
 	eoff_hi = end & ~(priv->asize - 1);
-	soff_lo = to & (priv->asize - 1);
 	eoff_lo = end & (priv->asize - 1);
 
 	pmc551_point(mtd, to, len, retlen, (void **)&ptr, NULL);
@@ -352,7 +336,7 @@ static int pmc551_write(struct mtd_info *mtd, loff_t to, size_t len,
  * Fixup routines for the V370PDC
  * PCI device ID 0x020011b0
  *
- * This function basicly kick starts the DRAM oboard the card and gets it
+ * This function basically kick starts the DRAM oboard the card and gets it
  * ready to be used.  Before this is done the device reads VERY erratic, so
  * much that it can crash the Linux 2.2.x series kernels when a user cat's
  * /proc/pci .. though that is mainly a kernel bug in handling the PCI DEVSEL
@@ -360,7 +344,7 @@ static int pmc551_write(struct mtd_info *mtd, loff_t to, size_t len,
  * mechanism
  * returns the size of the memory region found.
  */
-static u32 fixup_pmc551(struct pci_dev *dev)
+static int __init fixup_pmc551(struct pci_dev *dev)
 {
 #ifdef CONFIG_MTD_PMC551_BUGFIX
 	u32 dram_data;
@@ -541,7 +525,7 @@ static u32 fixup_pmc551(struct pci_dev *dev)
 
 	/*
 	 * Check to make certain the DEVSEL is set correctly, this device
-	 * has a tendancy to assert DEVSEL and TRDY when a write is performed
+	 * has a tendency to assert DEVSEL and TRDY when a write is performed
 	 * to the memory when memory is read-only
 	 */
 	if ((cmd & PCI_STATUS_DEVSEL_MASK) != 0x0) {
@@ -668,9 +652,9 @@ static int __init init_pmc551(void)
 {
 	struct pci_dev *PCI_Device = NULL;
 	struct mypriv *priv;
-	int count, found = 0;
+	int found = 0;
 	struct mtd_info *mtd;
-	u32 length = 0;
+	int length = 0;
 
 	if (msize) {
 		msize = (1 << (ffs(msize) - 1)) << 20;
@@ -695,7 +679,7 @@ static int __init init_pmc551(void)
 	/*
 	 * PCU-bus chipset probe.
 	 */
-	for (count = 0; count < MAX_MTD_DEVICES; count++) {
+	for (;;) {
 
 		if ((PCI_Device = pci_get_device(PCI_VENDOR_ID_V3_SEMI,
 						  PCI_DEVICE_ID_V3_SEMI_V370PDC,
@@ -732,16 +716,11 @@ static int __init init_pmc551(void)
 		}
 
 		mtd = kzalloc(sizeof(struct mtd_info), GFP_KERNEL);
-		if (!mtd) {
-			printk(KERN_NOTICE "pmc551: Cannot allocate new MTD "
-				"device.\n");
+		if (!mtd)
 			break;
-		}
 
 		priv = kzalloc(sizeof(struct mypriv), GFP_KERNEL);
 		if (!priv) {
-			printk(KERN_NOTICE "pmc551: Cannot allocate new MTD "
-				"device.\n");
 			kfree(mtd);
 			break;
 		}
@@ -788,18 +767,18 @@ static int __init init_pmc551(void)
 
 		mtd->size = msize;
 		mtd->flags = MTD_CAP_RAM;
-		mtd->erase = pmc551_erase;
-		mtd->read = pmc551_read;
-		mtd->write = pmc551_write;
-		mtd->point = pmc551_point;
-		mtd->unpoint = pmc551_unpoint;
+		mtd->_erase = pmc551_erase;
+		mtd->_read = pmc551_read;
+		mtd->_write = pmc551_write;
+		mtd->_point = pmc551_point;
+		mtd->_unpoint = pmc551_unpoint;
 		mtd->type = MTD_RAM;
 		mtd->name = "PMC551 RAM board";
 		mtd->erasesize = 0x10000;
 		mtd->writesize = 1;
 		mtd->owner = THIS_MODULE;
 
-		if (add_mtd_device(mtd)) {
+		if (mtd_device_register(mtd, NULL, 0)) {
 			printk(KERN_NOTICE "pmc551: Failed to register new device\n");
 			pci_iounmap(PCI_Device, priv->start);
 			kfree(mtd->priv);
@@ -807,7 +786,7 @@ static int __init init_pmc551(void)
 			break;
 		}
 
-		/* Keep a reference as the add_mtd_device worked */
+		/* Keep a reference as the mtd_device_register worked */
 		pci_dev_get(PCI_Device);
 
 		printk(KERN_NOTICE "Registered pmc551 memory device.\n");
@@ -824,8 +803,7 @@ static int __init init_pmc551(void)
 	}
 
 	/* Exited early, reference left over */
-	if (PCI_Device)
-		pci_dev_put(PCI_Device);
+	pci_dev_put(PCI_Device);
 
 	if (!pmc551list) {
 		printk(KERN_NOTICE "pmc551: not detected\n");
@@ -857,7 +835,7 @@ static void __exit cleanup_pmc551(void)
 		pci_dev_put(priv->dev);
 
 		kfree(mtd->priv);
-		del_mtd_device(mtd);
+		mtd_device_unregister(mtd);
 		kfree(mtd);
 		found++;
 	}

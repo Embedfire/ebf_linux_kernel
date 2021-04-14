@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/minix/file.c
  *
@@ -6,42 +7,46 @@
  *  minix regular file handling primitives
  */
 
-#include <linux/buffer_head.h>		/* for fsync_inode_buffers() */
 #include "minix.h"
 
 /*
  * We have mostly NULLs here: the current defaults are OK for
  * the minix filesystem.
  */
-int minix_sync_file(struct file *, struct dentry *, int);
-
 const struct file_operations minix_file_operations = {
 	.llseek		= generic_file_llseek,
-	.read		= do_sync_read,
-	.aio_read	= generic_file_aio_read,
-	.write		= do_sync_write,
-	.aio_write	= generic_file_aio_write,
+	.read_iter	= generic_file_read_iter,
+	.write_iter	= generic_file_write_iter,
 	.mmap		= generic_file_mmap,
-	.fsync		= minix_sync_file,
+	.fsync		= generic_file_fsync,
 	.splice_read	= generic_file_splice_read,
 };
 
+static int minix_setattr(struct dentry *dentry, struct iattr *attr)
+{
+	struct inode *inode = d_inode(dentry);
+	int error;
+
+	error = setattr_prepare(dentry, attr);
+	if (error)
+		return error;
+
+	if ((attr->ia_valid & ATTR_SIZE) &&
+	    attr->ia_size != i_size_read(inode)) {
+		error = inode_newsize_ok(inode, attr->ia_size);
+		if (error)
+			return error;
+
+		truncate_setsize(inode, attr->ia_size);
+		minix_truncate(inode);
+	}
+
+	setattr_copy(inode, attr);
+	mark_inode_dirty(inode);
+	return 0;
+}
+
 const struct inode_operations minix_file_inode_operations = {
-	.truncate	= minix_truncate,
+	.setattr	= minix_setattr,
 	.getattr	= minix_getattr,
 };
-
-int minix_sync_file(struct file * file, struct dentry *dentry, int datasync)
-{
-	struct inode *inode = dentry->d_inode;
-	int err;
-
-	err = sync_mapping_buffers(inode->i_mapping);
-	if (!(inode->i_state & I_DIRTY))
-		return err;
-	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
-		return err;
-	
-	err |= minix_sync_inode(inode);
-	return err ? -EIO : 0;
-}

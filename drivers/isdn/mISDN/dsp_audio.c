@@ -12,6 +12,8 @@
 #include <linux/delay.h>
 #include <linux/mISDNif.h>
 #include <linux/mISDNdsp.h>
+#include <linux/export.h>
+#include <linux/bitrev.h>
 #include "core.h"
 #include "dsp.h"
 
@@ -30,7 +32,7 @@ EXPORT_SYMBOL(dsp_audio_s16_to_law);
 /* alaw -> ulaw */
 u8 dsp_audio_alaw_to_ulaw[256];
 /* ulaw -> alaw */
-u8 dsp_audio_ulaw_to_alaw[256];
+static u8 dsp_audio_ulaw_to_alaw[256];
 u8 dsp_silence;
 
 
@@ -60,7 +62,7 @@ static inline unsigned char linear2alaw(short int linear)
 	}
 
 	/* Convert the scaled magnitude to segment number. */
-	for (seg = 0;  seg < 8;  seg++) {
+	for (seg = 0; seg < 8; seg++) {
 		if (pcm_val <= seg_end[seg])
 			break;
 	}
@@ -136,27 +138,14 @@ static unsigned char linear2ulaw(short sample)
 	return ulawbyte;
 }
 
-static int reverse_bits(int i)
-{
-	int z, j;
-	z = 0;
-
-	for (j = 0; j < 8; j++) {
-		if ((i & (1 << j)) != 0)
-			z |= 1 << (7 - j);
-	}
-	return z;
-}
-
-
 void dsp_audio_generate_law_tables(void)
 {
 	int i;
 	for (i = 0; i < 256; i++)
-		dsp_audio_alaw_to_s32[i] = alaw2linear(reverse_bits(i));
+		dsp_audio_alaw_to_s32[i] = alaw2linear(bitrev8((u8)i));
 
 	for (i = 0; i < 256; i++)
-		dsp_audio_ulaw_to_s32[i] = ulaw2linear(reverse_bits(i));
+		dsp_audio_ulaw_to_s32[i] = ulaw2linear(bitrev8((u8)i));
 
 	for (i = 0; i < 256; i++) {
 		dsp_audio_alaw_to_ulaw[i] =
@@ -175,13 +164,13 @@ dsp_audio_generate_s2law_table(void)
 		/* generating ulaw-table */
 		for (i = -32768; i < 32768; i++) {
 			dsp_audio_s16_to_law[i & 0xffff] =
-				reverse_bits(linear2ulaw(i));
+				bitrev8(linear2ulaw(i));
 		}
 	} else {
 		/* generating alaw-table */
 		for (i = -32768; i < 32768; i++) {
 			dsp_audio_s16_to_law[i & 0xffff] =
-				reverse_bits(linear2alaw(i));
+				bitrev8(linear2alaw(i));
 		}
 	}
 }
@@ -210,9 +199,8 @@ dsp_audio_generate_seven(void)
 		j = 0;
 		for (k = 0; k < 256; k++) {
 			if (dsp_audio_alaw_to_s32[k]
-				< dsp_audio_alaw_to_s32[i]) {
-			j++;
-			}
+			    < dsp_audio_alaw_to_s32[i])
+				j++;
 		}
 		sorted_alaw[j] = i;
 	}
@@ -263,7 +251,7 @@ dsp_audio_generate_mix_table(void)
 				sample = 32767;
 			if (sample < -32768)
 				sample = -32768;
-			dsp_audio_mix_law[(i<<8)|j] =
+			dsp_audio_mix_law[(i << 8) | j] =
 				dsp_audio_s16_to_law[sample & 0xffff];
 			j++;
 		}
@@ -431,4 +419,3 @@ dsp_change_volume(struct sk_buff *skb, int volume)
 		i++;
 	}
 }
-

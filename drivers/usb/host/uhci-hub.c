@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Universal Host Controller Interface driver for USB.
  *
@@ -15,14 +16,15 @@
 static const __u8 root_hub_hub_des[] =
 {
 	0x09,			/*  __u8  bLength; */
-	0x29,			/*  __u8  bDescriptorType; Hub-descriptor */
+	USB_DT_HUB,		/*  __u8  bDescriptorType; Hub-descriptor */
 	0x02,			/*  __u8  bNbrPorts; */
-	0x0a,			/* __u16  wHubCharacteristics; */
-	0x00,			/*   (per-port OC, no power switching) */
+	HUB_CHAR_NO_LPSM |	/* __u16  wHubCharacteristics; */
+		HUB_CHAR_INDV_PORT_OCPM, /* (per-port OC, no power switching) */
+	0x00,
 	0x01,			/*  __u8  bPwrOn2pwrGood; 2ms */
 	0x00,			/*  __u8  bHubContrCurrent; 0 mA */
-	0x00,			/*  __u8  DeviceRemovable; *** 7 Ports max *** */
-	0xff			/*  __u8  PortPwrCtrlMask; *** 7 ports max *** */
+	0x00,			/*  __u8  DeviceRemovable; *** 7 Ports max */
+	0xff			/*  __u8  PortPwrCtrlMask; *** 7 ports max */
 };
 
 #define	UHCI_RH_MAXCHILD	7
@@ -44,7 +46,7 @@ static int any_ports_active(struct uhci_hcd *uhci)
 	int port;
 
 	for (port = 0; port < uhci->rh_numports; ++port) {
-		if ((inw(uhci->io_addr + USBPORTSC1 + port * 2) &
+		if ((uhci_readw(uhci, USBPORTSC1 + port * 2) &
 				(USBPORTSC_CCS | RWC_BITS)) ||
 				test_bit(port, &uhci->port_c_suspend))
 			return 1;
@@ -68,27 +70,25 @@ static inline int get_hub_status_data(struct uhci_hcd *uhci, char *buf)
 
 	*buf = 0;
 	for (port = 0; port < uhci->rh_numports; ++port) {
-		if ((inw(uhci->io_addr + USBPORTSC1 + port * 2) & mask) ||
+		if ((uhci_readw(uhci, USBPORTSC1 + port * 2) & mask) ||
 				test_bit(port, &uhci->port_c_suspend))
 			*buf |= (1 << (port + 1));
 	}
 	return !!*buf;
 }
 
-#define OK(x)			len = (x); break
-
 #define CLR_RH_PORTSTAT(x) \
-	status = inw(port_addr); \
+	status = uhci_readw(uhci, port_addr);	\
 	status &= ~(RWC_BITS|WZ_BITS); \
 	status &= ~(x); \
 	status |= RWC_BITS & (x); \
-	outw(status, port_addr)
+	uhci_writew(uhci, status, port_addr)
 
 #define SET_RH_PORTSTAT(x) \
-	status = inw(port_addr); \
+	status = uhci_readw(uhci, port_addr);	\
 	status |= (x); \
 	status &= ~(RWC_BITS|WZ_BITS); \
-	outw(status, port_addr)
+	uhci_writew(uhci, status, port_addr)
 
 /* UHCI controllers don't automatically stop resume signalling after 20 msec,
  * so we have to poll and check timeouts in order to take care of it.
@@ -99,7 +99,7 @@ static void uhci_finish_suspend(struct uhci_hcd *uhci, int port,
 	int status;
 	int i;
 
-	if (inw(port_addr) & SUSPEND_BITS) {
+	if (uhci_readw(uhci, port_addr) & SUSPEND_BITS) {
 		CLR_RH_PORTSTAT(SUSPEND_BITS);
 		if (test_bit(port, &uhci->resuming_ports))
 			set_bit(port, &uhci->port_c_suspend);
@@ -110,23 +110,24 @@ static void uhci_finish_suspend(struct uhci_hcd *uhci, int port,
 		 * Experiments show that some controllers take longer, so
 		 * we'll poll for completion. */
 		for (i = 0; i < 10; ++i) {
-			if (!(inw(port_addr) & SUSPEND_BITS))
+			if (!(uhci_readw(uhci, port_addr) & SUSPEND_BITS))
 				break;
 			udelay(1);
 		}
 	}
 	clear_bit(port, &uhci->resuming_ports);
+	usb_hcd_end_port_resume(&uhci_to_hcd(uhci)->self, port);
 }
 
 /* Wait for the UHCI controller in HP's iLO2 server management chip.
  * It can take up to 250 us to finish a reset and set the CSC bit.
  */
-static void wait_for_HP(unsigned long port_addr)
+static void wait_for_HP(struct uhci_hcd *uhci, unsigned long port_addr)
 {
 	int i;
 
 	for (i = 10; i < 250; i += 10) {
-		if (inw(port_addr) & USBPORTSC_CSC)
+		if (uhci_readw(uhci, port_addr) & USBPORTSC_CSC)
 			return;
 		udelay(10);
 	}
@@ -140,8 +141,8 @@ static void uhci_check_ports(struct uhci_hcd *uhci)
 	int status;
 
 	for (port = 0; port < uhci->rh_numports; ++port) {
-		port_addr = uhci->io_addr + USBPORTSC1 + 2 * port;
-		status = inw(port_addr);
+		port_addr = USBPORTSC1 + 2 * port;
+		status = uhci_readw(uhci, port_addr);
 		if (unlikely(status & USBPORTSC_PR)) {
 			if (time_after_eq(jiffies, uhci->ports_timeout)) {
 				CLR_RH_PORTSTAT(USBPORTSC_PR);
@@ -149,9 +150,8 @@ static void uhci_check_ports(struct uhci_hcd *uhci)
 
 				/* HP's server management chip requires
 				 * a longer delay. */
-				if (to_pci_dev(uhci_dev(uhci))->vendor ==
-						PCI_VENDOR_ID_HP)
-					wait_for_HP(port_addr);
+				if (uhci->wait_for_hp)
+					wait_for_HP(uhci, port_addr);
 
 				/* If the port was enabled before, turning
 				 * reset on caused a port enable change.
@@ -167,7 +167,9 @@ static void uhci_check_ports(struct uhci_hcd *uhci)
 				/* Port received a wakeup request */
 				set_bit(port, &uhci->resuming_ports);
 				uhci->ports_timeout = jiffies +
-						msecs_to_jiffies(20);
+					msecs_to_jiffies(USB_RESUME_TIMEOUT);
+				usb_hcd_start_port_resume(
+						&uhci_to_hcd(uhci)->self, port);
 
 				/* Make sure we see the port again
 				 * after the resuming period is over. */
@@ -190,18 +192,19 @@ static int uhci_hub_status_data(struct usb_hcd *hcd, char *buf)
 	spin_lock_irqsave(&uhci->lock, flags);
 
 	uhci_scan_schedule(uhci);
-	if (!test_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags) || uhci->dead)
+	if (!HCD_HW_ACCESSIBLE(hcd) || uhci->dead)
 		goto done;
 	uhci_check_ports(uhci);
 
 	status = get_hub_status_data(uhci, buf);
 
 	switch (uhci->rh_state) {
-	    case UHCI_RH_SUSPENDING:
 	    case UHCI_RH_SUSPENDED:
 		/* if port change, ask to be resumed */
-		if (status)
+		if (status || uhci->resuming_ports) {
+			status = 1;
 			usb_hcd_resume_root_hub(hcd);
+		}
 		break;
 
 	    case UHCI_RH_AUTO_STOPPED:
@@ -222,7 +225,8 @@ static int uhci_hub_status_data(struct usb_hcd *hcd, char *buf)
 		/* auto-stop if nothing connected for 1 second */
 		if (any_ports_active(uhci))
 			uhci->rh_state = UHCI_RH_RUNNING;
-		else if (time_after_eq(jiffies, uhci->auto_stop_time))
+		else if (time_after_eq(jiffies, uhci->auto_stop_time) &&
+				!uhci->wait_for_hp)
 			suspend_rh(uhci, UHCI_RH_AUTO_STOPPED);
 		break;
 
@@ -240,13 +244,13 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			u16 wIndex, char *buf, u16 wLength)
 {
 	struct uhci_hcd *uhci = hcd_to_uhci(hcd);
-	int status, lstatus, retval = 0, len = 0;
+	int status, lstatus, retval = 0;
 	unsigned int port = wIndex - 1;
-	unsigned long port_addr = uhci->io_addr + USBPORTSC1 + 2 * port;
+	unsigned long port_addr = USBPORTSC1 + 2 * port;
 	u16 wPortChange, wPortStatus;
 	unsigned long flags;
 
-	if (!test_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags) || uhci->dead)
+	if (!HCD_HW_ACCESSIBLE(hcd) || uhci->dead)
 		return -ETIMEDOUT;
 
 	spin_lock_irqsave(&uhci->lock, flags);
@@ -254,20 +258,20 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 
 	case GetHubStatus:
 		*(__le32 *)buf = cpu_to_le32(0);
-		OK(4);		/* hub power */
+		retval = 4; /* hub power */
+		break;
 	case GetPortStatus:
 		if (port >= uhci->rh_numports)
 			goto err;
 
 		uhci_check_ports(uhci);
-		status = inw(port_addr);
+		status = uhci_readw(uhci, port_addr);
 
 		/* Intel controllers report the OverCurrent bit active on.
 		 * VIA controllers report it active off, so we'll adjust the
 		 * bit value.  (It's not standardized in the UHCI spec.)
 		 */
-		if (to_pci_dev(hcd->self.controller)->vendor ==
-				PCI_VENDOR_ID_VIA)
+		if (uhci->oc_low)
 			status ^= USBPORTSC_OC;
 
 		/* UHCI doesn't support C_RESET (always false) */
@@ -308,13 +312,14 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 
 		*(__le16 *)buf = cpu_to_le16(wPortStatus);
 		*(__le16 *)(buf + 2) = cpu_to_le16(wPortChange);
-		OK(4);
+		retval = 4;
+		break;
 	case SetHubFeature:		/* We don't implement these */
 	case ClearHubFeature:
 		switch (wValue) {
 		case C_HUB_OVER_CURRENT:
 		case C_HUB_LOCAL_POWER:
-			OK(0);
+			break;
 		default:
 			goto err;
 		}
@@ -326,7 +331,7 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		switch (wValue) {
 		case USB_PORT_FEAT_SUSPEND:
 			SET_RH_PORTSTAT(USBPORTSC_SUSP);
-			OK(0);
+			break;
 		case USB_PORT_FEAT_RESET:
 			SET_RH_PORTSTAT(USBPORTSC_PR);
 
@@ -334,11 +339,12 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			uhci_finish_suspend(uhci, port, port_addr);
 
 			/* USB v2.0 7.1.7.5 */
-			uhci->ports_timeout = jiffies + msecs_to_jiffies(50);
-			OK(0);
+			uhci->ports_timeout = jiffies +
+				msecs_to_jiffies(USB_RESUME_TIMEOUT);
+			break;
 		case USB_PORT_FEAT_POWER:
 			/* UHCI has no power switching */
-			OK(0);
+			break;
 		default:
 			goto err;
 		}
@@ -353,12 +359,12 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 
 			/* Disable terminates Resume signalling */
 			uhci_finish_suspend(uhci, port, port_addr);
-			OK(0);
+			break;
 		case USB_PORT_FEAT_C_ENABLE:
 			CLR_RH_PORTSTAT(USBPORTSC_PEC);
-			OK(0);
+			break;
 		case USB_PORT_FEAT_SUSPEND:
-			if (!(inw(port_addr) & USBPORTSC_SUSP)) {
+			if (!(uhci_readw(uhci, port_addr) & USBPORTSC_SUSP)) {
 
 				/* Make certain the port isn't suspended */
 				uhci_finish_suspend(uhci, port, port_addr);
@@ -370,7 +376,8 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 				 * if the port is disabled.  When this happens
 				 * just skip the Resume signalling.
 				 */
-				if (!(inw(port_addr) & USBPORTSC_RD))
+				if (!(uhci_readw(uhci, port_addr) &
+						USBPORTSC_RD))
 					uhci_finish_suspend(uhci, port,
 							port_addr);
 				else
@@ -378,32 +385,32 @@ static int uhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 					uhci->ports_timeout = jiffies +
 						msecs_to_jiffies(20);
 			}
-			OK(0);
+			break;
 		case USB_PORT_FEAT_C_SUSPEND:
 			clear_bit(port, &uhci->port_c_suspend);
-			OK(0);
+			break;
 		case USB_PORT_FEAT_POWER:
 			/* UHCI has no power switching */
 			goto err;
 		case USB_PORT_FEAT_C_CONNECTION:
 			CLR_RH_PORTSTAT(USBPORTSC_CSC);
-			OK(0);
+			break;
 		case USB_PORT_FEAT_C_OVER_CURRENT:
 			CLR_RH_PORTSTAT(USBPORTSC_OCC);
-			OK(0);
+			break;
 		case USB_PORT_FEAT_C_RESET:
 			/* this driver won't report these */
-			OK(0);
+			break;
 		default:
 			goto err;
 		}
 		break;
 	case GetHubDescriptor:
-		len = min_t(unsigned int, sizeof(root_hub_hub_des), wLength);
-		memcpy(buf, root_hub_hub_des, len);
-		if (len > 2)
+		retval = min_t(unsigned int, sizeof(root_hub_hub_des), wLength);
+		memcpy(buf, root_hub_hub_des, retval);
+		if (retval > 2)
 			buf[2] = uhci->rh_numports;
-		OK(len);
+		break;
 	default:
 err:
 		retval = -EPIPE;

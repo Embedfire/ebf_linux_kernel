@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
 
  * l1oip_codec.c  generic codec using lookup table
@@ -9,46 +10,35 @@
  *
  * Author	Andreas Eversberg (jolly@eversberg.eu)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
  */
 
 /*
 
-How the codec works:
---------------------
+  How the codec works:
+  --------------------
 
-The volume is increased to increase the dynamic range of the audio signal.
-Each sample is converted to a-LAW with only 16 steps of level resolution.
-A pair of two samples are stored in one byte.
+  The volume is increased to increase the dynamic range of the audio signal.
+  Each sample is converted to a-LAW with only 16 steps of level resolution.
+  A pair of two samples are stored in one byte.
 
-The first byte is stored in the upper bits, the second byte is stored in the
-lower bits.
+  The first byte is stored in the upper bits, the second byte is stored in the
+  lower bits.
 
-To speed up compression and decompression, two lookup tables are formed:
+  To speed up compression and decompression, two lookup tables are formed:
 
-- 16 bits index for two samples (law encoded) with 8 bit compressed result.
-- 8 bits index for one compressed data with 16 bits decompressed result.
+  - 16 bits index for two samples (law encoded) with 8 bit compressed result.
+  - 8 bits index for one compressed data with 16 bits decompressed result.
 
-NOTE: The bytes are handled as they are law-encoded.
+  NOTE: The bytes are handled as they are law-encoded.
 
 */
 
 #include <linux/vmalloc.h>
 #include <linux/mISDNif.h>
+#include <linux/in.h>
 #include "core.h"
+#include "l1oip.h"
 
 /* definitions of codec. don't use calculations, code may run slower. */
 
@@ -230,7 +220,7 @@ l1oip_law_to_4bit(u8 *data, int len, u8 *result, u32 *state)
 
 	/* send saved byte and first input byte */
 	if (*state) {
-		*result++ = table_com[(((*state)<<8)&0xff00) | (*data++)];
+		*result++ = table_com[(((*state) << 8) & 0xff00) | (*data++)];
 		len--;
 		o++;
 	}
@@ -265,7 +255,7 @@ l1oip_4bit_to_law(u8 *data, int len, u8 *result)
 
 	while (i < len) {
 		r = table_dec[*data++];
-		*result++ = r>>8;
+		*result++ = r >> 8;
 		*result++ = r;
 		i++;
 	}
@@ -310,10 +300,8 @@ l1oip_ulaw_to_alaw(u8 *data, int len, u8 *result)
 void
 l1oip_4bit_free(void)
 {
-	if (table_dec)
-		vfree(table_dec);
-	if (table_com)
-		vfree(table_com);
+	vfree(table_dec);
+	vfree(table_com);
 	table_com = NULL;
 	table_dec = NULL;
 }
@@ -328,14 +316,12 @@ l1oip_4bit_alloc(int ulaw)
 		return 0;
 
 	/* alloc conversion tables */
-	table_com = vmalloc(65536);
-	table_dec = vmalloc(512);
-	if (!table_com | !table_dec) {
+	table_com = vzalloc(65536);
+	table_dec = vzalloc(512);
+	if (!table_com || !table_dec) {
 		l1oip_4bit_free();
 		return -ENOMEM;
 	}
-	memset(table_com, 0, 65536);
-	memset(table_dec, 0, 512);
 	/* generate compression table */
 	i1 = 0;
 	while (i1 < 256) {
@@ -345,8 +331,8 @@ l1oip_4bit_alloc(int ulaw)
 			c = alaw_to_4bit[i1];
 		i2 = 0;
 		while (i2 < 256) {
-			table_com[(i1<<8) | i2] |= (c<<4);
-			table_com[(i2<<8) | i1] |= c;
+			table_com[(i1 << 8) | i2] |= (c << 4);
+			table_com[(i2 << 8) | i1] |= c;
 			i2++;
 		}
 		i1++;
@@ -361,8 +347,8 @@ l1oip_4bit_alloc(int ulaw)
 			sample = _4bit_to_alaw[i1];
 		i2 = 0;
 		while (i2 < 16) {
-			table_dec[(i1<<4) | i2] |= (sample<<8);
-			table_dec[(i2<<4) | i1] |= sample;
+			table_dec[(i1 << 4) | i2] |= (sample << 8);
+			table_dec[(i2 << 4) | i1] |= sample;
 			i2++;
 		}
 		i1++;
@@ -370,5 +356,3 @@ l1oip_4bit_alloc(int ulaw)
 
 	return 0;
 }
-
-

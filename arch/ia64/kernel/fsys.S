@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This file contains the light-weight system call handlers (fsyscall-handlers).
  *
@@ -21,13 +22,13 @@
 #include <asm/thread_info.h>
 #include <asm/sal.h>
 #include <asm/signal.h>
-#include <asm/system.h>
 #include <asm/unistd.h>
 
 #include "entry.h"
+#include <asm/native/inst.h>
 
 /*
- * See Documentation/ia64/fsys.txt for details on fsyscalls.
+ * See Documentation/ia64/fsys.rst for details on fsyscalls.
  *
  * On entry to an fsyscall handler:
  *   r10	= 0 (i.e., defaults to "successful syscall return")
@@ -61,16 +62,16 @@ ENTRY(fsys_getpid)
 	.prologue
 	.altrp b6
 	.body
-	add r17=IA64_TASK_GROUP_LEADER_OFFSET,r16
+	add r17=IA64_TASK_SIGNAL_OFFSET,r16
 	;;
-	ld8 r17=[r17]				// r17 = current->group_leader
+	ld8 r17=[r17]				// r17 = current->signal
 	add r9=TI_FLAGS+IA64_TASK_SIZE,r16
 	;;
 	ld4 r9=[r9]
-	add r17=IA64_TASK_TGIDLINK_OFFSET,r17
+	add r17=IA64_SIGNAL_PIDS_TGID_OFFSET,r17
 	;;
 	and r9=TIF_ALLWORK_MASK,r9
-	ld8 r17=[r17]				// r17 = current->group_leader->pids[PIDTYPE_PID].pid
+	ld8 r17=[r17]				// r17 = current->signal->pids[PIDTYPE_TGID]
 	;;
 	add r8=IA64_PID_LEVEL_OFFSET,r17
 	;;
@@ -90,63 +91,16 @@ ENTRY(fsys_getpid)
 	FSYS_RETURN
 END(fsys_getpid)
 
-ENTRY(fsys_getppid)
-	.prologue
-	.altrp b6
-	.body
-	add r17=IA64_TASK_GROUP_LEADER_OFFSET,r16
-	;;
-	ld8 r17=[r17]				// r17 = current->group_leader
-	add r9=TI_FLAGS+IA64_TASK_SIZE,r16
-	;;
-
-	ld4 r9=[r9]
-	add r17=IA64_TASK_REAL_PARENT_OFFSET,r17 // r17 = &current->group_leader->real_parent
-	;;
-	and r9=TIF_ALLWORK_MASK,r9
-
-1:	ld8 r18=[r17]				// r18 = current->group_leader->real_parent
-	;;
-	cmp.ne p8,p0=0,r9
-	add r8=IA64_TASK_TGID_OFFSET,r18	// r8 = &current->group_leader->real_parent->tgid
-	;;
-
-	/*
-	 * The .acq is needed to ensure that the read of tgid has returned its data before
-	 * we re-check "real_parent".
-	 */
-	ld4.acq r8=[r8]				// r8 = current->group_leader->real_parent->tgid
-#ifdef CONFIG_SMP
-	/*
-	 * Re-read current->group_leader->real_parent.
-	 */
-	ld8 r19=[r17]				// r19 = current->group_leader->real_parent
-(p8)	br.spnt.many fsys_fallback_syscall
-	;;
-	cmp.ne p6,p0=r18,r19			// did real_parent change?
-	mov r19=0			// i must not leak kernel bits...
-(p6)	br.cond.spnt.few 1b			// yes -> redo the read of tgid and the check
-	;;
-	mov r17=0			// i must not leak kernel bits...
-	mov r18=0			// i must not leak kernel bits...
-#else
-	mov r17=0			// i must not leak kernel bits...
-	mov r18=0			// i must not leak kernel bits...
-	mov r19=0			// i must not leak kernel bits...
-#endif
-	FSYS_RETURN
-END(fsys_getppid)
-
 ENTRY(fsys_set_tid_address)
 	.prologue
 	.altrp b6
 	.body
 	add r9=TI_FLAGS+IA64_TASK_SIZE,r16
-	add r17=IA64_TASK_TGIDLINK_OFFSET,r16
+	add r17=IA64_TASK_THREAD_PID_OFFSET,r16
 	;;
 	ld4 r9=[r9]
 	tnat.z p6,p7=r32		// check argument register for being NaT
-	ld8 r17=[r17]				// r17 = current->pids[PIDTYPE_PID].pid
+	ld8 r17=[r17]				// r17 = current->thread_pid
 	;;
 	and r9=TIF_ALLWORK_MASK,r9
 	add r8=IA64_PID_LEVEL_OFFSET,r17
@@ -173,7 +127,7 @@ ENTRY(fsys_set_tid_address)
 	FSYS_RETURN
 END(fsys_set_tid_address)
 
-#if IA64_GTOD_LOCK_OFFSET !=0
+#if IA64_GTOD_SEQ_OFFSET !=0
 #error fsys_gettimeofday incompatible with changes to struct fsyscall_gtod_data_t
 #endif
 #if IA64_ITC_JITTER_OFFSET !=0
@@ -279,12 +233,12 @@ ENTRY(fsys_gettimeofday)
 (p9)	cmp.eq p13,p0 = 0,r30	// if mmio_ptr, clear p13 jitter control
 	;;
 	.pred.rel.mutex p8,p9
-(p8)	mov r2 = ar.itc		// CPU_TIMER. 36 clocks latency!!!
+	MOV_FROM_ITC(p8, p6, r2, r10)	// CPU_TIMER. 36 clocks latency!!!
 (p9)	ld8 r2 = [r30]		// MMIO_TIMER. Could also have latency issues..
 (p13)	ld8 r25 = [r19]		// get itc_lastcycle value
-	ld8 r9 = [r22],IA64_TIMESPEC_TV_NSEC_OFFSET	// tv_sec
+	ld8 r9 = [r22],IA64_TIME_SN_SPEC_SNSEC_OFFSET	// sec
 	;;
-	ld8 r8 = [r22],-IA64_TIMESPEC_TV_NSEC_OFFSET	// tv_nsec
+	ld8 r8 = [r22],-IA64_TIME_SN_SPEC_SNSEC_OFFSET	// snsec
 (p13)	sub r3 = r25,r2		// Diff needed before comparison (thanks davidm)
 	;;
 (p13)	cmp.gt.unc p6,p7 = r3,r0 // check if it is less than last. p6,p7 cleared
@@ -312,9 +266,9 @@ EX(.fail_efault, probe.w.fault r31, 3)
 	mf
 	;;
 	ld4 r10 = [r20]		// gtod_lock.sequence
-	shr.u r2 = r2,r23	// shift by factor
-	;;
 	add r8 = r8,r2		// Add xtime.nsecs
+	;;
+	shr.u r8 = r8,r23	// shift by factor
 	cmp4.ne p7,p0 = r28,r10
 (p7)	br.cond.dpnt.few .time_redo	// sequence number changed, redo
 	// End critical section.
@@ -372,163 +326,6 @@ ENTRY(fsys_clock_gettime)
 END(fsys_clock_gettime)
 
 /*
- * long fsys_rt_sigprocmask (int how, sigset_t *set, sigset_t *oset, size_t sigsetsize).
- */
-#if _NSIG_WORDS != 1
-# error Sorry, fsys_rt_sigprocmask() needs to be updated for _NSIG_WORDS != 1.
-#endif
-ENTRY(fsys_rt_sigprocmask)
-	.prologue
-	.altrp b6
-	.body
-
-	add r2=IA64_TASK_BLOCKED_OFFSET,r16
-	add r9=TI_FLAGS+IA64_TASK_SIZE,r16
-	cmp4.ltu p6,p0=SIG_SETMASK,r32
-
-	cmp.ne p15,p0=r0,r34			// oset != NULL?
-	tnat.nz p8,p0=r34
-	add r31=IA64_TASK_SIGHAND_OFFSET,r16
-	;;
-	ld8 r3=[r2]				// read/prefetch current->blocked
-	ld4 r9=[r9]
-	tnat.nz.or p6,p0=r35
-
-	cmp.ne.or p6,p0=_NSIG_WORDS*8,r35
-	tnat.nz.or p6,p0=r32
-(p6)	br.spnt.few .fail_einval		// fail with EINVAL
-	;;
-#ifdef CONFIG_SMP
-	ld8 r31=[r31]				// r31 <- current->sighand
-#endif
-	and r9=TIF_ALLWORK_MASK,r9
-	tnat.nz.or p8,p0=r33
-	;;
-	cmp.ne p7,p0=0,r9
-	cmp.eq p6,p0=r0,r33			// set == NULL?
-	add r31=IA64_SIGHAND_SIGLOCK_OFFSET,r31	// r31 <- current->sighand->siglock
-(p8)	br.spnt.few .fail_efault		// fail with EFAULT
-(p7)	br.spnt.many fsys_fallback_syscall	// got pending kernel work...
-(p6)	br.dpnt.many .store_mask		// -> short-circuit to just reading the signal mask
-
-	/* Argh, we actually have to do some work and _update_ the signal mask: */
-
-EX(.fail_efault, probe.r.fault r33, 3)		// verify user has read-access to *set
-EX(.fail_efault, ld8 r14=[r33])			// r14 <- *set
-	mov r17=(1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1))
-	;;
-
-	rsm psr.i				// mask interrupt delivery
-	mov ar.ccv=0
-	andcm r14=r14,r17			// filter out SIGKILL & SIGSTOP
-
-#ifdef CONFIG_SMP
-	mov r17=1
-	;;
-	cmpxchg4.acq r18=[r31],r17,ar.ccv	// try to acquire the lock
-	mov r8=EINVAL			// default to EINVAL
-	;;
-	ld8 r3=[r2]			// re-read current->blocked now that we hold the lock
-	cmp4.ne p6,p0=r18,r0
-(p6)	br.cond.spnt.many .lock_contention
-	;;
-#else
-	ld8 r3=[r2]			// re-read current->blocked now that we hold the lock
-	mov r8=EINVAL			// default to EINVAL
-#endif
-	add r18=IA64_TASK_PENDING_OFFSET+IA64_SIGPENDING_SIGNAL_OFFSET,r16
-	add r19=IA64_TASK_SIGNAL_OFFSET,r16
-	cmp4.eq p6,p0=SIG_BLOCK,r32
-	;;
-	ld8 r19=[r19]			// r19 <- current->signal
-	cmp4.eq p7,p0=SIG_UNBLOCK,r32
-	cmp4.eq p8,p0=SIG_SETMASK,r32
-	;;
-	ld8 r18=[r18]			// r18 <- current->pending.signal
-	.pred.rel.mutex p6,p7,p8
-(p6)	or r14=r3,r14			// SIG_BLOCK
-(p7)	andcm r14=r3,r14		// SIG_UNBLOCK
-
-(p8)	mov r14=r14			// SIG_SETMASK
-(p6)	mov r8=0			// clear error code
-	// recalc_sigpending()
-	add r17=IA64_SIGNAL_GROUP_STOP_COUNT_OFFSET,r19
-
-	add r19=IA64_SIGNAL_SHARED_PENDING_OFFSET+IA64_SIGPENDING_SIGNAL_OFFSET,r19
-	;;
-	ld4 r17=[r17]		// r17 <- current->signal->group_stop_count
-(p7)	mov r8=0		// clear error code
-
-	ld8 r19=[r19]		// r19 <- current->signal->shared_pending
-	;;
-	cmp4.gt p6,p7=r17,r0	// p6/p7 <- (current->signal->group_stop_count > 0)?
-(p8)	mov r8=0		// clear error code
-
-	or r18=r18,r19		// r18 <- current->pending | current->signal->shared_pending
-	;;
-	// r18 <- (current->pending | current->signal->shared_pending) & ~current->blocked:
-	andcm r18=r18,r14
-	add r9=TI_FLAGS+IA64_TASK_SIZE,r16
-	;;
-
-(p7)	cmp.ne.or.andcm p6,p7=r18,r0		// p6/p7 <- signal pending
-	mov r19=0					// i must not leak kernel bits...
-(p6)	br.cond.dpnt.many .sig_pending
-	;;
-
-1:	ld4 r17=[r9]				// r17 <- current->thread_info->flags
-	;;
-	mov ar.ccv=r17
-	and r18=~_TIF_SIGPENDING,r17		// r18 <- r17 & ~(1 << TIF_SIGPENDING)
-	;;
-
-	st8 [r2]=r14				// update current->blocked with new mask
-	cmpxchg4.acq r8=[r9],r18,ar.ccv		// current->thread_info->flags <- r18
-	;;
-	cmp.ne p6,p0=r17,r8			// update failed?
-(p6)	br.cond.spnt.few 1b			// yes -> retry
-
-#ifdef CONFIG_SMP
-	st4.rel [r31]=r0			// release the lock
-#endif
-	ssm psr.i
-	;;
-
-	srlz.d					// ensure psr.i is set again
-	mov r18=0					// i must not leak kernel bits...
-
-.store_mask:
-EX(.fail_efault, (p15) probe.w.fault r34, 3)	// verify user has write-access to *oset
-EX(.fail_efault, (p15) st8 [r34]=r3)
-	mov r2=0					// i must not leak kernel bits...
-	mov r3=0					// i must not leak kernel bits...
-	mov r8=0				// return 0
-	mov r9=0					// i must not leak kernel bits...
-	mov r14=0					// i must not leak kernel bits...
-	mov r17=0					// i must not leak kernel bits...
-	mov r31=0					// i must not leak kernel bits...
-	FSYS_RETURN
-
-.sig_pending:
-#ifdef CONFIG_SMP
-	st4.rel [r31]=r0			// release the lock
-#endif
-	ssm psr.i
-	;;
-	srlz.d
-	br.sptk.many fsys_fallback_syscall	// with signal pending, do the heavy-weight syscall
-
-#ifdef CONFIG_SMP
-.lock_contention:
-	/* Rather than spinning here, fall back on doing a heavy-weight syscall.  */
-	ssm psr.i
-	;;
-	srlz.d
-	br.sptk.many fsys_fallback_syscall
-#endif
-END(fsys_rt_sigprocmask)
-
-/*
  * fsys_getcpu doesn't use the third parameter in this implementation. It reads
  * current_thread_info()->cpu and corresponding node in cpu_to_node_map.
  */
@@ -547,11 +344,15 @@ ENTRY(fsys_getcpu)
 	;;
 	tnat.nz p7,p0 = r33			// I guard against NaT argument
 (p7)    br.cond.spnt.few .fail_einval		// B
+	;;
+	cmp.ne p6,p0=r32,r0
+	cmp.ne p7,p0=r33,r0
+	;;
 #ifdef CONFIG_NUMA
 	movl r17=cpu_to_node_map
 	;;
-EX(.fail_efault, probe.w.fault r32, 3)		// M This takes 5 cycles
-EX(.fail_efault, probe.w.fault r33, 3)		// M This takes 5 cycles
+EX(.fail_efault, (p6) probe.w.fault r32, 3)		// M This takes 5 cycles
+EX(.fail_efault, (p7) probe.w.fault r33, 3)		// M This takes 5 cycles
 	shladd r18=r3,1,r17
 	;;
 	ld2 r20=[r18]				// r20 = cpu_to_node_map[cpu]
@@ -561,20 +362,20 @@ EX(.fail_efault, probe.w.fault r33, 3)		// M This takes 5 cycles
 (p8)	br.spnt.many fsys_fallback_syscall
 	;;
 	;;
-EX(.fail_efault, st4 [r32] = r3)
-EX(.fail_efault, st2 [r33] = r20)
+EX(.fail_efault, (p6) st4 [r32] = r3)
+EX(.fail_efault, (p7) st2 [r33] = r20)
 	mov r8=0
 	;;
 #else
-EX(.fail_efault, probe.w.fault r32, 3)		// M This takes 5 cycles
-EX(.fail_efault, probe.w.fault r33, 3)		// M This takes 5 cycles
+EX(.fail_efault, (p6) probe.w.fault r32, 3)		// M This takes 5 cycles
+EX(.fail_efault, (p7) probe.w.fault r33, 3)		// M This takes 5 cycles
 	and r2 = TIF_ALLWORK_MASK,r2
 	;;
 	cmp.ne p8,p0=0,r2
 (p8)	br.spnt.many fsys_fallback_syscall
 	;;
-EX(.fail_efault, st4 [r32] = r3)
-EX(.fail_efault, st2 [r33] = r0)
+EX(.fail_efault, (p6) st4 [r32] = r3)
+EX(.fail_efault, (p7) st2 [r33] = r0)
 	mov r8=0
 	;;
 #endif
@@ -592,11 +393,11 @@ ENTRY(fsys_fallback_syscall)
 	adds r17=-1024,r15
 	movl r14=sys_call_table
 	;;
-	rsm psr.i
+	RSM_PSR_I(p0, r26, r27)
 	shladd r18=r17,3,r14
 	;;
 	ld8 r18=[r18]				// load normal (heavy-weight) syscall entry-point
-	mov r29=psr				// read psr (12 cyc load latency)
+	MOV_FROM_PSR(p0, r29, r26)		// read psr (12 cyc load latency)
 	mov r27=ar.rsc
 	mov r21=ar.fpsr
 	mov r26=ar.pfs
@@ -682,8 +483,8 @@ GLOBAL_ENTRY(fsys_bubble_down)
 	nop.i 0
 	;;
 	mov ar.rsc=0				// M2   set enforced lazy mode, pl 0, LE, loadrs=0
-#ifdef CONFIG_VIRT_CPU_ACCOUNTING
-	mov.m r30=ar.itc			// M    get cycle for accounting
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
+	MOV_FROM_ITC(p0, p6, r30, r23)		// M    get cycle for accounting
 #else
 	nop.m 0
 #endif
@@ -708,7 +509,7 @@ GLOBAL_ENTRY(fsys_bubble_down)
 	cmp.ne pKStk,pUStk=r0,r0		// A    set pKStk <- 0, pUStk <- 1
 	br.call.sptk.many b7=ia64_syscall_setup	// B
 	;;
-#ifdef CONFIG_VIRT_CPU_ACCOUNTING
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
 	// mov.m r30=ar.itc is called in advance
 	add r16=TI_AC_STAMP+IA64_TASK_SIZE,r2
 	add r17=TI_AC_LEAVE+IA64_TASK_SIZE,r2
@@ -734,7 +535,7 @@ GLOBAL_ENTRY(fsys_bubble_down)
 	mov rp=r14				// I0   set the real return addr
 	and r3=_TIF_SYSCALL_TRACEAUDIT,r3	// A
 	;;
-	ssm psr.i				// M2   we're on kernel stacks now, reenable irqs
+	SSM_PSR_I(p0, p6, r22)			// M2   we're on kernel stacks now, reenable irqs
 	cmp.eq p8,p0=r3,r0			// A
 (p10)	br.cond.spnt.many ia64_ret_from_syscall	// B    return if bad call-frame or r15 is a NaT
 
@@ -767,7 +568,7 @@ fsyscall_table:
 	data8 0				// chown
 	data8 0				// lseek		// 1040
 	data8 fsys_getpid		// getpid
-	data8 fsys_getppid		// getppid
+	data8 0				// getppid
 	data8 0				// mount
 	data8 0				// umount
 	data8 0				// setuid		// 1045
@@ -904,7 +705,7 @@ fsyscall_table:
 	data8 0				// sigaltstack
 	data8 0				// rt_sigaction
 	data8 0				// rt_sigpending
-	data8 fsys_rt_sigprocmask	// rt_sigprocmask
+	data8 0				// rt_sigprocmask
 	data8 0				// rt_sigqueueinfo	// 1180
 	data8 0				// rt_sigreturn
 	data8 0				// rt_sigsuspend

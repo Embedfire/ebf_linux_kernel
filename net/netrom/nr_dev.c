@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
@@ -19,9 +16,9 @@
 #include <linux/fcntl.h>
 #include <linux/in.h>
 #include <linux/if_ether.h>	/* For the statistics structure. */
+#include <linux/slab.h>
+#include <linux/uaccess.h>
 
-#include <asm/system.h>
-#include <asm/uaccess.h>
 #include <asm/io.h>
 
 #include <linux/inet.h>
@@ -42,7 +39,7 @@
 
 int nr_rx_ip(struct sk_buff *skb, struct net_device *dev)
 {
-	struct net_device_stats *stats = netdev_priv(dev);
+	struct net_device_stats *stats = &dev->stats;
 
 	if (!netif_running(dev)) {
 		stats->rx_dropped++;
@@ -65,39 +62,9 @@ int nr_rx_ip(struct sk_buff *skb, struct net_device *dev)
 	return 1;
 }
 
-#ifdef CONFIG_INET
-
-static int nr_rebuild_header(struct sk_buff *skb)
-{
-	unsigned char *bp = skb->data;
-
-	if (arp_find(bp + 7, skb))
-		return 1;
-
-	bp[6] &= ~AX25_CBIT;
-	bp[6] &= ~AX25_EBIT;
-	bp[6] |= AX25_SSSID_SPARE;
-	bp    += AX25_ADDR_LEN;
-
-	bp[6] &= ~AX25_CBIT;
-	bp[6] |= AX25_EBIT;
-	bp[6] |= AX25_SSSID_SPARE;
-
-	return 0;
-}
-
-#else
-
-static int nr_rebuild_header(struct sk_buff *skb)
-{
-	return 1;
-}
-
-#endif
-
 static int nr_header(struct sk_buff *skb, struct net_device *dev,
 		     unsigned short type,
-		     const void *daddr, const void *saddr, unsigned len)
+		     const void *daddr, const void *saddr, unsigned int len)
 {
 	unsigned char *buff = skb_push(skb, NR_NETWORK_LEN + NR_TRANSPORT_LEN);
 
@@ -169,52 +136,43 @@ static int nr_close(struct net_device *dev)
 	return 0;
 }
 
-static int nr_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t nr_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct nr_private *nr = netdev_priv(dev);
-	struct net_device_stats *stats = &nr->stats;
+	struct net_device_stats *stats = &dev->stats;
 	unsigned int len = skb->len;
 
 	if (!nr_route_frame(skb, NULL)) {
 		kfree_skb(skb);
 		stats->tx_errors++;
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	stats->tx_packets++;
 	stats->tx_bytes += len;
 
-	return 0;
-}
-
-static struct net_device_stats *nr_get_stats(struct net_device *dev)
-{
-	struct nr_private *nr = netdev_priv(dev);
-
-	return &nr->stats;
+	return NETDEV_TX_OK;
 }
 
 static const struct header_ops nr_header_ops = {
 	.create	= nr_header,
-	.rebuild= nr_rebuild_header,
 };
 
+static const struct net_device_ops nr_netdev_ops = {
+	.ndo_open		= nr_open,
+	.ndo_stop		= nr_close,
+	.ndo_start_xmit		= nr_xmit,
+	.ndo_set_mac_address    = nr_set_mac_address,
+};
 
 void nr_setup(struct net_device *dev)
 {
 	dev->mtu		= NR_MAX_PACKET_SIZE;
-	dev->hard_start_xmit	= nr_xmit;
-	dev->open		= nr_open;
-	dev->stop		= nr_close;
-
+	dev->netdev_ops		= &nr_netdev_ops;
 	dev->header_ops		= &nr_header_ops;
 	dev->hard_header_len	= NR_NETWORK_LEN + NR_TRANSPORT_LEN;
 	dev->addr_len		= AX25_ADDR_LEN;
 	dev->type		= ARPHRD_NETROM;
-	dev->set_mac_address    = nr_set_mac_address;
 
 	/* New-style flags. */
 	dev->flags		= IFF_NOARP;
-
-	dev->get_stats 		= nr_get_stats;
 }

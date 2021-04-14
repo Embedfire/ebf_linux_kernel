@@ -1,27 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * c67x00-sched.c: Cypress C67X00 USB Host Controller Driver - TD scheduling
  *
  * Copyright (C) 2006-2008 Barco N.V.
  *    Derived from the Cypress cy7c67200/300 ezusb linux driver and
  *    based on multiple host controller drivers inside the linux kernel.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- * MA  02110-1301  USA.
  */
 
 #include <linux/kthread.h>
+#include <linux/slab.h>
 
 #include "c67x00.h"
 #include "c67x00-hcd.h"
@@ -36,7 +23,7 @@
 
 /* -------------------------------------------------------------------------- */
 
-/**
+/*
  * struct c67x00_ep_data: Host endpoint data structure
  */
 struct c67x00_ep_data {
@@ -47,7 +34,7 @@ struct c67x00_ep_data {
 	u16 next_frame;		/* For int/isoc transactions */
 };
 
-/**
+/*
  * struct c67x00_td
  *
  * Hardware parts are little endiannes, SW in CPU endianess.
@@ -99,7 +86,7 @@ struct c67x00_urb_priv {
 #define TD_PIDEP_OFFSET		0x04
 #define TD_PIDEPMASK_PID	0xF0
 #define TD_PIDEPMASK_EP		0x0F
-#define TD_PORTLENMASK_DL	0x02FF
+#define TD_PORTLENMASK_DL	0x03FF
 #define TD_PORTLENMASK_PN	0xC000
 
 #define TD_STATUS_OFFSET	0x07
@@ -143,9 +130,7 @@ struct c67x00_urb_priv {
 
 /* -------------------------------------------------------------------------- */
 
-#ifdef DEBUG
-
-/**
+/*
  * dbg_td - Dump the contents of the TD
  */
 static void dbg_td(struct c67x00_hcd *c67x00, struct c67x00_td *td, char *msg)
@@ -165,16 +150,8 @@ static void dbg_td(struct c67x00_hcd *c67x00, struct c67x00_td *td, char *msg)
 	dev_dbg(dev, "retry_cnt:      0x%02x\n", td->retry_cnt);
 	dev_dbg(dev, "residue:        0x%02x\n", td->residue);
 	dev_dbg(dev, "next_td_addr: 0x%04x\n", td_next_td_addr(td));
-	dev_dbg(dev, "data:");
-	print_hex_dump(KERN_DEBUG, "", DUMP_PREFIX_OFFSET, 16, 1,
-		       td->data, td_length(td), 1);
+	dev_dbg(dev, "data: %*ph\n", td_length(td), td->data);
 }
-#else				/* DEBUG */
-
-static inline void
-dbg_td(struct c67x00_hcd *c67x00, struct c67x00_td *td, char *msg) { }
-
-#endif				/* DEBUG */
 
 /* -------------------------------------------------------------------------- */
 /* Helper functions */
@@ -184,7 +161,7 @@ static inline u16 c67x00_get_current_frame_number(struct c67x00_hcd *c67x00)
 	return c67x00_ll_husb_get_frame(c67x00->sie) & HOST_FRAME_MASK;
 }
 
-/**
+/*
  * frame_add
  * Software wraparound for framenumbers.
  */
@@ -193,7 +170,7 @@ static inline u16 frame_add(u16 a, u16 b)
 	return (a + b) & HOST_FRAME_MASK;
 }
 
-/**
+/*
  * frame_after - is frame a after frame b
  */
 static inline int frame_after(u16 a, u16 b)
@@ -202,7 +179,7 @@ static inline int frame_after(u16 a, u16 b)
 	    (HOST_FRAME_MASK / 2);
 }
 
-/**
+/*
  * frame_after_eq - is frame a after or equal to frame b
  */
 static inline int frame_after_eq(u16 a, u16 b)
@@ -213,7 +190,7 @@ static inline int frame_after_eq(u16 a, u16 b)
 
 /* -------------------------------------------------------------------------- */
 
-/**
+/*
  * c67x00_release_urb - remove link from all tds to this urb
  * Disconnects the urb from it's tds, so that it can be given back.
  * pre: urb->hcpriv != NULL
@@ -343,7 +320,7 @@ void c67x00_endpoint_disable(struct usb_hcd *hcd, struct usb_host_endpoint *ep)
 		/* it could happen that we reinitialize this completion, while
 		 * somebody was waiting for that completion.  The timeout and
 		 * while loop handle such cases, but this might be improved */
-		INIT_COMPLETION(c67x00->endpoint_disable);
+		reinit_completion(&c67x00->endpoint_disable);
 		c67x00_sched_kick(c67x00);
 		wait_for_completion_timeout(&c67x00->endpoint_disable, 1 * HZ);
 
@@ -371,6 +348,13 @@ int c67x00_urb_enqueue(struct usb_hcd *hcd,
 	struct c67x00_hcd *c67x00 = hcd_to_c67x00_hcd(hcd);
 	int port = get_root_port(urb->dev)-1;
 
+	/* Allocate and initialize urb private data */
+	urbp = kzalloc(sizeof(*urbp), mem_flags);
+	if (!urbp) {
+		ret = -ENOMEM;
+		goto err_urbp;
+	}
+
 	spin_lock_irqsave(&c67x00->lock, flags);
 
 	/* Make sure host controller is running */
@@ -382,13 +366,6 @@ int c67x00_urb_enqueue(struct usb_hcd *hcd,
 	ret = usb_hcd_link_urb_to_ep(hcd, urb);
 	if (ret)
 		goto err_not_linked;
-
-	/* Allocate and initialize urb private data */
-	urbp = kzalloc(sizeof(*urbp), mem_flags);
-	if (!urbp) {
-		ret = -ENOMEM;
-		goto err_urbp;
-	}
 
 	INIT_LIST_HEAD(&urbp->hep_node);
 	urbp->urb = urb;
@@ -452,11 +429,11 @@ int c67x00_urb_enqueue(struct usb_hcd *hcd,
 	return 0;
 
 err_epdata:
-	kfree(urbp);
-err_urbp:
 	usb_hcd_unlink_urb_from_ep(hcd, urb);
 err_not_linked:
 	spin_unlock_irqrestore(&c67x00->lock, flags);
+	kfree(urbp);
+err_urbp:
 
 	return ret;
 }
@@ -509,7 +486,7 @@ c67x00_giveback_urb(struct c67x00_hcd *c67x00, struct urb *urb, int status)
 	c67x00_release_urb(c67x00, urb);
 	usb_hcd_unlink_urb_from_ep(c67x00_hcd_to_hcd(c67x00), urb);
 	spin_unlock(&c67x00->lock);
-	usb_hcd_giveback_urb(c67x00_hcd_to_hcd(c67x00), urb, urbp->status);
+	usb_hcd_giveback_urb(c67x00_hcd_to_hcd(c67x00), urb, status);
 	spin_lock(&c67x00->lock);
 }
 
@@ -580,7 +557,7 @@ static int c67x00_claim_frame_bw(struct c67x00_hcd *c67x00, struct urb *urb,
 
 /* -------------------------------------------------------------------------- */
 
-/**
+/*
  * td_addr and buf_addr must be word aligned
  */
 static int c67x00_create_td(struct c67x00_hcd *c67x00, struct urb *urb,
@@ -589,7 +566,7 @@ static int c67x00_create_td(struct c67x00_hcd *c67x00, struct urb *urb,
 {
 	struct c67x00_td *td;
 	struct c67x00_urb_priv *urbp = urb->hcpriv;
-	const __u8 active_flag = 1, retry_cnt = 1;
+	const __u8 active_flag = 1, retry_cnt = 3;
 	__u8 cmd = 0;
 	int tt = 0;
 
@@ -708,7 +685,7 @@ static int c67x00_add_data_urb(struct c67x00_hcd *c67x00, struct urb *urb)
 	return 0;
 }
 
-/**
+/*
  * return 0 in case more bandwidth is available, else errorcode
  */
 static int c67x00_add_ctrl_urb(struct c67x00_hcd *c67x00, struct urb *urb)
@@ -733,7 +710,8 @@ static int c67x00_add_ctrl_urb(struct c67x00_hcd *c67x00, struct urb *urb)
 			if (ret)
 				return ret;
 			break;
-		}		/* else fallthrough */
+		}
+		fallthrough;
 	case STATUS_STAGE:
 		pid = !usb_pipeout(urb->pipe) ? USB_PID_OUT : USB_PID_IN;
 		ret = c67x00_create_td(c67x00, urb, NULL, 0, pid, 1,
@@ -779,7 +757,8 @@ static int c67x00_add_iso_urb(struct c67x00_hcd *c67x00, struct urb *urb)
 		ret = c67x00_create_td(c67x00, urb, td_buf, len, pid, 0,
 				       urbp->cnt);
 		if (ret) {
-			printk(KERN_DEBUG "create failed: %d\n", ret);
+			dev_dbg(c67x00_hcd_dev(c67x00), "create failed: %d\n",
+				ret);
 			urb->iso_frame_desc[urbp->cnt].actual_length = 0;
 			urb->iso_frame_desc[urbp->cnt].status = ret;
 			if (urbp->cnt + 1 == urb->number_of_packets)
@@ -844,7 +823,7 @@ static void c67x00_fill_frame(struct c67x00_hcd *c67x00)
 
 /* -------------------------------------------------------------------------- */
 
-/**
+/*
  * Get TD from C67X00
  */
 static inline void
@@ -906,7 +885,7 @@ static inline int c67x00_end_of_data(struct c67x00_td *td)
 
 /* Remove all td's from the list which come
  * after last_td and are meant for the same pipe.
- * This is used when a short packet has occured */
+ * This is used when a short packet has occurred */
 static inline void c67x00_clear_pipe(struct c67x00_hcd *c67x00,
 				     struct c67x00_td *last_td)
 {
@@ -974,13 +953,11 @@ static void c67x00_handle_successful_td(struct c67x00_hcd *c67x00,
 static void c67x00_handle_isoc(struct c67x00_hcd *c67x00, struct c67x00_td *td)
 {
 	struct urb *urb = td->urb;
-	struct c67x00_urb_priv *urbp;
 	int cnt;
 
 	if (!urb)
 		return;
 
-	urbp = urb->hcpriv;
 	cnt = td->privdata;
 
 	if (td->status & TD_ERROR_MASK)
@@ -994,7 +971,7 @@ static void c67x00_handle_isoc(struct c67x00_hcd *c67x00, struct c67x00_td *td)
 
 /* -------------------------------------------------------------------------- */
 
-/**
+/*
  * c67x00_check_td_list - handle tds which have been processed by the c67x00
  * pre: current_td == 0
  */
@@ -1069,7 +1046,7 @@ static inline int c67x00_all_tds_processed(struct c67x00_hcd *c67x00)
 	return !c67x00_ll_husb_get_current_td(c67x00->sie);
 }
 
-/**
+/*
  * Send td to C67X00
  */
 static void c67x00_send_td(struct c67x00_hcd *c67x00, struct c67x00_td *td)
@@ -1105,7 +1082,7 @@ static void c67x00_send_frame(struct c67x00_hcd *c67x00)
 
 /* -------------------------------------------------------------------------- */
 
-/**
+/*
  * c67x00_do_work - Schedulers state machine
  */
 static void c67x00_do_work(struct c67x00_hcd *c67x00)
@@ -1146,9 +1123,9 @@ static void c67x00_do_work(struct c67x00_hcd *c67x00)
 
 /* -------------------------------------------------------------------------- */
 
-static void c67x00_sched_tasklet(unsigned long __c67x00)
+static void c67x00_sched_tasklet(struct tasklet_struct *t)
 {
-	struct c67x00_hcd *c67x00 = (struct c67x00_hcd *)__c67x00;
+	struct c67x00_hcd *c67x00 = from_tasklet(c67x00, t, tasklet);
 	c67x00_do_work(c67x00);
 }
 
@@ -1159,8 +1136,7 @@ void c67x00_sched_kick(struct c67x00_hcd *c67x00)
 
 int c67x00_sched_start_scheduler(struct c67x00_hcd *c67x00)
 {
-	tasklet_init(&c67x00->tasklet, c67x00_sched_tasklet,
-		     (unsigned long)c67x00);
+	tasklet_setup(&c67x00->tasklet, c67x00_sched_tasklet);
 	return 0;
 }
 

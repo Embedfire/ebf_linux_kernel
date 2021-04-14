@@ -10,9 +10,10 @@
  * of the GNU Public License, incorporated herein by reference.
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/fs.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/timer.h>
@@ -31,8 +32,6 @@ enum {
 	ASMTYPE_JUNIPER,
 	ASMTYPE_SPRUCE,
 };
-
-#define PFX "ibmasr: "
 
 #define TOPAZ_ASR_REG_OFFSET	4
 #define TOPAZ_ASR_TOGGLE	0x40
@@ -61,7 +60,7 @@ enum {
 #define SPRUCE_ASR_TOGGLE_MASK	0x02	/* bit 0: 0, then 1, then 0 */
 
 
-static int nowayout = WATCHDOG_NOWAYOUT;
+static bool nowayout = WATCHDOG_NOWAYOUT;
 
 static unsigned long asr_is_open;
 static char asr_expect_close;
@@ -69,7 +68,7 @@ static char asr_expect_close;
 static unsigned int asr_type, asr_base, asr_length;
 static unsigned int asr_read_addr, asr_write_addr;
 static unsigned char asr_toggle_mask, asr_disable_mask;
-static spinlock_t asr_lock;
+static DEFINE_SPINLOCK(asr_lock);
 
 static void __asr_toggle(void)
 {
@@ -85,7 +84,6 @@ static void __asr_toggle(void)
 
 	outb(reg & ~asr_toggle_mask, asr_write_addr);
 	reg = inb(asr_read_addr);
-	spin_unlock(&asr_lock);
 }
 
 static void asr_toggle(void)
@@ -236,12 +234,11 @@ static int __init asr_get_base_address(void)
 	}
 
 	if (!request_region(asr_base, asr_length, "ibmasr")) {
-		printk(KERN_ERR PFX "address %#x already in use\n",
-			asr_base);
+		pr_err("address %#x already in use\n", asr_base);
 		return -EBUSY;
 	}
 
-	printk(KERN_INFO PFX "found %sASR @ addr %#x\n", type, asr_base);
+	pr_info("found %sASR @ addr %#x\n", type, asr_base);
 
 	return 0;
 }
@@ -326,7 +323,7 @@ static int asr_open(struct inode *inode, struct file *file)
 	asr_toggle();
 	asr_enable();
 
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int asr_release(struct inode *inode, struct file *file)
@@ -334,8 +331,7 @@ static int asr_release(struct inode *inode, struct file *file)
 	if (asr_expect_close == 42)
 		asr_disable();
 	else {
-		printk(KERN_CRIT PFX
-				"unexpected close, not stopping watchdog!\n");
+		pr_crit("unexpected close, not stopping watchdog!\n");
 		asr_toggle();
 	}
 	clear_bit(0, &asr_is_open);
@@ -348,6 +344,7 @@ static const struct file_operations asr_fops = {
 	.llseek =		no_llseek,
 	.write =		asr_write,
 	.unlocked_ioctl =	asr_ioctl,
+	.compat_ioctl =		compat_ptr_ioctl,
 	.open =			asr_open,
 	.release =		asr_release,
 };
@@ -364,7 +361,7 @@ struct ibmasr_id {
 	int type;
 };
 
-static struct ibmasr_id __initdata ibmasr_id_table[] = {
+static struct ibmasr_id ibmasr_id_table[] __initdata = {
 	{ "IBM Automatic Server Restart - eserver xSeries 220", ASMTYPE_TOPAZ },
 	{ "IBM Automatic Server Restart - Machine Type 8673", ASMTYPE_PEARL },
 	{ "IBM Automatic Server Restart - Machine Type 8480", ASMTYPE_JASPER },
@@ -388,8 +385,6 @@ static int __init ibmasr_init(void)
 	if (!asr_type)
 		return -ENODEV;
 
-	spin_lock_init(&asr_lock);
-
 	rc = asr_get_base_address();
 	if (rc)
 		return rc;
@@ -397,7 +392,7 @@ static int __init ibmasr_init(void)
 	rc = misc_register(&asr_miscdev);
 	if (rc < 0) {
 		release_region(asr_base, asr_length);
-		printk(KERN_ERR PFX "failed to register misc device\n");
+		pr_err("failed to register misc device\n");
 		return rc;
 	}
 
@@ -417,7 +412,7 @@ static void __exit ibmasr_exit(void)
 module_init(ibmasr_init);
 module_exit(ibmasr_exit);
 
-module_param(nowayout, int, 0);
+module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 	"Watchdog cannot be stopped once started (default="
 				__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
@@ -425,4 +420,3 @@ MODULE_PARM_DESC(nowayout,
 MODULE_DESCRIPTION("IBM Automatic Server Restart driver");
 MODULE_AUTHOR("Andrey Panin");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);

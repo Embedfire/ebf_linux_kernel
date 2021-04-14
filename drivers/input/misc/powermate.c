@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * A driver for the Griffin Technology, Inc. "PowerMate" USB controller dial.
  *
@@ -31,7 +32,6 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/usb/input.h>
 
@@ -64,8 +64,8 @@ struct powermate_device {
 	dma_addr_t data_dma;
 	struct urb *irq, *config;
 	struct usb_ctrlrequest *configcr;
-	dma_addr_t configcr_dma;
 	struct usb_device *udev;
+	struct usb_interface *intf;
 	struct input_dev *input;
 	spinlock_t lock;
 	int static_brightness;
@@ -86,6 +86,7 @@ static void powermate_config_complete(struct urb *urb);
 static void powermate_irq(struct urb *urb)
 {
 	struct powermate_device *pm = urb->context;
+	struct device *dev = &pm->intf->dev;
 	int retval;
 
 	switch (urb->status) {
@@ -96,10 +97,12 @@ static void powermate_irq(struct urb *urb)
 	case -ENOENT:
 	case -ESHUTDOWN:
 		/* this urb is terminated, clean up */
-		dbg("%s - urb shutting down with status: %d", __func__, urb->status);
+		dev_dbg(dev, "%s - urb shutting down with status: %d\n",
+			__func__, urb->status);
 		return;
 	default:
-		dbg("%s - nonzero urb status received: %d", __func__, urb->status);
+		dev_dbg(dev, "%s - nonzero urb status received: %d\n",
+			__func__, urb->status);
 		goto exit;
 	}
 
@@ -111,8 +114,8 @@ static void powermate_irq(struct urb *urb)
 exit:
 	retval = usb_submit_urb (urb, GFP_ATOMIC);
 	if (retval)
-		err ("%s - usb_submit_urb failed with result %d",
-		     __func__, retval);
+		dev_err(dev, "%s - usb_submit_urb failed with result: %d\n",
+			__func__, retval);
 }
 
 /* Decide if we need to issue a control message and do so. Must be called with pm->lock taken */
@@ -182,8 +185,6 @@ static void powermate_sync_state(struct powermate_device *pm)
 	usb_fill_control_urb(pm->config, pm->udev, usb_sndctrlpipe(pm->udev, 0),
 			     (void *) pm->configcr, NULL, 0,
 			     powermate_config_complete, pm);
-	pm->config->setup_dma = pm->configcr_dma;
-	pm->config->transfer_flags |= URB_NO_SETUP_DMA_MAP;
 
 	if (usb_submit_urb(pm->config, GFP_ATOMIC))
 		printk(KERN_ERR "powermate: usb_submit_urb(config) failed");
@@ -276,25 +277,23 @@ static int powermate_input_event(struct input_dev *dev, unsigned int type, unsig
 
 static int powermate_alloc_buffers(struct usb_device *udev, struct powermate_device *pm)
 {
-	pm->data = usb_buffer_alloc(udev, POWERMATE_PAYLOAD_SIZE_MAX,
-				    GFP_ATOMIC, &pm->data_dma);
+	pm->data = usb_alloc_coherent(udev, POWERMATE_PAYLOAD_SIZE_MAX,
+				      GFP_KERNEL, &pm->data_dma);
 	if (!pm->data)
 		return -1;
 
-	pm->configcr = usb_buffer_alloc(udev, sizeof(*(pm->configcr)),
-					GFP_ATOMIC, &pm->configcr_dma);
+	pm->configcr = kmalloc(sizeof(*(pm->configcr)), GFP_KERNEL);
 	if (!pm->configcr)
-		return -1;
+		return -ENOMEM;
 
 	return 0;
 }
 
 static void powermate_free_buffers(struct usb_device *udev, struct powermate_device *pm)
 {
-	usb_buffer_free(udev, POWERMATE_PAYLOAD_SIZE_MAX,
-			pm->data, pm->data_dma);
-	usb_buffer_free(udev, sizeof(*(pm->configcr)),
-			pm->configcr, pm->configcr_dma);
+	usb_free_coherent(udev, POWERMATE_PAYLOAD_SIZE_MAX,
+			  pm->data, pm->data_dma);
+	kfree(pm->configcr);
 }
 
 /* Called whenever a USB device matching one in our supported devices table is connected */
@@ -309,6 +308,9 @@ static int powermate_probe(struct usb_interface *intf, const struct usb_device_i
 	int error = -ENOMEM;
 
 	interface = intf->cur_altsetting;
+	if (interface->desc.bNumEndpoints < 1)
+		return -EINVAL;
+
 	endpoint = &interface->endpoint[0].desc;
 	if (!usb_endpoint_is_int_in(endpoint))
 		return -EIO;
@@ -335,10 +337,11 @@ static int powermate_probe(struct usb_interface *intf, const struct usb_device_i
 		goto fail3;
 
 	pm->udev = udev;
+	pm->intf = intf;
 	pm->input = input_dev;
 
 	usb_make_path(udev, pm->phys, sizeof(pm->phys));
-	strlcpy(pm->phys, "/input0", sizeof(pm->phys));
+	strlcat(pm->phys, "/input0", sizeof(pm->phys));
 
 	spin_lock_init(&pm->lock);
 
@@ -430,7 +433,7 @@ static void powermate_disconnect(struct usb_interface *intf)
 	}
 }
 
-static struct usb_device_id powermate_devices [] = {
+static const struct usb_device_id powermate_devices[] = {
 	{ USB_DEVICE(POWERMATE_VENDOR, POWERMATE_PRODUCT_NEW) },
 	{ USB_DEVICE(POWERMATE_VENDOR, POWERMATE_PRODUCT_OLD) },
 	{ USB_DEVICE(CONTOUR_VENDOR, CONTOUR_JOG) },
@@ -446,18 +449,7 @@ static struct usb_driver powermate_driver = {
         .id_table =     powermate_devices,
 };
 
-static int __init powermate_init(void)
-{
-	return usb_register(&powermate_driver);
-}
-
-static void __exit powermate_cleanup(void)
-{
-	usb_deregister(&powermate_driver);
-}
-
-module_init(powermate_init);
-module_exit(powermate_cleanup);
+module_usb_driver(powermate_driver);
 
 MODULE_AUTHOR( "William R Sowerbutts" );
 MODULE_DESCRIPTION( "Griffin Technology, Inc PowerMate driver" );

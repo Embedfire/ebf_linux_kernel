@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* getroot.c: get the root dentry for an NFS mount
  *
  * Copyright (C) 2006 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/module.h>
@@ -23,21 +19,15 @@
 #include <linux/sunrpc/stats.h>
 #include <linux/nfs_fs.h>
 #include <linux/nfs_mount.h>
-#include <linux/nfs4_mount.h>
 #include <linux/lockd/bind.h>
 #include <linux/seq_file.h>
 #include <linux/mount.h>
-#include <linux/nfs_idmap.h>
 #include <linux/vfs.h>
 #include <linux/namei.h>
-#include <linux/mnt_namespace.h>
 #include <linux/security.h>
 
-#include <asm/system.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
-#include "nfs4_fs.h"
-#include "delegation.h"
 #include "internal.h"
 
 #define NFSDBG_FACILITY		NFSDBG_CLIENT
@@ -50,24 +40,23 @@ static int nfs_superblock_set_dummy_root(struct super_block *sb, struct inode *i
 {
 	/* The mntroot acts as the dummy root dentry for this superblock */
 	if (sb->s_root == NULL) {
-		sb->s_root = d_alloc_root(inode);
-		if (sb->s_root == NULL) {
-			iput(inode);
+		sb->s_root = d_make_root(inode);
+		if (sb->s_root == NULL)
 			return -ENOMEM;
-		}
-		/* Circumvent igrab(): we know the inode is not being freed */
-		atomic_inc(&inode->i_count);
+		ihold(inode);
 		/*
 		 * Ensure that this dentry is invisible to d_find_alias().
 		 * Otherwise, it may be spliced into the tree by
-		 * d_materialise_unique if a parent directory from the same
+		 * d_splice_alias if a parent directory from the same
 		 * filesystem gets mounted at a later time.
 		 * This again causes shrink_dcache_for_umount_subtree() to
 		 * Oops, since the test for IS_ROOT() will fail.
 		 */
-		spin_lock(&dcache_lock);
-		list_del_init(&sb->s_root->d_alias);
-		spin_unlock(&dcache_lock);
+		spin_lock(&d_inode(sb->s_root)->i_lock);
+		spin_lock(&sb->s_root->d_lock);
+		hlist_del_init(&sb->s_root->d_u.d_alias);
+		spin_unlock(&sb->s_root->d_lock);
+		spin_unlock(&d_inode(sb->s_root)->i_lock);
 	}
 	return 0;
 }
@@ -75,222 +64,102 @@ static int nfs_superblock_set_dummy_root(struct super_block *sb, struct inode *i
 /*
  * get an NFS2/NFS3 root dentry from the root filehandle
  */
-struct dentry *nfs_get_root(struct super_block *sb, struct nfs_fh *mntfh)
+int nfs_get_root(struct super_block *s, struct fs_context *fc)
 {
-	struct nfs_server *server = NFS_SB(sb);
+	struct nfs_fs_context *ctx = nfs_fc2context(fc);
+	struct nfs_server *server = NFS_SB(s);
 	struct nfs_fsinfo fsinfo;
-	struct nfs_fattr fattr;
-	struct dentry *mntroot;
+	struct dentry *root;
 	struct inode *inode;
-	int error;
+	char *name;
+	int error = -ENOMEM;
+	unsigned long kflags = 0, kflags_out = 0;
+
+	name = kstrdup(fc->source, GFP_KERNEL);
+	if (!name)
+		goto out;
 
 	/* get the actual root for this mount */
-	fsinfo.fattr = &fattr;
+	fsinfo.fattr = nfs_alloc_fattr();
+	if (fsinfo.fattr == NULL)
+		goto out_name;
 
-	error = server->nfs_client->rpc_ops->getroot(server, mntfh, &fsinfo);
+	fsinfo.fattr->label = nfs4_label_alloc(server, GFP_KERNEL);
+	if (IS_ERR(fsinfo.fattr->label))
+		goto out_fattr;
+	error = server->nfs_client->rpc_ops->getroot(server, ctx->mntfh, &fsinfo);
 	if (error < 0) {
 		dprintk("nfs_get_root: getattr error = %d\n", -error);
-		return ERR_PTR(error);
+		nfs_errorf(fc, "NFS: Couldn't getattr on root");
+		goto out_label;
 	}
 
-	inode = nfs_fhget(sb, mntfh, fsinfo.fattr);
+	inode = nfs_fhget(s, ctx->mntfh, fsinfo.fattr, NULL);
 	if (IS_ERR(inode)) {
 		dprintk("nfs_get_root: get root inode failed\n");
-		return ERR_CAST(inode);
+		error = PTR_ERR(inode);
+		nfs_errorf(fc, "NFS: Couldn't get root inode");
+		goto out_label;
 	}
 
-	error = nfs_superblock_set_dummy_root(sb, inode);
+	error = nfs_superblock_set_dummy_root(s, inode);
 	if (error != 0)
-		return ERR_PTR(error);
+		goto out_label;
 
 	/* root dentries normally start off anonymous and get spliced in later
 	 * if the dentry tree reaches them; however if the dentry already
 	 * exists, we'll pick it up at this point and use it as the root
 	 */
-	mntroot = d_alloc_anon(inode);
-	if (!mntroot) {
-		iput(inode);
+	root = d_obtain_root(inode);
+	if (IS_ERR(root)) {
 		dprintk("nfs_get_root: get root dentry failed\n");
-		return ERR_PTR(-ENOMEM);
+		error = PTR_ERR(root);
+		nfs_errorf(fc, "NFS: Couldn't get root dentry");
+		goto out_label;
 	}
 
-	security_d_instantiate(mntroot, inode);
+	security_d_instantiate(root, inode);
+	spin_lock(&root->d_lock);
+	if (IS_ROOT(root) && !root->d_fsdata &&
+	    !(root->d_flags & DCACHE_NFSFS_RENAMED)) {
+		root->d_fsdata = name;
+		name = NULL;
+	}
+	spin_unlock(&root->d_lock);
+	fc->root = root;
+	if (NFS_SB(s)->caps & NFS_CAP_SECURITY_LABEL)
+		kflags |= SECURITY_LSM_NATIVE_LABELS;
+	if (ctx->clone_data.sb) {
+		if (d_inode(fc->root)->i_fop != &nfs_dir_operations) {
+			error = -ESTALE;
+			goto error_splat_root;
+		}
+		/* clone lsm security options from the parent to the new sb */
+		error = security_sb_clone_mnt_opts(ctx->clone_data.sb,
+						   s, kflags, &kflags_out);
+	} else {
+		error = security_sb_set_mnt_opts(s, fc->security,
+							kflags, &kflags_out);
+	}
+	if (error)
+		goto error_splat_root;
+	if (NFS_SB(s)->caps & NFS_CAP_SECURITY_LABEL &&
+		!(kflags_out & SECURITY_LSM_NATIVE_LABELS))
+		NFS_SB(s)->caps &= ~NFS_CAP_SECURITY_LABEL;
 
-	if (!mntroot->d_op)
-		mntroot->d_op = server->nfs_client->rpc_ops->dentry_ops;
+	nfs_setsecurity(inode, fsinfo.fattr, fsinfo.fattr->label);
+	error = 0;
 
-	return mntroot;
+out_label:
+	nfs4_label_free(fsinfo.fattr->label);
+out_fattr:
+	nfs_free_fattr(fsinfo.fattr);
+out_name:
+	kfree(name);
+out:
+	return error;
+error_splat_root:
+	dput(fc->root);
+	fc->root = NULL;
+	goto out_label;
 }
-
-#ifdef CONFIG_NFS_V4
-
-/*
- * Do a simple pathwalk from the root FH of the server to the nominated target
- * of the mountpoint
- * - give error on symlinks
- * - give error on ".." occurring in the path
- * - follow traversals
- */
-int nfs4_path_walk(struct nfs_server *server,
-		   struct nfs_fh *mntfh,
-		   const char *path)
-{
-	struct nfs_fsinfo fsinfo;
-	struct nfs_fattr fattr;
-	struct nfs_fh lastfh;
-	struct qstr name;
-	int ret;
-
-	dprintk("--> nfs4_path_walk(,,%s)\n", path);
-
-	fsinfo.fattr = &fattr;
-	nfs_fattr_init(&fattr);
-
-	/* Eat leading slashes */
-	while (*path == '/')
-		path++;
-
-	/* Start by getting the root filehandle from the server */
-	ret = server->nfs_client->rpc_ops->getroot(server, mntfh, &fsinfo);
-	if (ret < 0) {
-		dprintk("nfs4_get_root: getroot error = %d\n", -ret);
-		return ret;
-	}
-
-	if (fattr.type != NFDIR) {
-		printk(KERN_ERR "nfs4_get_root:"
-		       " getroot encountered non-directory\n");
-		return -ENOTDIR;
-	}
-
-	/* FIXME: It is quite valid for the server to return a referral here */
-	if (fattr.valid & NFS_ATTR_FATTR_V4_REFERRAL) {
-		printk(KERN_ERR "nfs4_get_root:"
-		       " getroot obtained referral\n");
-		return -EREMOTE;
-	}
-
-next_component:
-	dprintk("Next: %s\n", path);
-
-	/* extract the next bit of the path */
-	if (!*path)
-		goto path_walk_complete;
-
-	name.name = path;
-	while (*path && *path != '/')
-		path++;
-	name.len = path - (const char *) name.name;
-
-	if (name.len > NFS4_MAXNAMLEN)
-		return -ENAMETOOLONG;
-
-eat_dot_dir:
-	while (*path == '/')
-		path++;
-
-	if (path[0] == '.' && (path[1] == '/' || !path[1])) {
-		path += 2;
-		goto eat_dot_dir;
-	}
-
-	/* FIXME: Why shouldn't the user be able to use ".." in the path? */
-	if (path[0] == '.' && path[1] == '.' && (path[2] == '/' || !path[2])
-	    ) {
-		printk(KERN_ERR "nfs4_get_root:"
-		       " Mount path contains reference to \"..\"\n");
-		return -EINVAL;
-	}
-
-	/* lookup the next FH in the sequence */
-	memcpy(&lastfh, mntfh, sizeof(lastfh));
-
-	dprintk("LookupFH: %*.*s [%s]\n", name.len, name.len, name.name, path);
-
-	ret = server->nfs_client->rpc_ops->lookupfh(server, &lastfh, &name,
-						    mntfh, &fattr);
-	if (ret < 0) {
-		dprintk("nfs4_get_root: getroot error = %d\n", -ret);
-		return ret;
-	}
-
-	if (fattr.type != NFDIR) {
-		printk(KERN_ERR "nfs4_get_root:"
-		       " lookupfh encountered non-directory\n");
-		return -ENOTDIR;
-	}
-
-	/* FIXME: Referrals are quite valid here too */
-	if (fattr.valid & NFS_ATTR_FATTR_V4_REFERRAL) {
-		printk(KERN_ERR "nfs4_get_root:"
-		       " lookupfh obtained referral\n");
-		return -EREMOTE;
-	}
-
-	goto next_component;
-
-path_walk_complete:
-	memcpy(&server->fsid, &fattr.fsid, sizeof(server->fsid));
-	dprintk("<-- nfs4_path_walk() = 0\n");
-	return 0;
-}
-
-/*
- * get an NFS4 root dentry from the root filehandle
- */
-struct dentry *nfs4_get_root(struct super_block *sb, struct nfs_fh *mntfh)
-{
-	struct nfs_server *server = NFS_SB(sb);
-	struct nfs_fattr fattr;
-	struct dentry *mntroot;
-	struct inode *inode;
-	int error;
-
-	dprintk("--> nfs4_get_root()\n");
-
-	/* get the info about the server and filesystem */
-	error = nfs4_server_capabilities(server, mntfh);
-	if (error < 0) {
-		dprintk("nfs_get_root: getcaps error = %d\n",
-			-error);
-		return ERR_PTR(error);
-	}
-
-	/* get the actual root for this mount */
-	error = server->nfs_client->rpc_ops->getattr(server, mntfh, &fattr);
-	if (error < 0) {
-		dprintk("nfs_get_root: getattr error = %d\n", -error);
-		return ERR_PTR(error);
-	}
-
-	inode = nfs_fhget(sb, mntfh, &fattr);
-	if (IS_ERR(inode)) {
-		dprintk("nfs_get_root: get root inode failed\n");
-		return ERR_CAST(inode);
-	}
-
-	error = nfs_superblock_set_dummy_root(sb, inode);
-	if (error != 0)
-		return ERR_PTR(error);
-
-	/* root dentries normally start off anonymous and get spliced in later
-	 * if the dentry tree reaches them; however if the dentry already
-	 * exists, we'll pick it up at this point and use it as the root
-	 */
-	mntroot = d_alloc_anon(inode);
-	if (!mntroot) {
-		iput(inode);
-		dprintk("nfs_get_root: get root dentry failed\n");
-		return ERR_PTR(-ENOMEM);
-	}
-
-	security_d_instantiate(mntroot, inode);
-
-	if (!mntroot->d_op)
-		mntroot->d_op = server->nfs_client->rpc_ops->dentry_ops;
-
-	dprintk("<-- nfs4_get_root()\n");
-	return mntroot;
-}
-
-#endif /* CONFIG_NFS_V4 */

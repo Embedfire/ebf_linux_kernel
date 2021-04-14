@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/em_u32.c	U32 Ematch
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Thomas Graf <tgraf@suug.ch>
  *		Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
@@ -35,7 +31,7 @@ static int em_u32_match(struct sk_buff *skb, struct tcf_ematch *em,
 	if (!tcf_valid_offset(skb, ptr, sizeof(u32)))
 		return 0;
 
-	return !(((*(__be32*) ptr)  ^ key->val) & key->mask);
+	return !(((*(__be32 *) ptr)  ^ key->val) & key->mask);
 }
 
 static struct tcf_ematch_ops em_u32_ops = {

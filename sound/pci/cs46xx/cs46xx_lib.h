@@ -1,22 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  The driver for the Cirrus Logic's Sound Fusion CS46XX based soundcards
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #ifndef __CS46XX_LIB_H__
@@ -35,7 +20,7 @@
 
 
 #ifdef CONFIG_SND_CS46XX_NEW_DSP
-#define CS46XX_MIN_PERIOD_SIZE 1
+#define CS46XX_MIN_PERIOD_SIZE 64
 #define CS46XX_MAX_PERIOD_SIZE 1024*1024
 #else
 #define CS46XX_MIN_PERIOD_SIZE 2048
@@ -62,7 +47,11 @@ static inline void snd_cs46xx_poke(struct snd_cs46xx *chip, unsigned long reg, u
 	unsigned int bank = reg >> 16;
 	unsigned int offset = reg & 0xffff;
 
-	/*if (bank == 0) printk("snd_cs46xx_poke: %04X - %08X\n",reg >> 2,val); */
+	/*
+	if (bank == 0)
+		printk(KERN_DEBUG "snd_cs46xx_poke: %04X - %08X\n",
+		       reg >> 2,val);
+	*/
 	writel(val, chip->region.idx[bank+1].remap_addr + offset);
 }
 
@@ -86,12 +75,12 @@ static inline unsigned int snd_cs46xx_peekBA0(struct snd_cs46xx *chip, unsigned 
 struct dsp_spos_instance *cs46xx_dsp_spos_create (struct snd_cs46xx * chip);
 void cs46xx_dsp_spos_destroy (struct snd_cs46xx * chip);
 int cs46xx_dsp_load_module (struct snd_cs46xx * chip, struct dsp_module_desc * module);
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 int cs46xx_dsp_resume(struct snd_cs46xx * chip);
 #endif
 struct dsp_symbol_entry *cs46xx_dsp_lookup_symbol (struct snd_cs46xx * chip, char * symbol_name,
 						   int symbol_type);
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_SND_PROC_FS
 int cs46xx_dsp_proc_init (struct snd_card *card, struct snd_cs46xx *chip);
 int cs46xx_dsp_proc_done (struct snd_cs46xx *chip);
 #else
@@ -114,7 +103,7 @@ int cs46xx_dsp_disable_adc_capture (struct snd_cs46xx *chip);
 int cs46xx_poke_via_dsp (struct snd_cs46xx *chip, u32 address, u32 data);
 struct dsp_scb_descriptor * cs46xx_dsp_create_scb (struct snd_cs46xx *chip, char * name,
 						   u32 * scb_data, u32 dest);
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_SND_PROC_FS
 void cs46xx_dsp_proc_free_scb_desc (struct dsp_scb_descriptor * scb);
 void cs46xx_dsp_proc_register_scb_desc (struct snd_cs46xx *chip,
 					struct dsp_scb_descriptor * scb);

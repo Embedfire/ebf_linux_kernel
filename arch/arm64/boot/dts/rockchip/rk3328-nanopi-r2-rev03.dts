@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2020 FriendlyElec Computer Tech. Co., Ltd.
+ * (http://www.friendlyarm.com)
+ */
+
+/dts-v1/;
+#include "rk3328-nanopi-r2-common.dtsi"
+
+/ {
+	model = "FriendlyElec NanoPi NEO3S";
+	compatible = "friendlyelec,nanopi-neo3s", "rockchip,rk3328";
+};
+
+&mach {
+	hwrev = <3>;
+	model = "NanoPi NEO3S";
+};
+
+&vccio_sd {
+	status = "okay";
+};
+
+&io_domains {
+	vccio3-supply = <&vccio_sd>;
+};
+
+&sdmmc {
+	vqmmc-supply = <&vccio_sd>;
+	max-frequency = <150000000>;
+	sd-uhs-sdr50;
+	sd-uhs-sdr104;
+	status = "okay";
+};
+
+&sdmmc_ext {
+	status = "okay";
+};
+
+&sdio_pwrseq {
+	status = "okay";
+};

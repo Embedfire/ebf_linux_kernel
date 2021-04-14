@@ -1,34 +1,20 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef __SOUND_ES1688_H
 #define __SOUND_ES1688_H
 
 /*
  *  Header file for ES488/ES1688
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
-#include "control.h"
-#include "pcm.h"
+#include <sound/control.h>
+#include <sound/pcm.h>
 #include <linux/interrupt.h>
 
 #define ES1688_HW_AUTO		0x0000
 #define ES1688_HW_688		0x0001
 #define ES1688_HW_1688		0x0002
+#define ES1688_HW_UNDEF	0x0003
 
 struct snd_es1688 {
 	unsigned long port;		/* port of ESS chip */
@@ -44,7 +30,6 @@ struct snd_es1688 {
 	unsigned char pad;
 	unsigned int dma_size;
 
-	struct snd_card *card;
 	struct snd_pcm *pcm;
 	struct snd_pcm_substream *playback_substream;
 	struct snd_pcm_substream *capture_substream;
@@ -108,14 +93,15 @@ struct snd_es1688 {
 void snd_es1688_mixer_write(struct snd_es1688 *chip, unsigned char reg, unsigned char data);
 
 int snd_es1688_create(struct snd_card *card,
+		      struct snd_es1688 *chip,
 		      unsigned long port,
 		      unsigned long mpu_port,
 		      int irq,
 		      int mpu_irq,
 		      int dma8,
-		      unsigned short hardware,
-		      struct snd_es1688 ** rchip);
-int snd_es1688_pcm(struct snd_es1688 *chip, int device, struct snd_pcm ** rpcm);
-int snd_es1688_mixer(struct snd_es1688 *chip);
+		      unsigned short hardware);
+int snd_es1688_pcm(struct snd_card *card, struct snd_es1688 *chip, int device);
+int snd_es1688_mixer(struct snd_card *card, struct snd_es1688 *chip);
+int snd_es1688_reset(struct snd_es1688 *chip);
 
 #endif /* __SOUND_ES1688_H */

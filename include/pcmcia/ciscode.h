@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ciscode.h
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * The initial developer of the original code is David A. Hinds
  * <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
@@ -119,7 +116,7 @@
 
 #define MANFID_TOSHIBA			0x0098
 
-#define MANFID_UNGERMANN 0x02c0
+#define MANFID_UNGERMANN		0x02c0
 
 #define MANFID_XIRCOM			0x0105
 

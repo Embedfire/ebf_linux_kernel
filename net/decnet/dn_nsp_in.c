@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * DECnet       An implementation of the DECnet protocol suite for the LINUX
  *              operating system.  DECnet is implemented using the  BSD Socket
@@ -34,15 +35,6 @@
 /******************************************************************************
     (c) 1995-1998 E.M. Serrat		emserrat@geocities.com
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
 *******************************************************************************/
 
 #include <linux/errno.h>
@@ -57,9 +49,9 @@
 #include <linux/netdevice.h>
 #include <linux/inet.h>
 #include <linux/route.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/tcp_states.h>
-#include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/termios.h>
@@ -80,10 +72,15 @@ extern int decnet_log_martians;
 
 static void dn_log_martian(struct sk_buff *skb, const char *msg)
 {
-	if (decnet_log_martians && net_ratelimit()) {
+	if (decnet_log_martians) {
 		char *devname = skb->dev ? skb->dev->name : "???";
 		struct dn_skb_cb *cb = DN_SKB_CB(skb);
-		printk(KERN_INFO "DECnet: Martian packet (%s) dev=%s src=0x%04hx dst=0x%04hx srcport=0x%04hx dstport=0x%04hx\n", msg, devname, dn_ntohs(cb->src), dn_ntohs(cb->dst), dn_ntohs(cb->src_port), dn_ntohs(cb->dst_port));
+		net_info_ratelimited("DECnet: Martian packet (%s) dev=%s src=0x%04hx dst=0x%04hx srcport=0x%04hx dstport=0x%04hx\n",
+				     msg, devname,
+				     le16_to_cpu(cb->src),
+				     le16_to_cpu(cb->dst),
+				     le16_to_cpu(cb->src_port),
+				     le16_to_cpu(cb->dst_port));
 	}
 }
 
@@ -98,23 +95,27 @@ static void dn_ack(struct sock *sk, struct sk_buff *skb, unsigned short ack)
 	unsigned short type = ((ack >> 12) & 0x0003);
 	int wakeup = 0;
 
-	switch(type) {
-		case 0: /* ACK - Data */
-			if (dn_after(ack, scp->ackrcv_dat)) {
-				scp->ackrcv_dat = ack & 0x0fff;
-				wakeup |= dn_nsp_check_xmit_queue(sk, skb, &scp->data_xmit_queue, ack);
-			}
-			break;
-		case 1: /* NAK - Data */
-			break;
-		case 2: /* ACK - OtherData */
-			if (dn_after(ack, scp->ackrcv_oth)) {
-				scp->ackrcv_oth = ack & 0x0fff;
-				wakeup |= dn_nsp_check_xmit_queue(sk, skb, &scp->other_xmit_queue, ack);
-			}
-			break;
-		case 3: /* NAK - OtherData */
-			break;
+	switch (type) {
+	case 0: /* ACK - Data */
+		if (dn_after(ack, scp->ackrcv_dat)) {
+			scp->ackrcv_dat = ack & 0x0fff;
+			wakeup |= dn_nsp_check_xmit_queue(sk, skb,
+							  &scp->data_xmit_queue,
+							  ack);
+		}
+		break;
+	case 1: /* NAK - Data */
+		break;
+	case 2: /* ACK - OtherData */
+		if (dn_after(ack, scp->ackrcv_oth)) {
+			scp->ackrcv_oth = ack & 0x0fff;
+			wakeup |= dn_nsp_check_xmit_queue(sk, skb,
+							  &scp->other_xmit_queue,
+							  ack);
+		}
+		break;
+	case 3: /* NAK - OtherData */
+		break;
 	}
 
 	if (wakeup && !sock_flag(sk, SOCK_DEAD))
@@ -133,7 +134,7 @@ static int dn_process_ack(struct sock *sk, struct sk_buff *skb, int oth)
 	if (skb->len < 2)
 		return len;
 
-	if ((ack = dn_ntohs(*ptr)) & 0x8000) {
+	if ((ack = le16_to_cpu(*ptr)) & 0x8000) {
 		skb_pull(skb, 2);
 		ptr++;
 		len += 2;
@@ -147,7 +148,7 @@ static int dn_process_ack(struct sock *sk, struct sk_buff *skb, int oth)
 	if (skb->len < 2)
 		return len;
 
-	if ((ack = dn_ntohs(*ptr)) & 0x8000) {
+	if ((ack = le16_to_cpu(*ptr)) & 0x8000) {
 		skb_pull(skb, 2);
 		len += 2;
 		if ((ack & 0x4000) == 0) {
@@ -237,7 +238,7 @@ static struct sock *dn_find_listener(struct sk_buff *skb, unsigned short *reason
 	cb->dst_port = msg->dstaddr;
 	cb->services = msg->services;
 	cb->info     = msg->info;
-	cb->segsize  = dn_ntohs(msg->segsize);
+	cb->segsize  = le16_to_cpu(msg->segsize);
 
 	if (!pskb_may_pull(skb, sizeof(*msg)))
 		goto err_out;
@@ -327,7 +328,7 @@ static void dn_nsp_conn_init(struct sock *sk, struct sk_buff *skb)
 		return;
 	}
 
-	sk->sk_ack_backlog++;
+	sk_acceptq_added(sk);
 	skb_queue_tail(&sk->sk_receive_queue, skb);
 	sk->sk_state_change(sk);
 }
@@ -344,7 +345,7 @@ static void dn_nsp_conn_conf(struct sock *sk, struct sk_buff *skb)
 	ptr = skb->data;
 	cb->services = *ptr++;
 	cb->info = *ptr++;
-	cb->segsize = dn_ntohs(*(__le16 *)ptr);
+	cb->segsize = le16_to_cpu(*(__le16 *)ptr);
 
 	if ((scp->state == DN_CI) || (scp->state == DN_CD)) {
 		scp->persist = 0;
@@ -361,7 +362,7 @@ static void dn_nsp_conn_conf(struct sock *sk, struct sk_buff *skb)
 		if (skb->len > 0) {
 			u16 dlen = *skb->data;
 			if ((dlen <= 16) && (dlen <= skb->len)) {
-				scp->conndata_in.opt_optl = dn_htons(dlen);
+				scp->conndata_in.opt_optl = cpu_to_le16(dlen);
 				skb_copy_from_linear_data_offset(skb, 1,
 					      scp->conndata_in.opt_data, dlen);
 			}
@@ -396,17 +397,17 @@ static void dn_nsp_disc_init(struct sock *sk, struct sk_buff *skb)
 	if (skb->len < 2)
 		goto out;
 
-	reason = dn_ntohs(*(__le16 *)skb->data);
+	reason = le16_to_cpu(*(__le16 *)skb->data);
 	skb_pull(skb, 2);
 
-	scp->discdata_in.opt_status = dn_htons(reason);
+	scp->discdata_in.opt_status = cpu_to_le16(reason);
 	scp->discdata_in.opt_optl   = 0;
 	memset(scp->discdata_in.opt_data, 0, 16);
 
 	if (skb->len > 0) {
 		u16 dlen = *skb->data;
 		if ((dlen <= 16) && (dlen <= skb->len)) {
-			scp->discdata_in.opt_optl = dn_htons(dlen);
+			scp->discdata_in.opt_optl = cpu_to_le16(dlen);
 			skb_copy_from_linear_data_offset(skb, 1, scp->discdata_in.opt_data, dlen);
 		}
 	}
@@ -414,19 +415,19 @@ static void dn_nsp_disc_init(struct sock *sk, struct sk_buff *skb)
 	scp->addrrem = cb->src_port;
 	sk->sk_state = TCP_CLOSE;
 
-	switch(scp->state) {
-		case DN_CI:
-		case DN_CD:
-			scp->state = DN_RJ;
-			sk->sk_err = ECONNREFUSED;
-			break;
-		case DN_RUN:
-			sk->sk_shutdown |= SHUTDOWN_MASK;
-			scp->state = DN_DN;
-			break;
-		case DN_DI:
-			scp->state = DN_DIC;
-			break;
+	switch (scp->state) {
+	case DN_CI:
+	case DN_CD:
+		scp->state = DN_RJ;
+		sk->sk_err = ECONNREFUSED;
+		break;
+	case DN_RUN:
+		sk->sk_shutdown |= SHUTDOWN_MASK;
+		scp->state = DN_DN;
+		break;
+	case DN_DI:
+		scp->state = DN_DIC;
+		break;
 	}
 
 	if (!sock_flag(sk, SOCK_DEAD)) {
@@ -463,27 +464,28 @@ static void dn_nsp_disc_conf(struct sock *sk, struct sk_buff *skb)
 	if (skb->len != 2)
 		goto out;
 
-	reason = dn_ntohs(*(__le16 *)skb->data);
+	reason = le16_to_cpu(*(__le16 *)skb->data);
 
 	sk->sk_state = TCP_CLOSE;
 
-	switch(scp->state) {
-		case DN_CI:
-			scp->state = DN_NR;
-			break;
-		case DN_DR:
-			if (reason == NSP_REASON_DC)
-				scp->state = DN_DRC;
-			if (reason == NSP_REASON_NL)
-				scp->state = DN_CN;
-			break;
-		case DN_DI:
-			scp->state = DN_DIC;
-			break;
-		case DN_RUN:
-			sk->sk_shutdown |= SHUTDOWN_MASK;
-		case DN_CC:
+	switch (scp->state) {
+	case DN_CI:
+		scp->state = DN_NR;
+		break;
+	case DN_DR:
+		if (reason == NSP_REASON_DC)
+			scp->state = DN_DRC;
+		if (reason == NSP_REASON_NL)
 			scp->state = DN_CN;
+		break;
+	case DN_DI:
+		scp->state = DN_DIC;
+		break;
+	case DN_RUN:
+		sk->sk_shutdown |= SHUTDOWN_MASK;
+		fallthrough;
+	case DN_CC:
+		scp->state = DN_CN;
 	}
 
 	if (!sock_flag(sk, SOCK_DEAD)) {
@@ -512,7 +514,7 @@ static void dn_nsp_linkservice(struct sock *sk, struct sk_buff *skb)
 	if (skb->len != 4)
 		goto out;
 
-	segnum = dn_ntohs(*(__le16 *)ptr);
+	segnum = le16_to_cpu(*(__le16 *)ptr);
 	ptr += 2;
 	lsflags = *(unsigned char *)ptr++;
 	fcval = *ptr;
@@ -581,7 +583,7 @@ static __inline__ int dn_queue_skb(struct sock *sk, struct sk_buff *skb, int sig
 	   number of warnings when compiling with -W --ANK
 	 */
 	if (atomic_read(&sk->sk_rmem_alloc) + skb->truesize >=
-	    (unsigned)sk->sk_rcvbuf) {
+	    (unsigned int)sk->sk_rcvbuf) {
 		err = -ENOMEM;
 		goto out;
 	}
@@ -593,19 +595,8 @@ static __inline__ int dn_queue_skb(struct sock *sk, struct sk_buff *skb, int sig
 	skb_set_owner_r(skb, sk);
 	skb_queue_tail(queue, skb);
 
-	/* This code only runs from BH or BH protected context.
-	 * Therefore the plain read_lock is ok here. -DaveM
-	 */
-	read_lock(&sk->sk_callback_lock);
-	if (!sock_flag(sk, SOCK_DEAD)) {
-		struct socket *sock = sk->sk_socket;
-		wake_up_interruptible(sk->sk_sleep);
-		if (sock && sock->fasync_list &&
-		    !test_bit(SOCK_ASYNC_WAITDATA, &sock->flags))
-			__kill_fasync(sock->fasync_list, sig,
-				    (sig == SIGURG) ? POLL_PRI : POLL_IN);
-	}
-	read_unlock(&sk->sk_callback_lock);
+	if (!sock_flag(sk, SOCK_DEAD))
+		sk->sk_data_ready(sk);
 out:
 	return err;
 }
@@ -620,7 +611,7 @@ static void dn_nsp_otherdata(struct sock *sk, struct sk_buff *skb)
 	if (skb->len < 2)
 		goto out;
 
-	cb->segnum = segnum = dn_ntohs(*(__le16 *)skb->data);
+	cb->segnum = segnum = le16_to_cpu(*(__le16 *)skb->data);
 	skb_pull(skb, 2);
 
 	if (seq_next(scp->numoth_rcv, segnum)) {
@@ -648,7 +639,7 @@ static void dn_nsp_data(struct sock *sk, struct sk_buff *skb)
 	if (skb->len < 2)
 		goto out;
 
-	cb->segnum = segnum = dn_ntohs(*(__le16 *)skb->data);
+	cb->segnum = segnum = le16_to_cpu(*(__le16 *)skb->data);
 	skb_pull(skb, 2);
 
 	if (seq_next(scp->numdat_rcv, segnum)) {
@@ -698,16 +689,16 @@ static int dn_nsp_no_socket(struct sk_buff *skb, unsigned short reason)
 		goto out;
 
 	if ((reason != NSP_REASON_OK) && ((cb->nsp_flags & 0x0c) == 0x08)) {
-		switch(cb->nsp_flags & 0x70) {
-			case 0x10:
-			case 0x60: /* (Retransmitted) Connect Init */
-				dn_nsp_return_disc(skb, NSP_DISCINIT, reason);
-				ret = NET_RX_SUCCESS;
-				break;
-			case 0x20: /* Connect Confirm */
-				dn_nsp_return_disc(skb, NSP_DISCCONF, reason);
-				ret = NET_RX_SUCCESS;
-				break;
+		switch (cb->nsp_flags & 0x70) {
+		case 0x10:
+		case 0x60: /* (Retransmitted) Connect Init */
+			dn_nsp_return_disc(skb, NSP_DISCINIT, reason);
+			ret = NET_RX_SUCCESS;
+			break;
+		case 0x20: /* Connect Confirm */
+			dn_nsp_return_disc(skb, NSP_DISCCONF, reason);
+			ret = NET_RX_SUCCESS;
+			break;
 		}
 	}
 
@@ -716,7 +707,8 @@ out:
 	return ret;
 }
 
-static int dn_nsp_rx_packet(struct sk_buff *skb)
+static int dn_nsp_rx_packet(struct net *net, struct sock *sk2,
+			    struct sk_buff *skb)
 {
 	struct dn_skb_cb *cb = DN_SKB_CB(skb);
 	struct sock *sk = NULL;
@@ -739,17 +731,17 @@ static int dn_nsp_rx_packet(struct sk_buff *skb)
 	 * Filter out conninits and useless packet types
 	 */
 	if ((cb->nsp_flags & 0x0c) == 0x08) {
-		switch(cb->nsp_flags & 0x70) {
-			case 0x00: /* NOP */
-			case 0x70: /* Reserved */
-			case 0x50: /* Reserved, Phase II node init */
+		switch (cb->nsp_flags & 0x70) {
+		case 0x00: /* NOP */
+		case 0x70: /* Reserved */
+		case 0x50: /* Reserved, Phase II node init */
+			goto free_out;
+		case 0x10:
+		case 0x60:
+			if (unlikely(cb->rt_flags & DN_RT_F_RTS))
 				goto free_out;
-			case 0x10:
-			case 0x60:
-				if (unlikely(cb->rt_flags & DN_RT_F_RTS))
-					goto free_out;
-				sk = dn_find_listener(skb, &reason);
-				goto got_it;
+			sk = dn_find_listener(skb, &reason);
+			goto got_it;
 		}
 	}
 
@@ -777,12 +769,8 @@ static int dn_nsp_rx_packet(struct sk_buff *skb)
 	 * Swap src & dst and look up in the normal way.
 	 */
 	if (unlikely(cb->rt_flags & DN_RT_F_RTS)) {
-		__le16 tmp = cb->dst_port;
-		cb->dst_port = cb->src_port;
-		cb->src_port = tmp;
-		tmp = cb->dst;
-		cb->dst = cb->src;
-		cb->src = tmp;
+		swap(cb->dst_port, cb->src_port);
+		swap(cb->dst, cb->src);
 	}
 
 	/*
@@ -816,7 +804,9 @@ free_out:
 
 int dn_nsp_rx(struct sk_buff *skb)
 {
-	return NF_HOOK(PF_DECnet, NF_DN_LOCAL_IN, skb, skb->dev, NULL, dn_nsp_rx_packet);
+	return NF_HOOK(NFPROTO_DECNET, NF_DN_LOCAL_IN,
+		       &init_net, NULL, skb, skb->dev, NULL,
+		       dn_nsp_rx_packet);
 }
 
 /*
@@ -841,20 +831,20 @@ int dn_nsp_backlog_rcv(struct sock *sk, struct sk_buff *skb)
 	 * Control packet.
 	 */
 	if ((cb->nsp_flags & 0x0c) == 0x08) {
-		switch(cb->nsp_flags & 0x70) {
-			case 0x10:
-			case 0x60:
-				dn_nsp_conn_init(sk, skb);
-				break;
-			case 0x20:
-				dn_nsp_conn_conf(sk, skb);
-				break;
-			case 0x30:
-				dn_nsp_disc_init(sk, skb);
-				break;
-			case 0x40:
-				dn_nsp_disc_conf(sk, skb);
-				break;
+		switch (cb->nsp_flags & 0x70) {
+		case 0x10:
+		case 0x60:
+			dn_nsp_conn_init(sk, skb);
+			break;
+		case 0x20:
+			dn_nsp_conn_conf(sk, skb);
+			break;
+		case 0x30:
+			dn_nsp_disc_init(sk, skb);
+			break;
+		case 0x40:
+			dn_nsp_disc_conf(sk, skb);
+			break;
 		}
 
 	} else if (cb->nsp_flags == 0x24) {
@@ -895,15 +885,15 @@ int dn_nsp_backlog_rcv(struct sock *sk, struct sk_buff *skb)
 			if (scp->state != DN_RUN)
 				goto free_out;
 
-			switch(cb->nsp_flags) {
-				case 0x10: /* LS */
-					dn_nsp_linkservice(sk, skb);
-					break;
-				case 0x30: /* OD */
-					dn_nsp_otherdata(sk, skb);
-					break;
-				default:
-					dn_nsp_data(sk, skb);
+			switch (cb->nsp_flags) {
+			case 0x10: /* LS */
+				dn_nsp_linkservice(sk, skb);
+				break;
+			case 0x30: /* OD */
+				dn_nsp_otherdata(sk, skb);
+				break;
+			default:
+				dn_nsp_data(sk, skb);
 			}
 
 		} else { /* Ack, chuck it out here */
@@ -914,4 +904,3 @@ free_out:
 
 	return NET_RX_SUCCESS;
 }
-

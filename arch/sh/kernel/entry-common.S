@@ -1,11 +1,7 @@
-/* 
+/* SPDX-License-Identifier: GPL-2.0
+ *
  *  Copyright (C) 1999, 2000, 2002  Niibe Yutaka
  *  Copyright (C) 2003 - 2008  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
- *
  */
 
 ! NOTE:
@@ -43,9 +39,10 @@
  *	syscall #
  *
  */
+#include <asm/dwarf.h>
 
-#if defined(CONFIG_PREEMPT)
-#  define preempt_stop()	cli
+#if defined(CONFIG_PREEMPTION)
+#  define preempt_stop()	cli ; TRACE_IRQS_OFF
 #else
 #  define preempt_stop()
 #  define resume_kernel		__restore_all
@@ -55,11 +52,7 @@
 	.align	2
 ENTRY(exception_error)
 	!
-#ifdef CONFIG_TRACE_IRQFLAGS
-	mov.l	2f, r0
-	jsr	@r0
-	 nop
-#endif
+	TRACE_IRQS_ON
 	sti
 	mov.l	1f, r0
 	jmp	@r0
@@ -67,18 +60,21 @@ ENTRY(exception_error)
 
 	.align	2
 1:	.long	do_exception_error
-#ifdef CONFIG_TRACE_IRQFLAGS
-2:	.long	trace_hardirqs_on
-#endif
 
 	.align	2
 ret_from_exception:
+	CFI_STARTPROC simple
+	CFI_DEF_CFA r14, 0
+	CFI_REL_OFFSET 17, 64
+	CFI_REL_OFFSET 15, 60
+	CFI_REL_OFFSET 14, 56
+	CFI_REL_OFFSET 13, 52
+	CFI_REL_OFFSET 12, 48
+	CFI_REL_OFFSET 11, 44
+	CFI_REL_OFFSET 10, 40
+	CFI_REL_OFFSET 9, 36
+	CFI_REL_OFFSET 8, 32
 	preempt_stop()
-#ifdef CONFIG_TRACE_IRQFLAGS
-	mov.l	4f, r0
-	jsr	@r0
-	 nop
-#endif
 ENTRY(ret_from_irq)
 	!
 	mov	#OFF_SR, r0
@@ -88,11 +84,12 @@ ENTRY(ret_from_irq)
 	get_current_thread_info r8, r0
 	bt	resume_kernel	! Yes, it's from kernel, go back soon
 
-#ifdef CONFIG_PREEMPT
+#ifdef CONFIG_PREEMPTION
 	bra	resume_userspace
 	 nop
 ENTRY(resume_kernel)
 	cli
+	TRACE_IRQS_OFF
 	mov.l	@(TI_PRE_COUNT,r8), r0	! current_thread_info->preempt_count
 	tst	r0, r0
 	bf	noresched
@@ -103,10 +100,11 @@ need_resched:
 
 	mov	#OFF_SR, r0
 	mov.l	@(r0,r15), r0		! get status register
-	and	#0xf0, r0		! interrupts off (exception path)?
-	cmp/eq	#0xf0, r0
+	shlr	r0
+	and	#(0xf0>>1), r0		! interrupts off (exception path)?
+	cmp/eq	#(0xf0>>1), r0
 	bt	noresched
-	mov.l	3f, r0
+	mov.l	1f, r0
 	jsr	@r0			! call preempt_schedule_irq
 	 nop
 	bra	need_resched
@@ -117,21 +115,15 @@ noresched:
 	 nop
 
 	.align 2
-1:	.long	PREEMPT_ACTIVE
-2:	.long	schedule
-3:	.long	preempt_schedule_irq
+1:	.long	preempt_schedule_irq
 #endif
 
 ENTRY(resume_userspace)
 	! r8: current_thread_info
 	cli
-#ifdef CONFIG_TRACE_IRQFLAGS
-	mov.l	5f, r0
-	jsr	@r0
-	 nop
-#endif
+	TRACE_IRQS_OFF
 	mov.l	@(TI_FLAGS,r8), r0		! current_thread_info->flags
-	tst	#_TIF_WORK_MASK, r0
+	tst	#(_TIF_WORK_MASK & 0xff), r0
 	bt/s	__restore_all
 	 tst	#_TIF_NEED_RESCHED, r0
 
@@ -141,12 +133,13 @@ work_pending:
 	! r8: current_thread_info
 	! t:  result of "tst	#_TIF_NEED_RESCHED, r0"
 	bf/s	work_resched
-	 tst	#(_TIF_SIGPENDING | _TIF_RESTORE_SIGMASK), r0
+	 tst	#(_TIF_SIGPENDING | _TIF_NOTIFY_RESUME), r0
 work_notifysig:
 	bt/s	__restore_all
 	 mov	r15, r4
 	mov	r12, r5		! set arg1(save_r0)
 	mov	r0, r6
+	sti
 	mov.l	2f, r1
 	mov.l	3f, r0
 	jmp	@r1
@@ -156,14 +149,10 @@ work_resched:
 	jsr	@r1				! schedule
 	 nop
 	cli
-#ifdef CONFIG_TRACE_IRQFLAGS
-	mov.l	5f, r0
-	jsr	@r0
-	 nop
-#endif
+	TRACE_IRQS_OFF
 	!
 	mov.l	@(TI_FLAGS,r8), r0		! current_thread_info->flags
-	tst	#_TIF_WORK_MASK, r0
+	tst	#(_TIF_WORK_MASK & 0xff), r0
 	bt	__restore_all
 	bra	work_pending
 	 tst	#_TIF_NEED_RESCHED, r0
@@ -172,23 +161,15 @@ work_resched:
 1:	.long	schedule
 2:	.long	do_notify_resume
 3:	.long	resume_userspace
-#ifdef CONFIG_TRACE_IRQFLAGS
-4:	.long	trace_hardirqs_on
-5:	.long	trace_hardirqs_off
-#endif
 
 	.align	2
 syscall_exit_work:
 	! r0: current_thread_info->flags
 	! r8: current_thread_info
-	tst	#_TIF_WORK_SYSCALL_MASK, r0
+	tst	#(_TIF_WORK_SYSCALL_MASK & 0xff), r0
 	bt/s	work_pending
 	 tst	#_TIF_NEED_RESCHED, r0
-#ifdef CONFIG_TRACE_IRQFLAGS
-	mov.l	5f, r0
-	jsr	@r0
-	 nop
-#endif
+	TRACE_IRQS_ON
 	sti
 	mov	r15, r4
 	mov.l	8f, r0			! do_syscall_trace_leave
@@ -197,41 +178,26 @@ syscall_exit_work:
 	bra	resume_userspace
 	 nop
 
-	.align	2
-syscall_trace_entry:
-	!                     	Yes it is traced.
-	mov     r15, r4
-	mov.l	7f, r11		! Call do_syscall_trace_enter which notifies
-	jsr	@r11	    	! superior (will chomp R[0-7])
-	 nop
-	mov.l	r0, @(OFF_R0,r15)	! Save return value
-	!			Reload R0-R4 from kernel stack, where the
-	!   	    	    	parent may have modified them using
-	!   	    	    	ptrace(POKEUSR).  (Note that R0-R2 are
-	!   	    	    	used by the system call handler directly
-	!   	    	    	from the kernel stack anyway, so don't need
-	!   	    	    	to be reloaded here.)  This allows the parent
-	!   	    	    	to rewrite system calls and args on the fly.
-	mov.l	@(OFF_R4,r15), r4   ! arg0
-	mov.l	@(OFF_R5,r15), r5
-	mov.l	@(OFF_R6,r15), r6
-	mov.l	@(OFF_R7,r15), r7   ! arg3
-	mov.l	@(OFF_R3,r15), r3   ! syscall_nr
-	!
-	mov.l	2f, r10			! Number of syscalls
-	cmp/hs	r10, r3
-	bf	syscall_call
-	mov	#-ENOSYS, r0
-	bra	syscall_exit
-	 mov.l	r0, @(OFF_R0,r15)	! Return value
-
 __restore_all:
-	mov.l	1f, r0
+	mov	#OFF_SR, r0
+	mov.l	@(r0,r15), r0	! get status register
+
+	shlr2	r0
+	and	#0x3c, r0
+	cmp/eq	#0x3c, r0
+	bt	1f
+	TRACE_IRQS_ON
+	bra	2f
+	 nop
+1:
+	TRACE_IRQS_OFF
+2:
+	mov.l	3f, r0
 	jmp	@r0
 	 nop
 
 	.align	2
-1:	.long	restore_all
+3:	.long	restore_all
 
 	.align	2
 syscall_badsys:			! Bad syscall number
@@ -257,8 +223,9 @@ debug_trap:
 	mov.l	@r8, r8
 	jsr	@r8
 	 nop
-	bra	__restore_all
+	bra	ret_from_exception
 	 nop
+	CFI_ENDPROC
 
 	.align	2
 1:	.long	debug_trap_table
@@ -269,19 +236,28 @@ debug_trap:
  *	Syscall #: R3
  *	Arguments #0 to #3: R4--R7
  *	Arguments #4 to #6: R0, R1, R2
- *	TRA: (number of arguments + ABI revision) x 4
+ *	TRA: See following table.
  *
- * This code also handles delegating other traps to the BIOS/gdb stub
- * according to:
- *
- * Trap number
  * (TRA>>2)	Purpose
  * --------	-------
  * 0x00-0x0f	original SH-3/4 syscall ABI (not in general use).
  * 0x10-0x1f	general SH-3/4 syscall ABI.
- * 0x20-0x2f	syscall ABI for SH-2 parts.
+ *      0x1f	unified SH-2/3/4 syscall ABI (preferred).
+ * 0x20-0x2f	original SH-2 syscall ABI.
  * 0x30-0x3f	debug traps used by the kernel.
  * 0x40-0xff	Not supported by all parts, so left unhandled.
+ *
+ * For making system calls, any trap number in the range for the
+ * given cpu model may be used, but the unified trap number 0x1f is
+ * preferred for compatibility with all models.
+ *
+ * The low bits of the trap number were once documented as matching
+ * the number of arguments, but they were never actually used as such
+ * by the kernel. SH-2 originally used its own separate trap range
+ * because several hardware exceptions fell in the range used for the
+ * SH-3/4 syscall ABI.
+ *
+ * This code also handles delegating other traps to the BIOS/gdb stub.
  *
  * Note: When we're first called, the TRA value must be shifted
  * right 2 bits in order to get the value that was used as the "trapa"
@@ -296,6 +272,19 @@ ret_from_fork:
 	 mov	r0, r4
 	bra	syscall_exit
 	 nop
+
+	.align	2
+	.globl	ret_from_kernel_thread
+ret_from_kernel_thread:
+	mov.l	1f, r8
+	jsr	@r8
+	 mov	r0, r4
+	mov.l	@(OFF_R5,r15), r5   ! fn
+	jsr	@r5
+	 mov.l	@(OFF_R4,r15), r4   ! arg
+	bra	syscall_exit
+	 nop
+
 	.align	2
 1:	.long	schedule_tail
 
@@ -304,34 +293,39 @@ ret_from_fork:
  * system calls and debug traps through their respective jump tables.
  */
 ENTRY(system_call)
+	setup_frame_reg
 #if !defined(CONFIG_CPU_SH2)
 	mov.l	1f, r9
 	mov.l	@r9, r8		! Read from TRA (Trap Address) Register
 #endif
+
+	mov	#OFF_TRA, r10
+	add	r15, r10
+	mov.l	r8, @r10		! set TRA value to tra
+
 	/*
 	 * Check the trap type
 	 */
 	mov	#((0x20 << 2) - 1), r9
 	cmp/hi	r9, r8
 	bt/s	debug_trap		! it's a debug trap..
-	 mov	#OFF_TRA, r9
-	add	r15, r9
-	mov.l	r8, @r9			! set TRA value to tra
-#ifdef CONFIG_TRACE_IRQFLAGS
-	mov.l	5f, r10
-	jsr	@r10
 	 nop
-#endif
+
+	TRACE_IRQS_ON
 	sti
 
 	!
 	get_current_thread_info r8, r10
 	mov.l	@(TI_FLAGS,r8), r8
-	mov	#_TIF_WORK_SYSCALL_MASK, r10
+	mov	#(_TIF_WORK_SYSCALL_MASK & 0xff), r10
+	mov	#(_TIF_WORK_SYSCALL_MASK >> 8), r9
 	tst	r10, r8
+	shll8	r9
+	bf	syscall_trace_entry
+	tst	r9, r8
 	bf	syscall_trace_entry
 	!
-	mov.l	2f, r8			! Number of syscalls
+	mov.l	6f, r8			! Number of syscalls
 	cmp/hs	r8, r3
 	bt	syscall_badsys
 	!
@@ -340,34 +334,67 @@ syscall_call:
 	mov.l	3f, r8		! Load the address of sys_call_table
 	add	r8, r3
 	mov.l	@r3, r8
+	mov.l	@(OFF_R2,r15), r2
+	mov.l	@(OFF_R1,r15), r1
+	mov.l	@(OFF_R0,r15), r0
+	mov.l	r2, @-r15
+	mov.l	r1, @-r15
+	mov.l	r0, @-r15
 	jsr	@r8	    	! jump to specific syscall handler
 	 nop
+	add	#12, r15
 	mov.l	@(OFF_R0,r15), r12		! save r0
 	mov.l	r0, @(OFF_R0,r15)		! save the return value
 	!
 syscall_exit:
 	cli
-#ifdef CONFIG_TRACE_IRQFLAGS
-	mov.l	6f, r0
-	jsr	@r0
-	 nop
-#endif
+	TRACE_IRQS_OFF
 	!
 	get_current_thread_info r8, r0
 	mov.l	@(TI_FLAGS,r8), r0		! current_thread_info->flags
-	tst	#_TIF_ALLWORK_MASK, r0
+	tst	#(_TIF_ALLWORK_MASK & 0xff), r0
+	mov	#(_TIF_ALLWORK_MASK >> 8), r1
+	bf	syscall_exit_work
+	shlr8	r0
+	tst	r0, r1
 	bf	syscall_exit_work
 	bra	__restore_all
 	 nop
+
+	.align	2
+syscall_trace_entry:
+	!                     	Yes it is traced.
+	mov     r15, r4
+	mov.l	7f, r11		! Call do_syscall_trace_enter which notifies
+	jsr	@r11	    	! superior (will chomp R[0-7])
+	 nop
+	cmp/eq	#-1, r0
+	bt	syscall_exit
+	!			Reload R0-R4 from kernel stack, where the
+	!   	    	    	parent may have modified them using
+	!   	    	    	ptrace(POKEUSR).  (Note that R0-R2 are
+	!   	    	    	reloaded from the kernel stack by syscall_call
+	!   	    	    	below, so don't need to be reloaded here.)
+	!   	    	    	This allows the parent to rewrite system calls
+	!   	    	    	and args on the fly.
+	mov.l	@(OFF_R4,r15), r4   ! arg0
+	mov.l	@(OFF_R5,r15), r5
+	mov.l	@(OFF_R6,r15), r6
+	mov.l	@(OFF_R7,r15), r7   ! arg3
+	mov.l	@(OFF_R3,r15), r3   ! syscall_nr
+	!
+	mov.l	6f, r10			! Number of syscalls
+	cmp/hs	r10, r3
+	bf	syscall_call
+	mov	#-ENOSYS, r0
+	bra	syscall_exit
+	 mov.l	r0, @(OFF_R0,r15)	! Return value
+
 	.align	2
 #if !defined(CONFIG_CPU_SH2)
 1:	.long	TRA
 #endif
-2:	.long	NR_syscalls
+6:	.long	NR_syscalls
 3:	.long	sys_call_table
-#ifdef CONFIG_TRACE_IRQFLAGS
-5:	.long	trace_hardirqs_on
-6:	.long	trace_hardirqs_off
-#endif
 7:	.long	do_syscall_trace_enter
 8:	.long	do_syscall_trace_leave

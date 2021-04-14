@@ -7,7 +7,7 @@
  *            ------------------
  *
  * You can find a subset of the documentation in 
- * Documentation/networking/z8530drv.txt.
+ * Documentation/networking/device_drivers/hamradio/z8530drv.rst.
  */
 
 /*
@@ -158,7 +158,6 @@
 #include <linux/in.h>
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
@@ -178,22 +177,23 @@
 #include <net/ax25.h>
 
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "z8530.h"
 
-static char banner[] __initdata = KERN_INFO "AX.25: Z8530 SCC driver version "VERSION".dl1bke\n";
+static const char banner[] __initconst = KERN_INFO \
+	"AX.25: Z8530 SCC driver version "VERSION".dl1bke\n";
 
-static void t_dwait(unsigned long);
-static void t_txdelay(unsigned long);
-static void t_tail(unsigned long);
-static void t_busy(unsigned long);
-static void t_maxkeyup(unsigned long);
-static void t_idle(unsigned long);
+static void t_dwait(struct timer_list *t);
+static void t_txdelay(struct timer_list *t);
+static void t_tail(struct timer_list *t);
+static void t_busy(struct timer_list *);
+static void t_maxkeyup(struct timer_list *);
+static void t_idle(struct timer_list *t);
 static void scc_tx_done(struct scc_channel *);
-static void scc_start_tx_timer(struct scc_channel *, void (*)(unsigned long), unsigned long);
+static void scc_start_tx_timer(struct scc_channel *,
+			       void (*)(struct timer_list *), unsigned long);
 static void scc_start_maxkeyup(struct scc_channel *);
 static void scc_start_defer(struct scc_channel *);
 
@@ -208,7 +208,8 @@ static void scc_net_setup(struct net_device *dev);
 static int scc_net_open(struct net_device *dev);
 static int scc_net_close(struct net_device *dev);
 static void scc_net_rx(struct scc_channel *scc, struct sk_buff *skb);
-static int scc_net_tx(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t scc_net_tx(struct sk_buff *skb,
+			      struct net_device *dev);
 static int scc_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
 static int scc_net_set_mac_address(struct net_device *dev, void *addr);
 static struct net_device_stats * scc_net_get_stats(struct net_device *dev);
@@ -540,7 +541,7 @@ static inline void scc_rxint(struct scc_channel *scc)
 		}
 		
 		scc->rx_buff = skb;
-		*(skb_put(skb, 1)) = 0;	/* KISS data */
+		skb_put_u8(skb, 0);	/* KISS data */
 	}
 	
 	if (skb->len >= scc->stat.bufsize)
@@ -555,7 +556,7 @@ static inline void scc_rxint(struct scc_channel *scc)
 		return;
 	}
 
-	*(skb_put(skb, 1)) = Inb(scc->data);
+	skb_put_u8(skb, Inb(scc->data));
 }
 
 
@@ -992,24 +993,27 @@ static void scc_key_trx(struct scc_channel *scc, char tx)
 
 /* ----> SCC timer interrupt handler and friends. <---- */
 
-static void __scc_start_tx_timer(struct scc_channel *scc, void (*handler)(unsigned long), unsigned long when)
+static void __scc_start_tx_timer(struct scc_channel *scc,
+				 void (*handler)(struct timer_list *t),
+				 unsigned long when)
 {
 	del_timer(&scc->tx_t);
 
 	if (when == 0)
 	{
-		handler((unsigned long) scc);
+		handler(&scc->tx_t);
 	} else 
 	if (when != TIMER_OFF)
 	{
-		scc->tx_t.data = (unsigned long) scc;
 		scc->tx_t.function = handler;
 		scc->tx_t.expires = jiffies + (when*HZ)/100;
 		add_timer(&scc->tx_t);
 	}
 }
 
-static void scc_start_tx_timer(struct scc_channel *scc, void (*handler)(unsigned long), unsigned long when)
+static void scc_start_tx_timer(struct scc_channel *scc,
+			       void (*handler)(struct timer_list *t),
+			       unsigned long when)
 {
 	unsigned long flags;
 	
@@ -1027,7 +1031,6 @@ static void scc_start_defer(struct scc_channel *scc)
 	
 	if (scc->kiss.maxdefer != 0 && scc->kiss.maxdefer != TIMER_OFF)
 	{
-		scc->tx_wdog.data = (unsigned long) scc;
 		scc->tx_wdog.function = t_busy;
 		scc->tx_wdog.expires = jiffies + HZ*scc->kiss.maxdefer;
 		add_timer(&scc->tx_wdog);
@@ -1044,7 +1047,6 @@ static void scc_start_maxkeyup(struct scc_channel *scc)
 	
 	if (scc->kiss.maxkeyup != 0 && scc->kiss.maxkeyup != TIMER_OFF)
 	{
-		scc->tx_wdog.data = (unsigned long) scc;
 		scc->tx_wdog.function = t_maxkeyup;
 		scc->tx_wdog.expires = jiffies + HZ*scc->kiss.maxkeyup;
 		add_timer(&scc->tx_wdog);
@@ -1068,7 +1070,8 @@ static void scc_tx_done(struct scc_channel *scc)
 		case KISS_DUPLEX_LINK:
 			scc->stat.tx_state = TXS_IDLE2;
 			if (scc->kiss.idletime != TIMER_OFF)
-			scc_start_tx_timer(scc, t_idle, scc->kiss.idletime*100);
+				scc_start_tx_timer(scc, t_idle,
+						   scc->kiss.idletime*100);
 			break;
 		case KISS_DUPLEX_OPTIMA:
 			scc_notify(scc, HWEV_ALL_SENT);
@@ -1120,9 +1123,9 @@ static inline int is_grouped(struct scc_channel *scc)
  * fulldup == 2:  mintime expired, reset status or key trx and start txdelay
  */
 
-static void t_dwait(unsigned long channel)
+static void t_dwait(struct timer_list *t)
 {
-	struct scc_channel *scc = (struct scc_channel *) channel;
+	struct scc_channel *scc = from_timer(scc, t, tx_t);
 	
 	if (scc->stat.tx_state == TXS_WAIT)	/* maxkeyup or idle timeout */
 	{
@@ -1162,9 +1165,9 @@ static void t_dwait(unsigned long channel)
  * kick transmission by a fake scc_txint(scc), start 'maxkeyup' watchdog.
  */
 
-static void t_txdelay(unsigned long channel)
+static void t_txdelay(struct timer_list *t)
 {
-	struct scc_channel *scc = (struct scc_channel *) channel;
+	struct scc_channel *scc = from_timer(scc, t, tx_t);
 
 	scc_start_maxkeyup(scc);
 
@@ -1183,9 +1186,9 @@ static void t_txdelay(unsigned long channel)
  * transmission after 'mintime' seconds
  */
 
-static void t_tail(unsigned long channel)
+static void t_tail(struct timer_list *t)
 {
-	struct scc_channel *scc = (struct scc_channel *) channel;
+	struct scc_channel *scc = from_timer(scc, t, tx_t);
 	unsigned long flags;
 	
 	spin_lock_irqsave(&scc->lock, flags); 
@@ -1210,9 +1213,9 @@ static void t_tail(unsigned long channel)
  * throw away send buffers if DCD remains active too long.
  */
 
-static void t_busy(unsigned long channel)
+static void t_busy(struct timer_list *t)
 {
-	struct scc_channel *scc = (struct scc_channel *) channel;
+	struct scc_channel *scc = from_timer(scc, t, tx_wdog);
 
 	del_timer(&scc->tx_t);
 	netif_stop_queue(scc->dev);	/* don't pile on the wabbit! */
@@ -1229,9 +1232,9 @@ static void t_busy(unsigned long channel)
  * this is our watchdog.
  */
 
-static void t_maxkeyup(unsigned long channel)
+static void t_maxkeyup(struct timer_list *t)
 {
-	struct scc_channel *scc = (struct scc_channel *) channel;
+	struct scc_channel *scc = from_timer(scc, t, tx_wdog);
 	unsigned long flags;
 
 	spin_lock_irqsave(&scc->lock, flags);
@@ -1263,9 +1266,9 @@ static void t_maxkeyup(unsigned long channel)
  * expires.
  */
 
-static void t_idle(unsigned long channel)
+static void t_idle(struct timer_list *t)
 {
-	struct scc_channel *scc = (struct scc_channel *) channel;
+	struct scc_channel *scc = from_timer(scc, t, tx_t);
 	
 	del_timer(&scc->tx_wdog);
 
@@ -1396,9 +1399,9 @@ static unsigned long scc_get_param(struct scc_channel *scc, unsigned int cmd)
 /* *			Send calibration pattern		     * */
 /* ******************************************************************* */
 
-static void scc_stop_calibrate(unsigned long channel)
+static void scc_stop_calibrate(struct timer_list *t)
 {
-	struct scc_channel *scc = (struct scc_channel *) channel;
+	struct scc_channel *scc = from_timer(scc, t, tx_wdog);
 	unsigned long flags;
 	
 	spin_lock_irqsave(&scc->lock, flags);
@@ -1425,7 +1428,6 @@ scc_start_calibrate(struct scc_channel *scc, int duration, unsigned char pattern
 
 	del_timer(&scc->tx_wdog);
 
-	scc->tx_wdog.data = (unsigned long) scc;
 	scc->tx_wdog.function = scc_stop_calibrate;
 	scc->tx_wdog.expires = jiffies + HZ*duration;
 	add_timer(&scc->tx_wdog);
@@ -1465,7 +1467,7 @@ static void z8530_init(void)
 	printk(KERN_INFO "Init Z8530 driver: %u channels, IRQ", Nchips*2);
 	
 	flag=" ";
-	for (k = 0; k < NR_IRQS; k++)
+	for (k = 0; k < nr_irqs; k++)
 		if (Ivec[k].used) 
 		{
 			printk("%s%d", flag, k);
@@ -1514,15 +1516,15 @@ static int scc_net_alloc(const char *name, struct scc_channel *scc)
 	int err;
 	struct net_device *dev;
 
-	dev = alloc_netdev(0, name, scc_net_setup);
+	dev = alloc_netdev(0, name, NET_NAME_UNKNOWN, scc_net_setup);
 	if (!dev) 
 		return -ENOMEM;
 
-	dev->priv = scc;
+	dev->ml_priv = scc;
 	scc->dev = dev;
 	spin_lock_init(&scc->lock);
-	init_timer(&scc->tx_t);
-	init_timer(&scc->tx_wdog);
+	timer_setup(&scc->tx_t, NULL, 0);
+	timer_setup(&scc->tx_wdog, NULL, 0);
 
 	err = register_netdevice(dev);
 	if (err) {
@@ -1542,22 +1544,23 @@ static int scc_net_alloc(const char *name, struct scc_channel *scc)
 /* *			    Network driver methods		      * */
 /* ******************************************************************** */
 
+static const struct net_device_ops scc_netdev_ops = {
+	.ndo_open            = scc_net_open,
+	.ndo_stop	     = scc_net_close,
+	.ndo_start_xmit	     = scc_net_tx,
+	.ndo_set_mac_address = scc_net_set_mac_address,
+	.ndo_get_stats       = scc_net_get_stats,
+	.ndo_do_ioctl        = scc_net_ioctl,
+};
+
 /* ----> Initialize device <----- */
 
 static void scc_net_setup(struct net_device *dev)
 {
 	dev->tx_queue_len    = 16;	/* should be enough... */
 
-	dev->open            = scc_net_open;
-	dev->stop	     = scc_net_close;
-
-	dev->hard_start_xmit = scc_net_tx;
+	dev->netdev_ops	     = &scc_netdev_ops;
 	dev->header_ops      = &ax25_header_ops;
-
-	dev->set_mac_address = scc_net_set_mac_address;
-	dev->get_stats       = scc_net_get_stats;
-	dev->do_ioctl        = scc_net_ioctl;
-	dev->tx_timeout      = NULL;
 
 	memcpy(dev->broadcast, &ax25_bcast,  AX25_ADDR_LEN);
 	memcpy(dev->dev_addr,  &ax25_defaddr, AX25_ADDR_LEN);
@@ -1575,7 +1578,7 @@ static void scc_net_setup(struct net_device *dev)
 
 static int scc_net_open(struct net_device *dev)
 {
-	struct scc_channel *scc = (struct scc_channel *) dev->priv;
+	struct scc_channel *scc = (struct scc_channel *) dev->ml_priv;
 
  	if (!scc->init)
 		return -EINVAL;
@@ -1593,7 +1596,7 @@ static int scc_net_open(struct net_device *dev)
 
 static int scc_net_close(struct net_device *dev)
 {
-	struct scc_channel *scc = (struct scc_channel *) dev->priv;
+	struct scc_channel *scc = (struct scc_channel *) dev->ml_priv;
 	unsigned long flags;
 
 	netif_stop_queue(dev);
@@ -1627,22 +1630,23 @@ static void scc_net_rx(struct scc_channel *scc, struct sk_buff *skb)
 	skb->protocol = ax25_type_trans(skb, scc->dev);
 	
 	netif_rx(skb);
-	scc->dev->last_rx = jiffies;
-	return;
 }
 
 /* ----> transmit frame <---- */
 
-static int scc_net_tx(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t scc_net_tx(struct sk_buff *skb, struct net_device *dev)
 {
-	struct scc_channel *scc = (struct scc_channel *) dev->priv;
+	struct scc_channel *scc = (struct scc_channel *) dev->ml_priv;
 	unsigned long flags;
 	char kisscmd;
+
+	if (skb->protocol == htons(ETH_P_IP))
+		return ax25_ip_xmit(skb);
 
 	if (skb->len > scc->stat.bufsize || skb->len < 2) {
 		scc->dev_stat.tx_dropped++;	/* bogus frame */
 		dev_kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 	
 	scc->dev_stat.tx_packets++;
@@ -1655,7 +1659,7 @@ static int scc_net_tx(struct sk_buff *skb, struct net_device *dev)
 	if (kisscmd) {
 		scc_set_param(scc, kisscmd, *skb->data);
 		dev_kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	spin_lock_irqsave(&scc->lock, flags);
@@ -1666,7 +1670,7 @@ static int scc_net_tx(struct sk_buff *skb, struct net_device *dev)
 		dev_kfree_skb(skb_del);
 	}
 	skb_queue_tail(&scc->tx_queue, skb);
-	dev->trans_start = jiffies;
+	netif_trans_update(dev);
 	
 
 	/*
@@ -1683,7 +1687,7 @@ static int scc_net_tx(struct sk_buff *skb, struct net_device *dev)
 			__scc_start_tx_timer(scc, t_dwait, 0);
 	}
 	spin_unlock_irqrestore(&scc->lock, flags);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* ----> ioctl functions <---- */
@@ -1705,7 +1709,7 @@ static int scc_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	struct scc_mem_config memcfg;
 	struct scc_hw_config hwcfg;
 	struct scc_calibrate cal;
-	struct scc_channel *scc = (struct scc_channel *) dev->priv;
+	struct scc_channel *scc = (struct scc_channel *) dev->ml_priv;
 	int chan;
 	unsigned char device_name[IFNAMSIZ];
 	void __user *arg = ifr->ifr_data;
@@ -1728,13 +1732,13 @@ static int scc_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 			if (hwcfg.irq == 2) hwcfg.irq = 9;
 
-			if (hwcfg.irq < 0 || hwcfg.irq >= NR_IRQS)
+			if (hwcfg.irq < 0 || hwcfg.irq >= nr_irqs)
 				return -EINVAL;
 				
 			if (!Ivec[hwcfg.irq].used && hwcfg.irq)
 			{
 				if (request_irq(hwcfg.irq, scc_isr,
-						IRQF_DISABLED, "AX.25 SCC",
+						0, "AX.25 SCC",
 						(void *)(long) hwcfg.irq))
 					printk(KERN_WARNING "z8530drv: warning, cannot get IRQ %d\n", hwcfg.irq);
 				else
@@ -1952,7 +1956,7 @@ static int scc_net_set_mac_address(struct net_device *dev, void *addr)
 
 static struct net_device_stats *scc_net_get_stats(struct net_device *dev)
 {
-	struct scc_channel *scc = (struct scc_channel *) dev->priv;
+	struct scc_channel *scc = (struct scc_channel *) dev->ml_priv;
 	
 	scc->dev_stat.rx_errors = scc->stat.rxerrs + scc->stat.rx_over;
 	scc->dev_stat.tx_errors = scc->stat.txerrs + scc->stat.tx_under;
@@ -2074,27 +2078,12 @@ static int scc_net_seq_show(struct seq_file *seq, void *v)
         return 0;
 }
 
-static struct seq_operations scc_net_seq_ops = {
+static const struct seq_operations scc_net_seq_ops = {
 	.start  = scc_net_seq_start,
 	.next   = scc_net_seq_next,
 	.stop   = scc_net_seq_stop,
 	.show   = scc_net_seq_show,
 };
-
-
-static int scc_net_seq_open(struct inode *inode, struct file *file)
-{
-	return seq_open(file, &scc_net_seq_ops);
-}
-
-static const struct file_operations scc_net_seq_fops = {
-	.owner	 = THIS_MODULE,
-	.open	 = scc_net_seq_open,
-	.read	 = seq_read,
-	.llseek	 = seq_lseek,
-	.release = seq_release_private,
-};
-
 #endif /* CONFIG_PROC_FS */
 
  
@@ -2118,7 +2107,7 @@ static int __init scc_init_driver (void)
 	}
 	rtnl_unlock();
 
-	proc_net_fops_create(&init_net, "z8530drv", 0, &scc_net_seq_fops);
+	proc_create_seq("z8530drv", 0, init_net.proc_net, &scc_net_seq_ops);
 
 	return 0;
 }
@@ -2148,7 +2137,7 @@ static void __exit scc_cleanup_driver(void)
 		}
 		
 	/* To unload the port must be closed so no real IRQ pending */
-	for (k=0; k < NR_IRQS ; k++)
+	for (k = 0; k < nr_irqs ; k++)
 		if (Ivec[k].used) free_irq(k, NULL);
 		
 	local_irq_enable();
@@ -2173,7 +2162,7 @@ static void __exit scc_cleanup_driver(void)
 	if (Vector_Latch)
 		release_region(Vector_Latch, 1);
 
-	proc_net_remove(&init_net, "z8530drv");
+	remove_proc_entry("z8530drv", init_net.proc_net);
 }
 
 MODULE_AUTHOR("Joerg Reuter <jreuter@yaina.de>");

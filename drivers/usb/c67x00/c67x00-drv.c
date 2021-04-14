@@ -1,24 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * c67x00-drv.c: Cypress C67X00 USB Common infrastructure
  *
  * Copyright (C) 2006-2008 Barco N.V.
  *    Derived from the Cypress cy7c67200/300 ezusb linux driver and
  *    based on multiple host controller drivers inside the linux kernel.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- * MA  02110-1301  USA.
  */
 
 /*
@@ -27,7 +13,7 @@
  * the link between the common hardware parts and the subdrivers (e.g.
  * interrupt handling).
  *
- * The c67x00 has 2 SIE's (serial interface engine) wich can be configured
+ * The c67x00 has 2 SIE's (serial interface engine) which can be configured
  * to be host, device or OTG (with some limitations, E.G. only SIE1 can be OTG).
  *
  * Depending on the platform configuration, the SIE's are created and
@@ -37,6 +23,8 @@
 #include <linux/device.h>
 #include <linux/io.h>
 #include <linux/list.h>
+#include <linux/slab.h>
+#include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/usb/c67x00.h>
 
@@ -114,7 +102,7 @@ static irqreturn_t c67x00_irq(int irq, void *__dev)
 
 /* ------------------------------------------------------------------------- */
 
-static int __devinit c67x00_drv_probe(struct platform_device *pdev)
+static int c67x00_drv_probe(struct platform_device *pdev)
 {
 	struct c67x00_device *c67x00;
 	struct c67x00_platform_data *pdata;
@@ -129,7 +117,7 @@ static int __devinit c67x00_drv_probe(struct platform_device *pdev)
 	if (!res2)
 		return -ENODEV;
 
-	pdata = pdev->dev.platform_data;
+	pdata = dev_get_platdata(&pdev->dev);
 	if (!pdata)
 		return -ENODEV;
 
@@ -137,13 +125,13 @@ static int __devinit c67x00_drv_probe(struct platform_device *pdev)
 	if (!c67x00)
 		return -ENOMEM;
 
-	if (!request_mem_region(res->start, res->end - res->start + 1,
+	if (!request_mem_region(res->start, resource_size(res),
 				pdev->name)) {
 		dev_err(&pdev->dev, "Memory region busy\n");
 		ret = -EBUSY;
 		goto request_mem_failed;
 	}
-	c67x00->hpi.base = ioremap(res->start, res->end - res->start + 1);
+	c67x00->hpi.base = ioremap(res->start, resource_size(res));
 	if (!c67x00->hpi.base) {
 		dev_err(&pdev->dev, "Unable to map HPI registers\n");
 		ret = -EIO;
@@ -152,7 +140,7 @@ static int __devinit c67x00_drv_probe(struct platform_device *pdev)
 
 	spin_lock_init(&c67x00->hpi.lock);
 	c67x00->hpi.regstep = pdata->hpi_regstep;
-	c67x00->pdata = pdev->dev.platform_data;
+	c67x00->pdata = dev_get_platdata(&pdev->dev);
 	c67x00->pdev = pdev;
 
 	c67x00_ll_init(c67x00);
@@ -182,14 +170,14 @@ static int __devinit c67x00_drv_probe(struct platform_device *pdev)
  request_irq_failed:
 	iounmap(c67x00->hpi.base);
  map_failed:
-	release_mem_region(res->start, res->end - res->start + 1);
+	release_mem_region(res->start, resource_size(res));
  request_mem_failed:
 	kfree(c67x00);
 
 	return ret;
 }
 
-static int __devexit c67x00_drv_remove(struct platform_device *pdev)
+static int c67x00_drv_remove(struct platform_device *pdev)
 {
 	struct c67x00_device *c67x00 = platform_get_drvdata(pdev);
 	struct resource *res;
@@ -208,7 +196,7 @@ static int __devexit c67x00_drv_remove(struct platform_device *pdev)
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (res)
-		release_mem_region(res->start, res->end - res->start + 1);
+		release_mem_region(res->start, resource_size(res));
 
 	kfree(c67x00);
 
@@ -217,27 +205,15 @@ static int __devexit c67x00_drv_remove(struct platform_device *pdev)
 
 static struct platform_driver c67x00_driver = {
 	.probe	= c67x00_drv_probe,
-	.remove	= __devexit_p(c67x00_drv_remove),
+	.remove	= c67x00_drv_remove,
 	.driver	= {
-		.owner = THIS_MODULE,
 		.name = "c67x00",
 	},
 };
-MODULE_ALIAS("platform:c67x00");
 
-static int __init c67x00_init(void)
-{
-	return platform_driver_register(&c67x00_driver);
-}
-
-static void __exit c67x00_exit(void)
-{
-	platform_driver_unregister(&c67x00_driver);
-}
-
-module_init(c67x00_init);
-module_exit(c67x00_exit);
+module_platform_driver(c67x00_driver);
 
 MODULE_AUTHOR("Peter Korsgaard, Jan Veldeman, Grant Likely");
 MODULE_DESCRIPTION("Cypress C67X00 USB Controller Driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:c67x00");

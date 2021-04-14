@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2005-2006 by Texas Instruments */
 
 #ifndef _CPPI_DMA_H_
@@ -5,20 +6,12 @@
 
 #include <linux/slab.h>
 #include <linux/list.h>
-#include <linux/smp_lock.h>
 #include <linux/errno.h>
 #include <linux/dmapool.h>
+#include <linux/dmaengine.h>
 
-#include "musb_dma.h"
 #include "musb_core.h"
-
-
-/* FIXME fully isolate CPPI from DaVinci ... the "CPPI generic" registers
- * would seem to be shared with the TUSB6020 (over VLYNQ).
- */
-
-#include "davinci.h"
-
+#include "musb_dma.h"
 
 /* CPPI RX/TX state RAM */
 
@@ -115,19 +108,40 @@ struct cppi_channel {
 /* CPPI DMA controller object */
 struct cppi {
 	struct dma_controller		controller;
-	struct musb			*musb;
 	void __iomem			*mregs;		/* Mentor regs */
 	void __iomem			*tibase;	/* TI/CPPI regs */
 
-	struct cppi_channel		tx[MUSB_C_NUM_EPT - 1];
-	struct cppi_channel		rx[MUSB_C_NUM_EPR - 1];
+	int				irq;
+
+	struct cppi_channel		tx[4];
+	struct cppi_channel		rx[4];
 
 	struct dma_pool			*pool;
 
 	struct list_head		tx_complete;
 };
 
-/* irq handling hook */
-extern void cppi_completion(struct musb *, u32 rx, u32 tx);
+/* CPPI IRQ handler */
+extern irqreturn_t cppi_interrupt(int, void *);
+
+struct cppi41_dma_channel {
+	struct dma_channel channel;
+	struct cppi41_dma_controller *controller;
+	struct musb_hw_ep *hw_ep;
+	struct dma_chan *dc;
+	dma_cookie_t cookie;
+	u8 port_num;
+	u8 is_tx;
+	u8 is_allocated;
+	u8 usb_toggle;
+
+	dma_addr_t buf_addr;
+	u32 total_len;
+	u32 prog_len;
+	u32 transferred;
+	u32 packet_sz;
+	struct list_head tx_check;
+	int tx_zlp;
+};
 
 #endif				/* end of ifndef _CPPI_DMA_H_ */

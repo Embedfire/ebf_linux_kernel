@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Kernel support for the ptrace() and syscall tracing interfaces.
  *
@@ -11,28 +12,24 @@
  */
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/slab.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
-#include <linux/smp_lock.h>
 #include <linux/user.h>
 #include <linux/security.h>
 #include <linux/audit.h>
 #include <linux/signal.h>
 #include <linux/regset.h>
 #include <linux/elf.h>
+#include <linux/tracehook.h>
 
-#include <asm/pgtable.h>
 #include <asm/processor.h>
 #include <asm/ptrace_offsets.h>
 #include <asm/rse.h>
-#include <asm/system.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/unwind.h>
-#ifdef CONFIG_PERFMON
-#include <asm/perfmon.h>
-#endif
 
 #include "entry.h"
 
@@ -455,7 +452,7 @@ ia64_peek (struct task_struct *child, struct switch_stack *child_stack,
 			return 0;
 		}
 	}
-	copied = access_process_vm(child, addr, &ret, sizeof(ret), 0);
+	copied = access_process_vm(child, addr, &ret, sizeof(ret), FOLL_FORCE);
 	if (copied != sizeof(ret))
 		return -EIO;
 	*val = ret;
@@ -491,7 +488,8 @@ ia64_poke (struct task_struct *child, struct switch_stack *child_stack,
 				*ia64_rse_skip_regs(krbs, regnum) = val;
 			}
 		}
-	} else if (access_process_vm(child, addr, &val, sizeof(val), 1)
+	} else if (access_process_vm(child, addr, &val, sizeof(val),
+				FOLL_FORCE | FOLL_WRITE)
 		   != sizeof(val))
 		return -EIO;
 	return 0;
@@ -545,7 +543,8 @@ ia64_sync_user_rbs (struct task_struct *child, struct switch_stack *sw,
 		ret = ia64_peek(child, sw, user_rbs_end, addr, &val);
 		if (ret < 0)
 			return ret;
-		if (access_process_vm(child, addr, &val, sizeof(val), 1)
+		if (access_process_vm(child, addr, &val, sizeof(val),
+				FOLL_FORCE | FOLL_WRITE)
 		    != sizeof(val))
 			return -EIO;
 	}
@@ -561,7 +560,8 @@ ia64_sync_kernel_rbs (struct task_struct *child, struct switch_stack *sw,
 
 	/* now copy word for word from user rbs to kernel rbs: */
 	for (addr = user_rbs_start; addr < user_rbs_end; addr += 8) {
-		if (access_process_vm(child, addr, &val, sizeof(val), 0)
+		if (access_process_vm(child, addr, &val, sizeof(val),
+				FOLL_FORCE)
 				!= sizeof(val))
 			return -EIO;
 
@@ -603,7 +603,7 @@ void ia64_ptrace_stop(void)
 {
 	if (test_and_set_tsk_thread_flag(current, TIF_RESTORE_RSE))
 		return;
-	tsk_set_notify_resume(current);
+	set_notify_resume(current);
 	unw_init_running(do_sync_rbs, ia64_sync_user_rbs);
 }
 
@@ -613,7 +613,6 @@ void ia64_ptrace_stop(void)
 void ia64_sync_krbs(void)
 {
 	clear_tsk_thread_flag(current, TIF_RESTORE_RSE);
-	tsk_clear_notify_resume(current);
 
 	unw_init_running(do_sync_rbs, ia64_sync_kernel_rbs);
 }
@@ -640,11 +639,11 @@ ptrace_attach_sync_user_rbs (struct task_struct *child)
 	 */
 
 	read_lock(&tasklist_lock);
-	if (child->signal) {
+	if (child->sighand) {
 		spin_lock_irq(&child->sighand->siglock);
 		if (child->state == TASK_STOPPED &&
 		    !test_and_set_tsk_thread_flag(child, TIF_RESTORE_RSE)) {
-			tsk_set_notify_resume(child);
+			set_notify_resume(child);
 
 			child->state = TASK_TRACED;
 			stopped = 1;
@@ -664,7 +663,7 @@ ptrace_attach_sync_user_rbs (struct task_struct *child)
 	 * job control stop, so that SIGCONT can be used to wake it up.
 	 */
 	read_lock(&tasklist_lock);
-	if (child->signal) {
+	if (child->sighand) {
 		spin_lock_irq(&child->sighand->siglock);
 		if (child->state == TASK_TRACED &&
 		    (child->signal->flags & SIGNAL_STOP_STOPPED)) {
@@ -673,33 +672,6 @@ ptrace_attach_sync_user_rbs (struct task_struct *child)
 		spin_unlock_irq(&child->sighand->siglock);
 	}
 	read_unlock(&tasklist_lock);
-}
-
-static inline int
-thread_matches (struct task_struct *thread, unsigned long addr)
-{
-	unsigned long thread_rbs_end;
-	struct pt_regs *thread_regs;
-
-	if (ptrace_check_attach(thread, 0) < 0)
-		/*
-		 * If the thread is not in an attachable state, we'll
-		 * ignore it.  The net effect is that if ADDR happens
-		 * to overlap with the portion of the thread's
-		 * register backing store that is currently residing
-		 * on the thread's kernel stack, then ptrace() may end
-		 * up accessing a stale value.  But if the thread
-		 * isn't stopped, that's a problem anyhow, so we're
-		 * doing as well as we can...
-		 */
-		return 0;
-
-	thread_regs = task_pt_regs(thread);
-	thread_rbs_end = ia64_get_user_rbs_end(thread, thread_regs, NULL);
-	if (!on_kernel_rbs(addr, thread_regs->ar_bspstore, thread_rbs_end))
-		return 0;
-
-	return 1;	/* looks like we've got a winner */
 }
 
 /*
@@ -860,7 +832,7 @@ ptrace_getregs (struct task_struct *child, struct pt_all_user_regs __user *ppr)
 	char nat = 0;
 	int i;
 
-	if (!access_ok(VERIFY_WRITE, ppr, sizeof(struct pt_all_user_regs)))
+	if (!access_ok(ppr, sizeof(struct pt_all_user_regs)))
 		return -EIO;
 
 	pt = task_pt_regs(child);
@@ -1005,7 +977,7 @@ ptrace_setregs (struct task_struct *child, struct pt_all_user_regs __user *ppr)
 
 	memset(&fpval, 0, sizeof(fpval));
 
-	if (!access_ok(VERIFY_READ, ppr, sizeof(struct pt_all_user_regs)))
+	if (!access_ok(ppr, sizeof(struct pt_all_user_regs)))
 		return -EIO;
 
 	pt = task_pt_regs(child);
@@ -1179,13 +1151,15 @@ ptrace_disable (struct task_struct *child)
 }
 
 long
-arch_ptrace (struct task_struct *child, long request, long addr, long data)
+arch_ptrace (struct task_struct *child, long request,
+	     unsigned long addr, unsigned long data)
 {
 	switch (request) {
 	case PTRACE_PEEKTEXT:
 	case PTRACE_PEEKDATA:
 		/* read word at location addr */
-		if (access_process_vm(child, addr, &data, sizeof(data), 0)
+		if (ptrace_access_vm(child, addr, &data, sizeof(data),
+				FOLL_FORCE)
 		    != sizeof(data))
 			return -EIO;
 		/* ensure return value is not mistaken for error code */
@@ -1232,57 +1206,25 @@ arch_ptrace (struct task_struct *child, long request, long addr, long data)
 }
 
 
-static void
-syscall_trace (void)
-{
-	/*
-	 * The 0x80 provides a way for the tracing parent to
-	 * distinguish between a syscall stop and SIGTRAP delivery.
-	 */
-	ptrace_notify(SIGTRAP
-		      | ((current->ptrace & PT_TRACESYSGOOD) ? 0x80 : 0));
-
-	/*
-	 * This isn't the same as continuing with a signal, but it
-	 * will do for normal use.  strace only continues with a
-	 * signal if the stopping signal is not SIGTRAP.  -brl
-	 */
-	if (current->exit_code) {
-		send_sig(current->exit_code, current, 1);
-		current->exit_code = 0;
-	}
-}
-
 /* "asmlinkage" so the input arguments are preserved... */
 
-asmlinkage void
+asmlinkage long
 syscall_trace_enter (long arg0, long arg1, long arg2, long arg3,
 		     long arg4, long arg5, long arg6, long arg7,
 		     struct pt_regs regs)
 {
-	if (test_thread_flag(TIF_SYSCALL_TRACE) 
-	    && (current->ptrace & PT_PTRACED))
-		syscall_trace();
+	if (test_thread_flag(TIF_SYSCALL_TRACE))
+		if (tracehook_report_syscall_entry(&regs))
+			return -ENOSYS;
 
 	/* copy user rbs to kernel rbs */
 	if (test_thread_flag(TIF_RESTORE_RSE))
 		ia64_sync_krbs();
 
-	if (unlikely(current->audit_context)) {
-		long syscall;
-		int arch;
 
-		if (IS_IA32_PROCESS(&regs)) {
-			syscall = regs.r1;
-			arch = AUDIT_ARCH_I386;
-		} else {
-			syscall = regs.r15;
-			arch = AUDIT_ARCH_IA64;
-		}
+	audit_syscall_entry(regs.r15, arg0, arg1, arg2, arg3);
 
-		audit_syscall_entry(arch, syscall, arg0, arg1, arg2, arg3);
-	}
-
+	return 0;
 }
 
 /* "asmlinkage" so the input arguments are preserved... */
@@ -1292,19 +1234,13 @@ syscall_trace_leave (long arg0, long arg1, long arg2, long arg3,
 		     long arg4, long arg5, long arg6, long arg7,
 		     struct pt_regs regs)
 {
-	if (unlikely(current->audit_context)) {
-		int success = AUDITSC_RESULT(regs.r10);
-		long result = regs.r8;
+	int step;
 
-		if (success != AUDITSC_SUCCESS)
-			result = -result;
-		audit_syscall_exit(success, result);
-	}
+	audit_syscall_exit(&regs);
 
-	if ((test_thread_flag(TIF_SYSCALL_TRACE)
-	    || test_thread_flag(TIF_SINGLESTEP))
-	    && (current->ptrace & PT_PTRACED))
-		syscall_trace();
+	step = test_thread_flag(TIF_SINGLESTEP);
+	if (step || test_thread_flag(TIF_SYSCALL_TRACE))
+		tracehook_report_syscall_exit(&regs, step);
 
 	/* copy user rbs to kernel rbs */
 	if (test_thread_flag(TIF_RESTORE_RSE))
@@ -1334,52 +1270,43 @@ struct regset_getset {
 	int ret;
 };
 
+static const ptrdiff_t pt_offsets[32] =
+{
+#define R(n) offsetof(struct pt_regs, r##n)
+	[0] = -1, R(1), R(2), R(3),
+	[4] = -1, [5] = -1, [6] = -1, [7] = -1,
+	R(8), R(9), R(10), R(11), R(12), R(13), R(14), R(15),
+	R(16), R(17), R(18), R(19), R(20), R(21), R(22), R(23),
+	R(24), R(25), R(26), R(27), R(28), R(29), R(30), R(31),
+#undef R
+};
+
 static int
 access_elf_gpreg(struct task_struct *target, struct unw_frame_info *info,
 		unsigned long addr, unsigned long *data, int write_access)
 {
-	struct pt_regs *pt;
-	unsigned long *ptr = NULL;
-	int ret;
-	char nat = 0;
+	struct pt_regs *pt = task_pt_regs(target);
+	unsigned reg = addr / sizeof(unsigned long);
+	ptrdiff_t d = pt_offsets[reg];
 
-	pt = task_pt_regs(target);
-	switch (addr) {
-	case ELF_GR_OFFSET(1):
-		ptr = &pt->r1;
-		break;
-	case ELF_GR_OFFSET(2):
-	case ELF_GR_OFFSET(3):
-		ptr = (void *)&pt->r2 + (addr - ELF_GR_OFFSET(2));
-		break;
-	case ELF_GR_OFFSET(4) ... ELF_GR_OFFSET(7):
+	if (d >= 0) {
+		unsigned long *ptr = (void *)pt + d;
+		if (write_access)
+			*ptr = *data;
+		else
+			*data = *ptr;
+		return 0;
+	} else {
+		char nat = 0;
 		if (write_access) {
 			/* read NaT bit first: */
 			unsigned long dummy;
-
-			ret = unw_get_gr(info, addr/8, &dummy, &nat);
+			int ret = unw_get_gr(info, reg, &dummy, &nat);
 			if (ret < 0)
 				return ret;
 		}
-		return unw_access_gr(info, addr/8, data, &nat, write_access);
-	case ELF_GR_OFFSET(8) ... ELF_GR_OFFSET(11):
-		ptr = (void *)&pt->r8 + addr - ELF_GR_OFFSET(8);
-		break;
-	case ELF_GR_OFFSET(12):
-	case ELF_GR_OFFSET(13):
-		ptr = (void *)&pt->r12 + addr - ELF_GR_OFFSET(12);
-		break;
-	case ELF_GR_OFFSET(14):
-		ptr = &pt->r14;
-		break;
-	case ELF_GR_OFFSET(15):
-		ptr = &pt->r15;
+		return unw_access_gr(info, reg, data, &nat, write_access);
 	}
-	if (write_access)
-		*ptr = *data;
-	else
-		*data = *ptr;
-	return 0;
 }
 
 static int
@@ -1551,7 +1478,7 @@ static int
 access_elf_reg(struct task_struct *target, struct unw_frame_info *info,
 		unsigned long addr, unsigned long *data, int write_access)
 {
-	if (addr >= ELF_GR_OFFSET(1) && addr <= ELF_GR_OFFSET(15))
+	if (addr >= ELF_GR_OFFSET(1) && addr <= ELF_GR_OFFSET(31))
 		return access_elf_gpreg(target, info, addr, data, write_access);
 	else if (addr >= ELF_BR_OFFSET(0) && addr <= ELF_BR_OFFSET(7))
 		return access_elf_breg(target, info, addr, data, write_access);
@@ -1559,12 +1486,17 @@ access_elf_reg(struct task_struct *target, struct unw_frame_info *info,
 		return access_elf_areg(target, info, addr, data, write_access);
 }
 
+struct regset_membuf {
+	struct membuf to;
+	int ret;
+};
+
 void do_gpregs_get(struct unw_frame_info *info, void *arg)
 {
-	struct pt_regs *pt;
-	struct regset_getset *dst = arg;
-	elf_greg_t tmp[16];
-	unsigned int i, index, min_copy;
+	struct regset_membuf *dst = arg;
+	struct membuf to = dst->to;
+	unsigned int n;
+	elf_greg_t reg;
 
 	if (unw_unwind_to_user(info) < 0)
 		return;
@@ -1582,165 +1514,53 @@ void do_gpregs_get(struct unw_frame_info *info, void *arg)
 
 
 	/* Skip r0 */
-	if (dst->count > 0 && dst->pos < ELF_GR_OFFSET(1)) {
-		dst->ret = user_regset_copyout_zero(&dst->pos, &dst->count,
-						      &dst->u.get.kbuf,
-						      &dst->u.get.ubuf,
-						      0, ELF_GR_OFFSET(1));
-		if (dst->ret || dst->count == 0)
+	membuf_zero(&to, 8);
+	for (n = 8; to.left && n < ELF_AR_END_OFFSET; n += 8) {
+		if (access_elf_reg(info->task, info, n, &reg, 0) < 0) {
+			dst->ret = -EIO;
 			return;
-	}
-
-	/* gr1 - gr15 */
-	if (dst->count > 0 && dst->pos < ELF_GR_OFFSET(16)) {
-		index = (dst->pos - ELF_GR_OFFSET(1)) / sizeof(elf_greg_t);
-		min_copy = ELF_GR_OFFSET(16) > (dst->pos + dst->count) ?
-			 (dst->pos + dst->count) : ELF_GR_OFFSET(16);
-		for (i = dst->pos; i < min_copy; i += sizeof(elf_greg_t),
-				index++)
-			if (access_elf_reg(dst->target, info, i,
-						&tmp[index], 0) < 0) {
-				dst->ret = -EIO;
-				return;
-			}
-		dst->ret = user_regset_copyout(&dst->pos, &dst->count,
-				&dst->u.get.kbuf, &dst->u.get.ubuf, tmp,
-				ELF_GR_OFFSET(1), ELF_GR_OFFSET(16));
-		if (dst->ret || dst->count == 0)
-			return;
-	}
-
-	/* r16-r31 */
-	if (dst->count > 0 && dst->pos < ELF_NAT_OFFSET) {
-		pt = task_pt_regs(dst->target);
-		dst->ret = user_regset_copyout(&dst->pos, &dst->count,
-				&dst->u.get.kbuf, &dst->u.get.ubuf, &pt->r16,
-				ELF_GR_OFFSET(16), ELF_NAT_OFFSET);
-		if (dst->ret || dst->count == 0)
-			return;
-	}
-
-	/* nat, pr, b0 - b7 */
-	if (dst->count > 0 && dst->pos < ELF_CR_IIP_OFFSET) {
-		index = (dst->pos - ELF_NAT_OFFSET) / sizeof(elf_greg_t);
-		min_copy = ELF_CR_IIP_OFFSET > (dst->pos + dst->count) ?
-			 (dst->pos + dst->count) : ELF_CR_IIP_OFFSET;
-		for (i = dst->pos; i < min_copy; i += sizeof(elf_greg_t),
-				index++)
-			if (access_elf_reg(dst->target, info, i,
-						&tmp[index], 0) < 0) {
-				dst->ret = -EIO;
-				return;
-			}
-		dst->ret = user_regset_copyout(&dst->pos, &dst->count,
-				&dst->u.get.kbuf, &dst->u.get.ubuf, tmp,
-				ELF_NAT_OFFSET, ELF_CR_IIP_OFFSET);
-		if (dst->ret || dst->count == 0)
-			return;
-	}
-
-	/* ip cfm psr ar.rsc ar.bsp ar.bspstore ar.rnat
-	 * ar.ccv ar.unat ar.fpsr ar.pfs ar.lc ar.ec ar.csd ar.ssd
-	 */
-	if (dst->count > 0 && dst->pos < (ELF_AR_END_OFFSET)) {
-		index = (dst->pos - ELF_CR_IIP_OFFSET) / sizeof(elf_greg_t);
-		min_copy = ELF_AR_END_OFFSET > (dst->pos + dst->count) ?
-			 (dst->pos + dst->count) : ELF_AR_END_OFFSET;
-		for (i = dst->pos; i < min_copy; i += sizeof(elf_greg_t),
-				index++)
-			if (access_elf_reg(dst->target, info, i,
-						&tmp[index], 0) < 0) {
-				dst->ret = -EIO;
-				return;
-			}
-		dst->ret = user_regset_copyout(&dst->pos, &dst->count,
-				&dst->u.get.kbuf, &dst->u.get.ubuf, tmp,
-				ELF_CR_IIP_OFFSET, ELF_AR_END_OFFSET);
+		}
+		membuf_store(&to, reg);
 	}
 }
 
 void do_gpregs_set(struct unw_frame_info *info, void *arg)
 {
-	struct pt_regs *pt;
 	struct regset_getset *dst = arg;
-	elf_greg_t tmp[16];
-	unsigned int i, index;
 
 	if (unw_unwind_to_user(info) < 0)
 		return;
 
+	if (!dst->count)
+		return;
 	/* Skip r0 */
-	if (dst->count > 0 && dst->pos < ELF_GR_OFFSET(1)) {
+	if (dst->pos < ELF_GR_OFFSET(1)) {
 		dst->ret = user_regset_copyin_ignore(&dst->pos, &dst->count,
 						       &dst->u.set.kbuf,
 						       &dst->u.set.ubuf,
 						       0, ELF_GR_OFFSET(1));
-		if (dst->ret || dst->count == 0)
-			return;
-	}
-
-	/* gr1-gr15 */
-	if (dst->count > 0 && dst->pos < ELF_GR_OFFSET(16)) {
-		i = dst->pos;
-		index = (dst->pos - ELF_GR_OFFSET(1)) / sizeof(elf_greg_t);
-		dst->ret = user_regset_copyin(&dst->pos, &dst->count,
-				&dst->u.set.kbuf, &dst->u.set.ubuf, tmp,
-				ELF_GR_OFFSET(1), ELF_GR_OFFSET(16));
 		if (dst->ret)
 			return;
-		for ( ; i < dst->pos; i += sizeof(elf_greg_t), index++)
-			if (access_elf_reg(dst->target, info, i,
-						&tmp[index], 1) < 0) {
-				dst->ret = -EIO;
-				return;
-			}
-		if (dst->count == 0)
-			return;
 	}
 
-	/* gr16-gr31 */
-	if (dst->count > 0 && dst->pos < ELF_NAT_OFFSET) {
-		pt = task_pt_regs(dst->target);
-		dst->ret = user_regset_copyin(&dst->pos, &dst->count,
-				&dst->u.set.kbuf, &dst->u.set.ubuf, &pt->r16,
-				ELF_GR_OFFSET(16), ELF_NAT_OFFSET);
-		if (dst->ret || dst->count == 0)
-			return;
-	}
+	while (dst->count && dst->pos < ELF_AR_END_OFFSET) {
+		unsigned int n, from, to;
+		elf_greg_t tmp[16];
 
-	/* nat, pr, b0 - b7 */
-	if (dst->count > 0 && dst->pos < ELF_CR_IIP_OFFSET) {
-		i = dst->pos;
-		index = (dst->pos - ELF_NAT_OFFSET) / sizeof(elf_greg_t);
+		from = dst->pos;
+		to = from + sizeof(tmp);
+		if (to > ELF_AR_END_OFFSET)
+			to = ELF_AR_END_OFFSET;
+		/* get up to 16 values */
 		dst->ret = user_regset_copyin(&dst->pos, &dst->count,
 				&dst->u.set.kbuf, &dst->u.set.ubuf, tmp,
-				ELF_NAT_OFFSET, ELF_CR_IIP_OFFSET);
+				from, to);
 		if (dst->ret)
 			return;
-		for (; i < dst->pos; i += sizeof(elf_greg_t), index++)
-			if (access_elf_reg(dst->target, info, i,
-						&tmp[index], 1) < 0) {
-				dst->ret = -EIO;
-				return;
-			}
-		if (dst->count == 0)
-			return;
-	}
-
-	/* ip cfm psr ar.rsc ar.bsp ar.bspstore ar.rnat
-	 * ar.ccv ar.unat ar.fpsr ar.pfs ar.lc ar.ec ar.csd ar.ssd
-	 */
-	if (dst->count > 0 && dst->pos < (ELF_AR_END_OFFSET)) {
-		i = dst->pos;
-		index = (dst->pos - ELF_CR_IIP_OFFSET) / sizeof(elf_greg_t);
-		dst->ret = user_regset_copyin(&dst->pos, &dst->count,
-				&dst->u.set.kbuf, &dst->u.set.ubuf, tmp,
-				ELF_CR_IIP_OFFSET, ELF_AR_END_OFFSET);
-		if (dst->ret)
-			return;
-		for ( ; i < dst->pos; i += sizeof(elf_greg_t), index++)
-			if (access_elf_reg(dst->target, info, i,
-						&tmp[index], 1) < 0) {
+		/* now copy them into registers */
+		for (n = 0; from < dst->pos; from += sizeof(elf_greg_t), n++)
+			if (access_elf_reg(dst->target, info, from,
+						&tmp[n], 1) < 0) {
 				dst->ret = -EIO;
 				return;
 			}
@@ -1751,60 +1571,36 @@ void do_gpregs_set(struct unw_frame_info *info, void *arg)
 
 void do_fpregs_get(struct unw_frame_info *info, void *arg)
 {
-	struct regset_getset *dst = arg;
-	struct task_struct *task = dst->target;
-	elf_fpreg_t tmp[30];
-	int index, min_copy, i;
+	struct task_struct *task = info->task;
+	struct regset_membuf *dst = arg;
+	struct membuf to = dst->to;
+	elf_fpreg_t reg;
+	unsigned int n;
 
 	if (unw_unwind_to_user(info) < 0)
 		return;
 
 	/* Skip pos 0 and 1 */
-	if (dst->count > 0 && dst->pos < ELF_FP_OFFSET(2)) {
-		dst->ret = user_regset_copyout_zero(&dst->pos, &dst->count,
-						      &dst->u.get.kbuf,
-						      &dst->u.get.ubuf,
-						      0, ELF_FP_OFFSET(2));
-		if (dst->count == 0 || dst->ret)
-			return;
-	}
+	membuf_zero(&to, 2 * sizeof(elf_fpreg_t));
 
 	/* fr2-fr31 */
-	if (dst->count > 0 && dst->pos < ELF_FP_OFFSET(32)) {
-		index = (dst->pos - ELF_FP_OFFSET(2)) / sizeof(elf_fpreg_t);
-
-		min_copy = min(((unsigned int)ELF_FP_OFFSET(32)),
-				dst->pos + dst->count);
-		for (i = dst->pos; i < min_copy; i += sizeof(elf_fpreg_t),
-				index++)
-			if (unw_get_fr(info, i / sizeof(elf_fpreg_t),
-					 &tmp[index])) {
-				dst->ret = -EIO;
-				return;
-			}
-		dst->ret = user_regset_copyout(&dst->pos, &dst->count,
-				&dst->u.get.kbuf, &dst->u.get.ubuf, tmp,
-				ELF_FP_OFFSET(2), ELF_FP_OFFSET(32));
-		if (dst->count == 0 || dst->ret)
+	for (n = 2; to.left && n < 32; n++) {
+		if (unw_get_fr(info, n, &reg)) {
+			dst->ret = -EIO;
 			return;
+		}
+		membuf_write(&to, &reg, sizeof(reg));
 	}
 
 	/* fph */
-	if (dst->count > 0) {
-		ia64_flush_fph(dst->target);
-		if (task->thread.flags & IA64_THREAD_FPH_VALID)
-			dst->ret = user_regset_copyout(
-				&dst->pos, &dst->count,
-				&dst->u.get.kbuf, &dst->u.get.ubuf,
-				&dst->target->thread.fph,
-				ELF_FP_OFFSET(32), -1);
-		else
-			/* Zero fill instead.  */
-			dst->ret = user_regset_copyout_zero(
-				&dst->pos, &dst->count,
-				&dst->u.get.kbuf, &dst->u.get.ubuf,
-				ELF_FP_OFFSET(32), -1);
-	}
+	if (!to.left)
+		return;
+
+	ia64_flush_fph(task);
+	if (task->thread.flags & IA64_THREAD_FPH_VALID)
+		membuf_write(&to, &task->thread.fph, 96 * sizeof(reg));
+	else
+		membuf_zero(&to, 96 * sizeof(reg));
 }
 
 void do_fpregs_set(struct unw_frame_info *info, void *arg)
@@ -1880,6 +1676,20 @@ void do_fpregs_set(struct unw_frame_info *info, void *arg)
 	}
 }
 
+static void
+unwind_and_call(void (*call)(struct unw_frame_info *, void *),
+	       struct task_struct *target, void *data)
+{
+	if (target == current)
+		unw_init_running(call, data);
+	else {
+		struct unw_frame_info info;
+		memset(&info, 0, sizeof(info));
+		unw_init_from_blocked_task(&info, target);
+		(*call)(&info, data);
+	}
+}
+
 static int
 do_regset_call(void (*call)(struct unw_frame_info *, void *),
 	       struct task_struct *target,
@@ -1891,27 +1701,18 @@ do_regset_call(void (*call)(struct unw_frame_info *, void *),
 				 .pos = pos, .count = count,
 				 .u.set = { .kbuf = kbuf, .ubuf = ubuf },
 				 .ret = 0 };
-
-	if (target == current)
-		unw_init_running(call, &info);
-	else {
-		struct unw_frame_info ufi;
-		memset(&ufi, 0, sizeof(ufi));
-		unw_init_from_blocked_task(&ufi, target);
-		(*call)(&ufi, &info);
-	}
-
+	unwind_and_call(call, target, &info);
 	return info.ret;
 }
 
 static int
 gpregs_get(struct task_struct *target,
 	   const struct user_regset *regset,
-	   unsigned int pos, unsigned int count,
-	   void *kbuf, void __user *ubuf)
+	   struct membuf to)
 {
-	return do_regset_call(do_gpregs_get, target, regset, pos, count,
-		kbuf, ubuf);
+	struct regset_membuf info = {.to = to};
+	unwind_and_call(do_gpregs_get, target, &info);
+	return info.ret;
 }
 
 static int gpregs_set(struct task_struct *target,
@@ -1940,7 +1741,7 @@ gpregs_writeback(struct task_struct *target,
 {
 	if (test_and_set_tsk_thread_flag(target, TIF_RESTORE_RSE))
 		return 0;
-	tsk_set_notify_resume(target);
+	set_notify_resume(target);
 	return do_regset_call(do_gpregs_writeback, target, regset, 0, 0,
 		NULL, NULL);
 }
@@ -1953,11 +1754,11 @@ fpregs_active(struct task_struct *target, const struct user_regset *regset)
 
 static int fpregs_get(struct task_struct *target,
 		const struct user_regset *regset,
-		unsigned int pos, unsigned int count,
-		void *kbuf, void __user *ubuf)
+		struct membuf to)
 {
-	return do_regset_call(do_fpregs_get, target, regset, pos, count,
-		kbuf, ubuf);
+	struct regset_membuf info = {.to = to};
+	unwind_and_call(do_fpregs_get, target, &info);
+	return info.ret;
 }
 
 static int fpregs_set(struct task_struct *target,
@@ -1974,7 +1775,6 @@ access_uarea(struct task_struct *child, unsigned long addr,
 	      unsigned long *data, int write_access)
 {
 	unsigned int pos = -1; /* an invalid value */
-	int ret;
 	unsigned long *ptr, regnum;
 
 	if ((addr & 0x7) != 0) {
@@ -2006,14 +1806,39 @@ access_uarea(struct task_struct *child, unsigned long addr,
 	}
 
 	if (pos != -1) {
-		if (write_access)
-			ret = fpregs_set(child, NULL, pos,
-				sizeof(unsigned long), data, NULL);
-		else
-			ret = fpregs_get(child, NULL, pos,
-				sizeof(unsigned long), data, NULL);
-		if (ret != 0)
-			return -1;
+		unsigned reg = pos / sizeof(elf_fpreg_t);
+		int which_half = (pos / sizeof(unsigned long)) & 1;
+
+		if (reg < 32) { /* fr2-fr31 */
+			struct unw_frame_info info;
+			elf_fpreg_t fpreg;
+
+			memset(&info, 0, sizeof(info));
+			unw_init_from_blocked_task(&info, child);
+			if (unw_unwind_to_user(&info) < 0)
+				return 0;
+
+			if (unw_get_fr(&info, reg, &fpreg))
+				return -1;
+			if (write_access) {
+				fpreg.u.bits[which_half] = *data;
+				if (unw_set_fr(&info, reg, fpreg))
+					return -1;
+			} else {
+				*data = fpreg.u.bits[which_half];
+			}
+		} else { /* fph */
+			elf_fpreg_t *p = &child->thread.fph[reg - 32];
+			unsigned long *bits = &p->u.bits[which_half];
+
+			ia64_sync_fph(child);
+			if (write_access)
+				*bits = *data;
+			else if (child->thread.flags & IA64_THREAD_FPH_VALID)
+				*data = *bits;
+			else
+				*data = 0;
+		}
 		return 0;
 	}
 
@@ -2099,15 +1924,14 @@ access_uarea(struct task_struct *child, unsigned long addr,
 	}
 
 	if (pos != -1) {
-		if (write_access)
-			ret = gpregs_set(child, NULL, pos,
-				sizeof(unsigned long), data, NULL);
-		else
-			ret = gpregs_get(child, NULL, pos,
-				sizeof(unsigned long), data, NULL);
-		if (ret != 0)
-			return -1;
-		return 0;
+		struct unw_frame_info info;
+
+		memset(&info, 0, sizeof(info));
+		unw_init_from_blocked_task(&info, child);
+		if (unw_unwind_to_user(&info) < 0)
+			return 0;
+
+		return access_elf_reg(child, &info, pos, data, write_access);
 	}
 
 	/* access debug registers */
@@ -2124,27 +1948,6 @@ access_uarea(struct task_struct *child, unsigned long addr,
 				"address 0x%lx\n", addr);
 		return -1;
 	}
-#ifdef CONFIG_PERFMON
-	/*
-	 * Check if debug registers are used by perfmon. This
-	 * test must be done once we know that we can do the
-	 * operation, i.e. the arguments are all valid, but
-	 * before we start modifying the state.
-	 *
-	 * Perfmon needs to keep a count of how many processes
-	 * are trying to modify the debug registers for system
-	 * wide monitoring sessions.
-	 *
-	 * We also include read access here, because they may
-	 * cause the PMU-installed debug register state
-	 * (dbr[], ibr[]) to be reset. The two arrays are also
-	 * used by perfmon, but we do not use
-	 * IA64_THREAD_DBG_VALID. The registers are restored
-	 * by the PMU context switch code.
-	 */
-	if (pfm_use_debug_registers(child))
-		return -1;
-#endif
 
 	if (!(child->thread.flags & IA64_THREAD_DBG_VALID)) {
 		child->thread.flags |= IA64_THREAD_DBG_VALID;
@@ -2173,14 +1976,14 @@ static const struct user_regset native_regsets[] = {
 		.core_note_type = NT_PRSTATUS,
 		.n = ELF_NGREG,
 		.size = sizeof(elf_greg_t), .align = sizeof(elf_greg_t),
-		.get = gpregs_get, .set = gpregs_set,
+		.regset_get = gpregs_get, .set = gpregs_set,
 		.writeback = gpregs_writeback
 	},
 	{
 		.core_note_type = NT_PRFPREG,
 		.n = ELF_NFPREG,
 		.size = sizeof(elf_fpreg_t), .align = sizeof(elf_fpreg_t),
-		.get = fpregs_get, .set = fpregs_set, .active = fpregs_active
+		.regset_get = fpregs_get, .set = fpregs_set, .active = fpregs_active
 	},
 };
 
@@ -2192,10 +1995,69 @@ static const struct user_regset_view user_ia64_view = {
 
 const struct user_regset_view *task_user_regset_view(struct task_struct *tsk)
 {
-#ifdef CONFIG_IA32_SUPPORT
-	extern const struct user_regset_view user_ia32_view;
-	if (IS_IA32_PROCESS(task_pt_regs(tsk)))
-		return &user_ia32_view;
-#endif
 	return &user_ia64_view;
+}
+
+struct syscall_get_set_args {
+	unsigned int i;
+	unsigned int n;
+	unsigned long *args;
+	struct pt_regs *regs;
+	int rw;
+};
+
+static void syscall_get_set_args_cb(struct unw_frame_info *info, void *data)
+{
+	struct syscall_get_set_args *args = data;
+	struct pt_regs *pt = args->regs;
+	unsigned long *krbs, cfm, ndirty;
+	int i, count;
+
+	if (unw_unwind_to_user(info) < 0)
+		return;
+
+	cfm = pt->cr_ifs;
+	krbs = (unsigned long *)info->task + IA64_RBS_OFFSET/8;
+	ndirty = ia64_rse_num_regs(krbs, krbs + (pt->loadrs >> 19));
+
+	count = 0;
+	if (in_syscall(pt))
+		count = min_t(int, args->n, cfm & 0x7f);
+
+	for (i = 0; i < count; i++) {
+		if (args->rw)
+			*ia64_rse_skip_regs(krbs, ndirty + i + args->i) =
+				args->args[i];
+		else
+			args->args[i] = *ia64_rse_skip_regs(krbs,
+				ndirty + i + args->i);
+	}
+
+	if (!args->rw) {
+		while (i < args->n) {
+			args->args[i] = 0;
+			i++;
+		}
+	}
+}
+
+void ia64_syscall_get_set_arguments(struct task_struct *task,
+	struct pt_regs *regs, unsigned long *args, int rw)
+{
+	struct syscall_get_set_args data = {
+		.i = 0,
+		.n = 6,
+		.args = args,
+		.regs = regs,
+		.rw = rw,
+	};
+
+	if (task == current)
+		unw_init_running(syscall_get_set_args_cb, &data);
+	else {
+		struct unw_frame_info ufi;
+		memset(&ufi, 0, sizeof(ufi));
+		unw_init_from_blocked_task(&ufi, task);
+		syscall_get_set_args_cb(&ufi, &data);
+	}
 }

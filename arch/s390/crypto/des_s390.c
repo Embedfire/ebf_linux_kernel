@@ -1,391 +1,185 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Cryptographic API.
  *
  * s390 implementation of the DES Cipher Algorithm.
  *
- * Copyright IBM Corp. 2003,2007
+ * Copyright IBM Corp. 2003, 2011
  * Author(s): Thomas Spatzier
  *	      Jan Glauber (jan.glauber@de.ibm.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
  */
 
-#include <crypto/algapi.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/cpufeature.h>
+#include <linux/crypto.h>
+#include <linux/fips.h>
+#include <linux/mutex.h>
+#include <crypto/algapi.h>
+#include <crypto/internal/des.h>
+#include <crypto/internal/skcipher.h>
+#include <asm/cpacf.h>
 
-#include "crypt_s390.h"
-#include "crypto_des.h"
+#define DES3_KEY_SIZE	(3 * DES_KEY_SIZE)
 
-#define DES_BLOCK_SIZE 8
-#define DES_KEY_SIZE 8
+static u8 *ctrblk;
+static DEFINE_MUTEX(ctrblk_lock);
 
-#define DES3_128_KEY_SIZE	(2 * DES_KEY_SIZE)
-#define DES3_128_BLOCK_SIZE	DES_BLOCK_SIZE
+static cpacf_mask_t km_functions, kmc_functions, kmctr_functions;
 
-#define DES3_192_KEY_SIZE	(3 * DES_KEY_SIZE)
-#define DES3_192_BLOCK_SIZE	DES_BLOCK_SIZE
-
-struct crypt_s390_des_ctx {
+struct s390_des_ctx {
 	u8 iv[DES_BLOCK_SIZE];
-	u8 key[DES_KEY_SIZE];
-};
-
-struct crypt_s390_des3_128_ctx {
-	u8 iv[DES_BLOCK_SIZE];
-	u8 key[DES3_128_KEY_SIZE];
-};
-
-struct crypt_s390_des3_192_ctx {
-	u8 iv[DES_BLOCK_SIZE];
-	u8 key[DES3_192_KEY_SIZE];
+	u8 key[DES3_KEY_SIZE];
 };
 
 static int des_setkey(struct crypto_tfm *tfm, const u8 *key,
-		      unsigned int keylen)
+		      unsigned int key_len)
 {
-	struct crypt_s390_des_ctx *dctx = crypto_tfm_ctx(tfm);
-	u32 *flags = &tfm->crt_flags;
-	int ret;
+	struct s390_des_ctx *ctx = crypto_tfm_ctx(tfm);
+	int err;
 
-	/* test if key is valid (not a weak key) */
-	ret = crypto_des_check_key(key, keylen, flags);
-	if (ret == 0)
-		memcpy(dctx->key, key, keylen);
-	return ret;
+	err = crypto_des_verify_key(tfm, key);
+	if (err)
+		return err;
+
+	memcpy(ctx->key, key, key_len);
+	return 0;
 }
 
-static void des_encrypt(struct crypto_tfm *tfm, u8 *out, const u8 *in)
+static int des_setkey_skcipher(struct crypto_skcipher *tfm, const u8 *key,
+			       unsigned int key_len)
 {
-	struct crypt_s390_des_ctx *dctx = crypto_tfm_ctx(tfm);
-
-	crypt_s390_km(KM_DEA_ENCRYPT, dctx->key, out, in, DES_BLOCK_SIZE);
+	return des_setkey(crypto_skcipher_tfm(tfm), key, key_len);
 }
 
-static void des_decrypt(struct crypto_tfm *tfm, u8 *out, const u8 *in)
+static void s390_des_encrypt(struct crypto_tfm *tfm, u8 *out, const u8 *in)
 {
-	struct crypt_s390_des_ctx *dctx = crypto_tfm_ctx(tfm);
+	struct s390_des_ctx *ctx = crypto_tfm_ctx(tfm);
 
-	crypt_s390_km(KM_DEA_DECRYPT, dctx->key, out, in, DES_BLOCK_SIZE);
+	cpacf_km(CPACF_KM_DEA, ctx->key, out, in, DES_BLOCK_SIZE);
+}
+
+static void s390_des_decrypt(struct crypto_tfm *tfm, u8 *out, const u8 *in)
+{
+	struct s390_des_ctx *ctx = crypto_tfm_ctx(tfm);
+
+	cpacf_km(CPACF_KM_DEA | CPACF_DECRYPT,
+		 ctx->key, out, in, DES_BLOCK_SIZE);
 }
 
 static struct crypto_alg des_alg = {
 	.cra_name		=	"des",
 	.cra_driver_name	=	"des-s390",
-	.cra_priority		=	CRYPT_S390_PRIORITY,
+	.cra_priority		=	300,
 	.cra_flags		=	CRYPTO_ALG_TYPE_CIPHER,
 	.cra_blocksize		=	DES_BLOCK_SIZE,
-	.cra_ctxsize		=	sizeof(struct crypt_s390_des_ctx),
+	.cra_ctxsize		=	sizeof(struct s390_des_ctx),
 	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(des_alg.cra_list),
 	.cra_u			=	{
 		.cipher = {
 			.cia_min_keysize	=	DES_KEY_SIZE,
 			.cia_max_keysize	=	DES_KEY_SIZE,
 			.cia_setkey		=	des_setkey,
-			.cia_encrypt		=	des_encrypt,
-			.cia_decrypt		=	des_decrypt,
+			.cia_encrypt		=	s390_des_encrypt,
+			.cia_decrypt		=	s390_des_decrypt,
 		}
 	}
 };
 
-static int ecb_desall_crypt(struct blkcipher_desc *desc, long func,
-			    void *param, struct blkcipher_walk *walk)
+static int ecb_desall_crypt(struct skcipher_request *req, unsigned long fc)
 {
-	int ret = blkcipher_walk_virt(desc, walk);
-	unsigned int nbytes;
+	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
+	struct s390_des_ctx *ctx = crypto_skcipher_ctx(tfm);
+	struct skcipher_walk walk;
+	unsigned int nbytes, n;
+	int ret;
 
-	while ((nbytes = walk->nbytes)) {
+	ret = skcipher_walk_virt(&walk, req, false);
+	while ((nbytes = walk.nbytes) != 0) {
 		/* only use complete blocks */
-		unsigned int n = nbytes & ~(DES_BLOCK_SIZE - 1);
-		u8 *out = walk->dst.virt.addr;
-		u8 *in = walk->src.virt.addr;
-
-		ret = crypt_s390_km(func, param, out, in, n);
-		BUG_ON((ret < 0) || (ret != n));
-
-		nbytes &= DES_BLOCK_SIZE - 1;
-		ret = blkcipher_walk_done(desc, walk, nbytes);
+		n = nbytes & ~(DES_BLOCK_SIZE - 1);
+		cpacf_km(fc, ctx->key, walk.dst.virt.addr,
+			 walk.src.virt.addr, n);
+		ret = skcipher_walk_done(&walk, nbytes - n);
 	}
-
 	return ret;
 }
 
-static int cbc_desall_crypt(struct blkcipher_desc *desc, long func,
-			    void *param, struct blkcipher_walk *walk)
+static int cbc_desall_crypt(struct skcipher_request *req, unsigned long fc)
 {
-	int ret = blkcipher_walk_virt(desc, walk);
-	unsigned int nbytes = walk->nbytes;
+	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
+	struct s390_des_ctx *ctx = crypto_skcipher_ctx(tfm);
+	struct skcipher_walk walk;
+	unsigned int nbytes, n;
+	int ret;
+	struct {
+		u8 iv[DES_BLOCK_SIZE];
+		u8 key[DES3_KEY_SIZE];
+	} param;
 
-	if (!nbytes)
-		goto out;
-
-	memcpy(param, walk->iv, DES_BLOCK_SIZE);
-	do {
+	ret = skcipher_walk_virt(&walk, req, false);
+	if (ret)
+		return ret;
+	memcpy(param.iv, walk.iv, DES_BLOCK_SIZE);
+	memcpy(param.key, ctx->key, DES3_KEY_SIZE);
+	while ((nbytes = walk.nbytes) != 0) {
 		/* only use complete blocks */
-		unsigned int n = nbytes & ~(DES_BLOCK_SIZE - 1);
-		u8 *out = walk->dst.virt.addr;
-		u8 *in = walk->src.virt.addr;
-
-		ret = crypt_s390_kmc(func, param, out, in, n);
-		BUG_ON((ret < 0) || (ret != n));
-
-		nbytes &= DES_BLOCK_SIZE - 1;
-		ret = blkcipher_walk_done(desc, walk, nbytes);
-	} while ((nbytes = walk->nbytes));
-	memcpy(walk->iv, param, DES_BLOCK_SIZE);
-
-out:
+		n = nbytes & ~(DES_BLOCK_SIZE - 1);
+		cpacf_kmc(fc, &param, walk.dst.virt.addr,
+			  walk.src.virt.addr, n);
+		memcpy(walk.iv, param.iv, DES_BLOCK_SIZE);
+		ret = skcipher_walk_done(&walk, nbytes - n);
+	}
 	return ret;
 }
 
-static int ecb_des_encrypt(struct blkcipher_desc *desc,
-			   struct scatterlist *dst, struct scatterlist *src,
-			   unsigned int nbytes)
+static int ecb_des_encrypt(struct skcipher_request *req)
 {
-	struct crypt_s390_des_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return ecb_desall_crypt(desc, KM_DEA_ENCRYPT, sctx->key, &walk);
+	return ecb_desall_crypt(req, CPACF_KM_DEA);
 }
 
-static int ecb_des_decrypt(struct blkcipher_desc *desc,
-			   struct scatterlist *dst, struct scatterlist *src,
-			   unsigned int nbytes)
+static int ecb_des_decrypt(struct skcipher_request *req)
 {
-	struct crypt_s390_des_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return ecb_desall_crypt(desc, KM_DEA_DECRYPT, sctx->key, &walk);
+	return ecb_desall_crypt(req, CPACF_KM_DEA | CPACF_DECRYPT);
 }
 
-static struct crypto_alg ecb_des_alg = {
-	.cra_name		=	"ecb(des)",
-	.cra_driver_name	=	"ecb-des-s390",
-	.cra_priority		=	CRYPT_S390_COMPOSITE_PRIORITY,
-	.cra_flags		=	CRYPTO_ALG_TYPE_BLKCIPHER,
-	.cra_blocksize		=	DES_BLOCK_SIZE,
-	.cra_ctxsize		=	sizeof(struct crypt_s390_des_ctx),
-	.cra_type		=	&crypto_blkcipher_type,
-	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(ecb_des_alg.cra_list),
-	.cra_u			=	{
-		.blkcipher = {
-			.min_keysize		=	DES_KEY_SIZE,
-			.max_keysize		=	DES_KEY_SIZE,
-			.setkey			=	des_setkey,
-			.encrypt		=	ecb_des_encrypt,
-			.decrypt		=	ecb_des_decrypt,
-		}
-	}
+static struct skcipher_alg ecb_des_alg = {
+	.base.cra_name		=	"ecb(des)",
+	.base.cra_driver_name	=	"ecb-des-s390",
+	.base.cra_priority	=	400,	/* combo: des + ecb */
+	.base.cra_blocksize	=	DES_BLOCK_SIZE,
+	.base.cra_ctxsize	=	sizeof(struct s390_des_ctx),
+	.base.cra_module	=	THIS_MODULE,
+	.min_keysize		=	DES_KEY_SIZE,
+	.max_keysize		=	DES_KEY_SIZE,
+	.setkey			=	des_setkey_skcipher,
+	.encrypt		=	ecb_des_encrypt,
+	.decrypt		=	ecb_des_decrypt,
 };
 
-static int cbc_des_encrypt(struct blkcipher_desc *desc,
-			   struct scatterlist *dst, struct scatterlist *src,
-			   unsigned int nbytes)
+static int cbc_des_encrypt(struct skcipher_request *req)
 {
-	struct crypt_s390_des_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return cbc_desall_crypt(desc, KMC_DEA_ENCRYPT, sctx->iv, &walk);
+	return cbc_desall_crypt(req, CPACF_KMC_DEA);
 }
 
-static int cbc_des_decrypt(struct blkcipher_desc *desc,
-			   struct scatterlist *dst, struct scatterlist *src,
-			   unsigned int nbytes)
+static int cbc_des_decrypt(struct skcipher_request *req)
 {
-	struct crypt_s390_des_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return cbc_desall_crypt(desc, KMC_DEA_DECRYPT, sctx->iv, &walk);
+	return cbc_desall_crypt(req, CPACF_KMC_DEA | CPACF_DECRYPT);
 }
 
-static struct crypto_alg cbc_des_alg = {
-	.cra_name		=	"cbc(des)",
-	.cra_driver_name	=	"cbc-des-s390",
-	.cra_priority		=	CRYPT_S390_COMPOSITE_PRIORITY,
-	.cra_flags		=	CRYPTO_ALG_TYPE_BLKCIPHER,
-	.cra_blocksize		=	DES_BLOCK_SIZE,
-	.cra_ctxsize		=	sizeof(struct crypt_s390_des_ctx),
-	.cra_type		=	&crypto_blkcipher_type,
-	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(cbc_des_alg.cra_list),
-	.cra_u			=	{
-		.blkcipher = {
-			.min_keysize		=	DES_KEY_SIZE,
-			.max_keysize		=	DES_KEY_SIZE,
-			.ivsize			=	DES_BLOCK_SIZE,
-			.setkey			=	des_setkey,
-			.encrypt		=	cbc_des_encrypt,
-			.decrypt		=	cbc_des_decrypt,
-		}
-	}
-};
-
-/*
- * RFC2451:
- *
- *   For DES-EDE3, there is no known need to reject weak or
- *   complementation keys.  Any weakness is obviated by the use of
- *   multiple keys.
- *
- *   However, if the two  independent 64-bit keys are equal,
- *   then the DES3 operation is simply the same as DES.
- *   Implementers MUST reject keys that exhibit this property.
- *
- */
-static int des3_128_setkey(struct crypto_tfm *tfm, const u8 *key,
-			   unsigned int keylen)
-{
-	int i, ret;
-	struct crypt_s390_des3_128_ctx *dctx = crypto_tfm_ctx(tfm);
-	const u8 *temp_key = key;
-	u32 *flags = &tfm->crt_flags;
-
-	if (!(memcmp(key, &key[DES_KEY_SIZE], DES_KEY_SIZE))) {
-		*flags |= CRYPTO_TFM_RES_BAD_KEY_SCHED;
-		return -EINVAL;
-	}
-	for (i = 0; i < 2; i++, temp_key += DES_KEY_SIZE) {
-		ret = crypto_des_check_key(temp_key, DES_KEY_SIZE, flags);
-		if (ret < 0)
-			return ret;
-	}
-	memcpy(dctx->key, key, keylen);
-	return 0;
-}
-
-static void des3_128_encrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
-{
-	struct crypt_s390_des3_128_ctx *dctx = crypto_tfm_ctx(tfm);
-
-	crypt_s390_km(KM_TDEA_128_ENCRYPT, dctx->key, dst, (void*)src,
-		      DES3_128_BLOCK_SIZE);
-}
-
-static void des3_128_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
-{
-	struct crypt_s390_des3_128_ctx *dctx = crypto_tfm_ctx(tfm);
-
-	crypt_s390_km(KM_TDEA_128_DECRYPT, dctx->key, dst, (void*)src,
-		      DES3_128_BLOCK_SIZE);
-}
-
-static struct crypto_alg des3_128_alg = {
-	.cra_name		=	"des3_ede128",
-	.cra_driver_name	=	"des3_ede128-s390",
-	.cra_priority		=	CRYPT_S390_PRIORITY,
-	.cra_flags		=	CRYPTO_ALG_TYPE_CIPHER,
-	.cra_blocksize		=	DES3_128_BLOCK_SIZE,
-	.cra_ctxsize		=	sizeof(struct crypt_s390_des3_128_ctx),
-	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(des3_128_alg.cra_list),
-	.cra_u			=	{
-		.cipher = {
-			.cia_min_keysize	=	DES3_128_KEY_SIZE,
-			.cia_max_keysize	=	DES3_128_KEY_SIZE,
-			.cia_setkey		=	des3_128_setkey,
-			.cia_encrypt		=	des3_128_encrypt,
-			.cia_decrypt		=	des3_128_decrypt,
-		}
-	}
-};
-
-static int ecb_des3_128_encrypt(struct blkcipher_desc *desc,
-				struct scatterlist *dst,
-				struct scatterlist *src, unsigned int nbytes)
-{
-	struct crypt_s390_des3_128_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return ecb_desall_crypt(desc, KM_TDEA_128_ENCRYPT, sctx->key, &walk);
-}
-
-static int ecb_des3_128_decrypt(struct blkcipher_desc *desc,
-				struct scatterlist *dst,
-				struct scatterlist *src, unsigned int nbytes)
-{
-	struct crypt_s390_des3_128_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return ecb_desall_crypt(desc, KM_TDEA_128_DECRYPT, sctx->key, &walk);
-}
-
-static struct crypto_alg ecb_des3_128_alg = {
-	.cra_name		=	"ecb(des3_ede128)",
-	.cra_driver_name	=	"ecb-des3_ede128-s390",
-	.cra_priority		=	CRYPT_S390_COMPOSITE_PRIORITY,
-	.cra_flags		=	CRYPTO_ALG_TYPE_BLKCIPHER,
-	.cra_blocksize		=	DES3_128_BLOCK_SIZE,
-	.cra_ctxsize		=	sizeof(struct crypt_s390_des3_128_ctx),
-	.cra_type		=	&crypto_blkcipher_type,
-	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(
-						ecb_des3_128_alg.cra_list),
-	.cra_u			=	{
-		.blkcipher = {
-			.min_keysize		=	DES3_128_KEY_SIZE,
-			.max_keysize		=	DES3_128_KEY_SIZE,
-			.setkey			=	des3_128_setkey,
-			.encrypt		=	ecb_des3_128_encrypt,
-			.decrypt		=	ecb_des3_128_decrypt,
-		}
-	}
-};
-
-static int cbc_des3_128_encrypt(struct blkcipher_desc *desc,
-				struct scatterlist *dst,
-				struct scatterlist *src, unsigned int nbytes)
-{
-	struct crypt_s390_des3_128_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return cbc_desall_crypt(desc, KMC_TDEA_128_ENCRYPT, sctx->iv, &walk);
-}
-
-static int cbc_des3_128_decrypt(struct blkcipher_desc *desc,
-				struct scatterlist *dst,
-				struct scatterlist *src, unsigned int nbytes)
-{
-	struct crypt_s390_des3_128_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return cbc_desall_crypt(desc, KMC_TDEA_128_DECRYPT, sctx->iv, &walk);
-}
-
-static struct crypto_alg cbc_des3_128_alg = {
-	.cra_name		=	"cbc(des3_ede128)",
-	.cra_driver_name	=	"cbc-des3_ede128-s390",
-	.cra_priority		=	CRYPT_S390_COMPOSITE_PRIORITY,
-	.cra_flags		=	CRYPTO_ALG_TYPE_BLKCIPHER,
-	.cra_blocksize		=	DES3_128_BLOCK_SIZE,
-	.cra_ctxsize		=	sizeof(struct crypt_s390_des3_128_ctx),
-	.cra_type		=	&crypto_blkcipher_type,
-	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(
-						cbc_des3_128_alg.cra_list),
-	.cra_u			=	{
-		.blkcipher = {
-			.min_keysize		=	DES3_128_KEY_SIZE,
-			.max_keysize		=	DES3_128_KEY_SIZE,
-			.ivsize			=	DES3_128_BLOCK_SIZE,
-			.setkey			=	des3_128_setkey,
-			.encrypt		=	cbc_des3_128_encrypt,
-			.decrypt		=	cbc_des3_128_decrypt,
-		}
-	}
+static struct skcipher_alg cbc_des_alg = {
+	.base.cra_name		=	"cbc(des)",
+	.base.cra_driver_name	=	"cbc-des-s390",
+	.base.cra_priority	=	400,	/* combo: des + cbc */
+	.base.cra_blocksize	=	DES_BLOCK_SIZE,
+	.base.cra_ctxsize	=	sizeof(struct s390_des_ctx),
+	.base.cra_module	=	THIS_MODULE,
+	.min_keysize		=	DES_KEY_SIZE,
+	.max_keysize		=	DES_KEY_SIZE,
+	.ivsize			=	DES_BLOCK_SIZE,
+	.setkey			=	des_setkey_skcipher,
+	.encrypt		=	cbc_des_encrypt,
+	.decrypt		=	cbc_des_decrypt,
 };
 
 /*
@@ -400,236 +194,309 @@ static struct crypto_alg cbc_des3_128_alg = {
  *   same as DES.  Implementers MUST reject keys that exhibit this
  *   property.
  *
+ *   In fips mode additinally check for all 3 keys are unique.
+ *
  */
-static int des3_192_setkey(struct crypto_tfm *tfm, const u8 *key,
-			   unsigned int keylen)
+static int des3_setkey(struct crypto_tfm *tfm, const u8 *key,
+		       unsigned int key_len)
 {
-	int i, ret;
-	struct crypt_s390_des3_192_ctx *dctx = crypto_tfm_ctx(tfm);
-	const u8 *temp_key = key;
-	u32 *flags = &tfm->crt_flags;
+	struct s390_des_ctx *ctx = crypto_tfm_ctx(tfm);
+	int err;
 
-	if (!(memcmp(key, &key[DES_KEY_SIZE], DES_KEY_SIZE) &&
-	    memcmp(&key[DES_KEY_SIZE], &key[DES_KEY_SIZE * 2],
-		   DES_KEY_SIZE))) {
+	err = crypto_des3_ede_verify_key(tfm, key);
+	if (err)
+		return err;
 
-		*flags |= CRYPTO_TFM_RES_BAD_KEY_SCHED;
-		return -EINVAL;
-	}
-	for (i = 0; i < 3; i++, temp_key += DES_KEY_SIZE) {
-		ret = crypto_des_check_key(temp_key, DES_KEY_SIZE, flags);
-		if (ret < 0)
-			return ret;
-	}
-	memcpy(dctx->key, key, keylen);
+	memcpy(ctx->key, key, key_len);
 	return 0;
 }
 
-static void des3_192_encrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
+static int des3_setkey_skcipher(struct crypto_skcipher *tfm, const u8 *key,
+				unsigned int key_len)
 {
-	struct crypt_s390_des3_192_ctx *dctx = crypto_tfm_ctx(tfm);
-
-	crypt_s390_km(KM_TDEA_192_ENCRYPT, dctx->key, dst, (void*)src,
-		      DES3_192_BLOCK_SIZE);
+	return des3_setkey(crypto_skcipher_tfm(tfm), key, key_len);
 }
 
-static void des3_192_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
+static void des3_encrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
 {
-	struct crypt_s390_des3_192_ctx *dctx = crypto_tfm_ctx(tfm);
+	struct s390_des_ctx *ctx = crypto_tfm_ctx(tfm);
 
-	crypt_s390_km(KM_TDEA_192_DECRYPT, dctx->key, dst, (void*)src,
-		      DES3_192_BLOCK_SIZE);
+	cpacf_km(CPACF_KM_TDEA_192, ctx->key, dst, src, DES_BLOCK_SIZE);
 }
 
-static struct crypto_alg des3_192_alg = {
+static void des3_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
+{
+	struct s390_des_ctx *ctx = crypto_tfm_ctx(tfm);
+
+	cpacf_km(CPACF_KM_TDEA_192 | CPACF_DECRYPT,
+		 ctx->key, dst, src, DES_BLOCK_SIZE);
+}
+
+static struct crypto_alg des3_alg = {
 	.cra_name		=	"des3_ede",
 	.cra_driver_name	=	"des3_ede-s390",
-	.cra_priority		=	CRYPT_S390_PRIORITY,
+	.cra_priority		=	300,
 	.cra_flags		=	CRYPTO_ALG_TYPE_CIPHER,
-	.cra_blocksize		=	DES3_192_BLOCK_SIZE,
-	.cra_ctxsize		=	sizeof(struct crypt_s390_des3_192_ctx),
+	.cra_blocksize		=	DES_BLOCK_SIZE,
+	.cra_ctxsize		=	sizeof(struct s390_des_ctx),
 	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(des3_192_alg.cra_list),
 	.cra_u			=	{
 		.cipher = {
-			.cia_min_keysize	=	DES3_192_KEY_SIZE,
-			.cia_max_keysize	=	DES3_192_KEY_SIZE,
-			.cia_setkey		=	des3_192_setkey,
-			.cia_encrypt		=	des3_192_encrypt,
-			.cia_decrypt		=	des3_192_decrypt,
+			.cia_min_keysize	=	DES3_KEY_SIZE,
+			.cia_max_keysize	=	DES3_KEY_SIZE,
+			.cia_setkey		=	des3_setkey,
+			.cia_encrypt		=	des3_encrypt,
+			.cia_decrypt		=	des3_decrypt,
 		}
 	}
 };
 
-static int ecb_des3_192_encrypt(struct blkcipher_desc *desc,
-				struct scatterlist *dst,
-				struct scatterlist *src, unsigned int nbytes)
+static int ecb_des3_encrypt(struct skcipher_request *req)
 {
-	struct crypt_s390_des3_192_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return ecb_desall_crypt(desc, KM_TDEA_192_ENCRYPT, sctx->key, &walk);
+	return ecb_desall_crypt(req, CPACF_KM_TDEA_192);
 }
 
-static int ecb_des3_192_decrypt(struct blkcipher_desc *desc,
-				struct scatterlist *dst,
-				struct scatterlist *src, unsigned int nbytes)
+static int ecb_des3_decrypt(struct skcipher_request *req)
 {
-	struct crypt_s390_des3_192_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return ecb_desall_crypt(desc, KM_TDEA_192_DECRYPT, sctx->key, &walk);
+	return ecb_desall_crypt(req, CPACF_KM_TDEA_192 | CPACF_DECRYPT);
 }
 
-static struct crypto_alg ecb_des3_192_alg = {
-	.cra_name		=	"ecb(des3_ede)",
-	.cra_driver_name	=	"ecb-des3_ede-s390",
-	.cra_priority		=	CRYPT_S390_COMPOSITE_PRIORITY,
-	.cra_flags		=	CRYPTO_ALG_TYPE_BLKCIPHER,
-	.cra_blocksize		=	DES3_192_BLOCK_SIZE,
-	.cra_ctxsize		=	sizeof(struct crypt_s390_des3_192_ctx),
-	.cra_type		=	&crypto_blkcipher_type,
-	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(
-						ecb_des3_192_alg.cra_list),
-	.cra_u			=	{
-		.blkcipher = {
-			.min_keysize		=	DES3_192_KEY_SIZE,
-			.max_keysize		=	DES3_192_KEY_SIZE,
-			.setkey			=	des3_192_setkey,
-			.encrypt		=	ecb_des3_192_encrypt,
-			.decrypt		=	ecb_des3_192_decrypt,
-		}
-	}
+static struct skcipher_alg ecb_des3_alg = {
+	.base.cra_name		=	"ecb(des3_ede)",
+	.base.cra_driver_name	=	"ecb-des3_ede-s390",
+	.base.cra_priority	=	400,	/* combo: des3 + ecb */
+	.base.cra_blocksize	=	DES_BLOCK_SIZE,
+	.base.cra_ctxsize	=	sizeof(struct s390_des_ctx),
+	.base.cra_module	=	THIS_MODULE,
+	.min_keysize		=	DES3_KEY_SIZE,
+	.max_keysize		=	DES3_KEY_SIZE,
+	.setkey			=	des3_setkey_skcipher,
+	.encrypt		=	ecb_des3_encrypt,
+	.decrypt		=	ecb_des3_decrypt,
 };
 
-static int cbc_des3_192_encrypt(struct blkcipher_desc *desc,
-				struct scatterlist *dst,
-				struct scatterlist *src, unsigned int nbytes)
+static int cbc_des3_encrypt(struct skcipher_request *req)
 {
-	struct crypt_s390_des3_192_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return cbc_desall_crypt(desc, KMC_TDEA_192_ENCRYPT, sctx->iv, &walk);
+	return cbc_desall_crypt(req, CPACF_KMC_TDEA_192);
 }
 
-static int cbc_des3_192_decrypt(struct blkcipher_desc *desc,
-				struct scatterlist *dst,
-				struct scatterlist *src, unsigned int nbytes)
+static int cbc_des3_decrypt(struct skcipher_request *req)
 {
-	struct crypt_s390_des3_192_ctx *sctx = crypto_blkcipher_ctx(desc->tfm);
-	struct blkcipher_walk walk;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	return cbc_desall_crypt(desc, KMC_TDEA_192_DECRYPT, sctx->iv, &walk);
+	return cbc_desall_crypt(req, CPACF_KMC_TDEA_192 | CPACF_DECRYPT);
 }
 
-static struct crypto_alg cbc_des3_192_alg = {
-	.cra_name		=	"cbc(des3_ede)",
-	.cra_driver_name	=	"cbc-des3_ede-s390",
-	.cra_priority		=	CRYPT_S390_COMPOSITE_PRIORITY,
-	.cra_flags		=	CRYPTO_ALG_TYPE_BLKCIPHER,
-	.cra_blocksize		=	DES3_192_BLOCK_SIZE,
-	.cra_ctxsize		=	sizeof(struct crypt_s390_des3_192_ctx),
-	.cra_type		=	&crypto_blkcipher_type,
-	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(
-						cbc_des3_192_alg.cra_list),
-	.cra_u			=	{
-		.blkcipher = {
-			.min_keysize		=	DES3_192_KEY_SIZE,
-			.max_keysize		=	DES3_192_KEY_SIZE,
-			.ivsize			=	DES3_192_BLOCK_SIZE,
-			.setkey			=	des3_192_setkey,
-			.encrypt		=	cbc_des3_192_encrypt,
-			.decrypt		=	cbc_des3_192_decrypt,
-		}
-	}
+static struct skcipher_alg cbc_des3_alg = {
+	.base.cra_name		=	"cbc(des3_ede)",
+	.base.cra_driver_name	=	"cbc-des3_ede-s390",
+	.base.cra_priority	=	400,	/* combo: des3 + cbc */
+	.base.cra_blocksize	=	DES_BLOCK_SIZE,
+	.base.cra_ctxsize	=	sizeof(struct s390_des_ctx),
+	.base.cra_module	=	THIS_MODULE,
+	.min_keysize		=	DES3_KEY_SIZE,
+	.max_keysize		=	DES3_KEY_SIZE,
+	.ivsize			=	DES_BLOCK_SIZE,
+	.setkey			=	des3_setkey_skcipher,
+	.encrypt		=	cbc_des3_encrypt,
+	.decrypt		=	cbc_des3_decrypt,
 };
 
-static int des_s390_init(void)
+static unsigned int __ctrblk_init(u8 *ctrptr, u8 *iv, unsigned int nbytes)
 {
-	int ret = 0;
+	unsigned int i, n;
 
-	if (!crypt_s390_func_available(KM_DEA_ENCRYPT) ||
-	    !crypt_s390_func_available(KM_TDEA_128_ENCRYPT) ||
-	    !crypt_s390_func_available(KM_TDEA_192_ENCRYPT))
-		return -EOPNOTSUPP;
+	/* align to block size, max. PAGE_SIZE */
+	n = (nbytes > PAGE_SIZE) ? PAGE_SIZE : nbytes & ~(DES_BLOCK_SIZE - 1);
+	memcpy(ctrptr, iv, DES_BLOCK_SIZE);
+	for (i = (n / DES_BLOCK_SIZE) - 1; i > 0; i--) {
+		memcpy(ctrptr + DES_BLOCK_SIZE, ctrptr, DES_BLOCK_SIZE);
+		crypto_inc(ctrptr + DES_BLOCK_SIZE, DES_BLOCK_SIZE);
+		ctrptr += DES_BLOCK_SIZE;
+	}
+	return n;
+}
 
-	ret = crypto_register_alg(&des_alg);
-	if (ret)
-		goto des_err;
-	ret = crypto_register_alg(&ecb_des_alg);
-	if (ret)
-		goto ecb_des_err;
-	ret = crypto_register_alg(&cbc_des_alg);
-	if (ret)
-		goto cbc_des_err;
+static int ctr_desall_crypt(struct skcipher_request *req, unsigned long fc)
+{
+	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
+	struct s390_des_ctx *ctx = crypto_skcipher_ctx(tfm);
+	u8 buf[DES_BLOCK_SIZE], *ctrptr;
+	struct skcipher_walk walk;
+	unsigned int n, nbytes;
+	int ret, locked;
 
-	ret = crypto_register_alg(&des3_128_alg);
-	if (ret)
-		goto des3_128_err;
-	ret = crypto_register_alg(&ecb_des3_128_alg);
-	if (ret)
-		goto ecb_des3_128_err;
-	ret = crypto_register_alg(&cbc_des3_128_alg);
-	if (ret)
-		goto cbc_des3_128_err;
+	locked = mutex_trylock(&ctrblk_lock);
 
-	ret = crypto_register_alg(&des3_192_alg);
-	if (ret)
-		goto des3_192_err;
-	ret = crypto_register_alg(&ecb_des3_192_alg);
-	if (ret)
-		goto ecb_des3_192_err;
-	ret = crypto_register_alg(&cbc_des3_192_alg);
-	if (ret)
-		goto cbc_des3_192_err;
-
-out:
+	ret = skcipher_walk_virt(&walk, req, false);
+	while ((nbytes = walk.nbytes) >= DES_BLOCK_SIZE) {
+		n = DES_BLOCK_SIZE;
+		if (nbytes >= 2*DES_BLOCK_SIZE && locked)
+			n = __ctrblk_init(ctrblk, walk.iv, nbytes);
+		ctrptr = (n > DES_BLOCK_SIZE) ? ctrblk : walk.iv;
+		cpacf_kmctr(fc, ctx->key, walk.dst.virt.addr,
+			    walk.src.virt.addr, n, ctrptr);
+		if (ctrptr == ctrblk)
+			memcpy(walk.iv, ctrptr + n - DES_BLOCK_SIZE,
+				DES_BLOCK_SIZE);
+		crypto_inc(walk.iv, DES_BLOCK_SIZE);
+		ret = skcipher_walk_done(&walk, nbytes - n);
+	}
+	if (locked)
+		mutex_unlock(&ctrblk_lock);
+	/* final block may be < DES_BLOCK_SIZE, copy only nbytes */
+	if (nbytes) {
+		cpacf_kmctr(fc, ctx->key, buf, walk.src.virt.addr,
+			    DES_BLOCK_SIZE, walk.iv);
+		memcpy(walk.dst.virt.addr, buf, nbytes);
+		crypto_inc(walk.iv, DES_BLOCK_SIZE);
+		ret = skcipher_walk_done(&walk, 0);
+	}
 	return ret;
-
-cbc_des3_192_err:
-	crypto_unregister_alg(&ecb_des3_192_alg);
-ecb_des3_192_err:
-	crypto_unregister_alg(&des3_192_alg);
-des3_192_err:
-	crypto_unregister_alg(&cbc_des3_128_alg);
-cbc_des3_128_err:
-	crypto_unregister_alg(&ecb_des3_128_alg);
-ecb_des3_128_err:
-	crypto_unregister_alg(&des3_128_alg);
-des3_128_err:
-	crypto_unregister_alg(&cbc_des_alg);
-cbc_des_err:
-	crypto_unregister_alg(&ecb_des_alg);
-ecb_des_err:
-	crypto_unregister_alg(&des_alg);
-des_err:
-	goto out;
 }
 
-static void __exit des_s390_fini(void)
+static int ctr_des_crypt(struct skcipher_request *req)
 {
-	crypto_unregister_alg(&cbc_des3_192_alg);
-	crypto_unregister_alg(&ecb_des3_192_alg);
-	crypto_unregister_alg(&des3_192_alg);
-	crypto_unregister_alg(&cbc_des3_128_alg);
-	crypto_unregister_alg(&ecb_des3_128_alg);
-	crypto_unregister_alg(&des3_128_alg);
-	crypto_unregister_alg(&cbc_des_alg);
-	crypto_unregister_alg(&ecb_des_alg);
-	crypto_unregister_alg(&des_alg);
+	return ctr_desall_crypt(req, CPACF_KMCTR_DEA);
 }
 
-module_init(des_s390_init);
-module_exit(des_s390_fini);
+static struct skcipher_alg ctr_des_alg = {
+	.base.cra_name		=	"ctr(des)",
+	.base.cra_driver_name	=	"ctr-des-s390",
+	.base.cra_priority	=	400,	/* combo: des + ctr */
+	.base.cra_blocksize	=	1,
+	.base.cra_ctxsize	=	sizeof(struct s390_des_ctx),
+	.base.cra_module	=	THIS_MODULE,
+	.min_keysize		=	DES_KEY_SIZE,
+	.max_keysize		=	DES_KEY_SIZE,
+	.ivsize			=	DES_BLOCK_SIZE,
+	.setkey			=	des_setkey_skcipher,
+	.encrypt		=	ctr_des_crypt,
+	.decrypt		=	ctr_des_crypt,
+	.chunksize		=	DES_BLOCK_SIZE,
+};
 
-MODULE_ALIAS("des");
-MODULE_ALIAS("des3_ede");
+static int ctr_des3_crypt(struct skcipher_request *req)
+{
+	return ctr_desall_crypt(req, CPACF_KMCTR_TDEA_192);
+}
+
+static struct skcipher_alg ctr_des3_alg = {
+	.base.cra_name		=	"ctr(des3_ede)",
+	.base.cra_driver_name	=	"ctr-des3_ede-s390",
+	.base.cra_priority	=	400,	/* combo: des3 + ede */
+	.base.cra_blocksize	=	1,
+	.base.cra_ctxsize	=	sizeof(struct s390_des_ctx),
+	.base.cra_module	=	THIS_MODULE,
+	.min_keysize		=	DES3_KEY_SIZE,
+	.max_keysize		=	DES3_KEY_SIZE,
+	.ivsize			=	DES_BLOCK_SIZE,
+	.setkey			=	des3_setkey_skcipher,
+	.encrypt		=	ctr_des3_crypt,
+	.decrypt		=	ctr_des3_crypt,
+	.chunksize		=	DES_BLOCK_SIZE,
+};
+
+static struct crypto_alg *des_s390_algs_ptr[2];
+static int des_s390_algs_num;
+static struct skcipher_alg *des_s390_skciphers_ptr[6];
+static int des_s390_skciphers_num;
+
+static int des_s390_register_alg(struct crypto_alg *alg)
+{
+	int ret;
+
+	ret = crypto_register_alg(alg);
+	if (!ret)
+		des_s390_algs_ptr[des_s390_algs_num++] = alg;
+	return ret;
+}
+
+static int des_s390_register_skcipher(struct skcipher_alg *alg)
+{
+	int ret;
+
+	ret = crypto_register_skcipher(alg);
+	if (!ret)
+		des_s390_skciphers_ptr[des_s390_skciphers_num++] = alg;
+	return ret;
+}
+
+static void des_s390_exit(void)
+{
+	while (des_s390_algs_num--)
+		crypto_unregister_alg(des_s390_algs_ptr[des_s390_algs_num]);
+	while (des_s390_skciphers_num--)
+		crypto_unregister_skcipher(des_s390_skciphers_ptr[des_s390_skciphers_num]);
+	if (ctrblk)
+		free_page((unsigned long) ctrblk);
+}
+
+static int __init des_s390_init(void)
+{
+	int ret;
+
+	/* Query available functions for KM, KMC and KMCTR */
+	cpacf_query(CPACF_KM, &km_functions);
+	cpacf_query(CPACF_KMC, &kmc_functions);
+	cpacf_query(CPACF_KMCTR, &kmctr_functions);
+
+	if (cpacf_test_func(&km_functions, CPACF_KM_DEA)) {
+		ret = des_s390_register_alg(&des_alg);
+		if (ret)
+			goto out_err;
+		ret = des_s390_register_skcipher(&ecb_des_alg);
+		if (ret)
+			goto out_err;
+	}
+	if (cpacf_test_func(&kmc_functions, CPACF_KMC_DEA)) {
+		ret = des_s390_register_skcipher(&cbc_des_alg);
+		if (ret)
+			goto out_err;
+	}
+	if (cpacf_test_func(&km_functions, CPACF_KM_TDEA_192)) {
+		ret = des_s390_register_alg(&des3_alg);
+		if (ret)
+			goto out_err;
+		ret = des_s390_register_skcipher(&ecb_des3_alg);
+		if (ret)
+			goto out_err;
+	}
+	if (cpacf_test_func(&kmc_functions, CPACF_KMC_TDEA_192)) {
+		ret = des_s390_register_skcipher(&cbc_des3_alg);
+		if (ret)
+			goto out_err;
+	}
+
+	if (cpacf_test_func(&kmctr_functions, CPACF_KMCTR_DEA) ||
+	    cpacf_test_func(&kmctr_functions, CPACF_KMCTR_TDEA_192)) {
+		ctrblk = (u8 *) __get_free_page(GFP_KERNEL);
+		if (!ctrblk) {
+			ret = -ENOMEM;
+			goto out_err;
+		}
+	}
+
+	if (cpacf_test_func(&kmctr_functions, CPACF_KMCTR_DEA)) {
+		ret = des_s390_register_skcipher(&ctr_des_alg);
+		if (ret)
+			goto out_err;
+	}
+	if (cpacf_test_func(&kmctr_functions, CPACF_KMCTR_TDEA_192)) {
+		ret = des_s390_register_skcipher(&ctr_des3_alg);
+		if (ret)
+			goto out_err;
+	}
+
+	return 0;
+out_err:
+	des_s390_exit();
+	return ret;
+}
+
+module_cpu_feature_match(MSA, des_s390_init);
+module_exit(des_s390_exit);
+
+MODULE_ALIAS_CRYPTO("des");
+MODULE_ALIAS_CRYPTO("des3_ede");
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DES & Triple DES EDE Cipher Algorithms");

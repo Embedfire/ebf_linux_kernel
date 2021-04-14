@@ -21,12 +21,16 @@ struct dm_dirty_log_type;
 
 struct dm_dirty_log {
 	struct dm_dirty_log_type *type;
+	int (*flush_callback_fn)(struct dm_target *ti);
 	void *context;
 };
 
 struct dm_dirty_log_type {
 	const char *name;
 	struct module *module;
+
+	/* For internal device-mapper use */
+	struct list_head list;
 
 	int (*ctr)(struct dm_dirty_log *log, struct dm_target *ti,
 		   unsigned argc, char **argv);
@@ -113,6 +117,16 @@ struct dm_dirty_log_type {
 	 */
 	int (*status)(struct dm_dirty_log *log, status_type_t status_type,
 		      char *result, unsigned maxlen);
+
+	/*
+	 * is_remote_recovering is necessary for cluster mirroring. It provides
+	 * a way to detect recovery on another node, so we aren't writing
+	 * concurrently.  This function is likely to block (when a cluster log
+	 * is used).
+	 *
+	 * Returns: 0, 1
+	 */
+	int (*is_remote_recovering)(struct dm_dirty_log *log, region_t region);
 };
 
 int dm_dirty_log_type_register(struct dm_dirty_log_type *type);
@@ -123,8 +137,9 @@ int dm_dirty_log_type_unregister(struct dm_dirty_log_type *type);
  * type->constructor/destructor() directly.
  */
 struct dm_dirty_log *dm_dirty_log_create(const char *type_name,
-					 struct dm_target *ti,
-					 unsigned argc, char **argv);
+			struct dm_target *ti,
+			int (*flush_callback_fn)(struct dm_target *ti),
+			unsigned argc, char **argv);
 void dm_dirty_log_destroy(struct dm_dirty_log *log);
 
 #endif	/* __KERNEL__ */

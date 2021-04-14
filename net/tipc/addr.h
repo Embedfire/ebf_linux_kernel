@@ -1,7 +1,7 @@
 /*
  * net/tipc/addr.h: Include file for TIPC address utility routines
  *
- * Copyright (c) 2000-2006, Ericsson AB
+ * Copyright (c) 2000-2006, 2018, Ericsson AB
  * Copyright (c) 2004-2005, Wind River Systems
  * All rights reserved.
  *
@@ -37,87 +37,55 @@
 #ifndef _TIPC_ADDR_H
 #define _TIPC_ADDR_H
 
-static inline u32 own_node(void)
+#include <linux/types.h>
+#include <linux/tipc.h>
+#include <net/net_namespace.h>
+#include <net/netns/generic.h>
+#include "core.h"
+
+static inline u32 tipc_own_addr(struct net *net)
 {
-	return tipc_node(tipc_own_addr);
+	return tipc_net(net)->node_addr;
 }
 
-static inline u32 own_cluster(void)
+static inline u8 *tipc_own_id(struct net *net)
 {
-	return tipc_cluster(tipc_own_addr);
+	struct tipc_net *tn = tipc_net(net);
+
+	if (!strlen(tn->node_id_string))
+		return NULL;
+	return tn->node_id;
 }
 
-static inline u32 own_zone(void)
+static inline char *tipc_own_id_string(struct net *net)
 {
-	return tipc_zone(tipc_own_addr);
+	return tipc_net(net)->node_id_string;
 }
 
-static inline int in_own_cluster(u32 addr)
+static inline u32 tipc_cluster_mask(u32 addr)
 {
-	return !((addr ^ tipc_own_addr) >> 12);
+	return addr & TIPC_ZONE_CLUSTER_MASK;
 }
 
-static inline int is_slave(u32 addr)
+static inline int tipc_node2scope(u32 node)
 {
-	return addr & 0x800;
+	return node ? TIPC_NODE_SCOPE : TIPC_CLUSTER_SCOPE;
 }
 
-static inline int may_route(u32 addr)
+static inline int tipc_scope2node(struct net *net, int sc)
 {
-	return(addr ^ tipc_own_addr) >> 11;
+	return sc != TIPC_NODE_SCOPE ? 0 : tipc_own_addr(net);
 }
 
-static inline int in_scope(u32 domain, u32 addr)
+static inline int in_own_node(struct net *net, u32 addr)
 {
-	if (!domain || (domain == addr))
-		return 1;
-	if (domain == (addr & 0xfffff000u)) /* domain <Z.C.0> */
-		return 1;
-	if (domain == (addr & 0xff000000u)) /* domain <Z.0.0> */
-		return 1;
-	return 0;
+	return addr == tipc_own_addr(net) || !addr;
 }
 
-/**
- * addr_scope - convert message lookup domain to equivalent 2-bit scope value
- */
-
-static inline int addr_scope(u32 domain)
-{
-	if (likely(!domain))
-		return TIPC_ZONE_SCOPE;
-	if (tipc_node(domain))
-		return TIPC_NODE_SCOPE;
-	if (tipc_cluster(domain))
-		return TIPC_CLUSTER_SCOPE;
-	return TIPC_ZONE_SCOPE;
-}
-
-/**
- * addr_domain - convert 2-bit scope value to equivalent message lookup domain
- *
- * Needed when address of a named message must be looked up a second time
- * after a network hop.
- */
-
-static inline int addr_domain(int sc)
-{
-	if (likely(sc == TIPC_NODE_SCOPE))
-		return tipc_own_addr;
-	if (sc == TIPC_CLUSTER_SCOPE)
-		return tipc_addr(tipc_zone(tipc_own_addr),
-				 tipc_cluster(tipc_own_addr), 0);
-	return tipc_addr(tipc_zone(tipc_own_addr), 0, 0);
-}
-
-static inline char *addr_string_fill(char *string, u32 addr)
-{
-	snprintf(string, 16, "<%u.%u.%u>",
-		 tipc_zone(addr), tipc_cluster(addr), tipc_node(addr));
-	return string;
-}
-
-int tipc_addr_domain_valid(u32);
-int tipc_addr_node_valid(u32 addr);
+bool tipc_in_scope(bool legacy_format, u32 domain, u32 addr);
+void tipc_set_node_id(struct net *net, u8 *id);
+void tipc_set_node_addr(struct net *net, u32 addr);
+char *tipc_nodeid2string(char *str, u8 *id);
+u32 tipc_node_id2hash(u8 *id128);
 
 #endif

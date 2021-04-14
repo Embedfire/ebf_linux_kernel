@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Common PowerQUICC II code.
  *
@@ -7,23 +8,19 @@
  * Based on code by Vitaly Bordug <vbordug@ru.mvista.com>
  * pq2_restart fix by Wade Farnsworth <wfarnsworth@mvista.com>
  * Copyright (c) 2006 MontaVista Software, Inc.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
+
+#include <linux/kprobes.h>
 
 #include <asm/cpm2.h>
 #include <asm/io.h>
 #include <asm/pci-bridge.h>
-#include <asm/system.h>
 
 #include <platforms/82xx/pq2.h>
 
 #define RMR_CSRE 0x00000001
 
-void pq2_restart(char *cmd)
+void __noreturn pq2_restart(char *cmd)
 {
 	local_irq_disable();
 	setbits32(&cpm2_immr->im_clkrst.car_rmr, RMR_CSRE);
@@ -34,6 +31,7 @@ void pq2_restart(char *cmd)
 
 	panic("Restart failed\n");
 }
+NOKPROBE_SYMBOL(pq2_restart)
 
 #ifdef CONFIG_PCI
 static int pq2_pci_exclude_device(struct pci_controller *hose,
@@ -53,7 +51,7 @@ static void __init pq2_pci_add_bridge(struct device_node *np)
 	if (of_address_to_resource(np, 0, &r) || r.end - r.start < 0x10b)
 		goto err;
 
-	ppc_pci_flags |= PPC_PCI_REASSIGN_ALL_BUS;
+	pci_add_flags(PCI_REASSIGN_ALL_BUS);
 
 	hose = pcibios_alloc_controller(np);
 	if (!hose)
@@ -72,11 +70,11 @@ err:
 
 void __init pq2_init_pci(void)
 {
-	struct device_node *np = NULL;
+	struct device_node *np;
 
 	ppc_md.pci_exclude_device = pq2_pci_exclude_device;
 
-	while ((np = of_find_compatible_node(np, NULL, "fsl,pq2-pci")))
+	for_each_compatible_node(np, NULL, "fsl,pq2-pci")
 		pq2_pci_add_bridge(np);
 }
 #endif

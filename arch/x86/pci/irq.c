@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	Low-Level PCI Support for PC -- Routing of Interrupts
  *
@@ -8,7 +9,6 @@
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/init.h>
-#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/dmi.h>
 #include <linux/io.h>
@@ -16,8 +16,7 @@
 #include <asm/io_apic.h>
 #include <linux/irq.h>
 #include <linux/acpi.h>
-
-#include "pci.h"
+#include <asm/pci_x86.h>
 
 #define PIRQ_SIGNATURE	(('$' << 0) + ('P' << 8) + ('I' << 16) + ('R' << 24))
 #define PIRQ_VERSION 0x0100
@@ -28,6 +27,7 @@ static int acer_tm360_irqrouting;
 static struct irq_routing_table *pirq_table;
 
 static int pirq_enable_irq(struct pci_dev *dev);
+static void pirq_disable_irq(struct pci_dev *dev);
 
 /*
  * Never use: 0, 1, 2 (timer, keyboard, and cascade)
@@ -54,8 +54,8 @@ struct irq_router_handler {
 	int (*probe)(struct irq_router *r, struct pci_dev *router, u16 device);
 };
 
-int (*pcibios_enable_irq)(struct pci_dev *dev) = NULL;
-void (*pcibios_disable_irq)(struct pci_dev *dev) = NULL;
+int (*pcibios_enable_irq)(struct pci_dev *dev) = pirq_enable_irq;
+void (*pcibios_disable_irq)(struct pci_dev *dev) = pirq_disable_irq;
 
 /*
  *  Check passed address for the PCI IRQ Routing Table signature
@@ -138,32 +138,29 @@ static void __init pirq_peer_trick(void)
 		busmap[e->bus] = 1;
 	}
 	for (i = 1; i < 256; i++) {
-		int node;
 		if (!busmap[i] || pci_find_bus(0, i))
 			continue;
-		node = get_mp_bus_to_node(i);
-		if (pci_scan_bus_on_node(i, &pci_root_ops, node))
-			printk(KERN_INFO "PCI: Discovered primary peer "
-			       "bus %02x [IRQ]\n", i);
+		pcibios_scan_root(i);
 	}
 	pcibios_last_bus = -1;
 }
 
 /*
  *  Code for querying and setting of IRQ routes on various interrupt routers.
+ *  PIC Edge/Level Control Registers (ELCR) 0x4d0 & 0x4d1.
  */
 
-void eisa_set_level_irq(unsigned int irq)
+void elcr_set_level_irq(unsigned int irq)
 {
 	unsigned char mask = 1 << (irq & 7);
 	unsigned int port = 0x4d0 + (irq >> 3);
 	unsigned char val;
-	static u16 eisa_irq_mask;
+	static u16 elcr_irq_mask;
 
-	if (irq >= 16 || (1 << irq) & eisa_irq_mask)
+	if (irq >= 16 || (1 << irq) & elcr_irq_mask)
 		return;
 
-	eisa_irq_mask |= (1 << irq);
+	elcr_irq_mask |= (1 << irq);
 	printk(KERN_DEBUG "PCI: setting IRQ %u as level-triggered\n", irq);
 	val = inb(port);
 	if (!(val & mask)) {
@@ -493,7 +490,7 @@ static int pirq_amd756_get(struct pci_dev *router, struct pci_dev *dev, int pirq
 	if (pirq <= 4)
 		irq = read_config_nybble(router, 0x56, pirq - 1);
 	dev_info(&dev->dev,
-		 "AMD756: dev [%04x/%04x], router PIRQ %d get IRQ %d\n",
+		 "AMD756: dev [%04x:%04x], router PIRQ %d get IRQ %d\n",
 		 dev->vendor, dev->device, pirq, irq);
 	return irq;
 }
@@ -501,7 +498,7 @@ static int pirq_amd756_get(struct pci_dev *router, struct pci_dev *dev, int pirq
 static int pirq_amd756_set(struct pci_dev *router, struct pci_dev *dev, int pirq, int irq)
 {
 	dev_info(&dev->dev,
-		 "AMD756: dev [%04x/%04x], router PIRQ %d set IRQ %d\n",
+		 "AMD756: dev [%04x:%04x], router PIRQ %d set IRQ %d\n",
 		 dev->vendor, dev->device, pirq, irq);
 	if (pirq <= 4)
 		write_config_nybble(router, 0x56, pirq - 1, irq);
@@ -534,7 +531,7 @@ static int pirq_bios_set(struct pci_dev *router, struct pci_dev *dev, int pirq, 
 {
 	struct pci_dev *bridge;
 	int pin = pci_get_interrupt_pin(dev, &bridge);
-	return pcibios_set_irq_routing(bridge, pin, irq);
+	return pcibios_set_irq_routing(bridge, pin - 1, irq);
 }
 
 #endif
@@ -573,6 +570,7 @@ static __init int intel_router_probe(struct irq_router *r, struct pci_dev *route
 	case PCI_DEVICE_ID_INTEL_ICH7_1:
 	case PCI_DEVICE_ID_INTEL_ICH7_30:
 	case PCI_DEVICE_ID_INTEL_ICH7_31:
+	case PCI_DEVICE_ID_INTEL_TGP_LPC:
 	case PCI_DEVICE_ID_INTEL_ESB2_0:
 	case PCI_DEVICE_ID_INTEL_ICH8_0:
 	case PCI_DEVICE_ID_INTEL_ICH8_1:
@@ -585,18 +583,33 @@ static __init int intel_router_probe(struct irq_router *r, struct pci_dev *route
 	case PCI_DEVICE_ID_INTEL_ICH9_3:
 	case PCI_DEVICE_ID_INTEL_ICH9_4:
 	case PCI_DEVICE_ID_INTEL_ICH9_5:
-	case PCI_DEVICE_ID_INTEL_TOLAPAI_0:
+	case PCI_DEVICE_ID_INTEL_EP80579_0:
 	case PCI_DEVICE_ID_INTEL_ICH10_0:
 	case PCI_DEVICE_ID_INTEL_ICH10_1:
 	case PCI_DEVICE_ID_INTEL_ICH10_2:
 	case PCI_DEVICE_ID_INTEL_ICH10_3:
-	case PCI_DEVICE_ID_INTEL_PCH_0:
-	case PCI_DEVICE_ID_INTEL_PCH_1:
+	case PCI_DEVICE_ID_INTEL_PATSBURG_LPC_0:
+	case PCI_DEVICE_ID_INTEL_PATSBURG_LPC_1:
 		r->name = "PIIX/ICH";
 		r->get = pirq_piix_get;
 		r->set = pirq_piix_set;
 		return 1;
 	}
+
+	if ((device >= PCI_DEVICE_ID_INTEL_5_3400_SERIES_LPC_MIN && 
+	     device <= PCI_DEVICE_ID_INTEL_5_3400_SERIES_LPC_MAX) 
+	||  (device >= PCI_DEVICE_ID_INTEL_COUGARPOINT_LPC_MIN && 
+	     device <= PCI_DEVICE_ID_INTEL_COUGARPOINT_LPC_MAX)
+	||  (device >= PCI_DEVICE_ID_INTEL_DH89XXCC_LPC_MIN &&
+	     device <= PCI_DEVICE_ID_INTEL_DH89XXCC_LPC_MAX)
+	||  (device >= PCI_DEVICE_ID_INTEL_PANTHERPOINT_LPC_MIN &&
+	     device <= PCI_DEVICE_ID_INTEL_PANTHERPOINT_LPC_MAX)) {
+		r->name = "PIIX/ICH";
+		r->get = pirq_piix_get;
+		r->set = pirq_piix_set;
+		return 1;
+	}
+
 	return 0;
 }
 
@@ -823,10 +836,11 @@ static void __init pirq_find_router(struct irq_router *r)
 	r->get = NULL;
 	r->set = NULL;
 
-	DBG(KERN_DEBUG "PCI: Attempting to find IRQ router for %04x:%04x\n",
+	DBG(KERN_DEBUG "PCI: Attempting to find IRQ router for [%04x:%04x]\n",
 	    rt->rtr_vendor, rt->rtr_device);
 
-	pirq_router_dev = pci_get_bus_and_slot(rt->rtr_bus, rt->rtr_devfn);
+	pirq_router_dev = pci_get_domain_bus_and_slot(0, rt->rtr_bus,
+						      rt->rtr_devfn);
 	if (!pirq_router_dev) {
 		DBG(KERN_DEBUG "PCI: Interrupt router not found at "
 			"%02x:%02x\n", rt->rtr_bus, rt->rtr_devfn);
@@ -843,7 +857,7 @@ static void __init pirq_find_router(struct irq_router *r)
 			h->probe(r, pirq_router_dev, pirq_router_dev->device))
 			break;
 	}
-	dev_info(&pirq_router_dev->dev, "%s IRQ router [%04x/%04x]\n",
+	dev_info(&pirq_router_dev->dev, "%s IRQ router [%04x:%04x]\n",
 		 pirq_router.name,
 		 pirq_router_dev->vendor, pirq_router_dev->device);
 
@@ -881,7 +895,9 @@ static int pcibios_lookup_irq(struct pci_dev *dev, int assign)
 		dev_dbg(&dev->dev, "no interrupt pin\n");
 		return 0;
 	}
-	pin = pin - 1;
+
+	if (io_apic_assign_pci_irqs)
+		return 0;
 
 	/* Find IRQ routing entry */
 
@@ -891,17 +907,17 @@ static int pcibios_lookup_irq(struct pci_dev *dev, int assign)
 	info = pirq_get_info(dev);
 	if (!info) {
 		dev_dbg(&dev->dev, "PCI INT %c not found in routing table\n",
-			'A' + pin);
+			'A' + pin - 1);
 		return 0;
 	}
-	pirq = info->irq[pin].link;
-	mask = info->irq[pin].bitmap;
+	pirq = info->irq[pin - 1].link;
+	mask = info->irq[pin - 1].bitmap;
 	if (!pirq) {
-		dev_dbg(&dev->dev, "PCI INT %c not routed\n", 'A' + pin);
+		dev_dbg(&dev->dev, "PCI INT %c not routed\n", 'A' + pin - 1);
 		return 0;
 	}
 	dev_dbg(&dev->dev, "PCI INT %c -> PIRQ %02x, mask %04x, excl %04x",
-		'A' + pin, pirq, mask, pirq_table->exclusive_irqs);
+		'A' + pin - 1, pirq, mask, pirq_table->exclusive_irqs);
 	mask &= pcibios_irq_mask;
 
 	/* Work around broken HP Pavilion Notebooks which assign USB to
@@ -943,7 +959,7 @@ static int pcibios_lookup_irq(struct pci_dev *dev, int assign)
 				newirq = i;
 		}
 	}
-	dev_dbg(&dev->dev, "PCI INT %c -> newirq %d", 'A' + pin, newirq);
+	dev_dbg(&dev->dev, "PCI INT %c -> newirq %d", 'A' + pin - 1, newirq);
 
 	/* Check if it is hardcoded */
 	if ((pirq & 0xf0) == 0xf0) {
@@ -952,11 +968,11 @@ static int pcibios_lookup_irq(struct pci_dev *dev, int assign)
 	} else if (r->get && (irq = r->get(pirq_router_dev, dev, pirq)) && \
 	((!(pci_probe & PCI_USE_PIRQ_MASK)) || ((1 << irq) & mask))) {
 		msg = "found";
-		eisa_set_level_irq(irq);
+		elcr_set_level_irq(irq);
 	} else if (newirq && r->set &&
 		(dev->class >> 8) != PCI_CLASS_DISPLAY_VGA) {
 		if (r->set(pirq_router_dev, dev, pirq, newirq)) {
-			eisa_set_level_irq(newirq);
+			elcr_set_level_irq(newirq);
 			msg = "assigned";
 			irq = newirq;
 		}
@@ -971,18 +987,18 @@ static int pcibios_lookup_irq(struct pci_dev *dev, int assign)
 			return 0;
 		}
 	}
-	dev_info(&dev->dev, "%s PCI INT %c -> IRQ %d\n", msg, 'A' + pin, irq);
+	dev_info(&dev->dev, "%s PCI INT %c -> IRQ %d\n", msg, 'A' + pin - 1, irq);
 
 	/* Update IRQ for all devices with the same pirq value */
-	while ((dev2 = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev2)) != NULL) {
+	for_each_pci_dev(dev2) {
 		pci_read_config_byte(dev2, PCI_INTERRUPT_PIN, &pin);
 		if (!pin)
 			continue;
-		pin--;
+
 		info = pirq_get_info(dev2);
 		if (!info)
 			continue;
-		if (info->irq[pin].link == pirq) {
+		if (info->irq[pin - 1].link == pirq) {
 			/*
 			 * We refuse to override the dev->irq
 			 * information. Give a warning!
@@ -1007,13 +1023,13 @@ static int pcibios_lookup_irq(struct pci_dev *dev, int assign)
 	return 1;
 }
 
-static void __init pcibios_fixup_irqs(void)
+void __init pcibios_fixup_irqs(void)
 {
 	struct pci_dev *dev = NULL;
 	u8 pin;
 
 	DBG(KERN_DEBUG "PCI: IRQ fixup\n");
-	while ((dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
+	for_each_pci_dev(dev) {
 		/*
 		 * If the BIOS has set an out of range IRQ number, just
 		 * ignore it.  Also keep track of which IRQ's are
@@ -1033,52 +1049,19 @@ static void __init pcibios_fixup_irqs(void)
 		pirq_penalty[dev->irq]++;
 	}
 
+	if (io_apic_assign_pci_irqs)
+		return;
+
 	dev = NULL;
-	while ((dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
+	for_each_pci_dev(dev) {
 		pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &pin);
-#ifdef CONFIG_X86_IO_APIC
-		/*
-		 * Recalculate IRQ numbers if we use the I/O APIC.
-		 */
-		if (io_apic_assign_pci_irqs) {
-			int irq;
+		if (!pin)
+			continue;
 
-			if (pin) {
-				/*
-				 * interrupt pins are numbered starting
-				 * from 1
-				 */
-				pin--;
-				irq = IO_APIC_get_PCI_irq_vector(dev->bus->number,
-					PCI_SLOT(dev->devfn), pin);
-	/*
-	 * Busses behind bridges are typically not listed in the MP-table.
-	 * In this case we have to look up the IRQ based on the parent bus,
-	 * parent slot, and pin number. The SMP code detects such bridged
-	 * busses itself so we should get into this branch reliably.
-	 */
-				if (irq < 0 && dev->bus->parent) { /* go back to the bridge */
-					struct pci_dev *bridge = dev->bus->self;
-
-					pin = (pin + PCI_SLOT(dev->devfn)) % 4;
-					irq = IO_APIC_get_PCI_irq_vector(bridge->bus->number,
-							PCI_SLOT(bridge->devfn), pin);
-					if (irq >= 0)
-						dev_warn(&dev->dev, "using bridge %s INT %c to get IRQ %d\n",
-							 pci_name(bridge),
-							 'A' + pin, irq);
-				}
-				if (irq >= 0) {
-					dev_info(&dev->dev, "PCI->APIC IRQ transform: INT %c -> IRQ %d\n", 'A' + pin, irq);
-					dev->irq = irq;
-				}
-			}
-		}
-#endif
 		/*
 		 * Still no IRQ? Try to lookup one...
 		 */
-		if (pin && !dev->irq)
+		if (!dev->irq)
 			pcibios_lookup_irq(dev, 0);
 	}
 }
@@ -1111,7 +1094,7 @@ static int __init fix_acer_tm360_irqrouting(const struct dmi_system_id *d)
 	return 0;
 }
 
-static struct dmi_system_id __initdata pciirq_dmi_table[] = {
+static const struct dmi_system_id pciirq_dmi_table[] __initconst = {
 	{
 		.callback = fix_broken_hp_bios_irq9,
 		.ident = "HP Pavilion N5400 Series Laptop",
@@ -1134,20 +1117,24 @@ static struct dmi_system_id __initdata pciirq_dmi_table[] = {
 	{ }
 };
 
-int __init pcibios_irq_init(void)
+void __init pcibios_irq_init(void)
 {
+	struct irq_routing_table *rtable = NULL;
+
 	DBG(KERN_DEBUG "PCI: IRQ init\n");
 
-	if (pcibios_enable_irq || raw_pci_ops == NULL)
-		return 0;
+	if (raw_pci_ops == NULL)
+		return;
 
 	dmi_check_system(pciirq_dmi_table);
 
 	pirq_table = pirq_find_routing_table();
 
 #ifdef CONFIG_PCI_BIOS
-	if (!pirq_table && (pci_probe & PCI_BIOS_IRQ_SCAN))
+	if (!pirq_table && (pci_probe & PCI_BIOS_IRQ_SCAN)) {
 		pirq_table = pcibios_get_irq_routing_table();
+		rtable = pirq_table;
+	}
 #endif
 	if (pirq_table) {
 		pirq_peer_trick();
@@ -1162,14 +1149,25 @@ int __init pcibios_irq_init(void)
 		 * If we're using the I/O APIC, avoid using the PCI IRQ
 		 * routing table
 		 */
-		if (io_apic_assign_pci_irqs)
+		if (io_apic_assign_pci_irqs) {
+			kfree(rtable);
 			pirq_table = NULL;
+		}
 	}
 
-	pcibios_enable_irq = pirq_enable_irq;
+	x86_init.pci.fixup_irqs();
 
-	pcibios_fixup_irqs();
-	return 0;
+	if (io_apic_assign_pci_irqs && pci_routeirq) {
+		struct pci_dev *dev = NULL;
+		/*
+		 * PCI IRQ routing is set up by pci_enable_device(), but we
+		 * also do it here in case there are still broken drivers that
+		 * don't use pci_enable_device().
+		 */
+		printk(KERN_INFO "PCI: Routing PCI interrupts for all devices because \"pci=routeirq\" specified\n");
+		for_each_pci_dev(dev)
+			pirq_enable_irq(dev);
+	}
 }
 
 static void pirq_penalize_isa_irq(int irq, int active)
@@ -1198,19 +1196,25 @@ void pcibios_penalize_isa_irq(int irq, int active)
 
 static int pirq_enable_irq(struct pci_dev *dev)
 {
-	u8 pin;
-	struct pci_dev *temp_dev;
+	u8 pin = 0;
 
 	pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &pin);
-	if (pin && !pcibios_lookup_irq(dev, 1) && !dev->irq) {
+	if (pin && !pcibios_lookup_irq(dev, 1)) {
 		char *msg = "";
 
-		pin--; /* interrupt pins are numbered starting from 1 */
+		if (!io_apic_assign_pci_irqs && dev->irq)
+			return 0;
 
 		if (io_apic_assign_pci_irqs) {
+#ifdef CONFIG_X86_IO_APIC
+			struct pci_dev *temp_dev;
 			int irq;
 
-			irq = IO_APIC_get_PCI_irq_vector(dev->bus->number, PCI_SLOT(dev->devfn), pin);
+			if (dev->irq_managed && dev->irq > 0)
+				return 0;
+
+			irq = IO_APIC_get_PCI_irq_vector(dev->bus->number,
+						PCI_SLOT(dev->devfn), pin - 1);
 			/*
 			 * Busses behind bridges are typically not listed in the MP-table.
 			 * In this case we have to look up the IRQ based on the parent bus,
@@ -1221,24 +1225,27 @@ static int pirq_enable_irq(struct pci_dev *dev)
 			while (irq < 0 && dev->bus->parent) { /* go back to the bridge */
 				struct pci_dev *bridge = dev->bus->self;
 
-				pin = (pin + PCI_SLOT(dev->devfn)) % 4;
+				pin = pci_swizzle_interrupt_pin(dev, pin);
 				irq = IO_APIC_get_PCI_irq_vector(bridge->bus->number,
-						PCI_SLOT(bridge->devfn), pin);
+						PCI_SLOT(bridge->devfn),
+						pin - 1);
 				if (irq >= 0)
 					dev_warn(&dev->dev, "using bridge %s "
 						 "INT %c to get IRQ %d\n",
-						 pci_name(bridge), 'A' + pin,
+						 pci_name(bridge), 'A' + pin - 1,
 						 irq);
 				dev = bridge;
 			}
 			dev = temp_dev;
 			if (irq >= 0) {
-				dev_info(&dev->dev, "PCI->APIC IRQ transform: "
-					 "INT %c -> IRQ %d\n", 'A' + pin, irq);
+				dev->irq_managed = 1;
 				dev->irq = irq;
+				dev_info(&dev->dev, "PCI->APIC IRQ transform: "
+					 "INT %c -> IRQ %d\n", 'A' + pin - 1, irq);
 				return 0;
 			} else
 				msg = "; probably buggy MP table";
+#endif
 		} else if (pci_probe & PCI_BIOS_IRQ_SCAN)
 			msg = "";
 		else
@@ -1253,7 +1260,29 @@ static int pirq_enable_irq(struct pci_dev *dev)
 			return 0;
 
 		dev_warn(&dev->dev, "can't find IRQ for PCI INT %c%s\n",
-			 'A' + pin, msg);
+			 'A' + pin - 1, msg);
 	}
 	return 0;
+}
+
+bool mp_should_keep_irq(struct device *dev)
+{
+	if (dev->power.is_prepared)
+		return true;
+#ifdef CONFIG_PM
+	if (dev->power.runtime_status == RPM_SUSPENDING)
+		return true;
+#endif
+
+	return false;
+}
+
+static void pirq_disable_irq(struct pci_dev *dev)
+{
+	if (io_apic_assign_pci_irqs && !mp_should_keep_irq(&dev->dev) &&
+	    dev->irq_managed && dev->irq) {
+		mp_unmap_irq(dev->irq);
+		dev->irq = 0;
+		dev->irq_managed = 0;
+	}
 }

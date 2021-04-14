@@ -12,12 +12,10 @@
 #include <linux/console.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/mc146818rtc.h>
 #include <linux/param.h>
 #include <linux/sched.h>
 
 #include <asm/bootinfo.h>
-#include <asm/mc146818-time.h>
 #include <asm/mipsregs.h>
 #include <asm/mmu_context.h>
 #include <asm/sgialib.h>
@@ -62,11 +60,6 @@ static inline void str2eaddr(unsigned char *ea, unsigned char *str)
 }
 #endif
 
-unsigned long read_persistent_clock(void)
-{
-	return mc146818_get_cmos_time();
-}
-
 /* An arbitrary time; this can be decreased if reliability looks good */
 #define WAIT_MS 10
 
@@ -95,7 +88,7 @@ void __init plat_mem_setup(void)
 	{
 		char* con = ArcGetEnvironmentVariable("console");
 		if (con && *con == 'd') {
-			static char options[8];
+			static char options[8] __initdata;
 			char *baud = ArcGetEnvironmentVariable("dbaud");
 			if (baud)
 				strcpy(options, baud);

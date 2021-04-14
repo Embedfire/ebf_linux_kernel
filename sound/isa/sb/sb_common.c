@@ -1,23 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *                   Uros Bizjak <uros@kss-loka.si>
  *
  *  Lowlevel routines for control of Sound Blaster cards
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <linux/delay.h>
@@ -25,11 +11,12 @@
 #include <linux/interrupt.h>
 #include <linux/slab.h>
 #include <linux/ioport.h>
+#include <linux/module.h>
+#include <linux/io.h>
 #include <sound/core.h>
 #include <sound/sb.h>
 #include <sound/initval.h>
 
-#include <asm/io.h>
 #include <asm/dma.h>
 
 MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
@@ -93,7 +80,7 @@ int snd_sbdsp_reset(struct snd_sb *chip)
 
 static int snd_sbdsp_version(struct snd_sb * chip)
 {
-	unsigned int result = -ENODEV;
+	unsigned int result;
 
 	snd_sbdsp_command(chip, SB_DSP_GET_VERSION);
 	result = (short) snd_sbdsp_get_byte(chip) << 8;
@@ -170,6 +157,9 @@ static int snd_sbdsp_probe(struct snd_sb * chip)
 	case SB_HW_CS5530:
 		str = "16 (CS5530)";
 		break;
+	case SB_HW_JAZZ16:
+		str = "Pro (Jazz16)";
+		break;
 	default:
 		return -ENODEV;
 	}
@@ -180,8 +170,7 @@ static int snd_sbdsp_probe(struct snd_sb * chip)
 
 static int snd_sbdsp_free(struct snd_sb *chip)
 {
-	if (chip->res_port)
-		release_and_free_resource(chip->res_port);
+	release_and_free_resource(chip->res_port);
 	if (chip->irq >= 0)
 		free_irq(chip->irq, (void *) chip);
 #ifdef CONFIG_ISA
@@ -215,11 +204,12 @@ int snd_sbdsp_create(struct snd_card *card,
 {
 	struct snd_sb *chip;
 	int err;
-	static struct snd_device_ops ops = {
+	static const struct snd_device_ops ops = {
 		.dev_free =	snd_sbdsp_dev_free,
 	};
 
-	snd_assert(r_chip != NULL, return -EINVAL);
+	if (snd_BUG_ON(!r_chip))
+		return -EINVAL;
 	*r_chip = NULL;
 	chip = kzalloc(sizeof(*chip), GFP_KERNEL);
 	if (chip == NULL)
@@ -236,13 +226,14 @@ int snd_sbdsp_create(struct snd_card *card,
 	if (request_irq(irq, irq_handler,
 			(hardware == SB_HW_ALS4000 ||
 			 hardware == SB_HW_CS5530) ?
-			IRQF_SHARED : IRQF_DISABLED,
+			IRQF_SHARED : 0,
 			"SoundBlaster", (void *) chip)) {
 		snd_printk(KERN_ERR "sb: can't grab irq %d\n", irq);
 		snd_sbdsp_free(chip);
 		return -EBUSY;
 	}
 	chip->irq = irq;
+	card->sync_irq = chip->irq;
 
 	if (hardware == SB_HW_ALS4000)
 		goto __skip_allocation;
@@ -301,19 +292,3 @@ EXPORT_SYMBOL(snd_sbmixer_add_ctl);
 EXPORT_SYMBOL(snd_sbmixer_suspend);
 EXPORT_SYMBOL(snd_sbmixer_resume);
 #endif
-
-/*
- *  INIT part
- */
-
-static int __init alsa_sb_common_init(void)
-{
-	return 0;
-}
-
-static void __exit alsa_sb_common_exit(void)
-{
-}
-
-module_init(alsa_sb_common_init)
-module_exit(alsa_sb_common_exit)

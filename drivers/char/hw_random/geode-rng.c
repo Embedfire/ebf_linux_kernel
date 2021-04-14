@@ -11,7 +11,7 @@
  * derived from
  *
  * Hardware driver for the AMD 768 Random Number Generator (RNG)
- * (c) Copyright 2001 Red Hat Inc <alan@redhat.com>
+ * (c) Copyright 2001 Red Hat Inc
  *
  * derived from
  *
@@ -24,12 +24,12 @@
  * warranty of any kind, whether express or implied.
  */
 
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/pci.h>
-#include <linux/hw_random.h>
 #include <linux/delay.h>
-#include <asm/io.h>
+#include <linux/hw_random.h>
+#include <linux/io.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/pci.h>
 
 
 #define PFX	KBUILD_MODNAME ": "
@@ -46,8 +46,7 @@
  * want to register another driver on the same PCI id.
  */
 static const struct pci_device_id pci_tbl[] = {
-	{ PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_LX_AES,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
+	{ PCI_VDEVICE(AMD, PCI_DEVICE_ID_AMD_LX_AES), 0, },
 	{ 0, },	/* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, pci_tbl);
@@ -110,10 +109,10 @@ found:
 		goto out;
 	geode_rng.priv = (unsigned long)mem;
 
-	printk(KERN_INFO "AMD Geode RNG detected\n");
+	pr_info("AMD Geode RNG detected\n");
 	err = hwrng_register(&geode_rng);
 	if (err) {
-		printk(KERN_ERR PFX "RNG registering failed (%d)\n",
+		pr_err(PFX "RNG registering failed (%d)\n",
 		       err);
 		goto err_unmap;
 	}

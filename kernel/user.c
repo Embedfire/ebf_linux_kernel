@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * The "user cache".
  *
@@ -13,15 +14,59 @@
 #include <linux/slab.h>
 #include <linux/bitops.h>
 #include <linux/key.h>
+#include <linux/sched/user.h>
 #include <linux/interrupt.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/user_namespace.h>
+#include <linux/proc_ns.h>
 
+/*
+ * userns count is 1 for root user, 1 for init_uts_ns,
+ * and 1 for... ?
+ */
 struct user_namespace init_user_ns = {
-	.kref = {
-		.refcount	= ATOMIC_INIT(2),
+	.uid_map = {
+		.nr_extents = 1,
+		{
+			.extent[0] = {
+				.first = 0,
+				.lower_first = 0,
+				.count = 4294967295U,
+			},
+		},
 	},
-	.root_user = &root_user,
+	.gid_map = {
+		.nr_extents = 1,
+		{
+			.extent[0] = {
+				.first = 0,
+				.lower_first = 0,
+				.count = 4294967295U,
+			},
+		},
+	},
+	.projid_map = {
+		.nr_extents = 1,
+		{
+			.extent[0] = {
+				.first = 0,
+				.lower_first = 0,
+				.count = 4294967295U,
+			},
+		},
+	},
+	.count = ATOMIC_INIT(3),
+	.owner = GLOBAL_ROOT_UID,
+	.group = GLOBAL_ROOT_GID,
+	.ns.inum = PROC_USER_INIT_INO,
+#ifdef CONFIG_USER_NS
+	.ns.ops = &userns_operations,
+#endif
+	.flags = USERNS_INIT_FLAGS,
+#ifdef CONFIG_KEYS
+	.keyring_name_list = LIST_HEAD_INIT(init_user_ns.keyring_name_list),
+	.keyring_sem = __RWSEM_INITIALIZER(init_user_ns.keyring_sem),
+#endif
 };
 EXPORT_SYMBOL_GPL(init_user_ns);
 
@@ -30,11 +75,14 @@ EXPORT_SYMBOL_GPL(init_user_ns);
  * when changing user ID's (ie setuid() and friends).
  */
 
+#define UIDHASH_BITS	(CONFIG_BASE_SMALL ? 3 : 7)
+#define UIDHASH_SZ	(1 << UIDHASH_BITS)
 #define UIDHASH_MASK		(UIDHASH_SZ - 1)
 #define __uidhashfn(uid)	(((uid >> UIDHASH_BITS) + uid) & UIDHASH_MASK)
-#define uidhashentry(ns, uid)	((ns)->uidhash_table + __uidhashfn((uid)))
+#define uidhashentry(uid)	(uidhash_table + __uidhashfn((__kuid_val(uid))))
 
 static struct kmem_cache *uid_cachep;
+static struct hlist_head uidhash_table[UIDHASH_SZ];
 
 /*
  * The uidhash_lock is mostly taken from process context, but it is
@@ -47,15 +95,14 @@ static struct kmem_cache *uid_cachep;
  */
 static DEFINE_SPINLOCK(uidhash_lock);
 
+/* root_user.__count is 1, for init task cred */
 struct user_struct root_user = {
-	.__count	= ATOMIC_INIT(1),
+	.__count	= REFCOUNT_INIT(1),
 	.processes	= ATOMIC_INIT(1),
-	.files		= ATOMIC_INIT(0),
 	.sigpending	= ATOMIC_INIT(0),
 	.locked_shm     = 0,
-#ifdef CONFIG_USER_SCHED
-	.tg		= &init_task_group,
-#endif
+	.uid		= GLOBAL_ROOT_UID,
+	.ratelimit	= RATELIMIT_STATE_INIT(root_user.ratelimit, 0, 0),
 };
 
 /*
@@ -71,14 +118,13 @@ static void uid_hash_remove(struct user_struct *up)
 	hlist_del_init(&up->uidhash_node);
 }
 
-static struct user_struct *uid_hash_find(uid_t uid, struct hlist_head *hashent)
+static struct user_struct *uid_hash_find(kuid_t uid, struct hlist_head *hashent)
 {
 	struct user_struct *user;
-	struct hlist_node *h;
 
-	hlist_for_each_entry(user, h, hashent, uidhash_node) {
-		if (user->uid == uid) {
-			atomic_inc(&user->__count);
+	hlist_for_each_entry(user, hashent, uidhash_node) {
+		if (uid_eq(user->uid, uid)) {
+			refcount_inc(&user->__count);
 			return user;
 		}
 	}
@@ -86,271 +132,17 @@ static struct user_struct *uid_hash_find(uid_t uid, struct hlist_head *hashent)
 	return NULL;
 }
 
-#ifdef CONFIG_USER_SCHED
-
-static void sched_destroy_user(struct user_struct *up)
-{
-	sched_destroy_group(up->tg);
-}
-
-static int sched_create_user(struct user_struct *up)
-{
-	int rc = 0;
-
-	up->tg = sched_create_group(&root_task_group);
-	if (IS_ERR(up->tg))
-		rc = -ENOMEM;
-
-	return rc;
-}
-
-static void sched_switch_user(struct task_struct *p)
-{
-	sched_move_task(p);
-}
-
-#else	/* CONFIG_USER_SCHED */
-
-static void sched_destroy_user(struct user_struct *up) { }
-static int sched_create_user(struct user_struct *up) { return 0; }
-static void sched_switch_user(struct task_struct *p) { }
-
-#endif	/* CONFIG_USER_SCHED */
-
-#if defined(CONFIG_USER_SCHED) && defined(CONFIG_SYSFS)
-
-static struct kset *uids_kset; /* represents the /sys/kernel/uids/ directory */
-static DEFINE_MUTEX(uids_mutex);
-
-static inline void uids_mutex_lock(void)
-{
-	mutex_lock(&uids_mutex);
-}
-
-static inline void uids_mutex_unlock(void)
-{
-	mutex_unlock(&uids_mutex);
-}
-
-/* uid directory attributes */
-#ifdef CONFIG_FAIR_GROUP_SCHED
-static ssize_t cpu_shares_show(struct kobject *kobj,
-			       struct kobj_attribute *attr,
-			       char *buf)
-{
-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
-
-	return sprintf(buf, "%lu\n", sched_group_shares(up->tg));
-}
-
-static ssize_t cpu_shares_store(struct kobject *kobj,
-				struct kobj_attribute *attr,
-				const char *buf, size_t size)
-{
-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
-	unsigned long shares;
-	int rc;
-
-	sscanf(buf, "%lu", &shares);
-
-	rc = sched_group_set_shares(up->tg, shares);
-
-	return (rc ? rc : size);
-}
-
-static struct kobj_attribute cpu_share_attr =
-	__ATTR(cpu_share, 0644, cpu_shares_show, cpu_shares_store);
-#endif
-
-#ifdef CONFIG_RT_GROUP_SCHED
-static ssize_t cpu_rt_runtime_show(struct kobject *kobj,
-				   struct kobj_attribute *attr,
-				   char *buf)
-{
-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
-
-	return sprintf(buf, "%lu\n", sched_group_rt_runtime(up->tg));
-}
-
-static ssize_t cpu_rt_runtime_store(struct kobject *kobj,
-				    struct kobj_attribute *attr,
-				    const char *buf, size_t size)
-{
-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
-	unsigned long rt_runtime;
-	int rc;
-
-	sscanf(buf, "%lu", &rt_runtime);
-
-	rc = sched_group_set_rt_runtime(up->tg, rt_runtime);
-
-	return (rc ? rc : size);
-}
-
-static struct kobj_attribute cpu_rt_runtime_attr =
-	__ATTR(cpu_rt_runtime, 0644, cpu_rt_runtime_show, cpu_rt_runtime_store);
-
-static ssize_t cpu_rt_period_show(struct kobject *kobj,
-				   struct kobj_attribute *attr,
-				   char *buf)
-{
-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
-
-	return sprintf(buf, "%lu\n", sched_group_rt_period(up->tg));
-}
-
-static ssize_t cpu_rt_period_store(struct kobject *kobj,
-				    struct kobj_attribute *attr,
-				    const char *buf, size_t size)
-{
-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
-	unsigned long rt_period;
-	int rc;
-
-	sscanf(buf, "%lu", &rt_period);
-
-	rc = sched_group_set_rt_period(up->tg, rt_period);
-
-	return (rc ? rc : size);
-}
-
-static struct kobj_attribute cpu_rt_period_attr =
-	__ATTR(cpu_rt_period, 0644, cpu_rt_period_show, cpu_rt_period_store);
-#endif
-
-/* default attributes per uid directory */
-static struct attribute *uids_attributes[] = {
-#ifdef CONFIG_FAIR_GROUP_SCHED
-	&cpu_share_attr.attr,
-#endif
-#ifdef CONFIG_RT_GROUP_SCHED
-	&cpu_rt_runtime_attr.attr,
-	&cpu_rt_period_attr.attr,
-#endif
-	NULL
-};
-
-/* the lifetime of user_struct is not managed by the core (now) */
-static void uids_release(struct kobject *kobj)
-{
-	return;
-}
-
-static struct kobj_type uids_ktype = {
-	.sysfs_ops = &kobj_sysfs_ops,
-	.default_attrs = uids_attributes,
-	.release = uids_release,
-};
-
-/* create /sys/kernel/uids/<uid>/cpu_share file for this user */
-static int uids_user_create(struct user_struct *up)
-{
-	struct kobject *kobj = &up->kobj;
-	int error;
-
-	memset(kobj, 0, sizeof(struct kobject));
-	kobj->kset = uids_kset;
-	error = kobject_init_and_add(kobj, &uids_ktype, NULL, "%d", up->uid);
-	if (error) {
-		kobject_put(kobj);
-		goto done;
-	}
-
-	kobject_uevent(kobj, KOBJ_ADD);
-done:
-	return error;
-}
-
-/* create these entries in sysfs:
- * 	"/sys/kernel/uids" directory
- * 	"/sys/kernel/uids/0" directory (for root user)
- * 	"/sys/kernel/uids/0/cpu_share" file (for root user)
- */
-int __init uids_sysfs_init(void)
-{
-	uids_kset = kset_create_and_add("uids", NULL, kernel_kobj);
-	if (!uids_kset)
-		return -ENOMEM;
-
-	return uids_user_create(&root_user);
-}
-
-/* work function to remove sysfs directory for a user and free up
- * corresponding structures.
- */
-static void remove_user_sysfs_dir(struct work_struct *w)
-{
-	struct user_struct *up = container_of(w, struct user_struct, work);
-	unsigned long flags;
-	int remove_user = 0;
-
-	/* Make uid_hash_remove() + sysfs_remove_file() + kobject_del()
-	 * atomic.
-	 */
-	uids_mutex_lock();
-
-	local_irq_save(flags);
-
-	if (atomic_dec_and_lock(&up->__count, &uidhash_lock)) {
-		uid_hash_remove(up);
-		remove_user = 1;
-		spin_unlock_irqrestore(&uidhash_lock, flags);
-	} else {
-		local_irq_restore(flags);
-	}
-
-	if (!remove_user)
-		goto done;
-
-	kobject_uevent(&up->kobj, KOBJ_REMOVE);
-	kobject_del(&up->kobj);
-	kobject_put(&up->kobj);
-
-	sched_destroy_user(up);
-	key_put(up->uid_keyring);
-	key_put(up->session_keyring);
-	kmem_cache_free(uid_cachep, up);
-
-done:
-	uids_mutex_unlock();
-}
-
 /* IRQs are disabled and uidhash_lock is held upon function entry.
  * IRQ state (as stored in flags) is restored and uidhash_lock released
  * upon function exit.
  */
-static inline void free_user(struct user_struct *up, unsigned long flags)
-{
-	/* restore back the count */
-	atomic_inc(&up->__count);
-	spin_unlock_irqrestore(&uidhash_lock, flags);
-
-	INIT_WORK(&up->work, remove_user_sysfs_dir);
-	schedule_work(&up->work);
-}
-
-#else	/* CONFIG_USER_SCHED && CONFIG_SYSFS */
-
-int uids_sysfs_init(void) { return 0; }
-static inline int uids_user_create(struct user_struct *up) { return 0; }
-static inline void uids_mutex_lock(void) { }
-static inline void uids_mutex_unlock(void) { }
-
-/* IRQs are disabled and uidhash_lock is held upon function entry.
- * IRQ state (as stored in flags) is restored and uidhash_lock released
- * upon function exit.
- */
-static inline void free_user(struct user_struct *up, unsigned long flags)
+static void free_user(struct user_struct *up, unsigned long flags)
+	__releases(&uidhash_lock)
 {
 	uid_hash_remove(up);
 	spin_unlock_irqrestore(&uidhash_lock, flags);
-	sched_destroy_user(up);
-	key_put(up->uid_keyring);
-	key_put(up->session_keyring);
 	kmem_cache_free(uid_cachep, up);
 }
-
-#endif
 
 /*
  * Locate the user_struct for the passed UID.  If found, take a ref on it.  The
@@ -358,14 +150,13 @@ static inline void free_user(struct user_struct *up, unsigned long flags)
  *
  * If the user_struct could not be found, return NULL.
  */
-struct user_struct *find_user(uid_t uid)
+struct user_struct *find_user(kuid_t uid)
 {
 	struct user_struct *ret;
 	unsigned long flags;
-	struct user_namespace *ns = current->nsproxy->user_ns;
 
 	spin_lock_irqsave(&uidhash_lock, flags);
-	ret = uid_hash_find(uid, uidhashentry(ns, uid));
+	ret = uid_hash_find(uid, uidhashentry(uid));
 	spin_unlock_irqrestore(&uidhash_lock, flags);
 	return ret;
 }
@@ -377,22 +168,14 @@ void free_uid(struct user_struct *up)
 	if (!up)
 		return;
 
-	local_irq_save(flags);
-	if (atomic_dec_and_lock(&up->__count, &uidhash_lock))
+	if (refcount_dec_and_lock_irqsave(&up->__count, &uidhash_lock, &flags))
 		free_user(up, flags);
-	else
-		local_irq_restore(flags);
 }
 
-struct user_struct *alloc_uid(struct user_namespace *ns, uid_t uid)
+struct user_struct *alloc_uid(kuid_t uid)
 {
-	struct hlist_head *hashent = uidhashentry(ns, uid);
+	struct hlist_head *hashent = uidhashentry(uid);
 	struct user_struct *up, *new;
-
-	/* Make uid_hash_find() + uids_user_create() + uid_hash_insert()
-	 * atomic.
-	 */
-	uids_mutex_lock();
 
 	spin_lock_irq(&uidhash_lock);
 	up = uid_hash_find(uid, hashent);
@@ -401,16 +184,12 @@ struct user_struct *alloc_uid(struct user_namespace *ns, uid_t uid)
 	if (!up) {
 		new = kmem_cache_zalloc(uid_cachep, GFP_KERNEL);
 		if (!new)
-			goto out_unlock;
+			return NULL;
 
 		new->uid = uid;
-		atomic_set(&new->__count, 1);
-
-		if (sched_create_user(new) < 0)
-			goto out_free_user;
-
-		if (uids_user_create(new))
-			goto out_destoy_sched;
+		refcount_set(&new->__count, 1);
+		ratelimit_state_init(&new->ratelimit, HZ, 100);
+		ratelimit_set_flags(&new->ratelimit, RATELIMIT_MSG_ON_RELEASE);
 
 		/*
 		 * Before adding this, check whether we raced
@@ -419,91 +198,16 @@ struct user_struct *alloc_uid(struct user_namespace *ns, uid_t uid)
 		spin_lock_irq(&uidhash_lock);
 		up = uid_hash_find(uid, hashent);
 		if (up) {
-			/* This case is not possible when CONFIG_USER_SCHED
-			 * is defined, since we serialize alloc_uid() using
-			 * uids_mutex. Hence no need to call
-			 * sched_destroy_user() or remove_user_sysfs_dir().
-			 */
-			key_put(new->uid_keyring);
-			key_put(new->session_keyring);
 			kmem_cache_free(uid_cachep, new);
 		} else {
 			uid_hash_insert(new, hashent);
 			up = new;
 		}
 		spin_unlock_irq(&uidhash_lock);
-
 	}
-
-	uids_mutex_unlock();
 
 	return up;
-
-out_destoy_sched:
-	sched_destroy_user(new);
-out_free_user:
-	kmem_cache_free(uid_cachep, new);
-out_unlock:
-	uids_mutex_unlock();
-	return NULL;
 }
-
-void switch_uid(struct user_struct *new_user)
-{
-	struct user_struct *old_user;
-
-	/* What if a process setreuid()'s and this brings the
-	 * new uid over his NPROC rlimit?  We can check this now
-	 * cheaply with the new uid cache, so if it matters
-	 * we should be checking for it.  -DaveM
-	 */
-	old_user = current->user;
-	atomic_inc(&new_user->processes);
-	atomic_dec(&old_user->processes);
-	switch_uid_keyring(new_user);
-	current->user = new_user;
-	sched_switch_user(current);
-
-	/*
-	 * We need to synchronize with __sigqueue_alloc()
-	 * doing a get_uid(p->user).. If that saw the old
-	 * user value, we need to wait until it has exited
-	 * its critical region before we can free the old
-	 * structure.
-	 */
-	smp_mb();
-	spin_unlock_wait(&current->sighand->siglock);
-
-	free_uid(old_user);
-	suid_keys(current);
-}
-
-#ifdef CONFIG_USER_NS
-void release_uids(struct user_namespace *ns)
-{
-	int i;
-	unsigned long flags;
-	struct hlist_head *head;
-	struct hlist_node *nd;
-
-	spin_lock_irqsave(&uidhash_lock, flags);
-	/*
-	 * collapse the chains so that the user_struct-s will
-	 * be still alive, but not in hashes. subsequent free_uid()
-	 * will free them.
-	 */
-	for (i = 0; i < UIDHASH_SZ; i++) {
-		head = ns->uidhash_table + i;
-		while (!hlist_empty(head)) {
-			nd = head->first;
-			hlist_del_init(nd);
-		}
-	}
-	spin_unlock_irqrestore(&uidhash_lock, flags);
-
-	free_uid(ns->root_user);
-}
-#endif
 
 static int __init uid_cache_init(void)
 {
@@ -513,14 +217,13 @@ static int __init uid_cache_init(void)
 			0, SLAB_HWCACHE_ALIGN|SLAB_PANIC, NULL);
 
 	for(n = 0; n < UIDHASH_SZ; ++n)
-		INIT_HLIST_HEAD(init_user_ns.uidhash_table + n);
+		INIT_HLIST_HEAD(uidhash_table + n);
 
 	/* Insert the root user immediately (init already runs as root) */
 	spin_lock_irq(&uidhash_lock);
-	uid_hash_insert(&root_user, uidhashentry(&init_user_ns, 0));
+	uid_hash_insert(&root_user, uidhashentry(GLOBAL_ROOT_UID));
 	spin_unlock_irq(&uidhash_lock);
 
 	return 0;
 }
-
-module_init(uid_cache_init);
+subsys_initcall(uid_cache_init);

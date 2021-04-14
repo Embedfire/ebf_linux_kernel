@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * r2300.c: R2000 and R3000 specific mmu/cache code.
  *
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  *
  * with a lot of changes to make this thing work for R3000s
  * Tx39XX R4k style caches added. HK
@@ -11,13 +12,12 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/smp.h>
 #include <linux/mm.h>
 
 #include <asm/cacheops.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
 #include <asm/mmu_context.h>
-#include <asm/system.h>
 #include <asm/isadep.h>
 #include <asm/io.h>
 #include <asm/bootinfo.h>
@@ -28,14 +28,12 @@ static unsigned long icache_size, dcache_size;		/* Size in bytes */
 
 #include <asm/r4kcache.h>
 
-extern int r3k_have_wired_reg;	/* in r3k-tlb.c */
-
 /* This sequence is required to ensure icache is disabled immediately */
 #define TX39_STOP_STREAMING() \
 __asm__ __volatile__( \
-	".set    push\n\t" \
-	".set    noreorder\n\t" \
-	"b       1f\n\t" \
+	".set	 push\n\t" \
+	".set	 noreorder\n\t" \
+	"b	 1f\n\t" \
 	"nop\n\t" \
 	"1:\n\t" \
 	".set pop" \
@@ -170,8 +168,6 @@ static void tx39_flush_cache_page(struct vm_area_struct *vma, unsigned long page
 {
 	int exec = vma->vm_flags & VM_EXEC;
 	struct mm_struct *mm = vma->vm_mm;
-	pgd_t *pgdp;
-	pud_t *pudp;
 	pmd_t *pmdp;
 	pte_t *ptep;
 
@@ -183,10 +179,8 @@ static void tx39_flush_cache_page(struct vm_area_struct *vma, unsigned long page
 		return;
 
 	page &= PAGE_MASK;
-	pgdp = pgd_offset(mm, page);
-	pudp = pud_offset(pgdp, page);
-	pmdp = pmd_offset(pudp, page);
-	ptep = pte_offset(pmdp, page);
+	pmdp = pmd_off(mm, page);
+	ptep = pte_offset_kernel(pmdp, page);
 
 	/*
 	 * If the page isn't marked valid, the page cannot possibly be
@@ -252,6 +246,11 @@ static void tx39_flush_icache_range(unsigned long start, unsigned long end)
 	}
 }
 
+static void tx39_flush_kernel_vmap_range(unsigned long vaddr, int size)
+{
+	BUG();
+}
+
 static void tx39_dma_cache_wback_inv(unsigned long addr, unsigned long size)
 {
 	unsigned long end;
@@ -284,25 +283,6 @@ static void tx39_dma_cache_inv(unsigned long addr, unsigned long size)
 	} else {
 		blast_inv_dcache_range(addr, addr + size);
 	}
-}
-
-static void tx39_flush_cache_sigtramp(unsigned long addr)
-{
-	unsigned long ic_lsize = current_cpu_data.icache.linesz;
-	unsigned long dc_lsize = current_cpu_data.dcache.linesz;
-	unsigned long config;
-	unsigned long flags;
-
-	protected_writeback_dcache_line(addr & ~(dc_lsize - 1));
-
-	/* disable icache (set ICE#) */
-	local_irq_save(flags);
-	config = read_c0_conf();
-	write_c0_conf(config & ~TX39_CONF_ICE);
-	TX39_STOP_STREAMING();
-	protected_flush_icache_line(addr & ~(ic_lsize - 1));
-	write_c0_conf(config);
-	local_irq_restore(flags);
 }
 
 static __init void tx39_probe_cache(void)
@@ -339,7 +319,7 @@ static __init void tx39_probe_cache(void)
 	}
 }
 
-void __cpuinit tx39_cache_init(void)
+void tx39_cache_init(void)
 {
 	extern void build_clear_page(void);
 	extern void build_copy_page(void);
@@ -356,7 +336,7 @@ void __cpuinit tx39_cache_init(void)
 		/* TX39/H core (writethru direct-map cache) */
 		__flush_cache_vmap	= tx39__flush_cache_vmap;
 		__flush_cache_vunmap	= tx39__flush_cache_vunmap;
-		flush_cache_all	= tx39h_flush_icache_all;
+		flush_cache_all = tx39h_flush_icache_all;
 		__flush_cache_all	= tx39h_flush_icache_all;
 		flush_cache_mm		= (void *) tx39h_flush_icache_all;
 		flush_cache_range	= (void *) tx39h_flush_icache_all;
@@ -364,7 +344,6 @@ void __cpuinit tx39_cache_init(void)
 		flush_icache_range	= (void *) tx39h_flush_icache_all;
 		local_flush_icache_range = (void *) tx39h_flush_icache_all;
 
-		flush_cache_sigtramp	= (void *) tx39h_flush_icache_all;
 		local_flush_data_cache_page	= (void *) tx39h_flush_icache_all;
 		flush_data_cache_page	= (void *) tx39h_flush_icache_all;
 
@@ -378,8 +357,6 @@ void __cpuinit tx39_cache_init(void)
 	case CPU_TX3927:
 	default:
 		/* TX39/H2,H3 core (writeback 2way-set-associative cache) */
-		r3k_have_wired_reg = 1;
-		write_c0_wired(0);	/* set 8 on reset... */
 		/* board-dependent init code may set WBON */
 
 		__flush_cache_vmap	= tx39__flush_cache_vmap;
@@ -393,7 +370,8 @@ void __cpuinit tx39_cache_init(void)
 		flush_icache_range = tx39_flush_icache_range;
 		local_flush_icache_range = tx39_flush_icache_range;
 
-		flush_cache_sigtramp = tx39_flush_cache_sigtramp;
+		__flush_kernel_vmap_range = tx39_flush_kernel_vmap_range;
+
 		local_flush_data_cache_page = local_tx39_flush_data_cache_page;
 		flush_data_cache_page = tx39_flush_data_cache_page;
 
@@ -402,11 +380,14 @@ void __cpuinit tx39_cache_init(void)
 		_dma_cache_inv = tx39_dma_cache_inv;
 
 		shm_align_mask = max_t(unsigned long,
-		                       (dcache_size / current_cpu_data.dcache.ways) - 1,
-		                       PAGE_SIZE - 1);
+				       (dcache_size / current_cpu_data.dcache.ways) - 1,
+				       PAGE_SIZE - 1);
 
 		break;
 	}
+
+	__flush_icache_user_range = flush_icache_range;
+	__local_flush_icache_user_range = local_flush_icache_range;
 
 	current_cpu_data.icache.waysize = icache_size / current_cpu_data.icache.ways;
 	current_cpu_data.dcache.waysize = dcache_size / current_cpu_data.dcache.ways;
@@ -422,9 +403,9 @@ void __cpuinit tx39_cache_init(void)
 	current_cpu_data.icache.waybit = 0;
 	current_cpu_data.dcache.waybit = 0;
 
-	printk("Primary instruction cache %ldkB, linesize %d bytes\n",
+	pr_info("Primary instruction cache %ldkB, linesize %d bytes\n",
 		icache_size >> 10, current_cpu_data.icache.linesz);
-	printk("Primary data cache %ldkB, linesize %d bytes\n",
+	pr_info("Primary data cache %ldkB, linesize %d bytes\n",
 		dcache_size >> 10, current_cpu_data.dcache.linesz);
 
 	build_clear_page();

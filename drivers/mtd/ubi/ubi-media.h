@@ -1,28 +1,12 @@
+/* SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause) */
 /*
- * Copyright (c) International Business Machines Corp., 2006
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
- * the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
+ * Copyright (C) International Business Machines Corp., 2006
  * Authors: Artem Bityutskiy (Битюцкий Артём)
  *          Thomas Gleixner
  *          Frank Haverkamp
  *          Oliver Lohmann
  *          Andreas Arnez
- */
-
-/*
+ *
  * This file defines the layout of UBI headers and all the other UBI on-flash
  * data structures.
  */
@@ -61,6 +45,11 @@ enum {
  * Volume flags used in the volume table record.
  *
  * @UBI_VTBL_AUTORESIZE_FLG: auto-resize this volume
+ * @UBI_VTBL_SKIP_CRC_CHECK_FLG: skip the CRC check done on a static volume at
+ *				 open time. Should only be set on volumes that
+ *				 are used by upper layers doing this kind of
+ *				 check. Main use-case for this flag is
+ *				 boot-time reduction
  *
  * %UBI_VTBL_AUTORESIZE_FLG flag can be set only for one volume in the volume
  * table. UBI automatically re-sizes the volume which has this flag and makes
@@ -92,6 +81,7 @@ enum {
  */
 enum {
 	UBI_VTBL_AUTORESIZE_FLG = 0x01,
+	UBI_VTBL_SKIP_CRC_CHECK_FLG = 0x02,
 };
 
 /*
@@ -129,13 +119,14 @@ enum {
  * @ec: the erase counter
  * @vid_hdr_offset: where the VID header starts
  * @data_offset: where the user data start
+ * @image_seq: image sequence number
  * @padding2: reserved for future, zeroes
  * @hdr_crc: erase counter header CRC checksum
  *
  * The erase counter header takes 64 bytes and has a plenty of unused space for
  * future usage. The unused fields are zeroed. The @version field is used to
  * indicate the version of UBI implementation which is supposed to be able to
- * work with this UBI image. If @version is greater then the current UBI
+ * work with this UBI image. If @version is greater than the current UBI
  * version, the image is rejected. This may be useful in future if something
  * is changed radically. This field is duplicated in the volume identifier
  * header.
@@ -144,6 +135,14 @@ enum {
  * volume identifier header and user data, relative to the beginning of the
  * physical eraseblock. These values have to be the same for all physical
  * eraseblocks.
+ *
+ * The @image_seq field is used to validate a UBI image that has been prepared
+ * for a UBI device. The @image_seq value can be any value, but it must be the
+ * same on all eraseblocks. UBI will ensure that all new erase counter headers
+ * also contain this value, and will check the value when attaching the flash.
+ * One way to make use of @image_seq is to increase its value by one every time
+ * an image is flashed over an existing image, then, if the flashing does not
+ * complete, UBI will detect the error when attaching the media.
  */
 struct ubi_ec_hdr {
 	__be32  magic;
@@ -152,9 +151,10 @@ struct ubi_ec_hdr {
 	__be64  ec; /* Warning: the current limit is 31-bit anyway! */
 	__be32  vid_hdr_offset;
 	__be32  data_offset;
-	__u8    padding2[36];
+	__be32  image_seq;
+	__u8    padding2[32];
 	__be32  hdr_crc;
-} __attribute__ ((packed));
+} __packed;
 
 /**
  * struct ubi_vid_hdr - on-flash UBI volume identifier header.
@@ -187,7 +187,7 @@ struct ubi_ec_hdr {
  * (sequence number) is used to distinguish between older and newer versions of
  * logical eraseblocks.
  *
- * There are 2 situations when there may be more then one physical eraseblock
+ * There are 2 situations when there may be more than one physical eraseblock
  * corresponding to the same logical eraseblock, i.e., having the same @vol_id
  * and @lnum values in the volume identifier header. Suppose we have a logical
  * eraseblock L and it is mapped to the physical eraseblock P.
@@ -219,7 +219,7 @@ struct ubi_ec_hdr {
  * copy. UBI also calculates data CRC when the data is moved and stores it at
  * the @data_crc field of the copy (P1). So when UBI needs to pick one physical
  * eraseblock of two (P or P1), the @copy_flag of the newer one (P1) is
- * examined. If it is cleared, the situation* is simple and the newer one is
+ * examined. If it is cleared, the situation is simple and the newer one is
  * picked. If it is set, the data CRC of the copy (P1) is examined. If the CRC
  * checksum is correct, this physical eraseblock is selected (P1). Otherwise
  * the older one (P) is selected.
@@ -282,14 +282,14 @@ struct ubi_vid_hdr {
 	__be64  sqnum;
 	__u8    padding3[12];
 	__be32  hdr_crc;
-} __attribute__ ((packed));
+} __packed;
 
 /* Internal UBI volumes count */
 #define UBI_INT_VOL_COUNT 1
 
 /*
- * Starting ID of internal volumes. There is reserved room for 4096 internal
- * volumes.
+ * Starting ID of internal volumes: 0x7fffefff.
+ * There is reserved room for 4096 internal volumes.
  */
 #define UBI_INTERNAL_VOL_START (0x7FFFFFFF - 4096)
 
@@ -363,6 +363,141 @@ struct ubi_vtbl_record {
 	__u8    flags;
 	__u8    padding[23];
 	__be32  crc;
-} __attribute__ ((packed));
+} __packed;
 
+/* UBI fastmap on-flash data structures */
+
+#define UBI_FM_SB_VOLUME_ID	(UBI_LAYOUT_VOLUME_ID + 1)
+#define UBI_FM_DATA_VOLUME_ID	(UBI_LAYOUT_VOLUME_ID + 2)
+
+/* fastmap on-flash data structure format version */
+#define UBI_FM_FMT_VERSION	1
+
+#define UBI_FM_SB_MAGIC		0x7B11D69F
+#define UBI_FM_HDR_MAGIC	0xD4B82EF7
+#define UBI_FM_VHDR_MAGIC	0xFA370ED1
+#define UBI_FM_POOL_MAGIC	0x67AF4D08
+#define UBI_FM_EBA_MAGIC	0xf0c040a8
+
+/* A fastmap super block can be located between PEB 0 and
+ * UBI_FM_MAX_START */
+#define UBI_FM_MAX_START	64
+
+/* A fastmap can use up to UBI_FM_MAX_BLOCKS PEBs */
+#define UBI_FM_MAX_BLOCKS	32
+
+/* 5% of the total number of PEBs have to be scanned while attaching
+ * from a fastmap.
+ * But the size of this pool is limited to be between UBI_FM_MIN_POOL_SIZE and
+ * UBI_FM_MAX_POOL_SIZE */
+#define UBI_FM_MIN_POOL_SIZE	8
+#define UBI_FM_MAX_POOL_SIZE	256
+
+/**
+ * struct ubi_fm_sb - UBI fastmap super block
+ * @magic: fastmap super block magic number (%UBI_FM_SB_MAGIC)
+ * @version: format version of this fastmap
+ * @data_crc: CRC over the fastmap data
+ * @used_blocks: number of PEBs used by this fastmap
+ * @block_loc: an array containing the location of all PEBs of the fastmap
+ * @block_ec: the erase counter of each used PEB
+ * @sqnum: highest sequence number value at the time while taking the fastmap
+ *
+ */
+struct ubi_fm_sb {
+	__be32 magic;
+	__u8 version;
+	__u8 padding1[3];
+	__be32 data_crc;
+	__be32 used_blocks;
+	__be32 block_loc[UBI_FM_MAX_BLOCKS];
+	__be32 block_ec[UBI_FM_MAX_BLOCKS];
+	__be64 sqnum;
+	__u8 padding2[32];
+} __packed;
+
+/**
+ * struct ubi_fm_hdr - header of the fastmap data set
+ * @magic: fastmap header magic number (%UBI_FM_HDR_MAGIC)
+ * @free_peb_count: number of free PEBs known by this fastmap
+ * @used_peb_count: number of used PEBs known by this fastmap
+ * @scrub_peb_count: number of to be scrubbed PEBs known by this fastmap
+ * @bad_peb_count: number of bad PEBs known by this fastmap
+ * @erase_peb_count: number of bad PEBs which have to be erased
+ * @vol_count: number of UBI volumes known by this fastmap
+ */
+struct ubi_fm_hdr {
+	__be32 magic;
+	__be32 free_peb_count;
+	__be32 used_peb_count;
+	__be32 scrub_peb_count;
+	__be32 bad_peb_count;
+	__be32 erase_peb_count;
+	__be32 vol_count;
+	__u8 padding[4];
+} __packed;
+
+/* struct ubi_fm_hdr is followed by two struct ubi_fm_scan_pool */
+
+/**
+ * struct ubi_fm_scan_pool - Fastmap pool PEBs to be scanned while attaching
+ * @magic: pool magic numer (%UBI_FM_POOL_MAGIC)
+ * @size: current pool size
+ * @max_size: maximal pool size
+ * @pebs: an array containing the location of all PEBs in this pool
+ */
+struct ubi_fm_scan_pool {
+	__be32 magic;
+	__be16 size;
+	__be16 max_size;
+	__be32 pebs[UBI_FM_MAX_POOL_SIZE];
+	__be32 padding[4];
+} __packed;
+
+/* ubi_fm_scan_pool is followed by nfree+nused struct ubi_fm_ec records */
+
+/**
+ * struct ubi_fm_ec - stores the erase counter of a PEB
+ * @pnum: PEB number
+ * @ec: ec of this PEB
+ */
+struct ubi_fm_ec {
+	__be32 pnum;
+	__be32 ec;
+} __packed;
+
+/**
+ * struct ubi_fm_volhdr - Fastmap volume header
+ * it identifies the start of an eba table
+ * @magic: Fastmap volume header magic number (%UBI_FM_VHDR_MAGIC)
+ * @vol_id: volume id of the fastmapped volume
+ * @vol_type: type of the fastmapped volume
+ * @data_pad: data_pad value of the fastmapped volume
+ * @used_ebs: number of used LEBs within this volume
+ * @last_eb_bytes: number of bytes used in the last LEB
+ */
+struct ubi_fm_volhdr {
+	__be32 magic;
+	__be32 vol_id;
+	__u8 vol_type;
+	__u8 padding1[3];
+	__be32 data_pad;
+	__be32 used_ebs;
+	__be32 last_eb_bytes;
+	__u8 padding2[8];
+} __packed;
+
+/* struct ubi_fm_volhdr is followed by one struct ubi_fm_eba records */
+
+/**
+ * struct ubi_fm_eba - denotes an association between a PEB and LEB
+ * @magic: EBA table magic number
+ * @reserved_pebs: number of table entries
+ * @pnum: PEB number of LEB (LEB is the index)
+ */
+struct ubi_fm_eba {
+	__be32 magic;
+	__be32 reserved_pebs;
+	__be32 pnum[];
+} __packed;
 #endif /* !__UBI_MEDIA_H__ */

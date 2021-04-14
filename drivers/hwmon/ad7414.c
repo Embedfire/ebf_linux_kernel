@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * An hwmon driver for the Analog Devices AD7414
  *
@@ -12,11 +13,6 @@
  *
  * Based on ad7418.c
  * Copyright 2006 Tower Technologies, Alessandro Zummo <a.zummo at towertech.it>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/module.h>
@@ -27,6 +23,7 @@
 #include <linux/err.h>
 #include <linux/mutex.h>
 #include <linux/sysfs.h>
+#include <linux/slab.h>
 
 
 /* AD7414 registers */
@@ -38,7 +35,7 @@
 static u8 AD7414_REG_LIMIT[] = { AD7414_REG_T_HIGH, AD7414_REG_T_LOW };
 
 struct ad7414_data {
-	struct device		*hwmon_dev;
+	struct i2c_client	*client;
 	struct mutex		lock;	/* atomic read data updates */
 	char			valid;	/* !=0 if following fields are valid */
 	unsigned long		next_update;	/* In jiffies */
@@ -49,7 +46,8 @@ struct ad7414_data {
 /* REG: (0.25C/bit, two's complement) << 6 */
 static inline int ad7414_temp_from_reg(s16 reg)
 {
-	/* use integer division instead of equivalent right shift to
+	/*
+	 * use integer division instead of equivalent right shift to
 	 * guarantee arithmetic shift and preserve the sign
 	 */
 	return ((int)reg / 64) * 250;
@@ -57,10 +55,9 @@ static inline int ad7414_temp_from_reg(s16 reg)
 
 static inline int ad7414_read(struct i2c_client *client, u8 reg)
 {
-	if (reg == AD7414_REG_TEMP) {
-		int value = i2c_smbus_read_word_data(client, reg);
-		return (value < 0) ? value : swab16(value);
-	} else
+	if (reg == AD7414_REG_TEMP)
+		return i2c_smbus_read_word_swapped(client, reg);
+	else
 		return i2c_smbus_read_byte_data(client, reg);
 }
 
@@ -71,8 +68,8 @@ static inline int ad7414_write(struct i2c_client *client, u8 reg, u8 value)
 
 static struct ad7414_data *ad7414_update_device(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct ad7414_data *data = i2c_get_clientdata(client);
+	struct ad7414_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 
 	mutex_lock(&data->lock);
 
@@ -106,33 +103,37 @@ static struct ad7414_data *ad7414_update_device(struct device *dev)
 	return data;
 }
 
-static ssize_t show_temp_input(struct device *dev,
+static ssize_t temp_input_show(struct device *dev,
 			       struct device_attribute *attr, char *buf)
 {
 	struct ad7414_data *data = ad7414_update_device(dev);
 	return sprintf(buf, "%d\n", ad7414_temp_from_reg(data->temp_input));
 }
-static SENSOR_DEVICE_ATTR(temp1_input, S_IRUGO, show_temp_input, NULL, 0);
+static SENSOR_DEVICE_ATTR_RO(temp1_input, temp_input, 0);
 
-static ssize_t show_max_min(struct device *dev, struct device_attribute *attr,
-			  char *buf)
+static ssize_t max_min_show(struct device *dev, struct device_attribute *attr,
+			    char *buf)
 {
 	int index = to_sensor_dev_attr(attr)->index;
 	struct ad7414_data *data = ad7414_update_device(dev);
 	return sprintf(buf, "%d\n", data->temps[index] * 1000);
 }
 
-static ssize_t set_max_min(struct device *dev,
-			   struct device_attribute *attr,
-			   const char *buf, size_t count)
+static ssize_t max_min_store(struct device *dev,
+			     struct device_attribute *attr, const char *buf,
+			     size_t count)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct ad7414_data *data = i2c_get_clientdata(client);
+	struct ad7414_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 	int index = to_sensor_dev_attr(attr)->index;
 	u8 reg = AD7414_REG_LIMIT[index];
-	long temp = simple_strtol(buf, NULL, 10);
+	long temp;
+	int ret = kstrtol(buf, 10, &temp);
 
-	temp = SENSORS_LIMIT(temp, -40000, 85000);
+	if (ret < 0)
+		return ret;
+
+	temp = clamp_val(temp, -40000, 85000);
 	temp = (temp + (temp < 0 ? -500 : 500)) / 1000;
 
 	mutex_lock(&data->lock);
@@ -142,12 +143,10 @@ static ssize_t set_max_min(struct device *dev,
 	return count;
 }
 
-static SENSOR_DEVICE_ATTR(temp1_max, S_IWUSR | S_IRUGO,
-			  show_max_min, set_max_min, 0);
-static SENSOR_DEVICE_ATTR(temp1_min, S_IWUSR | S_IRUGO,
-			  show_max_min, set_max_min, 1);
+static SENSOR_DEVICE_ATTR_RW(temp1_max, max_min, 0);
+static SENSOR_DEVICE_ATTR_RW(temp1_min, max_min, 1);
 
-static ssize_t show_alarm(struct device *dev, struct device_attribute *attr,
+static ssize_t alarm_show(struct device *dev, struct device_attribute *attr,
 			  char *buf)
 {
 	int bitnr = to_sensor_dev_attr(attr)->index;
@@ -156,10 +155,10 @@ static ssize_t show_alarm(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%d\n", value);
 }
 
-static SENSOR_DEVICE_ATTR(temp1_min_alarm, S_IRUGO, show_alarm, NULL, 3);
-static SENSOR_DEVICE_ATTR(temp1_max_alarm, S_IRUGO, show_alarm, NULL, 4);
+static SENSOR_DEVICE_ATTR_RO(temp1_min_alarm, alarm, 3);
+static SENSOR_DEVICE_ATTR_RO(temp1_max_alarm, alarm, 4);
 
-static struct attribute *ad7414_attributes[] = {
+static struct attribute *ad7414_attrs[] = {
 	&sensor_dev_attr_temp1_input.dev_attr.attr,
 	&sensor_dev_attr_temp1_max.dev_attr.attr,
 	&sensor_dev_attr_temp1_min.dev_attr.attr,
@@ -168,28 +167,24 @@ static struct attribute *ad7414_attributes[] = {
 	NULL
 };
 
-static const struct attribute_group ad7414_group = {
-	.attrs = ad7414_attributes,
-};
+ATTRIBUTE_GROUPS(ad7414);
 
-static int ad7414_probe(struct i2c_client *client,
-			const struct i2c_device_id *dev_id)
+static int ad7414_probe(struct i2c_client *client)
 {
+	struct device *dev = &client->dev;
 	struct ad7414_data *data;
+	struct device *hwmon_dev;
 	int conf;
-	int err = 0;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA |
 				     I2C_FUNC_SMBUS_READ_WORD_DATA))
-		goto exit;
+		return -EOPNOTSUPP;
 
-	data = kzalloc(sizeof(struct ad7414_data), GFP_KERNEL);
-	if (!data) {
-		err = -ENOMEM;
-		goto exit;
-	}
+	data = devm_kzalloc(dev, sizeof(struct ad7414_data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
 
-	i2c_set_clientdata(client, data);
+	data->client = client;
 	mutex_init(&data->lock);
 
 	dev_info(&client->dev, "chip found\n");
@@ -197,69 +192,40 @@ static int ad7414_probe(struct i2c_client *client,
 	/* Make sure the chip is powered up. */
 	conf = i2c_smbus_read_byte_data(client, AD7414_REG_CONF);
 	if (conf < 0)
-		dev_warn(&client->dev,
-			 "ad7414_probe unable to read config register.\n");
+		dev_warn(dev, "ad7414_probe unable to read config register.\n");
 	else {
 		conf &= ~(1 << 7);
 		i2c_smbus_write_byte_data(client, AD7414_REG_CONF, conf);
 	}
 
-	/* Register sysfs hooks */
-	err = sysfs_create_group(&client->dev.kobj, &ad7414_group);
-	if (err)
-		goto exit_free;
-
-	data->hwmon_dev = hwmon_device_register(&client->dev);
-	if (IS_ERR(data->hwmon_dev)) {
-		err = PTR_ERR(data->hwmon_dev);
-		goto exit_remove;
-	}
-
-	return 0;
-
-exit_remove:
-	sysfs_remove_group(&client->dev.kobj, &ad7414_group);
-exit_free:
-	kfree(data);
-exit:
-	return err;
-}
-
-static int __devexit ad7414_remove(struct i2c_client *client)
-{
-	struct ad7414_data *data = i2c_get_clientdata(client);
-
-	hwmon_device_unregister(data->hwmon_dev);
-	sysfs_remove_group(&client->dev.kobj, &ad7414_group);
-	kfree(data);
-	return 0;
+	hwmon_dev = devm_hwmon_device_register_with_groups(dev,
+							   client->name,
+							   data, ad7414_groups);
+	return PTR_ERR_OR_ZERO(hwmon_dev);
 }
 
 static const struct i2c_device_id ad7414_id[] = {
 	{ "ad7414", 0 },
 	{}
 };
+MODULE_DEVICE_TABLE(i2c, ad7414_id);
+
+static const struct of_device_id __maybe_unused ad7414_of_match[] = {
+	{ .compatible = "ad,ad7414" },
+	{ },
+};
+MODULE_DEVICE_TABLE(of, ad7414_of_match);
 
 static struct i2c_driver ad7414_driver = {
 	.driver = {
 		.name	= "ad7414",
+		.of_match_table = of_match_ptr(ad7414_of_match),
 	},
-	.probe	= ad7414_probe,
-	.remove	= __devexit_p(ad7414_remove),
+	.probe_new = ad7414_probe,
 	.id_table = ad7414_id,
 };
 
-static int __init ad7414_init(void)
-{
-	return i2c_add_driver(&ad7414_driver);
-}
-module_init(ad7414_init);
-
-static void __exit ad7414_exit(void)
-{
-	i2c_del_driver(&ad7414_driver);
-}
-module_exit(ad7414_exit);
+module_i2c_driver(ad7414_driver);
 
 MODULE_AUTHOR("Stefan Roese <sr at denx.de>, "
 	      "Frank Edelhaeuser <frank.edelhaeuser at spansion.com>");

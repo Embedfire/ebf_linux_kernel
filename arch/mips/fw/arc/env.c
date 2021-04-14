@@ -5,7 +5,7 @@
  *
  * env.c: ARCS environment variable routines.
  *
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -18,10 +18,4 @@ PCHAR __init
 ArcGetEnvironmentVariable(CHAR *name)
 {
 	return (CHAR *) ARC_CALL1(get_evar, name);
-}
-
-LONG __init
-ArcSetEnvironmentVariable(PCHAR name, PCHAR value)
-{
-	return ARC_CALL2(set_evar, name, value);
 }

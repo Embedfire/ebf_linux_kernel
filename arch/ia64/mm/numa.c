@@ -15,7 +15,7 @@
 #include <linux/mm.h>
 #include <linux/node.h>
 #include <linux/init.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/module.h>
 #include <asm/mmzone.h>
 #include <asm/numa.h>
@@ -36,6 +36,12 @@ struct node_cpuid_s node_cpuid[NR_CPUS] =
  */
 u8 numa_slit[MAX_NUMNODES * MAX_NUMNODES];
 
+int __node_distance(int from, int to)
+{
+	return slit_distance(from, to);
+}
+EXPORT_SYMBOL(__node_distance);
+
 /* Identify which cnode a physical address resides on */
 int
 paddr_to_nid(unsigned long paddr)
@@ -49,6 +55,7 @@ paddr_to_nid(unsigned long paddr)
 
 	return (i < num_node_memblks) ? node_memblk[i].nid : (num_node_memblks ? -1 : 0);
 }
+EXPORT_SYMBOL(paddr_to_nid);
 
 #if defined(CONFIG_SPARSEMEM) && defined(CONFIG_NUMA)
 /*
@@ -58,19 +65,32 @@ paddr_to_nid(unsigned long paddr)
  * SPARSEMEM to allocate the SPARSEMEM sectionmap on the NUMA node where
  * the section resides.
  */
-int early_pfn_to_nid(unsigned long pfn)
+int __meminit __early_pfn_to_nid(unsigned long pfn,
+					struct mminit_pfnnid_cache *state)
 {
 	int i, section = pfn >> PFN_SECTION_SHIFT, ssec, esec;
+
+	if (section >= state->last_start && section < state->last_end)
+		return state->last_nid;
 
 	for (i = 0; i < num_node_memblks; i++) {
 		ssec = node_memblk[i].start_paddr >> PA_SECTION_SHIFT;
 		esec = (node_memblk[i].start_paddr + node_memblk[i].size +
 			((1L << PA_SECTION_SHIFT) - 1)) >> PA_SECTION_SHIFT;
-		if (section >= ssec && section < esec)
+		if (section >= ssec && section < esec) {
+			state->last_start = ssec;
+			state->last_end = esec;
+			state->last_nid = node_memblk[i].nid;
 			return node_memblk[i].nid;
+		}
 	}
 
-	return 0;
+	return -1;
+}
+
+void numa_clear_node(int cpu)
+{
+	unmap_cpu_from_node(cpu, NUMA_NO_NODE);
 }
 
 #ifdef CONFIG_MEMORY_HOTPLUG
@@ -86,7 +106,5 @@ int memory_add_physaddr_to_nid(u64 addr)
 		return 0;
 	return nid;
 }
-
-EXPORT_SYMBOL_GPL(memory_add_physaddr_to_nid);
 #endif
 #endif

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	Mac bong noise generator. Note - we ought to put a boingy noise
  *	here 8)
@@ -47,16 +48,16 @@ static unsigned long mac_bell_phasepersample;
  * some function protos
  */
 static void mac_init_asc( void );
-static void mac_nosound( unsigned long );
+static void mac_nosound(struct timer_list *);
 static void mac_quadra_start_bell( unsigned int, unsigned int, unsigned int );
-static void mac_quadra_ring_bell( unsigned long );
+static void mac_quadra_ring_bell(struct timer_list *);
 static void mac_av_start_bell( unsigned int, unsigned int, unsigned int );
 static void ( *mac_special_bell )( unsigned int, unsigned int, unsigned int );
 
 /*
  * our timer to start/continue/stop the bell
  */
-static DEFINE_TIMER(mac_sound_timer, mac_nosound, 0, 0);
+static DEFINE_TIMER(mac_sound_timer, mac_nosound);
 
 /*
  * Sort of initialize the sound chip (called from mac_mksound on the first
@@ -114,7 +115,8 @@ static void mac_init_asc( void )
 			 *   16-bit I/O functionality.  The PowerBook 500 series computers
 			 *   support 16-bit stereo output, but only mono input."
 			 *
-			 *   http://til.info.apple.com/techinfo.nsf/artnum/n16405
+			 *   Technical Information Library (TIL) article number 16405. 
+			 *   https://support.apple.com/kb/TA32601
 			 *
 			 * --David Kilzer
 			 */
@@ -162,7 +164,7 @@ static void mac_init_asc( void )
 void mac_mksound( unsigned int freq, unsigned int length )
 {
 	__u32 cfreq = ( freq << 5 ) / 468;
-	__u32 flags;
+	unsigned long flags;
 	int i;
 
 	if ( mac_special_bell == NULL )
@@ -214,7 +216,7 @@ void mac_mksound( unsigned int freq, unsigned int length )
 /*
  * regular ASC: stop whining ..
  */
-static void mac_nosound( unsigned long ignored )
+static void mac_nosound(struct timer_list *unused)
 {
 	mac_asc_regs[ ASC_ENABLE ] = 0;
 }
@@ -224,7 +226,7 @@ static void mac_nosound( unsigned long ignored )
  */
 static void mac_quadra_start_bell( unsigned int freq, unsigned int length, unsigned int volume )
 {
-	__u32 flags;
+	unsigned long flags;
 
 	/* if the bell is already ringing, ring longer */
 	if ( mac_bell_duration > 0 )
@@ -268,10 +270,10 @@ static void mac_quadra_start_bell( unsigned int freq, unsigned int length, unsig
  * already load the wave table, or at least call this one...
  * This piece keeps reloading the wave table until done.
  */
-static void mac_quadra_ring_bell( unsigned long ignored )
+static void mac_quadra_ring_bell(struct timer_list *unused)
 {
 	int	i, count = mac_asc_samplespersec / HZ;
-	__u32 flags;
+	unsigned long flags;
 
 	/*
 	 * we neither want a sound buffer overflow nor underflow, so we need to match

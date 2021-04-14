@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_POWERPC_KEYLARGO_H
 #define _ASM_POWERPC_KEYLARGO_H
 #ifdef __KERNEL__
@@ -21,7 +22,7 @@
 #define KEYLARGO_FCR4		0x48
 #define KEYLARGO_FCR5		0x4c	/* Pangea only */
 
-/* K2 aditional FCRs */
+/* K2 additional FCRs */
 #define K2_FCR6			0x34
 #define K2_FCR7			0x30
 #define K2_FCR8			0x2c
@@ -51,7 +52,7 @@
 
 #define KL_GPIO_SOUND_POWER		(KEYLARGO_GPIO_0+0x05)
 
-/* Hrm... this one is only to be used on Pismo. It seeem to also
+/* Hrm... this one is only to be used on Pismo. It seems to also
  * control the timebase enable on other machines. Still to be
  * experimented... --BenH.
  */

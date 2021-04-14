@@ -1,41 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 1999, 2000, 2004  MIPS Technologies, Inc.
  *	All rights reserved.
  *	Authors: Carsten Langgaard <carstenl@mips.com>
  *		 Maciej W. Rozycki <macro@mips.com>
  *
- *  This program is free software; you can distribute it and/or modify it
- *  under the terms of the GNU General Public License (Version 2) as
- *  published by the Free Software Foundation.
- *
- *  This program is distributed in the hope it will be useful, but WITHOUT
- *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- *  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- *  for more details.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
  * MIPS boards specific PCI support.
  */
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
-#include <linux/init.h>
 
 #include <asm/mips-boards/bonito64.h>
 
-#define PCI_ACCESS_READ  0
+#define PCI_ACCESS_READ	 0
 #define PCI_ACCESS_WRITE 1
 
-#ifdef CONFIG_LEMOTE_FULONG
-#define CFG_SPACE_REG(offset) (void *)CKSEG1ADDR(BONITO_PCICFG_BASE | (offset))
-#define ID_SEL_BEGIN 11
-#else
 #define CFG_SPACE_REG(offset) (void *)CKSEG1ADDR(_pcictrl_bonito_pcicfg + (offset))
 #define ID_SEL_BEGIN 10
-#endif
 #define MAX_DEV_NUM (31 - ID_SEL_BEGIN)
 
 
@@ -77,10 +59,8 @@ static int bonito64_pcibios_config_access(unsigned char access_type,
 	addrp = CFG_SPACE_REG(addr & 0xffff);
 	if (access_type == PCI_ACCESS_WRITE) {
 		writel(cpu_to_le32(*data), addrp);
-#ifndef CONFIG_LEMOTE_FULONG
 		/* Wait till done */
 		while (BONITO_PCIMSTAT & 0xF);
-#endif
 	} else {
 		*data = le32_to_cpu(readl(addrp));
 	}
@@ -144,7 +124,7 @@ static int bonito64_pcibios_write(struct pci_bus *bus, unsigned int devfn,
 		data = val;
 	else {
 		if (bonito64_pcibios_config_access(PCI_ACCESS_READ, bus, devfn,
-		                               where, &data))
+					       where, &data))
 			return -1;
 
 		if (size == 1)

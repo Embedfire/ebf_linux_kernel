@@ -1,35 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-sa1100/generic.c
  *
  * Author: Nicolas Pitre
  *
  * Code common to all SA11x0 machines.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
+#include <linux/gpio.h>
+#include <linux/gpio/machine.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+#include <linux/dma-mapping.h>
 #include <linux/pm.h>
 #include <linux/cpufreq.h>
 #include <linux/ioport.h>
-#include <linux/sched.h>	/* just for sched_clock() - funny that */
 #include <linux/platform_device.h>
+#include <linux/reboot.h>
+#include <linux/regulator/fixed.h>
+#include <linux/regulator/machine.h>
+#include <linux/irqchip/irq-sa11x0.h>
+
+#include <video/sa1100fb.h>
+
+#include <soc/sa1100/pwer.h>
 
 #include <asm/div64.h>
-#include <asm/cnt32_to_63.h>
-#include <mach/hardware.h>
-#include <asm/system.h>
-#include <asm/pgtable.h>
 #include <asm/mach/map.h>
 #include <asm/mach/flash.h>
 #include <asm/irq.h>
-#include <asm/gpio.h>
+#include <asm/system_misc.h>
+
+#include <mach/hardware.h>
+#include <mach/irqs.h>
+#include <mach/reset.h>
 
 #include "generic.h"
+#include <clocksource/pxa.h>
 
 unsigned int reset_status;
 EXPORT_SYMBOL(reset_status);
@@ -39,107 +47,31 @@ EXPORT_SYMBOL(reset_status);
 /*
  * This table is setup for a 3.6864MHz Crystal.
  */
-static const unsigned short cclk_frequency_100khz[NR_FREQS] = {
-	 590,	/*  59.0 MHz */
-	 737,	/*  73.7 MHz */
-	 885, 	/*  88.5 MHz */
-	1032,	/* 103.2 MHz */
-	1180,	/* 118.0 MHz */
-	1327,	/* 132.7 MHz */
-	1475,	/* 147.5 MHz */
-	1622,	/* 162.2 MHz */
-	1769,	/* 176.9 MHz */
-	1917,	/* 191.7 MHz */
-	2064,	/* 206.4 MHz */
-	2212,	/* 221.2 MHz */
-	2359,   /* 235.9 MHz */
-	2507,   /* 250.7 MHz */
-	2654,   /* 265.4 MHz */
-	2802    /* 280.2 MHz */
+struct cpufreq_frequency_table sa11x0_freq_table[NR_FREQS+1] = {
+	{ .frequency = 59000,	/*  59.0 MHz */},
+	{ .frequency = 73700,	/*  73.7 MHz */},
+	{ .frequency = 88500,	/*  88.5 MHz */},
+	{ .frequency = 103200,	/* 103.2 MHz */},
+	{ .frequency = 118000,	/* 118.0 MHz */},
+	{ .frequency = 132700,	/* 132.7 MHz */},
+	{ .frequency = 147500,	/* 147.5 MHz */},
+	{ .frequency = 162200,	/* 162.2 MHz */},
+	{ .frequency = 176900,	/* 176.9 MHz */},
+	{ .frequency = 191700,	/* 191.7 MHz */},
+	{ .frequency = 206400,	/* 206.4 MHz */},
+	{ .frequency = 221200,	/* 221.2 MHz */},
+	{ .frequency = 235900,	/* 235.9 MHz */},
+	{ .frequency = 250700,	/* 250.7 MHz */},
+	{ .frequency = 265400,	/* 265.4 MHz */},
+	{ .frequency = 280200,	/* 280.2 MHz */},
+	{ .frequency = CPUFREQ_TABLE_END, },
 };
-
-#if defined(CONFIG_CPU_FREQ_SA1100) || defined(CONFIG_CPU_FREQ_SA1110)
-/* rounds up(!)  */
-unsigned int sa11x0_freq_to_ppcr(unsigned int khz)
-{
-	int i;
-
-	khz /= 100;
-
-	for (i = 0; i < NR_FREQS; i++)
-		if (cclk_frequency_100khz[i] >= khz)
-			break;
-
-	return i;
-}
-
-unsigned int sa11x0_ppcr_to_freq(unsigned int idx)
-{
-	unsigned int freq = 0;
-	if (idx < NR_FREQS)
-		freq = cclk_frequency_100khz[idx] * 100;
-	return freq;
-}
-
-
-/* make sure that only the "userspace" governor is run -- anything else wouldn't make sense on
- * this platform, anyway.
- */
-int sa11x0_verify_speed(struct cpufreq_policy *policy)
-{
-	unsigned int tmp;
-	if (policy->cpu)
-		return -EINVAL;
-
-	cpufreq_verify_within_limits(policy, policy->cpuinfo.min_freq, policy->cpuinfo.max_freq);
-
-	/* make sure that at least one frequency is within the policy */
-	tmp = cclk_frequency_100khz[sa11x0_freq_to_ppcr(policy->min)] * 100;
-	if (tmp > policy->max)
-		policy->max = tmp;
-
-	cpufreq_verify_within_limits(policy, policy->cpuinfo.min_freq, policy->cpuinfo.max_freq);
-
-	return 0;
-}
 
 unsigned int sa11x0_getspeed(unsigned int cpu)
 {
 	if (cpu)
 		return 0;
-	return cclk_frequency_100khz[PPCR & 0xf] * 100;
-}
-
-#else
-/*
- * We still need to provide this so building without cpufreq works.
- */ 
-unsigned int cpufreq_get(unsigned int cpu)
-{
-	return cclk_frequency_100khz[PPCR & 0xf] * 100;
-}
-EXPORT_SYMBOL(cpufreq_get);
-#endif
-
-/*
- * This is the SA11x0 sched_clock implementation.  This has
- * a resolution of 271ns, and a maximum value of 32025597s (370 days).
- *
- * The return value is guaranteed to be monotonic in that range as
- * long as there is always less than 582 seconds between successive
- * calls to this function.
- *
- *  ( * 1E9 / 3686400 => * 78125 / 288)
- */
-unsigned long long sched_clock(void)
-{
-	unsigned long long v = cnt32_to_63(OSCR);
-
-	/* the <<1 gets rid of the cnt_32_to_63 top bit saving on a bic insn */
-	v *= 78125<<1;
-	do_div(v, 288<<1);
-
-	return v;
+	return sa11x0_freq_table[PPCR & 0xf].frequency;
 }
 
 /*
@@ -162,12 +94,33 @@ static void sa1100_power_off(void)
 	PMCR = PMCR_SF;
 }
 
+void sa11x0_restart(enum reboot_mode mode, const char *cmd)
+{
+	clear_reset_status(RESET_STATUS_ALL);
+
+	if (mode == REBOOT_SOFT) {
+		/* Jump into ROM at address 0 */
+		soft_restart(0);
+	} else {
+		/* Use on-chip reset capability */
+		RSRR = RSRR_SWR;
+	}
+}
+
+static void sa11x0_register_device(struct platform_device *dev, void *data)
+{
+	int err;
+	dev->dev.platform_data = data;
+	err = platform_device_register(dev);
+	if (err)
+		printk(KERN_ERR "Unable to register device %s: %d\n",
+			dev->name, err);
+}
+
+
 static struct resource sa11x0udc_resources[] = {
-	[0] = {
-		.start	= 0x80000000,
-		.end	= 0x8000ffff,
-		.flags	= IORESOURCE_MEM,
-	},
+	[0] = DEFINE_RES_MEM(__PREG(Ser0UDCCR), SZ_64K),
+	[1] = DEFINE_RES_IRQ(IRQ_Ser0UDC),
 };
 
 static u64 sa11x0udc_dma_mask = 0xffffffffUL;
@@ -184,11 +137,8 @@ static struct platform_device sa11x0udc_device = {
 };
 
 static struct resource sa11x0uart1_resources[] = {
-	[0] = {
-		.start	= 0x80010000,
-		.end	= 0x8001ffff,
-		.flags	= IORESOURCE_MEM,
-	},
+	[0] = DEFINE_RES_MEM(__PREG(Ser1UTCR0), SZ_64K),
+	[1] = DEFINE_RES_IRQ(IRQ_Ser1UART),
 };
 
 static struct platform_device sa11x0uart1_device = {
@@ -199,11 +149,8 @@ static struct platform_device sa11x0uart1_device = {
 };
 
 static struct resource sa11x0uart3_resources[] = {
-	[0] = {
-		.start	= 0x80050000,
-		.end	= 0x8005ffff,
-		.flags	= IORESOURCE_MEM,
-	},
+	[0] = DEFINE_RES_MEM(__PREG(Ser3UTCR0), SZ_64K),
+	[1] = DEFINE_RES_IRQ(IRQ_Ser3UART),
 };
 
 static struct platform_device sa11x0uart3_device = {
@@ -214,11 +161,9 @@ static struct platform_device sa11x0uart3_device = {
 };
 
 static struct resource sa11x0mcp_resources[] = {
-	[0] = {
-		.start	= 0x80060000,
-		.end	= 0x8006ffff,
-		.flags	= IORESOURCE_MEM,
-	},
+	[0] = DEFINE_RES_MEM(__PREG(Ser4MCCR0), SZ_64K),
+	[1] = DEFINE_RES_MEM(__PREG(Ser4MCCR1), 4),
+	[2] = DEFINE_RES_IRQ(IRQ_Ser4MCP),
 };
 
 static u64 sa11x0mcp_dma_mask = 0xffffffffUL;
@@ -234,17 +179,24 @@ static struct platform_device sa11x0mcp_device = {
 	.resource	= sa11x0mcp_resources,
 };
 
-void sa11x0_set_mcp_data(struct mcp_plat_data *data)
+void __init sa11x0_ppc_configure_mcp(void)
 {
-	sa11x0mcp_device.dev.platform_data = data;
+	/* Setup the PPC unit for the MCP */
+	PPDR &= ~PPC_RXD4;
+	PPDR |= PPC_TXD4 | PPC_SCLK | PPC_SFRM;
+	PSDR |= PPC_RXD4;
+	PSDR &= ~(PPC_TXD4 | PPC_SCLK | PPC_SFRM);
+	PPSR &= ~(PPC_TXD4 | PPC_SCLK | PPC_SFRM);
+}
+
+void sa11x0_register_mcp(struct mcp_plat_data *data)
+{
+	sa11x0_register_device(&sa11x0mcp_device, data);
 }
 
 static struct resource sa11x0ssp_resources[] = {
-	[0] = {
-		.start	= 0x80070000,
-		.end	= 0x8007ffff,
-		.flags	= IORESOURCE_MEM,
-	},
+	[0] = DEFINE_RES_MEM(0x80070000, SZ_64K),
+	[1] = DEFINE_RES_IRQ(IRQ_Ser4SSP),
 };
 
 static u64 sa11x0ssp_dma_mask = 0xffffffffUL;
@@ -261,16 +213,8 @@ static struct platform_device sa11x0ssp_device = {
 };
 
 static struct resource sa11x0fb_resources[] = {
-	[0] = {
-		.start	= 0xb0100000,
-		.end	= 0xb010ffff,
-		.flags	= IORESOURCE_MEM,
-	},
-	[1] = {
-		.start	= IRQ_LCD,
-		.end	= IRQ_LCD,
-		.flags	= IORESOURCE_IRQ,
-	},
+	[0] = DEFINE_RES_MEM(0xb0100000, SZ_64K),
+	[1] = DEFINE_RES_IRQ(IRQ_LCD),
 };
 
 static struct platform_device sa11x0fb_device = {
@@ -283,43 +227,37 @@ static struct platform_device sa11x0fb_device = {
 	.resource	= sa11x0fb_resources,
 };
 
-static struct platform_device sa11x0pcmcia_device = {
-	.name		= "sa11x0-pcmcia",
-	.id		= -1,
-};
+void sa11x0_register_lcd(struct sa1100fb_mach_info *inf)
+{
+	sa11x0_register_device(&sa11x0fb_device, inf);
+}
+
+void sa11x0_register_pcmcia(int socket, struct gpiod_lookup_table *table)
+{
+	if (table)
+		gpiod_add_lookup_table(table);
+	platform_device_register_simple("sa11x0-pcmcia", socket, NULL, 0);
+}
 
 static struct platform_device sa11x0mtd_device = {
-	.name		= "flash",
+	.name		= "sa1100-mtd",
 	.id		= -1,
 };
 
-void sa11x0_set_flash_data(struct flash_platform_data *flash,
-			   struct resource *res, int nr)
+void sa11x0_register_mtd(struct flash_platform_data *flash,
+			 struct resource *res, int nr)
 {
 	flash->name = "sa1100";
-	sa11x0mtd_device.dev.platform_data = flash;
 	sa11x0mtd_device.resource = res;
 	sa11x0mtd_device.num_resources = nr;
+	sa11x0_register_device(&sa11x0mtd_device, flash);
 }
 
 static struct resource sa11x0ir_resources[] = {
-	{
-		.start	= __PREG(Ser2UTCR0),
-		.end	= __PREG(Ser2UTCR0) + 0x24 - 1,
-		.flags	= IORESOURCE_MEM,
-	}, {
-		.start	= __PREG(Ser2HSCR0),
-		.end	= __PREG(Ser2HSCR0) + 0x1c - 1,
-		.flags	= IORESOURCE_MEM,
-	}, {
-		.start	= __PREG(Ser2HSCR2),
-		.end	= __PREG(Ser2HSCR2) + 0x04 - 1,
-		.flags	= IORESOURCE_MEM,
-	}, {
-		.start	= IRQ_Ser2ICP,
-		.end	= IRQ_Ser2ICP,
-		.flags	= IORESOURCE_IRQ,
-	}
+	DEFINE_RES_MEM(__PREG(Ser2UTCR0), 0x24),
+	DEFINE_RES_MEM(__PREG(Ser2HSCR0), 0x1c),
+	DEFINE_RES_MEM(__PREG(Ser2HSCR2), 0x04),
+	DEFINE_RES_IRQ(IRQ_Ser2ICP),
 };
 
 static struct platform_device sa11x0ir_device = {
@@ -329,46 +267,97 @@ static struct platform_device sa11x0ir_device = {
 	.resource	= sa11x0ir_resources,
 };
 
-void sa11x0_set_irda_data(struct irda_platform_data *irda)
+void sa11x0_register_irda(struct irda_platform_data *irda)
 {
-	sa11x0ir_device.dev.platform_data = irda;
+	sa11x0_register_device(&sa11x0ir_device, irda);
 }
+
+static struct resource sa1100_rtc_resources[] = {
+	DEFINE_RES_MEM(0x90010000, 0x40),
+	DEFINE_RES_IRQ_NAMED(IRQ_RTC1Hz, "rtc 1Hz"),
+	DEFINE_RES_IRQ_NAMED(IRQ_RTCAlrm, "rtc alarm"),
+};
 
 static struct platform_device sa11x0rtc_device = {
 	.name		= "sa1100-rtc",
 	.id		= -1,
+	.num_resources	= ARRAY_SIZE(sa1100_rtc_resources),
+	.resource	= sa1100_rtc_resources,
+};
+
+static struct resource sa11x0dma_resources[] = {
+	DEFINE_RES_MEM(DMA_PHYS, DMA_SIZE),
+	DEFINE_RES_IRQ(IRQ_DMA0),
+	DEFINE_RES_IRQ(IRQ_DMA1),
+	DEFINE_RES_IRQ(IRQ_DMA2),
+	DEFINE_RES_IRQ(IRQ_DMA3),
+	DEFINE_RES_IRQ(IRQ_DMA4),
+	DEFINE_RES_IRQ(IRQ_DMA5),
+};
+
+static u64 sa11x0dma_dma_mask = DMA_BIT_MASK(32);
+
+static struct platform_device sa11x0dma_device = {
+	.name		= "sa11x0-dma",
+	.id		= -1,
+	.dev = {
+		.dma_mask = &sa11x0dma_dma_mask,
+		.coherent_dma_mask = 0xffffffff,
+	},
+	.num_resources	= ARRAY_SIZE(sa11x0dma_resources),
+	.resource	= sa11x0dma_resources,
 };
 
 static struct platform_device *sa11x0_devices[] __initdata = {
 	&sa11x0udc_device,
 	&sa11x0uart1_device,
 	&sa11x0uart3_device,
-	&sa11x0mcp_device,
 	&sa11x0ssp_device,
-	&sa11x0pcmcia_device,
-	&sa11x0fb_device,
-	&sa11x0mtd_device,
 	&sa11x0rtc_device,
+	&sa11x0dma_device,
 };
 
 static int __init sa1100_init(void)
 {
 	pm_power_off = sa1100_power_off;
 
-	if (sa11x0ir_device.dev.platform_data)
-		platform_device_register(&sa11x0ir_device);
+	regulator_has_full_constraints();
 
 	return platform_add_devices(sa11x0_devices, ARRAY_SIZE(sa11x0_devices));
 }
 
 arch_initcall(sa1100_init);
 
-void (*sa1100fb_backlight_power)(int on);
-void (*sa1100fb_lcd_power)(int on);
+void __init sa11x0_init_late(void)
+{
+	sa11x0_pm_init();
+}
 
-EXPORT_SYMBOL(sa1100fb_backlight_power);
-EXPORT_SYMBOL(sa1100fb_lcd_power);
+int __init sa11x0_register_fixed_regulator(int n,
+	struct fixed_voltage_config *cfg,
+	struct regulator_consumer_supply *supplies, unsigned num_supplies,
+	bool uses_gpio)
+{
+	struct regulator_init_data *id;
 
+	cfg->init_data = id = kzalloc(sizeof(*cfg->init_data), GFP_KERNEL);
+	if (!cfg->init_data)
+		return -ENOMEM;
+
+	if (!uses_gpio)
+		id->constraints.always_on = 1;
+	id->constraints.name = cfg->supply_name;
+	id->constraints.min_uV = cfg->microvolts;
+	id->constraints.max_uV = cfg->microvolts;
+	id->constraints.valid_modes_mask = REGULATOR_MODE_NORMAL;
+	id->constraints.valid_ops_mask = REGULATOR_CHANGE_STATUS;
+	id->consumer_supplies = supplies;
+	id->num_consumer_supplies = num_supplies;
+
+	platform_device_register_resndata(NULL, "reg-fixed-voltage", n,
+					  NULL, 0, cfg, sizeof(*cfg));
+	return 0;
+}
 
 /*
  * Common I/O mapping:
@@ -389,7 +378,7 @@ EXPORT_SYMBOL(sa1100fb_lcd_power);
  */
 
 static struct map_desc standard_io_desc[] __initdata = {
-  	{	/* PCM */
+	{	/* PCM */
 		.virtual	=  0xf8000000,
 		.pfn		= __phys_to_pfn(0x80000000),
 		.length		= 0x00100000,
@@ -417,13 +406,31 @@ void __init sa1100_map_io(void)
 	iotable_init(standard_io_desc, ARRAY_SIZE(standard_io_desc));
 }
 
+void __init sa1100_timer_init(void)
+{
+	pxa_timer_nodt_init(IRQ_OST0, io_p2v(0x90000000));
+}
+
+static struct resource irq_resource =
+	DEFINE_RES_MEM_NAMED(0x90050000, SZ_64K, "irqs");
+
+void __init sa1100_init_irq(void)
+{
+	request_resource(&iomem_resource, &irq_resource);
+
+	sa11x0_init_irq_nodt(IRQ_GPIO0_SC, irq_resource.start);
+
+	sa1100_init_gpio();
+	sa11xx_clk_init();
+}
+
 /*
  * Disable the memory bus request/grant signals on the SA1110 to
  * ensure that we don't receive spurious memory requests.  We set
  * the MBGNT signal false to ensure the SA1111 doesn't own the
  * SDRAM bus.
  */
-void __init sa1110_mb_disable(void)
+void sa1110_mb_disable(void)
 {
 	unsigned long flags;
 
@@ -442,7 +449,7 @@ void __init sa1110_mb_disable(void)
  * If the system is going to use the SA-1111 DMA engines, set up
  * the memory bus request/grant pins.
  */
-void __devinit sa1110_mb_enable(void)
+void sa1110_mb_enable(void)
 {
 	unsigned long flags;
 
@@ -458,3 +465,25 @@ void __devinit sa1110_mb_enable(void)
 	local_irq_restore(flags);
 }
 
+int sa11x0_gpio_set_wake(unsigned int gpio, unsigned int on)
+{
+	if (on)
+		PWER |= BIT(gpio);
+	else
+		PWER &= ~BIT(gpio);
+
+	return 0;
+}
+
+int sa11x0_sc_set_wake(unsigned int irq, unsigned int on)
+{
+	if (BIT(irq) != IC_RTCAlrm)
+		return -EINVAL;
+
+	if (on)
+		PWER |= PWER_RTC;
+	else
+		PWER &= ~PWER_RTC;
+
+	return 0;
+}

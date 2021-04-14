@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for Epson RTC-9701JE
  *
@@ -7,10 +8,6 @@
  *
  * Copyright (C) 2006 8D Technologies inc.
  * Copyright (C) 2004 Compulab Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -78,38 +75,27 @@ static int r9701_get_datetime(struct device *dev, struct rtc_time *dt)
 	if (ret)
 		return ret;
 
-	memset(dt, 0, sizeof(*dt));
+	dt->tm_sec = bcd2bin(buf[0]); /* RSECCNT */
+	dt->tm_min = bcd2bin(buf[1]); /* RMINCNT */
+	dt->tm_hour = bcd2bin(buf[2]); /* RHRCNT */
 
-	dt->tm_sec = BCD2BIN(buf[0]); /* RSECCNT */
-	dt->tm_min = BCD2BIN(buf[1]); /* RMINCNT */
-	dt->tm_hour = BCD2BIN(buf[2]); /* RHRCNT */
+	dt->tm_mday = bcd2bin(buf[3]); /* RDAYCNT */
+	dt->tm_mon = bcd2bin(buf[4]) - 1; /* RMONCNT */
+	dt->tm_year = bcd2bin(buf[5]) + 100; /* RYRCNT */
 
-	dt->tm_mday = BCD2BIN(buf[3]); /* RDAYCNT */
-	dt->tm_mon = BCD2BIN(buf[4]) - 1; /* RMONCNT */
-	dt->tm_year = BCD2BIN(buf[5]) + 100; /* RYRCNT */
-
-	/* the rtc device may contain illegal values on power up
-	 * according to the data sheet. make sure they are valid.
-	 */
-
-	return rtc_valid_tm(dt);
+	return 0;
 }
 
 static int r9701_set_datetime(struct device *dev, struct rtc_time *dt)
 {
-	int ret, year;
+	int ret;
 
-	year = dt->tm_year + 1900;
-	if (year >= 2100 || year < 2000)
-		return -EINVAL;
-
-	ret = write_reg(dev, RHRCNT, BIN2BCD(dt->tm_hour));
-	ret = ret ? ret : write_reg(dev, RMINCNT, BIN2BCD(dt->tm_min));
-	ret = ret ? ret : write_reg(dev, RSECCNT, BIN2BCD(dt->tm_sec));
-	ret = ret ? ret : write_reg(dev, RDAYCNT, BIN2BCD(dt->tm_mday));
-	ret = ret ? ret : write_reg(dev, RMONCNT, BIN2BCD(dt->tm_mon + 1));
-	ret = ret ? ret : write_reg(dev, RYRCNT, BIN2BCD(dt->tm_year - 100));
-	ret = ret ? ret : write_reg(dev, RWKCNT, 1 << dt->tm_wday);
+	ret = write_reg(dev, RHRCNT, bin2bcd(dt->tm_hour));
+	ret = ret ? ret : write_reg(dev, RMINCNT, bin2bcd(dt->tm_min));
+	ret = ret ? ret : write_reg(dev, RSECCNT, bin2bcd(dt->tm_sec));
+	ret = ret ? ret : write_reg(dev, RDAYCNT, bin2bcd(dt->tm_mday));
+	ret = ret ? ret : write_reg(dev, RMONCNT, bin2bcd(dt->tm_mon + 1));
+	ret = ret ? ret : write_reg(dev, RYRCNT, bin2bcd(dt->tm_year - 100));
 
 	return ret;
 }
@@ -119,58 +105,41 @@ static const struct rtc_class_ops r9701_rtc_ops = {
 	.set_time	= r9701_set_datetime,
 };
 
-static int __devinit r9701_probe(struct spi_device *spi)
+static int r9701_probe(struct spi_device *spi)
 {
 	struct rtc_device *rtc;
 	unsigned char tmp;
 	int res;
 
-	rtc = rtc_device_register("r9701",
-				&spi->dev, &r9701_rtc_ops, THIS_MODULE);
-	if (IS_ERR(rtc))
-		return PTR_ERR(rtc);
-
-	dev_set_drvdata(&spi->dev, rtc);
-
 	tmp = R100CNT;
 	res = read_regs(&spi->dev, &tmp, 1);
 	if (res || tmp != 0x20) {
-		rtc_device_unregister(rtc);
-		return res;
+		dev_err(&spi->dev, "cannot read RTC register\n");
+		return -ENODEV;
 	}
 
-	return 0;
-}
+	rtc = devm_rtc_allocate_device(&spi->dev);
+	if (IS_ERR(rtc))
+		return PTR_ERR(rtc);
 
-static int __devexit r9701_remove(struct spi_device *spi)
-{
-	struct rtc_device *rtc = dev_get_drvdata(&spi->dev);
+	spi_set_drvdata(spi, rtc);
+	rtc->ops = &r9701_rtc_ops;
+	rtc->range_min = RTC_TIMESTAMP_BEGIN_2000;
+	rtc->range_max = RTC_TIMESTAMP_END_2099;
 
-	rtc_device_unregister(rtc);
-	return 0;
+	return rtc_register_device(rtc);
 }
 
 static struct spi_driver r9701_driver = {
 	.driver = {
 		.name	= "rtc-r9701",
-		.owner	= THIS_MODULE,
 	},
 	.probe	= r9701_probe,
-	.remove = __devexit_p(r9701_remove),
 };
 
-static __init int r9701_init(void)
-{
-	return spi_register_driver(&r9701_driver);
-}
-module_init(r9701_init);
-
-static __exit void r9701_exit(void)
-{
-	spi_unregister_driver(&r9701_driver);
-}
-module_exit(r9701_exit);
+module_spi_driver(r9701_driver);
 
 MODULE_DESCRIPTION("r9701 spi RTC driver");
 MODULE_AUTHOR("Magnus Damm <damm@opensource.se>");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("spi:rtc-r9701");

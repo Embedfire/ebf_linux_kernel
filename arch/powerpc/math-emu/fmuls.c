@@ -1,10 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/types.h>
 #include <linux/errno.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
-#include "soft-fp.h"
-#include "double.h"
-#include "single.h"
+#include <asm/sfp-machine.h>
+#include <math-emu/soft-fp.h>
+#include <math-emu/double.h>
+#include <math-emu/single.h>
 
 int
 fmuls(void *frD, void *frA, void *frB)
@@ -12,14 +14,14 @@ fmuls(void *frD, void *frA, void *frB)
 	FP_DECL_D(A);
 	FP_DECL_D(B);
 	FP_DECL_D(R);
-	int ret = 0;
+	FP_DECL_EX;
 
 #ifdef DEBUG
 	printk("%s: %p %p %p\n", __func__, frD, frA, frB);
 #endif
 
-	__FP_UNPACK_D(A, frA);
-	__FP_UNPACK_D(B, frB);
+	FP_UNPACK_DP(A, frA);
+	FP_UNPACK_DP(B, frB);
 
 #ifdef DEBUG
 	printk("A: %ld %lu %lu %ld (%ld) [%08lx.%08lx %lx]\n",
@@ -30,7 +32,7 @@ fmuls(void *frD, void *frA, void *frB)
 
 	if ((A_c == FP_CLS_INF && B_c == FP_CLS_ZERO) ||
 	    (A_c == FP_CLS_ZERO && B_c == FP_CLS_INF))
-		ret |= EFLAG_VXIMZ;
+		FP_SET_EXCEPTION(EFLAG_VXIMZ);
 
 	FP_MUL_D(R, A, B);
 
@@ -39,5 +41,7 @@ fmuls(void *frD, void *frA, void *frB)
 	       R_s, R_f1, R_f0, R_e, R_c, R_f1, R_f0, R_e + 1023);
 #endif
 
-	return (ret | __FP_PACK_DS(frD, R));
+	__FP_PACK_DS(frD, R);
+
+	return FP_CUR_EXCEPTIONS;
 }

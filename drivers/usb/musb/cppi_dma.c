@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2005-2006 by Texas Instruments
  *
@@ -6,10 +7,15 @@
  * The TUSB6020, using VLYNQ, has CPPI that looks much like DaVinci.
  */
 
+#include <linux/module.h>
+#include <linux/platform_device.h>
+#include <linux/slab.h>
 #include <linux/usb.h>
 
 #include "musb_core.h"
+#include "musb_debug.h"
 #include "cppi_dma.h"
+#include "davinci.h"
 
 
 /* CPPI DMA status 7-mar-2006:
@@ -101,7 +107,7 @@ static void cppi_reset_tx(struct cppi_tx_stateram __iomem *tx, u32 ptr)
 	musb_writel(&tx->tx_complete, 0, ptr);
 }
 
-static void __init cppi_pool_init(struct cppi *cppi, struct cppi_channel *c)
+static void cppi_pool_init(struct cppi *cppi, struct cppi_channel *c)
 {
 	int	j;
 
@@ -146,13 +152,10 @@ static void cppi_pool_free(struct cppi_channel *c)
 	c->last_processed = NULL;
 }
 
-static int __init cppi_controller_start(struct dma_controller *c)
+static void cppi_controller_start(struct cppi *controller)
 {
-	struct cppi	*controller;
 	void __iomem	*tibase;
 	int		i;
-
-	controller = container_of(c, struct cppi, controller);
 
 	/* do whatever is necessary to start controller */
 	for (i = 0; i < ARRAY_SIZE(controller->tx); i++) {
@@ -208,8 +211,6 @@ static int __init cppi_controller_start(struct dma_controller *c)
 	/* disable RNDIS mode, also host rx RNDIS autorequest */
 	musb_writel(tibase, DAVINCI_RNDIS_REG, 0);
 	musb_writel(tibase, DAVINCI_AUTOREQ_REG, 0);
-
-	return 0;
 }
 
 /*
@@ -218,13 +219,13 @@ static int __init cppi_controller_start(struct dma_controller *c)
  *  De-Init the DMA controller as necessary.
  */
 
-static int cppi_controller_stop(struct dma_controller *c)
+static void cppi_controller_stop(struct cppi *controller)
 {
-	struct cppi		*controller;
 	void __iomem		*tibase;
 	int			i;
+	struct musb		*musb;
 
-	controller = container_of(c, struct cppi, controller);
+	musb = controller->controller.musb;
 
 	tibase = controller->tibase;
 	/* DISABLE INDIVIDUAL CHANNEL Interrupts */
@@ -233,7 +234,7 @@ static int cppi_controller_stop(struct dma_controller *c)
 	musb_writel(tibase, DAVINCI_RXCPPI_INTCLR_REG,
 			DAVINCI_DMA_ALL_CHANNELS_ENABLE);
 
-	DBG(1, "Tearing down RX and TX Channels\n");
+	musb_dbg(musb, "Tearing down RX and TX Channels");
 	for (i = 0; i < ARRAY_SIZE(controller->tx); i++) {
 		/* FIXME restructure of txdma to use bds like rxdma */
 		controller->tx[i].last_processed = NULL;
@@ -249,8 +250,6 @@ static int cppi_controller_stop(struct dma_controller *c)
 	/*disable tx/rx cppi */
 	musb_writel(tibase, DAVINCI_TXCPPI_CTRL_REG, DAVINCI_DMA_CTRL_DISABLE);
 	musb_writel(tibase, DAVINCI_RXCPPI_CTRL_REG, DAVINCI_DMA_CTRL_DISABLE);
-
-	return 0;
 }
 
 /* While dma channel is allocated, we only want the core irqs active
@@ -286,9 +285,11 @@ cppi_channel_allocate(struct dma_controller *c,
 	u8			index;
 	struct cppi_channel	*cppi_ch;
 	void __iomem		*tibase;
+	struct musb		*musb;
 
 	controller = container_of(c, struct cppi, controller);
 	tibase = controller->tibase;
+	musb = c->musb;
 
 	/* ep0 doesn't use DMA; remember cppi indices are 0..N-1 */
 	index = ep->epnum - 1;
@@ -298,13 +299,13 @@ cppi_channel_allocate(struct dma_controller *c,
 	 */
 	if (transmit) {
 		if (index >= ARRAY_SIZE(controller->tx)) {
-			DBG(1, "no %cX%d CPPI channel\n", 'T', index);
+			musb_dbg(musb, "no %cX%d CPPI channel", 'T', index);
 			return NULL;
 		}
 		cppi_ch = controller->tx + index;
 	} else {
 		if (index >= ARRAY_SIZE(controller->rx)) {
-			DBG(1, "no %cX%d CPPI channel\n", 'R', index);
+			musb_dbg(musb, "no %cX%d CPPI channel", 'R', index);
 			return NULL;
 		}
 		cppi_ch = controller->rx + index;
@@ -315,12 +316,13 @@ cppi_channel_allocate(struct dma_controller *c,
 	 * with the other DMA engine too
 	 */
 	if (cppi_ch->hw_ep)
-		DBG(1, "re-allocating DMA%d %cX channel %p\n",
+		musb_dbg(musb, "re-allocating DMA%d %cX channel %p",
 				index, transmit ? 'T' : 'R', cppi_ch);
 	cppi_ch->hw_ep = ep;
 	cppi_ch->channel.status = MUSB_DMA_STATUS_FREE;
+	cppi_ch->channel.max_len = 0x7fffffff;
 
-	DBG(4, "Allocate CPPI%d %cX\n", index, transmit ? 'T' : 'R');
+	musb_dbg(musb, "Allocate CPPI%d %cX", index, transmit ? 'T' : 'R');
 	return &cppi_ch->channel;
 }
 
@@ -335,7 +337,8 @@ static void cppi_channel_release(struct dma_channel *channel)
 	c = container_of(channel, struct cppi_channel, channel);
 	tibase = c->controller->tibase;
 	if (!c->hw_ep)
-		DBG(1, "releasing idle DMA channel %p\n", c);
+		musb_dbg(c->controller->controller.musb,
+			"releasing idle DMA channel %p", c);
 	else if (!c->transmit)
 		core_rxirq_enable(tibase, c->index + 1);
 
@@ -353,10 +356,10 @@ cppi_dump_rx(int level, struct cppi_channel *c, const char *tag)
 
 	musb_ep_select(base, c->index + 1);
 
-	DBG(level, "RX DMA%d%s: %d left, csr %04x, "
-			"%08x H%08x S%08x C%08x, "
-			"B%08x L%08x %08x .. %08x"
-			"\n",
+	musb_dbg(c->controller->controller.musb,
+		"RX DMA%d%s: %d left, csr %04x, "
+		"%08x H%08x S%08x C%08x, "
+		"B%08x L%08x %08x .. %08x",
 		c->index, tag,
 		musb_readl(c->controller->tibase,
 			DAVINCI_RXCPPI_BUFCNT0_REG + 4 * c->index),
@@ -383,10 +386,10 @@ cppi_dump_tx(int level, struct cppi_channel *c, const char *tag)
 
 	musb_ep_select(base, c->index + 1);
 
-	DBG(level, "TX DMA%d%s: csr %04x, "
-			"H%08x S%08x C%08x %08x, "
-			"F%08x L%08x .. %08x"
-			"\n",
+	musb_dbg(c->controller->controller.musb,
+		"TX DMA%d%s: csr %04x, "
+		"H%08x S%08x C%08x %08x, "
+		"F%08x L%08x .. %08x",
 		c->index, tag,
 		musb_readw(c->hw_ep->regs, MUSB_TXCSR),
 
@@ -434,17 +437,13 @@ static void cppi_dump_rxbd(const char *tag, struct cppi_descriptor *bd)
 
 static void cppi_dump_rxq(int level, const char *tag, struct cppi_channel *rx)
 {
-#if MUSB_DEBUG > 0
 	struct cppi_descriptor	*bd;
 
-	if (!_dbg_level(level))
-		return;
 	cppi_dump_rx(level, rx, tag);
 	if (rx->last_processed)
 		cppi_dump_rxbd("last", rx->last_processed);
 	for (bd = rx->head; bd; bd = bd->next)
 		cppi_dump_rxbd("active", bd);
-#endif
 }
 
 
@@ -500,7 +499,7 @@ static inline int cppi_autoreq_update(struct cppi_channel *rx,
 		if (!(val & MUSB_RXCSR_H_REQPKT)) {
 			val |= MUSB_RXCSR_H_REQPKT | MUSB_RXCSR_H_WZC_BITS;
 			musb_writew(regs, MUSB_RXCSR, val);
-			/* flush writebufer */
+			/* flush writebuffer */
 			val = musb_readw(regs, MUSB_RXCSR);
 		}
 	}
@@ -576,6 +575,7 @@ cppi_next_tx_segment(struct musb *musb, struct cppi_channel *tx)
 	 * trigger the "send a ZLP?" confusion.
 	 */
 	rndis = (maxpacket & 0x3f) == 0
+		&& length > maxpacket
 		&& length < 0xffff
 		&& (length % maxpacket) != 0;
 
@@ -583,19 +583,20 @@ cppi_next_tx_segment(struct musb *musb, struct cppi_channel *tx)
 		maxpacket = length;
 		n_bds = 1;
 	} else {
-		n_bds = length / maxpacket;
-		if (!length || (length % maxpacket))
-			n_bds++;
+		if (length)
+			n_bds = DIV_ROUND_UP(length, maxpacket);
+		else
+			n_bds = 1;
 		n_bds = min(n_bds, (unsigned) NUM_TXCHAN_BD);
 		length = min(n_bds * maxpacket, length);
 	}
 
-	DBG(4, "TX DMA%d, pktSz %d %s bds %d dma 0x%x len %u\n",
+	musb_dbg(musb, "TX DMA%d, pktSz %d %s bds %d dma 0x%llx len %u",
 			tx->index,
 			maxpacket,
 			rndis ? "rndis" : "transparent",
 			n_bds,
-			addr, length);
+			(unsigned long long)addr, length);
 
 	cppi_rndis_update(tx, 0, musb->ctrl_base, rndis);
 
@@ -647,7 +648,7 @@ cppi_next_tx_segment(struct musb *musb, struct cppi_channel *tx)
 				bd->hw_options |= CPPI_ZERO_SET;
 		}
 
-		DBG(5, "TXBD %p: nxt %08x buf %08x len %04x opt %08x\n",
+		musb_dbg(musb, "TXBD %p: nxt %08x buf %08x len %04x opt %08x",
 				bd, bd->hw_next, bd->hw_bufp,
 				bd->hw_off_len, bd->hw_options);
 
@@ -736,7 +737,7 @@ cppi_next_tx_segment(struct musb *musb, struct cppi_channel *tx)
  * So this module parameter lets the heuristic be disabled.  When using
  * gadgetfs, the heuristic will probably need to be disabled.
  */
-static int cppi_rx_rndis = 1;
+static bool cppi_rx_rndis = 1;
 
 module_param(cppi_rx_rndis, bool, 0);
 MODULE_PARM_DESC(cppi_rx_rndis, "enable/disable RX RNDIS heuristic");
@@ -769,6 +770,7 @@ cppi_next_rx_segment(struct musb *musb, struct cppi_channel *rx, int onepacket)
 	void __iomem		*tibase = musb->ctrl_base;
 	int			is_rndis = 0;
 	struct cppi_rx_stateram	__iomem *rx_ram = rx->state_ram;
+	struct cppi_descriptor	*d;
 
 	if (onepacket) {
 		/* almost every USB driver, host or peripheral side */
@@ -790,9 +792,7 @@ cppi_next_rx_segment(struct musb *musb, struct cppi_channel *rx, int onepacket)
 			n_bds = 0xffff / maxpacket;
 			length = n_bds * maxpacket;
 		} else {
-			n_bds = length / maxpacket;
-			if (length % maxpacket)
-				n_bds++;
+			n_bds = DIV_ROUND_UP(length, maxpacket);
 		}
 		if (n_bds == 1)
 			onepacket = 1;
@@ -812,8 +812,8 @@ cppi_next_rx_segment(struct musb *musb, struct cppi_channel *rx, int onepacket)
 
 	length = min(n_bds * maxpacket, length);
 
-	DBG(4, "RX DMA%d seg, maxp %d %s bds %d (cnt %d) "
-			"dma 0x%x len %u %u/%u\n",
+	musb_dbg(musb, "RX DMA%d seg, maxp %d %s bds %d (cnt %d) "
+			"dma 0x%llx len %u %u/%u",
 			rx->index, maxpacket,
 			onepacket
 				? (is_rndis ? "rndis" : "onepacket")
@@ -822,7 +822,8 @@ cppi_next_rx_segment(struct musb *musb, struct cppi_channel *rx, int onepacket)
 			musb_readl(tibase,
 				DAVINCI_RXCPPI_BUFCNT0_REG + (rx->index * 4))
 					& 0xffff,
-			addr, length, rx->channel.actual_len, rx->buf_len);
+			(unsigned long long)addr, length,
+			rx->channel.actual_len, rx->buf_len);
 
 	/* only queue one segment at a time, since the hardware prevents
 	 * correct queue shutdown after unexpected short packets
@@ -881,12 +882,8 @@ cppi_next_rx_segment(struct musb *musb, struct cppi_channel *rx, int onepacket)
 	bd->hw_options |= CPPI_SOP_SET;
 	tail->hw_options |= CPPI_EOP_SET;
 
-	if (debug >= 5) {
-		struct cppi_descriptor	*d;
-
-		for (d = rx->head; d; d = d->next)
-			cppi_dump_rxbd("S", d);
-	}
+	for (d = rx->head; d; d = d->next)
+		cppi_dump_rxbd("S", d);
 
 	/* in case the preceding transfer left some state... */
 	tail = rx->last_processed;
@@ -926,7 +923,7 @@ cppi_next_rx_segment(struct musb *musb, struct cppi_channel *rx, int onepacket)
 			DAVINCI_RXCPPI_BUFCNT0_REG + (rx->index * 4))
 			& 0xffff;
 	if (i < (2 + n_bds)) {
-		DBG(2, "bufcnt%d underrun - %d (for %d)\n",
+		musb_dbg(musb, "bufcnt%d underrun - %d (for %d)",
 					rx->index, i, n_bds);
 		musb_writel(tibase,
 			DAVINCI_RXCPPI_BUFCNT0_REG + (rx->index * 4),
@@ -957,7 +954,7 @@ static int cppi_channel_program(struct dma_channel *ch,
 
 	cppi_ch = container_of(ch, struct cppi_channel, channel);
 	controller = cppi_ch->controller;
-	musb = controller->musb;
+	musb = controller->controller.musb;
 
 	switch (ch->status) {
 	case MUSB_DMA_STATUS_BUS_ABORT:
@@ -975,10 +972,10 @@ static int cppi_channel_program(struct dma_channel *ch,
 		/* WARN_ON(1); */
 		break;
 	case MUSB_DMA_STATUS_UNKNOWN:
-		DBG(1, "%cX DMA%d not allocated!\n",
+		musb_dbg(musb, "%cX DMA%d not allocated!",
 				cppi_ch->transmit ? 'T' : 'R',
 				cppi_ch->index);
-		/* FALLTHROUGH */
+		fallthrough;
 	case MUSB_DMA_STATUS_FREE:
 		break;
 	}
@@ -990,6 +987,7 @@ static int cppi_channel_program(struct dma_channel *ch,
 	cppi_ch->offset = 0;
 	cppi_ch->maxpacket = maxpacket;
 	cppi_ch->buf_len = len;
+	cppi_ch->channel.actual_len = 0;
 
 	/* TX channel? or RX? */
 	if (cppi_ch->transmit)
@@ -1011,6 +1009,7 @@ static bool cppi_rx_scan(struct cppi *cppi, unsigned ch)
 	int				i;
 	dma_addr_t			safe2ack;
 	void __iomem			*regs = rx->hw_ep->regs;
+	struct musb			*musb = cppi->controller.musb;
 
 	cppi_dump_rx(6, rx, "/K");
 
@@ -1029,9 +1028,9 @@ static bool cppi_rx_scan(struct cppi *cppi, unsigned ch)
 		if (!completed && (bd->hw_options & CPPI_OWN_SET))
 			break;
 
-		DBG(5, "C/RXBD %08x: nxt %08x buf %08x "
-			"off.len %08x opt.len %08x (%d)\n",
-			bd->dma, bd->hw_next, bd->hw_bufp,
+		musb_dbg(musb, "C/RXBD %llx: nxt %08x buf %08x "
+			"off.len %08x opt.len %08x (%d)",
+			(unsigned long long)bd->dma, bd->hw_next, bd->hw_bufp,
 			bd->hw_off_len, bd->hw_options,
 			rx->channel.actual_len);
 
@@ -1051,7 +1050,7 @@ static bool cppi_rx_scan(struct cppi *cppi, unsigned ch)
 			 * CPPI ignores those BDs even though OWN is still set.
 			 */
 			completed = true;
-			DBG(3, "rx short %d/%d (%d)\n",
+			musb_dbg(musb, "rx short %d/%d (%d)",
 					len, bd->buflen,
 					rx->channel.actual_len);
 		}
@@ -1101,11 +1100,12 @@ static bool cppi_rx_scan(struct cppi *cppi, unsigned ch)
 		musb_ep_select(cppi->mregs, rx->index + 1);
 		csr = musb_readw(regs, MUSB_RXCSR);
 		if (csr & MUSB_RXCSR_DMAENAB) {
-			DBG(4, "list%d %p/%p, last %08x%s, csr %04x\n",
+			musb_dbg(musb, "list%d %p/%p, last %llx%s, csr %04x",
 				rx->index,
 				rx->head, rx->tail,
 				rx->last_processed
-					? rx->last_processed->dma
+					? (unsigned long long)
+						rx->last_processed->dma
 					: 0,
 				completed ? ", completed" : "",
 				csr);
@@ -1121,7 +1121,7 @@ static bool cppi_rx_scan(struct cppi *cppi, unsigned ch)
 		 * setting it here "should" be racey, but seems to work
 		 */
 		csr = musb_readw(rx->hw_ep->regs, MUSB_RXCSR);
-		if (is_host_active(cppi->musb)
+		if (is_host_active(cppi->controller.musb)
 				&& bd
 				&& !(csr & MUSB_RXCSR_H_REQPKT)) {
 			csr |= MUSB_RXCSR_H_REQPKT;
@@ -1138,16 +1138,32 @@ static bool cppi_rx_scan(struct cppi *cppi, unsigned ch)
 	return completed;
 }
 
-void cppi_completion(struct musb *musb, u32 rx, u32 tx)
+irqreturn_t cppi_interrupt(int irq, void *dev_id)
 {
-	void __iomem		*tibase;
-	int			i, index;
+	struct musb		*musb = dev_id;
 	struct cppi		*cppi;
+	void __iomem		*tibase;
 	struct musb_hw_ep	*hw_ep = NULL;
+	u32			rx, tx;
+	int			i, index;
+	unsigned long		flags;
 
 	cppi = container_of(musb->dma_controller, struct cppi, controller);
+	if (cppi->irq)
+		spin_lock_irqsave(&musb->lock, flags);
 
 	tibase = musb->ctrl_base;
+
+	tx = musb_readl(tibase, DAVINCI_TXCPPI_MASKED_REG);
+	rx = musb_readl(tibase, DAVINCI_RXCPPI_MASKED_REG);
+
+	if (!tx && !rx) {
+		if (cppi->irq)
+			spin_unlock_irqrestore(&musb->lock, flags);
+		return IRQ_NONE;
+	}
+
+	musb_dbg(musb, "CPPI IRQ Tx%x Rx%x", tx, rx);
 
 	/* process TX channels */
 	for (index = 0; tx; tx = tx >> 1, index++) {
@@ -1170,8 +1186,13 @@ void cppi_completion(struct musb *musb, u32 rx, u32 tx)
 
 		bd = tx_ch->head;
 
+		/*
+		 * If Head is null then this could mean that a abort interrupt
+		 * that needs to be acknowledged.
+		 */
 		if (NULL == bd) {
-			DBG(1, "null BD\n");
+			musb_dbg(musb, "null BD");
+			musb_writel(&tx_ram->tx_complete, 0, 0);
 			continue;
 		}
 
@@ -1185,7 +1206,7 @@ void cppi_completion(struct musb *musb, u32 rx, u32 tx)
 			if (bd->hw_options & CPPI_OWN_SET)
 				break;
 
-			DBG(5, "C/TXBD %p n %x b %x off %x opt %x\n",
+			musb_dbg(musb, "C/TXBD %p n %x b %x off %x opt %x",
 					bd, bd->hw_next, bd->hw_bufp,
 					bd->hw_off_len, bd->hw_options);
 
@@ -1222,27 +1243,7 @@ void cppi_completion(struct musb *musb, u32 rx, u32 tx)
 
 				hw_ep = tx_ch->hw_ep;
 
-				/* Peripheral role never repurposes the
-				 * endpoint, so immediate completion is
-				 * safe.  Host role waits for the fifo
-				 * to empty (TXPKTRDY irq) before going
-				 * to the next queued bulk transfer.
-				 */
-				if (is_host_active(cppi->musb)) {
-#if 0
-					/* WORKAROUND because we may
-					 * not always get TXKPTRDY ...
-					 */
-					int	csr;
-
-					csr = musb_readw(hw_ep->regs,
-						MUSB_TXCSR);
-					if (csr & MUSB_TXCSR_TXPKTRDY)
-#endif
-						completed = false;
-				}
-				if (completed)
-					musb_dma_completion(musb, index + 1, 1);
+				musb_dma_completion(musb, index + 1, 1);
 
 			} else {
 				/* Bigger transfer than we could fit in
@@ -1286,13 +1287,22 @@ void cppi_completion(struct musb *musb, u32 rx, u32 tx)
 
 	/* write to CPPI EOI register to re-enable interrupts */
 	musb_writel(tibase, DAVINCI_CPPI_EOI_REG, 0);
+
+	if (cppi->irq)
+		spin_unlock_irqrestore(&musb->lock, flags);
+
+	return IRQ_HANDLED;
 }
+EXPORT_SYMBOL_GPL(cppi_interrupt);
 
 /* Instantiate a software object representing a DMA controller. */
-struct dma_controller *__init
-dma_controller_create(struct musb *musb, void __iomem *mregs)
+struct dma_controller *
+cppi_dma_controller_create(struct musb *musb, void __iomem *mregs)
 {
 	struct cppi		*controller;
+	struct device		*dev = musb->controller;
+	struct platform_device	*pdev = to_platform_device(dev);
+	int			irq = platform_get_irq_byname(pdev, "dma");
 
 	controller = kzalloc(sizeof *controller, GFP_KERNEL);
 	if (!controller)
@@ -1301,9 +1311,7 @@ dma_controller_create(struct musb *musb, void __iomem *mregs)
 	controller->mregs = mregs;
 	controller->tibase = mregs - DAVINCI_BASE_OFFSET;
 
-	controller->musb = musb;
-	controller->controller.start = cppi_controller_start;
-	controller->controller.stop = cppi_controller_stop;
+	controller->controller.musb = musb;
 	controller->controller.channel_alloc = cppi_channel_allocate;
 	controller->controller.channel_release = cppi_channel_release;
 	controller->controller.channel_program = cppi_channel_program;
@@ -1315,7 +1323,7 @@ dma_controller_create(struct musb *musb, void __iomem *mregs)
 
 	/* setup BufferPool */
 	controller->pool = dma_pool_create("cppi",
-			controller->musb->controller,
+			controller->controller.musb->controller,
 			sizeof(struct cppi_descriptor),
 			CPPI_DESCRIPTOR_ALIGN, 0);
 	if (!controller->pool) {
@@ -1323,23 +1331,40 @@ dma_controller_create(struct musb *musb, void __iomem *mregs)
 		return NULL;
 	}
 
+	if (irq > 0) {
+		if (request_irq(irq, cppi_interrupt, 0, "cppi-dma", musb)) {
+			dev_err(dev, "request_irq %d failed!\n", irq);
+			musb_dma_controller_destroy(&controller->controller);
+			return NULL;
+		}
+		controller->irq = irq;
+	}
+
+	cppi_controller_start(controller);
 	return &controller->controller;
 }
+EXPORT_SYMBOL_GPL(cppi_dma_controller_create);
 
 /*
  *  Destroy a previously-instantiated DMA controller.
  */
-void dma_controller_destroy(struct dma_controller *c)
+void cppi_dma_controller_destroy(struct dma_controller *c)
 {
 	struct cppi	*cppi;
 
 	cppi = container_of(c, struct cppi, controller);
+
+	cppi_controller_stop(cppi);
+
+	if (cppi->irq)
+		free_irq(cppi->irq, cppi->controller.musb);
 
 	/* assert:  caller stopped the controller first */
 	dma_pool_destroy(cppi->pool);
 
 	kfree(cppi);
 }
+EXPORT_SYMBOL_GPL(cppi_dma_controller_destroy);
 
 /*
  * Context: controller irqlocked, endpoint selected
@@ -1391,15 +1416,6 @@ static int cppi_channel_abort(struct dma_channel *channel)
 
 	if (cppi_ch->transmit) {
 		struct cppi_tx_stateram __iomem *tx_ram;
-		int			enabled;
-
-		/* mask interrupts raised to signal teardown complete.  */
-		enabled = musb_readl(tibase, DAVINCI_TXCPPI_INTENAB_REG)
-				& (1 << cppi_ch->index);
-		if (enabled)
-			musb_writel(tibase, DAVINCI_TXCPPI_INTCLR_REG,
-					(1 << cppi_ch->index));
-
 		/* REVISIT put timeouts on these controller handshakes */
 
 		cppi_dump_tx(6, cppi_ch, " (teardown)");
@@ -1414,7 +1430,6 @@ static int cppi_channel_abort(struct dma_channel *channel)
 		do {
 			value = musb_readl(&tx_ram->tx_complete, 0);
 		} while (0xFFFFFFFC != value);
-		musb_writel(&tx_ram->tx_complete, 0, 0xFFFFFFFC);
 
 		/* FIXME clean up the transfer state ... here?
 		 * the completion routine should get called with
@@ -1427,23 +1442,15 @@ static int cppi_channel_abort(struct dma_channel *channel)
 		musb_writew(regs, MUSB_TXCSR, value);
 		musb_writew(regs, MUSB_TXCSR, value);
 
-		/* re-enable interrupt */
-		if (enabled)
-			musb_writel(tibase, DAVINCI_TXCPPI_INTENAB_REG,
-					(1 << cppi_ch->index));
-
-		/* While we scrub the TX state RAM, ensure that we clean
-		 * up any interrupt that's currently asserted:
+		/*
 		 * 1. Write to completion Ptr value 0x1(bit 0 set)
 		 *    (write back mode)
-		 * 2. Write to completion Ptr value 0x0(bit 0 cleared)
-		 *    (compare mode)
-		 * Value written is compared(for bits 31:2) and when
-		 * equal, interrupt is deasserted.
+		 * 2. Wait for abort interrupt and then put the channel in
+		 *    compare mode by writing 1 to the tx_complete register.
 		 */
 		cppi_reset_tx(tx_ram, 1);
-		musb_writel(&tx_ram->tx_complete, 0, 0);
-
+		cppi_ch->head = NULL;
+		musb_writel(&tx_ram->tx_complete, 0, 1);
 		cppi_dump_tx(5, cppi_ch, " (done teardown)");
 
 		/* REVISIT tx side _should_ clean up the same way
@@ -1462,7 +1469,7 @@ static int cppi_channel_abort(struct dma_channel *channel)
 		core_rxirq_disable(tibase, cppi_ch->index + 1);
 
 		/* for host, ensure ReqPkt is never set again */
-		if (is_host_active(cppi_ch->controller->musb)) {
+		if (is_host_active(cppi_ch->controller->controller.musb)) {
 			value = musb_readl(tibase, DAVINCI_AUTOREQ_REG);
 			value &= ~((0x3) << (cppi_ch->index * 2));
 			musb_writel(tibase, DAVINCI_AUTOREQ_REG, value);
@@ -1471,7 +1478,7 @@ static int cppi_channel_abort(struct dma_channel *channel)
 		csr = musb_readw(regs, MUSB_RXCSR);
 
 		/* for host, clear (just) ReqPkt at end of current packet(s) */
-		if (is_host_active(cppi_ch->controller->musb)) {
+		if (is_host_active(cppi_ch->controller->controller.musb)) {
 			csr |= MUSB_RXCSR_H_WZC_BITS;
 			csr &= ~MUSB_RXCSR_H_REQPKT;
 		} else

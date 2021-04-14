@@ -1,14 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef _ASM_POWERPC_PAGE_64_H
 #define _ASM_POWERPC_PAGE_64_H
 
 /*
  * Copyright (C) 2001 PPC64 Team, IBM Corp
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
+
+#include <asm/asm-const.h>
 
 /*
  * We always define HW_PAGE_SHIFT to 12 as use of 64K pages remains Linux
@@ -42,144 +40,67 @@
 
 typedef unsigned long pte_basic_t;
 
-static __inline__ void clear_page(void *addr)
+static inline void clear_page(void *addr)
 {
-	unsigned long lines, line_size;
+	unsigned long iterations;
+	unsigned long onex, twox, fourx, eightx;
 
-	line_size = ppc64_caches.dline_size;
-	lines = ppc64_caches.dlines_per_page;
+	iterations = ppc64_caches.l1d.blocks_per_page / 8;
 
-	__asm__ __volatile__(
+	/*
+	 * Some verisions of gcc use multiply instructions to
+	 * calculate the offsets so lets give it a hand to
+	 * do better.
+	 */
+	onex = ppc64_caches.l1d.block_size;
+	twox = onex << 1;
+	fourx = onex << 2;
+	eightx = onex << 3;
+
+	asm volatile(
 	"mtctr	%1	# clear_page\n\
-1:      dcbz	0,%0\n\
-	add	%0,%0,%3\n\
+	.balign	16\n\
+1:	dcbz	0,%0\n\
+	dcbz	%3,%0\n\
+	dcbz	%4,%0\n\
+	dcbz	%5,%0\n\
+	dcbz	%6,%0\n\
+	dcbz	%7,%0\n\
+	dcbz	%8,%0\n\
+	dcbz	%9,%0\n\
+	add	%0,%0,%10\n\
 	bdnz+	1b"
-        : "=r" (addr)
-        : "r" (lines), "0" (addr), "r" (line_size)
+	: "=&r" (addr)
+	: "r" (iterations), "0" (addr), "b" (onex), "b" (twox),
+		"b" (twox+onex), "b" (fourx), "b" (fourx+onex),
+		"b" (twox+fourx), "b" (eightx-onex), "r" (eightx)
 	: "ctr", "memory");
 }
 
-extern void copy_4K_page(void *to, void *from);
-
-#ifdef CONFIG_PPC_64K_PAGES
-static inline void copy_page(void *to, void *from)
-{
-	unsigned int i;
-	for (i=0; i < (1 << (PAGE_SHIFT - 12)); i++) {
-		copy_4K_page(to, from);
-		to += 4096;
-		from += 4096;
-	}
-}
-#else /* CONFIG_PPC_64K_PAGES */
-static inline void copy_page(void *to, void *from)
-{
-	copy_4K_page(to, from);
-}
-#endif /* CONFIG_PPC_64K_PAGES */
+extern void copy_page(void *to, void *from);
 
 /* Log 2 of page table size */
 extern u64 ppc64_pft_size;
 
-/* Large pages size */
-#ifdef CONFIG_HUGETLB_PAGE
-extern unsigned int HPAGE_SHIFT;
-#else
-#define HPAGE_SHIFT PAGE_SHIFT
-#endif
-#define HPAGE_SIZE		((1UL) << HPAGE_SHIFT)
-#define HPAGE_MASK		(~(HPAGE_SIZE - 1))
-#define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT - PAGE_SHIFT)
-#define HUGE_MAX_HSTATE		3
-
 #endif /* __ASSEMBLY__ */
-
-#ifdef CONFIG_PPC_MM_SLICES
-
-#define SLICE_LOW_SHIFT		28
-#define SLICE_HIGH_SHIFT	40
-
-#define SLICE_LOW_TOP		(0x100000000ul)
-#define SLICE_NUM_LOW		(SLICE_LOW_TOP >> SLICE_LOW_SHIFT)
-#define SLICE_NUM_HIGH		(PGTABLE_RANGE >> SLICE_HIGH_SHIFT)
-
-#define GET_LOW_SLICE_INDEX(addr)	((addr) >> SLICE_LOW_SHIFT)
-#define GET_HIGH_SLICE_INDEX(addr)	((addr) >> SLICE_HIGH_SHIFT)
-
-#ifndef __ASSEMBLY__
-
-struct slice_mask {
-	u16 low_slices;
-	u16 high_slices;
-};
-
-struct mm_struct;
-
-extern unsigned long slice_get_unmapped_area(unsigned long addr,
-					     unsigned long len,
-					     unsigned long flags,
-					     unsigned int psize,
-					     int topdown,
-					     int use_cache);
-
-extern unsigned int get_slice_psize(struct mm_struct *mm,
-				    unsigned long addr);
-
-extern void slice_init_context(struct mm_struct *mm, unsigned int psize);
-extern void slice_set_user_psize(struct mm_struct *mm, unsigned int psize);
-extern void slice_set_range_psize(struct mm_struct *mm, unsigned long start,
-				  unsigned long len, unsigned int psize);
-
-#define slice_mm_new_context(mm)	((mm)->context.id == 0)
-
-#endif /* __ASSEMBLY__ */
-#else
-#define slice_init()
-#define get_slice_psize(mm, addr)	((mm)->context.user_psize)
-#define slice_set_user_psize(mm, psize)		\
-do {						\
-	(mm)->context.user_psize = (psize);	\
-	(mm)->context.sllp = SLB_VSID_USER | mmu_psize_defs[(psize)].sllp; \
-} while (0)
-#define slice_set_range_psize(mm, start, len, psize)	\
-	slice_set_user_psize((mm), (psize))
-#define slice_mm_new_context(mm)	1
-#endif /* CONFIG_PPC_MM_SLICES */
-
-#ifdef CONFIG_HUGETLB_PAGE
-
-#define HAVE_ARCH_HUGETLB_UNMAPPED_AREA
-
-#endif /* !CONFIG_HUGETLB_PAGE */
-
-#ifdef MODULE
-#define __page_aligned __attribute__((__aligned__(PAGE_SIZE)))
-#else
-#define __page_aligned \
-	__attribute__((__aligned__(PAGE_SIZE), \
-		__section__(".data.page_aligned")))
-#endif
 
 #define VM_DATA_DEFAULT_FLAGS \
-	(test_thread_flag(TIF_32BIT) ? \
+	(is_32bit_task() ? \
 	 VM_DATA_DEFAULT_FLAGS32 : VM_DATA_DEFAULT_FLAGS64)
 
 /*
  * This is the default if a program doesn't have a PT_GNU_STACK
  * program header entry. The PPC64 ELF ABI has a non executable stack
- * stack by default, so in the absense of a PT_GNU_STACK program header
+ * stack by default, so in the absence of a PT_GNU_STACK program header
  * we turn execute permission off.
  */
-#define VM_STACK_DEFAULT_FLAGS32	(VM_READ | VM_WRITE | VM_EXEC | \
-					 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
-
-#define VM_STACK_DEFAULT_FLAGS64	(VM_READ | VM_WRITE | \
-					 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
+#define VM_STACK_DEFAULT_FLAGS32	VM_DATA_FLAGS_EXEC
+#define VM_STACK_DEFAULT_FLAGS64	VM_DATA_FLAGS_NON_EXEC
 
 #define VM_STACK_DEFAULT_FLAGS \
-	(test_thread_flag(TIF_32BIT) ? \
+	(is_32bit_task() ? \
 	 VM_STACK_DEFAULT_FLAGS32 : VM_STACK_DEFAULT_FLAGS64)
 
-#include <asm-generic/page.h>
+#include <asm-generic/getorder.h>
 
 #endif /* _ASM_POWERPC_PAGE_64_H */

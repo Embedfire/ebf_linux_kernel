@@ -54,7 +54,7 @@
  * 9/28/04 Christoph Hellwig <hch@lst.de>
  *	    - merge the two source files
  *	    - remove internal queueing code
- * 14/06/07 Alan Cox <alan@redhat.com>
+ * 14/06/07 Alan Cox <alan@lxorguk.ukuu.org.uk>
  *	 - Grand cleanup and Linuxisation
  */
 
@@ -69,7 +69,6 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/dma-mapping.h>
 
 #include <asm/io.h>
@@ -144,7 +143,7 @@ static u8 wait_chip_ready(struct orc_host * host)
 	for (i = 0; i < 10; i++) {	/* Wait 1 second for report timeout     */
 		if (inb(host->base + ORC_HCTRL) & HOSTSTOP)	/* Wait HOSTSTOP set */
 			return 1;
-		mdelay(100);
+		msleep(100);
 	}
 	return 0;
 }
@@ -156,7 +155,7 @@ static u8 wait_firmware_ready(struct orc_host * host)
 	for (i = 0; i < 10; i++) {	/* Wait 1 second for report timeout     */
 		if (inb(host->base + ORC_HSTUS) & RREADY)		/* Wait READY set */
 			return 1;
-		mdelay(100);	/* wait 100ms before try again  */
+		msleep(100);	/* wait 100ms before try again  */
 	}
 	return 0;
 }
@@ -417,7 +416,7 @@ static u8 orc_load_firmware(struct orc_host * host)
 	/* Go back and check they match */
 
 	outb(PRGMRST | DOWNLOAD, host->base + ORC_RISCCTL);	/* Reset program count 0 */
-	bios_addr -= 0x1000;	/* Reset the BIOS adddress      */
+	bios_addr -= 0x1000;	/* Reset the BIOS address */
 	for (i = 0, data32_ptr = (u8 *) & data32;	/* Check the code       */
 	     i < 0x1000;	/* Firmware code size = 4K      */
 	     i++, bios_addr++) {
@@ -492,7 +491,7 @@ static void init_alloc_map(struct orc_host * host)
  *	init_orchid		-	initialise the host adapter
  *	@host:host adapter to initialise
  *
- *	Initialise the controller and if neccessary load the firmware.
+ *	Initialise the controller and if necessary load the firmware.
  *
  *	Returns -1 if the initialisation fails.
  */
@@ -633,7 +632,7 @@ static int orc_device_reset(struct orc_host * host, struct scsi_cmnd *cmd, unsig
 		return FAILED;
 	}
 
-	/* Reset device is handled by the firmare, we fill in an SCB and
+	/* Reset device is handled by the firmware, we fill in an SCB and
 	   fire it at the controller, it does the rest */
 	scb->opcode = ORC_BUSDEVRST;
 	scb->target = target;
@@ -889,10 +888,10 @@ static int inia100_build_scb(struct orc_host * host, struct orc_scb * scb, struc
 	scb->sense_len = SENSE_SIZE;
 	scb->cdb_len = cmd->cmd_len;
 	if (scb->cdb_len >= IMAX_CDB) {
-		printk("max cdb length= %x\b", cmd->cmd_len);
+		printk("max cdb length= %x\n", cmd->cmd_len);
 		scb->cdb_len = IMAX_CDB;
 	}
-	scb->ident = cmd->device->lun | DISC_ALLOW;
+	scb->ident = (u8)(cmd->device->lun & 0xff) | DISC_ALLOW;
 	if (cmd->device->tagged_supported) {	/* Tag Support                  */
 		scb->tag_msg = SIMPLE_QUEUE_TAG;	/* Do simple tag only   */
 	} else {
@@ -912,7 +911,7 @@ static int inia100_build_scb(struct orc_host * host, struct orc_scb * scb, struc
  *	queue the command down to the controller
  */
 
-static int inia100_queue(struct scsi_cmnd * cmd, void (*done) (struct scsi_cmnd *))
+static int inia100_queue_lck(struct scsi_cmnd * cmd, void (*done) (struct scsi_cmnd *))
 {
 	struct orc_scb *scb;
 	struct orc_host *host;		/* Point to Host adapter control block */
@@ -930,6 +929,8 @@ static int inia100_queue(struct scsi_cmnd * cmd, void (*done) (struct scsi_cmnd 
 	orc_exec_scb(host, scb);	/* Start execute SCB            */
 	return 0;
 }
+
+static DEF_SCSI_QCMD(inia100_queue)
 
 /*****************************************************************************
  Function name  : inia100_abort
@@ -1077,12 +1078,10 @@ static struct scsi_host_template inia100_template = {
 	.can_queue		= 1,
 	.this_id		= 1,
 	.sg_tablesize		= SG_ALL,
-	.cmd_per_lun 		= 1,
-	.use_clustering		= ENABLE_CLUSTERING,
 };
 
-static int __devinit inia100_probe_one(struct pci_dev *pdev,
-		const struct pci_device_id *id)
+static int inia100_probe_one(struct pci_dev *pdev,
+			     const struct pci_device_id *id)
 {
 	struct Scsi_Host *shost;
 	struct orc_host *host;
@@ -1094,7 +1093,7 @@ static int __devinit inia100_probe_one(struct pci_dev *pdev,
 
 	if (pci_enable_device(pdev))
 		goto out;
-	if (pci_set_dma_mask(pdev, DMA_32BIT_MASK)) {
+	if (dma_set_mask(&pdev->dev, DMA_BIT_MASK(32))) {
 		printk(KERN_WARNING "Unable to set 32bit DMA "
 				    "on inia100 adapter, ignoring.\n");
 		goto out_disable_device;
@@ -1124,23 +1123,21 @@ static int __devinit inia100_probe_one(struct pci_dev *pdev,
 
 	/* Get total memory needed for SCB */
 	sz = ORC_MAXQUEUE * sizeof(struct orc_scb);
-	host->scb_virt = pci_alloc_consistent(pdev, sz,
-			&host->scb_phys);
+	host->scb_virt = dma_alloc_coherent(&pdev->dev, sz, &host->scb_phys,
+					    GFP_KERNEL);
 	if (!host->scb_virt) {
 		printk("inia100: SCB memory allocation error\n");
 		goto out_host_put;
 	}
-	memset(host->scb_virt, 0, sz);
 
 	/* Get total memory needed for ESCB */
 	sz = ORC_MAXQUEUE * sizeof(struct orc_extended_scb);
-	host->escb_virt = pci_alloc_consistent(pdev, sz,
-			&host->escb_phys);
+	host->escb_virt = dma_alloc_coherent(&pdev->dev, sz, &host->escb_phys,
+					     GFP_KERNEL);
 	if (!host->escb_virt) {
 		printk("inia100: ESCB memory allocation error\n");
 		goto out_free_scb_array;
 	}
-	memset(host->escb_virt, 0, sz);
 
 	biosaddr = host->BIOScfg;
 	biosaddr = (biosaddr << 4);
@@ -1181,10 +1178,12 @@ static int __devinit inia100_probe_one(struct pci_dev *pdev,
 out_free_irq:
         free_irq(shost->irq, shost);
 out_free_escb_array:
-	pci_free_consistent(pdev, ORC_MAXQUEUE * sizeof(struct orc_extended_scb),
+	dma_free_coherent(&pdev->dev,
+			ORC_MAXQUEUE * sizeof(struct orc_extended_scb),
 			host->escb_virt, host->escb_phys);
 out_free_scb_array:
-	pci_free_consistent(pdev, ORC_MAXQUEUE * sizeof(struct orc_scb),
+	dma_free_coherent(&pdev->dev,
+			ORC_MAXQUEUE * sizeof(struct orc_scb),
 			host->scb_virt, host->scb_phys);
 out_host_put:
 	scsi_host_put(shost);
@@ -1196,7 +1195,7 @@ out:
 	return error;
 }
 
-static void __devexit inia100_remove_one(struct pci_dev *pdev)
+static void inia100_remove_one(struct pci_dev *pdev)
 {
 	struct Scsi_Host *shost = pci_get_drvdata(pdev);
 	struct orc_host *host = (struct orc_host *)shost->hostdata;
@@ -1204,9 +1203,11 @@ static void __devexit inia100_remove_one(struct pci_dev *pdev)
 	scsi_remove_host(shost);
 
         free_irq(shost->irq, shost);
-	pci_free_consistent(pdev, ORC_MAXQUEUE * sizeof(struct orc_extended_scb),
+	dma_free_coherent(&pdev->dev,
+			ORC_MAXQUEUE * sizeof(struct orc_extended_scb),
 			host->escb_virt, host->escb_phys);
-	pci_free_consistent(pdev, ORC_MAXQUEUE * sizeof(struct orc_scb),
+	dma_free_coherent(&pdev->dev,
+			ORC_MAXQUEUE * sizeof(struct orc_scb),
 			host->scb_virt, host->scb_phys);
         release_region(shost->io_port, 256);
 
@@ -1223,22 +1224,11 @@ static struct pci_driver inia100_pci_driver = {
 	.name		= "inia100",
 	.id_table	= inia100_pci_tbl,
 	.probe		= inia100_probe_one,
-	.remove		= __devexit_p(inia100_remove_one),
+	.remove		= inia100_remove_one,
 };
 
-static int __init inia100_init(void)
-{
-	return pci_register_driver(&inia100_pci_driver);
-}
-
-static void __exit inia100_exit(void)
-{
-	pci_unregister_driver(&inia100_pci_driver);
-}
+module_pci_driver(inia100_pci_driver);
 
 MODULE_DESCRIPTION("Initio A100U2W SCSI driver");
 MODULE_AUTHOR("Initio Corporation");
 MODULE_LICENSE("Dual BSD/GPL");
-
-module_init(inia100_init);
-module_exit(inia100_exit);

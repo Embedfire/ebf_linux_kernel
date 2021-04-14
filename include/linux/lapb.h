@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * These are the public elements of the Linux LAPB module.
  */
@@ -44,7 +45,8 @@ struct lapb_parms_struct {
 	unsigned int mode;
 };
 
-extern int lapb_register(struct net_device *dev, struct lapb_register_struct *callbacks);
+extern int lapb_register(struct net_device *dev,
+			 const struct lapb_register_struct *callbacks);
 extern int lapb_unregister(struct net_device *dev);
 extern int lapb_getparms(struct net_device *dev, struct lapb_parms_struct *parms);
 extern int lapb_setparms(struct net_device *dev, struct lapb_parms_struct *parms);

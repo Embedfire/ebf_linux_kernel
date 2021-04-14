@@ -1,23 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * llc_output.c - LLC minimal output path
  *
  * Copyright (c) 1997 by Procom Technology, Inc.
  * 		 2001-2003 by Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- * This program can be redistributed or modified under the terms of the
- * GNU General Public License version 2 as published by the Free Software
- * Foundation.
- * This program is distributed without any warranty or implied warranty
- * of merchantability or fitness for a particular purpose.
- *
- * See the GNU General Public License version 2 for more details.
  */
 
 #include <linux/if_arp.h>
-#include <linux/if_tr.h>
 #include <linux/netdevice.h>
-#include <linux/trdevice.h>
 #include <linux/skbuff.h>
+#include <linux/export.h>
 #include <net/llc.h>
 #include <net/llc_pdu.h>
 
@@ -33,48 +25,18 @@
 int llc_mac_hdr_init(struct sk_buff *skb,
 		     const unsigned char *sa, const unsigned char *da)
 {
-	int rc = 0;
+	int rc = -EINVAL;
 
 	switch (skb->dev->type) {
-#ifdef CONFIG_TR
-	case ARPHRD_IEEE802_TR: {
-		struct net_device *dev = skb->dev;
-		struct trh_hdr *trh;
-
-		skb_push(skb, sizeof(*trh));
-		skb_reset_mac_header(skb);
-		trh = tr_hdr(skb);
-		trh->ac = AC;
-		trh->fc = LLC_FRAME;
-		if (sa)
-			memcpy(trh->saddr, sa, dev->addr_len);
-		else
-			memset(trh->saddr, 0, dev->addr_len);
-		if (da) {
-			memcpy(trh->daddr, da, dev->addr_len);
-			tr_source_route(skb, trh, dev);
-			skb_reset_mac_header(skb);
-		}
-		break;
-	}
-#endif
 	case ARPHRD_ETHER:
-	case ARPHRD_LOOPBACK: {
-		unsigned short len = skb->len;
-		struct ethhdr *eth;
-
-		skb_push(skb, sizeof(*eth));
-		skb_reset_mac_header(skb);
-		eth = eth_hdr(skb);
-		eth->h_proto = htons(len);
-		memcpy(eth->h_dest, da, ETH_ALEN);
-		memcpy(eth->h_source, sa, ETH_ALEN);
+	case ARPHRD_LOOPBACK:
+		rc = dev_hard_header(skb, skb->dev, ETH_P_802_2, da, sa,
+				     skb->len);
+		if (rc > 0)
+			rc = 0;
 		break;
-	}
 	default:
-		printk(KERN_WARNING "device type not supported: %d\n",
-		       skb->dev->type);
-		rc = -EINVAL;
+		break;
 	}
 	return rc;
 }
@@ -103,6 +65,8 @@ int llc_build_and_send_ui_pkt(struct llc_sap *sap, struct sk_buff *skb,
 	rc = llc_mac_hdr_init(skb, skb->dev->dev_addr, dmac);
 	if (likely(!rc))
 		rc = dev_queue_xmit(skb);
+	else
+		kfree_skb(skb);
 	return rc;
 }
 

@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright (C) 1996 Mike Shaver (shaver@zeroknowledge.com)
  */
@@ -34,154 +31,127 @@ static int min_reset[]   = {0}, max_reset[]   = {1};
 
 static struct ctl_table_header *nr_table_header;
 
-static ctl_table nr_table[] = {
+static struct ctl_table nr_table[] = {
 	{
-		.ctl_name	= NET_NETROM_DEFAULT_PATH_QUALITY,
 		.procname	= "default_path_quality",
 		.data		= &sysctl_netrom_default_path_quality,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_quality,
 		.extra2		= &max_quality
 	},
 	{
-		.ctl_name	= NET_NETROM_OBSOLESCENCE_COUNT_INITIALISER,
 		.procname	= "obsolescence_count_initialiser",
 		.data		= &sysctl_netrom_obsolescence_count_initialiser,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_obs,
 		.extra2		= &max_obs
 	},
 	{
-		.ctl_name	= NET_NETROM_NETWORK_TTL_INITIALISER,
 		.procname	= "network_ttl_initialiser",
 		.data		= &sysctl_netrom_network_ttl_initialiser,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_ttl,
 		.extra2		= &max_ttl
 	},
 	{
-		.ctl_name	= NET_NETROM_TRANSPORT_TIMEOUT,
 		.procname	= "transport_timeout",
 		.data		= &sysctl_netrom_transport_timeout,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_t1,
 		.extra2		= &max_t1
 	},
 	{
-		.ctl_name	= NET_NETROM_TRANSPORT_MAXIMUM_TRIES,
 		.procname	= "transport_maximum_tries",
 		.data		= &sysctl_netrom_transport_maximum_tries,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_n2,
 		.extra2		= &max_n2
 	},
 	{
-		.ctl_name	= NET_NETROM_TRANSPORT_ACKNOWLEDGE_DELAY,
 		.procname	= "transport_acknowledge_delay",
 		.data		= &sysctl_netrom_transport_acknowledge_delay,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_t2,
 		.extra2		= &max_t2
 	},
 	{
-		.ctl_name	= NET_NETROM_TRANSPORT_BUSY_DELAY,
 		.procname	= "transport_busy_delay",
 		.data		= &sysctl_netrom_transport_busy_delay,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_t4,
 		.extra2		= &max_t4
 	},
 	{
-		.ctl_name	= NET_NETROM_TRANSPORT_REQUESTED_WINDOW_SIZE,
 		.procname	= "transport_requested_window_size",
 		.data		= &sysctl_netrom_transport_requested_window_size,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_window,
 		.extra2		= &max_window
 	},
 	{
-		.ctl_name	= NET_NETROM_TRANSPORT_NO_ACTIVITY_TIMEOUT,
 		.procname	= "transport_no_activity_timeout",
 		.data		= &sysctl_netrom_transport_no_activity_timeout,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_idle,
 		.extra2		= &max_idle
 	},
 	{
-		.ctl_name	= NET_NETROM_ROUTING_CONTROL,
 		.procname	= "routing_control",
 		.data		= &sysctl_netrom_routing_control,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_route,
 		.extra2		= &max_route
 	},
 	{
-		.ctl_name	= NET_NETROM_LINK_FAILS_COUNT,
 		.procname	= "link_fails_count",
 		.data		= &sysctl_netrom_link_fails_count,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_fails,
 		.extra2		= &max_fails
 	},
 	{
-		.ctl_name	= NET_NETROM_RESET,
 		.procname	= "reset",
 		.data		= &sysctl_netrom_reset_circuit,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.strategy	= &sysctl_intvec,
+		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &min_reset,
 		.extra2		= &max_reset
 	},
-	{ .ctl_name = 0 }
-};
-
-static struct ctl_path nr_path[] = {
-	{ .procname = "net", .ctl_name = CTL_NET, },
-	{ .procname = "netrom", .ctl_name = NET_NETROM, },
 	{ }
 };
 
-void __init nr_register_sysctl(void)
+int __init nr_register_sysctl(void)
 {
-	nr_table_header = register_sysctl_paths(nr_path, nr_table);
+	nr_table_header = register_net_sysctl(&init_net, "net/netrom", nr_table);
+	if (!nr_table_header)
+		return -ENOMEM;
+	return 0;
 }
 
 void nr_unregister_sysctl(void)
 {
-	unregister_sysctl_table(nr_table_header);
+	unregister_net_sysctl_table(nr_table_header);
 }

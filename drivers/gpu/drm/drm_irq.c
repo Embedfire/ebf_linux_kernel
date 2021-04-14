@@ -1,9 +1,27 @@
-/**
- * \file drm_irq.c
- * IRQ support
+/*
+ * drm_irq.c IRQ and vblank support
  *
  * \author Rickard E. (Rik) Faith <faith@valinux.com>
  * \author Gareth Hughes <gareth@valinux.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
  */
 
 /*
@@ -33,434 +51,208 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "drmP.h"
 
+#include <linux/export.h>
 #include <linux/interrupt.h>	/* For task queue support */
+#include <linux/pci.h>
+#include <linux/vgaarb.h>
+
+#include <drm/drm.h>
+#include <drm/drm_device.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_irq.h>
+#include <drm/drm_print.h>
+#include <drm/drm_vblank.h>
+
+#include "drm_internal.h"
 
 /**
- * Get interrupt from bus id.
+ * DOC: irq helpers
  *
- * \param inode device inode.
- * \param file_priv DRM file private.
- * \param cmd command.
- * \param arg user argument, pointing to a drm_irq_busid structure.
- * \return zero on success or a negative number on failure.
+ * The DRM core provides very simple support helpers to enable IRQ handling on a
+ * device through the drm_irq_install() and drm_irq_uninstall() functions. This
+ * only supports devices with a single interrupt on the main device stored in
+ * &drm_device.dev and set as the device paramter in drm_dev_alloc().
  *
- * Finds the PCI device with the specified bus id and gets its IRQ number.
- * This IOCTL is deprecated, and will now return EINVAL for any busid not equal
- * to that of the device that this DRM instance attached to.
+ * These IRQ helpers are strictly optional. Drivers which roll their own only
+ * need to set &drm_device.irq_enabled to signal the DRM core that vblank
+ * interrupts are working. Since these helpers don't automatically clean up the
+ * requested interrupt like e.g. devm_request_irq() they're not really
+ * recommended.
  */
-int drm_irq_by_busid(struct drm_device *dev, void *data,
-		     struct drm_file *file_priv)
-{
-	struct drm_irq_busid *p = data;
-
-	if (!drm_core_check_feature(dev, DRIVER_HAVE_IRQ))
-		return -EINVAL;
-
-	if ((p->busnum >> 8) != drm_get_pci_domain(dev) ||
-	    (p->busnum & 0xff) != dev->pdev->bus->number ||
-	    p->devnum != PCI_SLOT(dev->pdev->devfn) || p->funcnum != PCI_FUNC(dev->pdev->devfn))
-		return -EINVAL;
-
-	p->irq = dev->irq;
-
-	DRM_DEBUG("%d:%d:%d => IRQ %d\n", p->busnum, p->devnum, p->funcnum,
-		  p->irq);
-
-	return 0;
-}
 
 /**
- * Install IRQ handler.
+ * drm_irq_install - install IRQ handler
+ * @dev: DRM device
+ * @irq: IRQ number to install the handler for
  *
- * \param dev DRM device.
- * \param irq IRQ number.
+ * Initializes the IRQ related data. Installs the handler, calling the driver
+ * &drm_driver.irq_preinstall and &drm_driver.irq_postinstall functions before
+ * and after the installation.
  *
- * Initializes the IRQ related data, and setups drm_device::vbl_queue. Installs the handler, calling the driver
- * \c drm_driver_irq_preinstall() and \c drm_driver_irq_postinstall() functions
- * before and after the installation.
+ * This is the simplified helper interface provided for drivers with no special
+ * needs. Drivers which need to install interrupt handlers for multiple
+ * interrupts must instead set &drm_device.irq_enabled to signal the DRM core
+ * that vblank interrupts are available.
+ *
+ * @irq must match the interrupt number that would be passed to request_irq(),
+ * if called directly instead of using this helper function.
+ *
+ * &drm_driver.irq_handler is called to handle the registered interrupt.
+ *
+ * Returns:
+ * Zero on success or a negative error code on failure.
  */
-static int drm_irq_install(struct drm_device * dev)
+int drm_irq_install(struct drm_device *dev, int irq)
 {
 	int ret;
 	unsigned long sh_flags = 0;
 
-	if (!drm_core_check_feature(dev, DRIVER_HAVE_IRQ))
+	if (irq == 0)
 		return -EINVAL;
 
-	if (dev->irq == 0)
-		return -EINVAL;
-
-	mutex_lock(&dev->struct_mutex);
-
-	/* Driver must have been initialized */
-	if (!dev->dev_private) {
-		mutex_unlock(&dev->struct_mutex);
-		return -EINVAL;
-	}
-
-	if (dev->irq_enabled) {
-		mutex_unlock(&dev->struct_mutex);
+	if (dev->irq_enabled)
 		return -EBUSY;
-	}
-	dev->irq_enabled = 1;
-	mutex_unlock(&dev->struct_mutex);
+	dev->irq_enabled = true;
 
-	DRM_DEBUG("irq=%d\n", dev->irq);
-
-	if (drm_core_check_feature(dev, DRIVER_IRQ_VBL)) {
-		init_waitqueue_head(&dev->vbl_queue);
-
-		spin_lock_init(&dev->vbl_lock);
-
-		INIT_LIST_HEAD(&dev->vbl_sigs);
-		INIT_LIST_HEAD(&dev->vbl_sigs2);
-
-		dev->vbl_pending = 0;
-	}
+	DRM_DEBUG("irq=%d\n", irq);
 
 	/* Before installing handler */
-	dev->driver->irq_preinstall(dev);
+	if (dev->driver->irq_preinstall)
+		dev->driver->irq_preinstall(dev);
 
-	/* Install handler */
-	if (drm_core_check_feature(dev, DRIVER_IRQ_SHARED))
+	/* PCI devices require shared interrupts. */
+	if (dev->pdev)
 		sh_flags = IRQF_SHARED;
 
-	ret = request_irq(dev->irq, dev->driver->irq_handler,
-			  sh_flags, dev->devname, dev);
+	ret = request_irq(irq, dev->driver->irq_handler,
+			  sh_flags, dev->driver->name, dev);
+
 	if (ret < 0) {
-		mutex_lock(&dev->struct_mutex);
-		dev->irq_enabled = 0;
-		mutex_unlock(&dev->struct_mutex);
+		dev->irq_enabled = false;
 		return ret;
 	}
 
 	/* After installing handler */
-	dev->driver->irq_postinstall(dev);
+	if (dev->driver->irq_postinstall)
+		ret = dev->driver->irq_postinstall(dev);
 
-	return 0;
+	if (ret < 0) {
+		dev->irq_enabled = false;
+		if (drm_core_check_feature(dev, DRIVER_LEGACY))
+			vga_client_register(dev->pdev, NULL, NULL, NULL);
+		free_irq(irq, dev);
+	} else {
+		dev->irq = irq;
+	}
+
+	return ret;
 }
+EXPORT_SYMBOL(drm_irq_install);
 
 /**
- * Uninstall the IRQ handler.
+ * drm_irq_uninstall - uninstall the IRQ handler
+ * @dev: DRM device
  *
- * \param dev DRM device.
+ * Calls the driver's &drm_driver.irq_uninstall function and unregisters the IRQ
+ * handler.  This should only be called by drivers which used drm_irq_install()
+ * to set up their interrupt handler. Other drivers must only reset
+ * &drm_device.irq_enabled to false.
  *
- * Calls the driver's \c drm_driver_irq_uninstall() function, and stops the irq.
+ * Note that for kernel modesetting drivers it is a bug if this function fails.
+ * The sanity checks are only to catch buggy user modesetting drivers which call
+ * the same function through an ioctl.
+ *
+ * Returns:
+ * Zero on success or a negative error code on failure.
  */
-int drm_irq_uninstall(struct drm_device * dev)
+int drm_irq_uninstall(struct drm_device *dev)
 {
-	int irq_enabled;
+	unsigned long irqflags;
+	bool irq_enabled;
+	int i;
 
-	if (!drm_core_check_feature(dev, DRIVER_HAVE_IRQ))
-		return -EINVAL;
-
-	mutex_lock(&dev->struct_mutex);
 	irq_enabled = dev->irq_enabled;
-	dev->irq_enabled = 0;
-	mutex_unlock(&dev->struct_mutex);
+	dev->irq_enabled = false;
+
+	/*
+	 * Wake up any waiters so they don't hang. This is just to paper over
+	 * issues for UMS drivers which aren't in full control of their
+	 * vblank/irq handling. KMS drivers must ensure that vblanks are all
+	 * disabled when uninstalling the irq handler.
+	 */
+	if (drm_dev_has_vblank(dev)) {
+		spin_lock_irqsave(&dev->vbl_lock, irqflags);
+		for (i = 0; i < dev->num_crtcs; i++) {
+			struct drm_vblank_crtc *vblank = &dev->vblank[i];
+
+			if (!vblank->enabled)
+				continue;
+
+			WARN_ON(drm_core_check_feature(dev, DRIVER_MODESET));
+
+			drm_vblank_disable_and_save(dev, i);
+			wake_up(&vblank->queue);
+		}
+		spin_unlock_irqrestore(&dev->vbl_lock, irqflags);
+	}
 
 	if (!irq_enabled)
 		return -EINVAL;
 
 	DRM_DEBUG("irq=%d\n", dev->irq);
 
-	dev->driver->irq_uninstall(dev);
+	if (drm_core_check_feature(dev, DRIVER_LEGACY))
+		vga_client_register(dev->pdev, NULL, NULL, NULL);
+
+	if (dev->driver->irq_uninstall)
+		dev->driver->irq_uninstall(dev);
 
 	free_irq(dev->irq, dev);
 
-	dev->locked_tasklet_func = NULL;
-
 	return 0;
 }
-
 EXPORT_SYMBOL(drm_irq_uninstall);
 
-/**
- * IRQ control ioctl.
- *
- * \param inode device inode.
- * \param file_priv DRM file private.
- * \param cmd command.
- * \param arg user argument, pointing to a drm_control structure.
- * \return zero on success or a negative number on failure.
- *
- * Calls irq_install() or irq_uninstall() according to \p arg.
- */
-int drm_control(struct drm_device *dev, void *data,
-		struct drm_file *file_priv)
+#if IS_ENABLED(CONFIG_DRM_LEGACY)
+int drm_legacy_irq_control(struct drm_device *dev, void *data,
+			   struct drm_file *file_priv)
 {
 	struct drm_control *ctl = data;
+	int ret = 0, irq;
 
-	/* if we haven't irq we fallback for compatibility reasons - this used to be a separate function in drm_dma.h */
+	/* if we haven't irq we fallback for compatibility reasons -
+	 * this used to be a separate function in drm_dma.h
+	 */
 
+	if (!drm_core_check_feature(dev, DRIVER_HAVE_IRQ))
+		return 0;
+	if (!drm_core_check_feature(dev, DRIVER_LEGACY))
+		return 0;
+	/* UMS was only ever supported on pci devices. */
+	if (WARN_ON(!dev->pdev))
+		return -EINVAL;
 
 	switch (ctl->func) {
 	case DRM_INST_HANDLER:
-		if (!drm_core_check_feature(dev, DRIVER_HAVE_IRQ))
-			return 0;
+		irq = dev->pdev->irq;
+
 		if (dev->if_version < DRM_IF_VERSION(1, 2) &&
-		    ctl->irq != dev->irq)
+		    ctl->irq != irq)
 			return -EINVAL;
-		return drm_irq_install(dev);
+		mutex_lock(&dev->struct_mutex);
+		ret = drm_irq_install(dev, irq);
+		mutex_unlock(&dev->struct_mutex);
+
+		return ret;
 	case DRM_UNINST_HANDLER:
-		if (!drm_core_check_feature(dev, DRIVER_HAVE_IRQ))
-			return 0;
-		return drm_irq_uninstall(dev);
+		mutex_lock(&dev->struct_mutex);
+		ret = drm_irq_uninstall(dev);
+		mutex_unlock(&dev->struct_mutex);
+
+		return ret;
 	default:
 		return -EINVAL;
 	}
 }
-
-/**
- * Wait for VBLANK.
- *
- * \param inode device inode.
- * \param file_priv DRM file private.
- * \param cmd command.
- * \param data user argument, pointing to a drm_wait_vblank structure.
- * \return zero on success or a negative number on failure.
- *
- * Verifies the IRQ is installed.
- *
- * If a signal is requested checks if this task has already scheduled the same signal
- * for the same vblank sequence number - nothing to be done in
- * that case. If the number of tasks waiting for the interrupt exceeds 100 the
- * function fails. Otherwise adds a new entry to drm_device::vbl_sigs for this
- * task.
- *
- * If a signal is not requested, then calls vblank_wait().
- */
-int drm_wait_vblank(struct drm_device *dev, void *data, struct drm_file *file_priv)
-{
-	union drm_wait_vblank *vblwait = data;
-	struct timeval now;
-	int ret = 0;
-	unsigned int flags, seq;
-
-	if ((!dev->irq) || (!dev->irq_enabled))
-		return -EINVAL;
-
-	if (vblwait->request.type &
-	    ~(_DRM_VBLANK_TYPES_MASK | _DRM_VBLANK_FLAGS_MASK)) {
-		DRM_ERROR("Unsupported type value 0x%x, supported mask 0x%x\n",
-			  vblwait->request.type,
-			  (_DRM_VBLANK_TYPES_MASK | _DRM_VBLANK_FLAGS_MASK));
-		return -EINVAL;
-	}
-
-	flags = vblwait->request.type & _DRM_VBLANK_FLAGS_MASK;
-
-	if (!drm_core_check_feature(dev, (flags & _DRM_VBLANK_SECONDARY) ?
-				    DRIVER_IRQ_VBL2 : DRIVER_IRQ_VBL))
-		return -EINVAL;
-
-	seq = atomic_read((flags & _DRM_VBLANK_SECONDARY) ? &dev->vbl_received2
-			  : &dev->vbl_received);
-
-	switch (vblwait->request.type & _DRM_VBLANK_TYPES_MASK) {
-	case _DRM_VBLANK_RELATIVE:
-		vblwait->request.sequence += seq;
-		vblwait->request.type &= ~_DRM_VBLANK_RELATIVE;
-	case _DRM_VBLANK_ABSOLUTE:
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	if ((flags & _DRM_VBLANK_NEXTONMISS) &&
-	    (seq - vblwait->request.sequence) <= (1<<23)) {
-		vblwait->request.sequence = seq + 1;
-	}
-
-	if (flags & _DRM_VBLANK_SIGNAL) {
-		unsigned long irqflags;
-		struct list_head *vbl_sigs = (flags & _DRM_VBLANK_SECONDARY)
-				      ? &dev->vbl_sigs2 : &dev->vbl_sigs;
-		struct drm_vbl_sig *vbl_sig;
-
-		spin_lock_irqsave(&dev->vbl_lock, irqflags);
-
-		/* Check if this task has already scheduled the same signal
-		 * for the same vblank sequence number; nothing to be done in
-		 * that case
-		 */
-		list_for_each_entry(vbl_sig, vbl_sigs, head) {
-			if (vbl_sig->sequence == vblwait->request.sequence
-			    && vbl_sig->info.si_signo ==
-			    vblwait->request.signal
-			    && vbl_sig->task == current) {
-				spin_unlock_irqrestore(&dev->vbl_lock,
-						       irqflags);
-				vblwait->reply.sequence = seq;
-				goto done;
-			}
-		}
-
-		if (dev->vbl_pending >= 100) {
-			spin_unlock_irqrestore(&dev->vbl_lock, irqflags);
-			return -EBUSY;
-		}
-
-		dev->vbl_pending++;
-
-		spin_unlock_irqrestore(&dev->vbl_lock, irqflags);
-
-		if (!
-		    (vbl_sig =
-		     drm_alloc(sizeof(struct drm_vbl_sig), DRM_MEM_DRIVER))) {
-			return -ENOMEM;
-		}
-
-		memset((void *)vbl_sig, 0, sizeof(*vbl_sig));
-
-		vbl_sig->sequence = vblwait->request.sequence;
-		vbl_sig->info.si_signo = vblwait->request.signal;
-		vbl_sig->task = current;
-
-		spin_lock_irqsave(&dev->vbl_lock, irqflags);
-
-		list_add_tail(&vbl_sig->head, vbl_sigs);
-
-		spin_unlock_irqrestore(&dev->vbl_lock, irqflags);
-
-		vblwait->reply.sequence = seq;
-	} else {
-		if (flags & _DRM_VBLANK_SECONDARY) {
-			if (dev->driver->vblank_wait2)
-				ret = dev->driver->vblank_wait2(dev, &vblwait->request.sequence);
-		} else if (dev->driver->vblank_wait)
-			ret =
-			    dev->driver->vblank_wait(dev,
-						     &vblwait->request.sequence);
-
-		do_gettimeofday(&now);
-		vblwait->reply.tval_sec = now.tv_sec;
-		vblwait->reply.tval_usec = now.tv_usec;
-	}
-
-      done:
-	return ret;
-}
-
-/**
- * Send the VBLANK signals.
- *
- * \param dev DRM device.
- *
- * Sends a signal for each task in drm_device::vbl_sigs and empties the list.
- *
- * If a signal is not requested, then calls vblank_wait().
- */
-void drm_vbl_send_signals(struct drm_device * dev)
-{
-	unsigned long flags;
-	int i;
-
-	spin_lock_irqsave(&dev->vbl_lock, flags);
-
-	for (i = 0; i < 2; i++) {
-		struct drm_vbl_sig *vbl_sig, *tmp;
-		struct list_head *vbl_sigs = i ? &dev->vbl_sigs2 : &dev->vbl_sigs;
-		unsigned int vbl_seq = atomic_read(i ? &dev->vbl_received2 :
-						   &dev->vbl_received);
-
-		list_for_each_entry_safe(vbl_sig, tmp, vbl_sigs, head) {
-			if ((vbl_seq - vbl_sig->sequence) <= (1 << 23)) {
-				vbl_sig->info.si_code = vbl_seq;
-				send_sig_info(vbl_sig->info.si_signo,
-					      &vbl_sig->info, vbl_sig->task);
-
-				list_del(&vbl_sig->head);
-
-				drm_free(vbl_sig, sizeof(*vbl_sig),
-					 DRM_MEM_DRIVER);
-
-				dev->vbl_pending--;
-			}
-		}
-	}
-
-	spin_unlock_irqrestore(&dev->vbl_lock, flags);
-}
-
-EXPORT_SYMBOL(drm_vbl_send_signals);
-
-/**
- * Tasklet wrapper function.
- *
- * \param data DRM device in disguise.
- *
- * Attempts to grab the HW lock and calls the driver callback on success. On
- * failure, leave the lock marked as contended so the callback can be called
- * from drm_unlock().
- */
-static void drm_locked_tasklet_func(unsigned long data)
-{
-	struct drm_device *dev = (struct drm_device *)data;
-	unsigned long irqflags;
-	void (*tasklet_func)(struct drm_device *);
-	
-	spin_lock_irqsave(&dev->tasklet_lock, irqflags);
-	tasklet_func = dev->locked_tasklet_func;
-	spin_unlock_irqrestore(&dev->tasklet_lock, irqflags);
-
-	if (!tasklet_func ||
-	    !drm_lock_take(&dev->lock,
-			   DRM_KERNEL_CONTEXT)) {
-		return;
-	}
-
-	dev->lock.lock_time = jiffies;
-	atomic_inc(&dev->counts[_DRM_STAT_LOCKS]);
-
-	spin_lock_irqsave(&dev->tasklet_lock, irqflags);
-	tasklet_func = dev->locked_tasklet_func;
-	dev->locked_tasklet_func = NULL;
-	spin_unlock_irqrestore(&dev->tasklet_lock, irqflags);
-	
-	if (tasklet_func != NULL)
-		tasklet_func(dev);
-
-	drm_lock_free(&dev->lock,
-		      DRM_KERNEL_CONTEXT);
-}
-
-/**
- * Schedule a tasklet to call back a driver hook with the HW lock held.
- *
- * \param dev DRM device.
- * \param func Driver callback.
- *
- * This is intended for triggering actions that require the HW lock from an
- * interrupt handler. The lock will be grabbed ASAP after the interrupt handler
- * completes. Note that the callback may be called from interrupt or process
- * context, it must not make any assumptions about this. Also, the HW lock will
- * be held with the kernel context or any client context.
- */
-void drm_locked_tasklet(struct drm_device *dev, void (*func)(struct drm_device *))
-{
-	unsigned long irqflags;
-	static DECLARE_TASKLET(drm_tasklet, drm_locked_tasklet_func, 0);
-
-	if (!drm_core_check_feature(dev, DRIVER_HAVE_IRQ) ||
-	    test_bit(TASKLET_STATE_SCHED, &drm_tasklet.state))
-		return;
-
-	spin_lock_irqsave(&dev->tasklet_lock, irqflags);
-
-	if (dev->locked_tasklet_func) {
-		spin_unlock_irqrestore(&dev->tasklet_lock, irqflags);
-		return;
-	}
-
-	dev->locked_tasklet_func = func;
-
-	spin_unlock_irqrestore(&dev->tasklet_lock, irqflags);
-
-	drm_tasklet.data = (unsigned long)dev;
-
-	tasklet_hi_schedule(&drm_tasklet);
-}
-EXPORT_SYMBOL(drm_locked_tasklet);
+#endif

@@ -11,6 +11,7 @@
 
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/pci.h>
 #include <linux/serial_8250.h>
 
@@ -28,7 +29,7 @@ static void __init sni_pcimt_sc_init(void)
 
 	scsiz = cacheconf & 7;
 	if (scsiz == 0) {
-		printk("Second level cache is deactived.\n");
+		printk("Second level cache is deactivated.\n");
 		return;
 	}
 	if (scsiz >= 6) {
@@ -59,7 +60,7 @@ static inline void sni_pcimt_detect(void)
 	p += sprintf(p, "%s PCI", (csmsr & 0x80) ? "RM200" : "RM300");
 	if ((csmsr & 0x80) == 0)
 		p += sprintf(p, ", board revision %s",
-		             (csmsr & 0x20) ? "D" : "C");
+			     (csmsr & 0x20) ? "D" : "C");
 	asic = csmsr & 0x80;
 	asic = (csmsr & 0x08) ? asic : !asic;
 	p += sprintf(p, ", ASIC PCI Rev %s", asic ? "1.0" : "1.1");
@@ -90,22 +91,22 @@ static struct platform_device pcimt_serial8250_device = {
 };
 
 static struct resource pcimt_cmos_rsrc[] = {
-        {
-                .start = 0x70,
-                .end   = 0x71,
-                .flags = IORESOURCE_IO
-        },
-        {
-                .start = 8,
-                .end   = 8,
-                .flags = IORESOURCE_IRQ
-        }
+	{
+		.start = 0x70,
+		.end   = 0x71,
+		.flags = IORESOURCE_IO
+	},
+	{
+		.start = 8,
+		.end   = 8,
+		.flags = IORESOURCE_IRQ
+	}
 };
 
 static struct platform_device pcimt_cmos_device = {
-        .name           = "rtc_cmos",
-        .num_resources  = ARRAY_SIZE(pcimt_cmos_rsrc),
-        .resource       = pcimt_cmos_rsrc
+	.name		= "rtc_cmos",
+	.num_resources	= ARRAY_SIZE(pcimt_cmos_rsrc),
+	.resource	= pcimt_cmos_rsrc
 };
 
 
@@ -184,42 +185,35 @@ static void __init sni_pcimt_resource_init(void)
 
 extern struct pci_ops sni_pcimt_ops;
 
+#ifdef CONFIG_PCI
 static struct pci_controller sni_controller = {
 	.pci_ops	= &sni_pcimt_ops,
 	.mem_resource	= &sni_mem_resource,
 	.mem_offset	= 0x00000000UL,
 	.io_resource	= &sni_io_resource,
 	.io_offset	= 0x00000000UL,
-	.io_map_base    = SNI_PORT_BASE
+	.io_map_base	= SNI_PORT_BASE
 };
+#endif
 
-static void enable_pcimt_irq(unsigned int irq)
+static void enable_pcimt_irq(struct irq_data *d)
 {
-	unsigned int mask = 1 << (irq - PCIMT_IRQ_INT2);
+	unsigned int mask = 1 << (d->irq - PCIMT_IRQ_INT2);
 
 	*(volatile u8 *) PCIMT_IRQSEL |= mask;
 }
 
-void disable_pcimt_irq(unsigned int irq)
+void disable_pcimt_irq(struct irq_data *d)
 {
-	unsigned int mask = ~(1 << (irq - PCIMT_IRQ_INT2));
+	unsigned int mask = ~(1 << (d->irq - PCIMT_IRQ_INT2));
 
 	*(volatile u8 *) PCIMT_IRQSEL &= mask;
 }
 
-static void end_pcimt_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		enable_pcimt_irq(irq);
-}
-
 static struct irq_chip pcimt_irq_type = {
-	.typename = "PCIMT",
-	.ack = disable_pcimt_irq,
-	.mask = disable_pcimt_irq,
-	.mask_ack = disable_pcimt_irq,
-	.unmask = enable_pcimt_irq,
-	.end = end_pcimt_irq,
+	.name = "PCIMT",
+	.irq_mask = disable_pcimt_irq,
+	.irq_unmask = enable_pcimt_irq,
 };
 
 /*
@@ -304,7 +298,7 @@ void __init sni_pcimt_irq_init(void)
 	mips_cpu_irq_init();
 	/* Actually we've got more interrupts to handle ...  */
 	for (i = PCIMT_IRQ_INT2; i <= PCIMT_IRQ_SCSI; i++)
-		set_irq_chip(i, &pcimt_irq_type);
+		irq_set_chip_and_handler(i, &pcimt_irq_type, handle_level_irq);
 	sni_hwint = sni_pcimt_hwint;
 	change_c0_status(ST0_IM, IE_IRQ1|IE_IRQ3);
 }
@@ -327,9 +321,9 @@ static int __init snirm_pcimt_setup_devinit(void)
 	case SNI_BRD_PCI_MTOWER:
 	case SNI_BRD_PCI_DESKTOP:
 	case SNI_BRD_PCI_MTOWER_CPLUS:
-	        platform_device_register(&pcimt_serial8250_device);
-	        platform_device_register(&pcimt_cmos_device);
-	        break;
+		platform_device_register(&pcimt_serial8250_device);
+		platform_device_register(&pcimt_cmos_device);
+		break;
 	}
 
 	return 0;

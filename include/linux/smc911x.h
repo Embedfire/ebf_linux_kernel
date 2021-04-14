@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __SMC911X_H__
 #define __SMC911X_H__
 
@@ -7,6 +8,7 @@
 struct smc911x_platdata {
 	unsigned long flags;
 	unsigned long irq_flags; /* IRQF_... */
+	int irq_polarity;
 };
 
 #endif /* __SMC911X_H__ */

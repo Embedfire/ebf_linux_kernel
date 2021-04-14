@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Written by Kanoj Sarcar (kanoj@sgi.com) Aug 99
  * Adapted for the alpha wildfire architecture Jan 2001.
@@ -6,8 +7,6 @@
 #define _ASM_MMZONE_H_
 
 #include <asm/smp.h>
-
-struct bootmem_data_t; /* stupid forward decl. */
 
 /*
  * Following are macros that are specific to this numa platform.
@@ -56,7 +55,6 @@ PLAT_NODE_DATA_LOCALNR(unsigned long p, int n)
  * Given a kernel address, find the home node of the underlying memory.
  */
 #define kvaddr_to_nid(kaddr)	pa_to_nid(__pa(kaddr))
-#define node_start_pfn(nid)	(NODE_DATA(nid)->node_start_pfn)
 
 /*
  * Given a kaddr, LOCAL_BASE_ADDR finds the owning node of the memory
@@ -67,15 +65,12 @@ PLAT_NODE_DATA_LOCALNR(unsigned long p, int n)
     ((unsigned long)__va(NODE_DATA(kvaddr_to_nid(kaddr))->node_start_pfn  \
 			 << PAGE_SHIFT))
 
-/* XXX: FIXME -- wli */
+/* XXX: FIXME -- nyc */
 #define kern_addr_valid(kaddr)	(0)
 
 #define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
 
-#define VALID_PAGE(page)	(((page) - mem_map) < max_mapnr)
-
 #define pmd_page(pmd)		(pfn_to_page(pmd_val(pmd) >> 32))
-#define pgd_page(pgd)		(pfn_to_page(pgd_val(pgd) >> 32))
 #define pte_pfn(pte)		(pte_val(pte) >> 32)
 
 #define mk_pte(page, pgprot)						     \

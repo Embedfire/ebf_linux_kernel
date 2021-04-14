@@ -1,27 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 /*
  * IBM ASM Service Processor Device Driver
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
- *
  * Copyright (C) IBM Corporation, 2004
  *
- * Author: Max Asböck <amax@us.ibm.com>
- *
+ * Author: Max AsbÃ¶ck <amax@us.ibm.com>
  */
 
+#include <linux/sched.h>
+#include <linux/slab.h>
 #include "ibmasm.h"
 #include "lowlevel.h"
 
@@ -43,14 +31,14 @@ static void wake_up_event_readers(struct service_processor *sp)
                 wake_up_interruptible(&reader->wait);
 }
 
-/**
+/*
  * receive_event
  * Called by the interrupt handler when a dot command of type sp_event is
  * received.
  * Store the event in the circular event buffer, wake up any sleeping
  * event readers.
  * There is no reader marker in the buffer, therefore readers are
- * responsible for keeping up with the writer, or they will loose events.
+ * responsible for keeping up with the writer, or they will lose events.
  */
 void ibmasm_receive_event(struct service_processor *sp, void *data, unsigned int data_size)
 {
@@ -80,7 +68,7 @@ static inline int event_available(struct event_buffer *b, struct event_reader *r
 	return (r->next_serial_number < b->next_serial_number);
 }
 
-/**
+/*
  * get_next_event
  * Called by event readers (initiated from user space through the file
  * system).
@@ -153,7 +141,7 @@ int ibmasm_event_buffer_init(struct service_processor *sp)
 
 	buffer = kmalloc(sizeof(struct event_buffer), GFP_KERNEL);
 	if (!buffer)
-		return 1;
+		return -ENOMEM;
 
 	buffer->next_index = 0;
 	buffer->next_serial_number = 1;

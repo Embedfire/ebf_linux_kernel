@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # Makefile for the FPU instruction emulation.
 #
 
-obj-y    := math.o
+# suppress all warnings - as math.c produces a lot!
+ccflags-y := -w
 
-EXTRA_AFLAGS := -ansi
-EXTRA_CFLAGS = -I. -Iinclude/math-emu -w
+obj-y    := math_$(BITS).o

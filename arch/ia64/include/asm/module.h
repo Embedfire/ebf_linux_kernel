@@ -1,5 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_IA64_MODULE_H
 #define _ASM_IA64_MODULE_H
+
+#include <asm-generic/module.h>
 
 /*
  * IA-64-specific support for kernel module loader.
@@ -22,14 +25,6 @@ struct mod_arch_specific {
 	void *init_unw_table;		/* init unwind-table cookie returned by unwinder */
 	unsigned int next_got_entry;	/* index of next available got entry */
 };
-
-#define Elf_Shdr	Elf64_Shdr
-#define Elf_Sym		Elf64_Sym
-#define Elf_Ehdr	Elf64_Ehdr
-
-#define MODULE_PROC_FAMILY	"ia64"
-#define MODULE_ARCH_VERMAGIC	MODULE_PROC_FAMILY \
-	"gcc-" __stringify(__GNUC__) "." __stringify(__GNUC_MINOR__)
 
 #define ARCH_SHF_SMALL	SHF_IA_64_SHORT
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * devtree.c - convenience functions for device tree manipulation
  * Copyright 2007 David Gibson, IBM Corporation.
@@ -5,11 +6,6 @@
  *
  * Authors: David Gibson <david@gibson.dropbear.id.au>
  *	    Scott Wood <scottwood@freescale.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <stdarg.h>
 #include <stddef.h>
@@ -213,7 +209,7 @@ static int find_range(u32 *reg, u32 *ranges, int nregaddr,
 		u32 range_addr[MAX_ADDR_CELLS];
 		u32 range_size[MAX_ADDR_CELLS];
 
-		copy_val(range_addr, ranges + i, naddr);
+		copy_val(range_addr, ranges + i, nregaddr);
 		copy_val(range_size, ranges + i + nregaddr + naddr, nsize);
 
 		if (compare_reg(reg, range_addr, range_size))

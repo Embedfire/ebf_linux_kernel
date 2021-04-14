@@ -1,10 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* 
- * File...........: linux/include/asm-s390x/idals.h
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  *		    Martin Schwidefsky <schwidefsky@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
- * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 2000a
- 
+ * Copyright IBM Corp. 2000
+ *
  * History of changes
  * 07/24/00 new file
  * 05/04/02 code restructuring.
@@ -18,13 +18,9 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <asm/cio.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
-#ifdef __s390x__
 #define IDA_SIZE_LOG 12 /* 11 for 2k , 12 for 4k */
-#else
-#define IDA_SIZE_LOG 11 /* 11 for 2k , 12 for 4k */
-#endif
 #define IDA_BLOCK_SIZE (1L<<IDA_SIZE_LOG)
 
 /*
@@ -33,35 +29,25 @@
 static inline int
 idal_is_needed(void *vaddr, unsigned int length)
 {
-#ifdef __s390x__
 	return ((__pa(vaddr) + length - 1) >> 31) != 0;
-#else
-	return 0;
-#endif
 }
 
 
 /*
  * Return the number of idal words needed for an address/length pair.
  */
-static inline unsigned int
-idal_nr_words(void *vaddr, unsigned int length)
+static inline unsigned int idal_nr_words(void *vaddr, unsigned int length)
 {
-#ifdef __s390x__
-	if (idal_is_needed(vaddr, length))
-		return ((__pa(vaddr) & (IDA_BLOCK_SIZE-1)) + length + 
-			(IDA_BLOCK_SIZE-1)) >> IDA_SIZE_LOG;
-#endif
-	return 0;
+	return ((__pa(vaddr) & (IDA_BLOCK_SIZE-1)) + length +
+		(IDA_BLOCK_SIZE-1)) >> IDA_SIZE_LOG;
 }
 
 /*
  * Create the list of idal words for an address/length pair.
  */
-static inline unsigned long *
-idal_create_words(unsigned long *idaws, void *vaddr, unsigned int length)
+static inline unsigned long *idal_create_words(unsigned long *idaws,
+					       void *vaddr, unsigned int length)
 {
-#ifdef __s390x__
 	unsigned long paddr;
 	unsigned int cidaw;
 
@@ -74,7 +60,6 @@ idal_create_words(unsigned long *idaws, void *vaddr, unsigned int length)
 		paddr += IDA_BLOCK_SIZE;
 		*idaws++ = paddr;
 	}
-#endif
 	return idaws;
 }
 
@@ -85,7 +70,6 @@ idal_create_words(unsigned long *idaws, void *vaddr, unsigned int length)
 static inline int
 set_normalized_cda(struct ccw1 * ccw, void *vaddr)
 {
-#ifdef __s390x__
 	unsigned int nridaws;
 	unsigned long *idal;
 
@@ -101,7 +85,6 @@ set_normalized_cda(struct ccw1 * ccw, void *vaddr)
 		ccw->flags |= CCW_FLAG_IDA;
 		vaddr = idal;
 	}
-#endif
 	ccw->cda = (__u32)(unsigned long) vaddr;
 	return 0;
 }
@@ -112,12 +95,10 @@ set_normalized_cda(struct ccw1 * ccw, void *vaddr)
 static inline void
 clear_normalized_cda(struct ccw1 * ccw)
 {
-#ifdef __s390x__
 	if (ccw->flags & CCW_FLAG_IDA) {
 		kfree((void *)(unsigned long) ccw->cda);
 		ccw->flags &= ~CCW_FLAG_IDA;
 	}
-#endif
 	ccw->cda = 0;
 }
 
@@ -141,8 +122,7 @@ idal_buffer_alloc(size_t size, int page_order)
 
 	nr_ptrs = (size + IDA_BLOCK_SIZE - 1) >> IDA_SIZE_LOG;
 	nr_chunks = (4096 << page_order) >> IDA_SIZE_LOG;
-	ib = kmalloc(sizeof(struct idal_buffer) + nr_ptrs*sizeof(void *),
-		     GFP_DMA | GFP_KERNEL);
+	ib = kmalloc(struct_size(ib, data, nr_ptrs), GFP_DMA | GFP_KERNEL);
 	if (ib == NULL)
 		return ERR_PTR(-ENOMEM);
 	ib->size = size;
@@ -189,12 +169,8 @@ idal_buffer_free(struct idal_buffer *ib)
 static inline int
 __idal_buffer_is_needed(struct idal_buffer *ib)
 {
-#ifdef __s390x__
 	return ib->size > (4096ul << ib->page_order) ||
 		idal_is_needed(ib->data[0], ib->size);
-#else
-	return ib->size > (4096ul << ib->page_order);
-#endif
 }
 
 /*

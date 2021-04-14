@@ -1,17 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * SMC 37C93X initialization code
  */
 
 #include <linux/kernel.h>
 
-#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 
 #include <asm/hwrpb.h>
 #include <asm/io.h>
-#include <asm/segment.h>
 
 #define SMC_DEBUG 0
 
@@ -80,7 +79,6 @@
 static unsigned long __init SMCConfigState(unsigned long baseAddr)
 {
 	unsigned char devId;
-	unsigned char devRev;
 
 	unsigned long configPort;
 	unsigned long indexPort;
@@ -101,7 +99,7 @@ static unsigned long __init SMCConfigState(unsigned long baseAddr)
 		devId = inb(dataPort);
 		if (devId == VALID_DEVICE_ID) {
 			outb(DEVICE_REV, indexPort);
-			devRev = inb(dataPort);
+			/* unsigned char devRev = */ inb(dataPort);
 			break;
 		}
 		else

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* linux/spi/ads7846.h */
 
 /* Touchscreen characteristics vary between boards and models.  The
@@ -12,11 +13,13 @@ enum ads7846_filter {
 };
 
 struct ads7846_platform_data {
-	u16	model;			/* 7843, 7845, 7846. */
+	u16	model;			/* 7843, 7845, 7846, 7873. */
 	u16	vref_delay_usecs;	/* 0 for external vref; etc */
-	u16	vref_mv;		/* external vref value, milliVolts */
+	u16	vref_mv;		/* external vref value, milliVolts
+					 * ads7846: if 0, use internal vref */
 	bool	keep_vref_on;		/* set to keep vref on for differential
 					 * measurements as well */
+	bool	swap_xy;		/* swap x and y axes */
 
 	/* Settling time of the analog signals; a function of Vcc and the
 	 * capacitance on the X/Y drivers.  If set to non-zero, two samples
@@ -43,10 +46,17 @@ struct ads7846_platform_data {
 	u16	debounce_tol;		/* tolerance used for filtering */
 	u16	debounce_rep;		/* additional consecutive good readings
 					 * required after the first two */
+	int	gpio_pendown;		/* the GPIO used to decide the pendown
+					 * state if get_pendown_state == NULL */
+	int	gpio_pendown_debounce;	/* platform specific debounce time for
+					 * the gpio_pendown */
 	int	(*get_pendown_state)(void);
-	int	(*filter_init)	(struct ads7846_platform_data *pdata,
+	int	(*filter_init)	(const struct ads7846_platform_data *pdata,
 				 void **filter_data);
 	int	(*filter)	(void *filter_data, int data_idx, int *val);
 	void	(*filter_cleanup)(void *filter_data);
+	void	(*wait_for_sync)(void);
+	bool	wakeup;
+	unsigned long irq_flags;
 };
 

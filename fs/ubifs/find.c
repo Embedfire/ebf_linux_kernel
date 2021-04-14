@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of UBIFS.
  *
  * Copyright (C) 2006-2008 Nokia Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 51
- * Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  *
  * Authors: Artem Bityutskiy (Битюцкий Артём)
  *          Adrian Hunter
@@ -183,18 +171,18 @@ static const struct ubifs_lprops *scan_for_dirty(struct ubifs_info *c,
 				    &data);
 	if (err)
 		return ERR_PTR(err);
-	ubifs_assert(data.lnum >= c->main_first && data.lnum < c->leb_cnt);
+	ubifs_assert(c, data.lnum >= c->main_first && data.lnum < c->leb_cnt);
 	c->lscan_lnum = data.lnum;
 	lprops = ubifs_lpt_lookup_dirty(c, data.lnum);
 	if (IS_ERR(lprops))
 		return lprops;
-	ubifs_assert(lprops->lnum == data.lnum);
-	ubifs_assert(lprops->free + lprops->dirty >= min_space);
-	ubifs_assert(lprops->dirty >= c->dead_wm ||
+	ubifs_assert(c, lprops->lnum == data.lnum);
+	ubifs_assert(c, lprops->free + lprops->dirty >= min_space);
+	ubifs_assert(c, lprops->dirty >= c->dead_wm ||
 		     (pick_free &&
 		      lprops->free + lprops->dirty == c->leb_size));
-	ubifs_assert(!(lprops->flags & LPROPS_TAKEN));
-	ubifs_assert(!exclude_index || !(lprops->flags & LPROPS_INDEX));
+	ubifs_assert(c, !(lprops->flags & LPROPS_TAKEN));
+	ubifs_assert(c, !exclude_index || !(lprops->flags & LPROPS_INDEX));
 	return lprops;
 }
 
@@ -252,8 +240,8 @@ int ubifs_find_dirty_leb(struct ubifs_info *c, struct ubifs_lprops *ret_lp,
 		 * But if the index takes fewer LEBs than it is reserved for it,
 		 * this function must avoid picking those reserved LEBs.
 		 */
-		if (c->min_idx_lebs >= c->lst.idx_lebs) {
-			rsvd_idx_lebs = c->min_idx_lebs -  c->lst.idx_lebs;
+		if (c->bi.min_idx_lebs >= c->lst.idx_lebs) {
+			rsvd_idx_lebs = c->bi.min_idx_lebs -  c->lst.idx_lebs;
 			exclude_index = 1;
 		}
 		spin_unlock(&c->space_lock);
@@ -276,7 +264,7 @@ int ubifs_find_dirty_leb(struct ubifs_info *c, struct ubifs_lprops *ret_lp,
 			pick_free = 0;
 	} else {
 		spin_lock(&c->space_lock);
-		exclude_index = (c->min_idx_lebs >= c->lst.idx_lebs);
+		exclude_index = (c->bi.min_idx_lebs >= c->lst.idx_lebs);
 		spin_unlock(&c->space_lock);
 	}
 
@@ -315,7 +303,7 @@ int ubifs_find_dirty_leb(struct ubifs_info *c, struct ubifs_lprops *ret_lp,
 		lp = idx_lp;
 
 	if (lp) {
-		ubifs_assert(lp->free + lp->dirty >= c->dead_wm);
+		ubifs_assert(c, lp->free + lp->dirty >= c->dead_wm);
 		goto found;
 	}
 
@@ -326,7 +314,7 @@ int ubifs_find_dirty_leb(struct ubifs_info *c, struct ubifs_lprops *ret_lp,
 		err = PTR_ERR(lp);
 		goto out;
 	}
-	ubifs_assert(lp->dirty >= c->dead_wm ||
+	ubifs_assert(c, lp->dirty >= c->dead_wm ||
 		     (pick_free && lp->free + lp->dirty == c->leb_size));
 
 found:
@@ -462,15 +450,15 @@ const struct ubifs_lprops *do_find_free_space(struct ubifs_info *c,
 				    &data);
 	if (err)
 		return ERR_PTR(err);
-	ubifs_assert(data.lnum >= c->main_first && data.lnum < c->leb_cnt);
+	ubifs_assert(c, data.lnum >= c->main_first && data.lnum < c->leb_cnt);
 	c->lscan_lnum = data.lnum;
 	lprops = ubifs_lpt_lookup_dirty(c, data.lnum);
 	if (IS_ERR(lprops))
 		return lprops;
-	ubifs_assert(lprops->lnum == data.lnum);
-	ubifs_assert(lprops->free >= min_space);
-	ubifs_assert(!(lprops->flags & LPROPS_TAKEN));
-	ubifs_assert(!(lprops->flags & LPROPS_INDEX));
+	ubifs_assert(c, lprops->lnum == data.lnum);
+	ubifs_assert(c, lprops->free >= min_space);
+	ubifs_assert(c, !(lprops->flags & LPROPS_TAKEN));
+	ubifs_assert(c, !(lprops->flags & LPROPS_INDEX));
 	return lprops;
 }
 
@@ -478,7 +466,7 @@ const struct ubifs_lprops *do_find_free_space(struct ubifs_info *c,
  * ubifs_find_free_space - find a data LEB with free space.
  * @c: the UBIFS file-system description object
  * @min_space: minimum amount of required free space
- * @free: contains amount of free space in the LEB on exit
+ * @offs: contains offset of where free space starts on exit
  * @squeeze: whether to try to find space in a non-empty LEB first
  *
  * This function looks for an LEB with at least @min_space bytes of free space.
@@ -490,7 +478,7 @@ const struct ubifs_lprops *do_find_free_space(struct ubifs_info *c,
  * failed to find a LEB with @min_space bytes of free space and other a negative
  * error codes in case of failure.
  */
-int ubifs_find_free_space(struct ubifs_info *c, int min_space, int *free,
+int ubifs_find_free_space(struct ubifs_info *c, int min_space, int *offs,
 			  int squeeze)
 {
 	const struct ubifs_lprops *lprops;
@@ -501,13 +489,12 @@ int ubifs_find_free_space(struct ubifs_info *c, int min_space, int *free,
 
 	/* Check if there are enough empty LEBs for commit */
 	spin_lock(&c->space_lock);
-	if (c->min_idx_lebs > c->lst.idx_lebs)
-		rsvd_idx_lebs = c->min_idx_lebs -  c->lst.idx_lebs;
+	if (c->bi.min_idx_lebs > c->lst.idx_lebs)
+		rsvd_idx_lebs = c->bi.min_idx_lebs -  c->lst.idx_lebs;
 	else
 		rsvd_idx_lebs = 0;
 	lebs = c->lst.empty_lebs + c->freeable_cnt + c->idx_gc_cnt -
 	       c->lst.taken_empty_lebs;
-	ubifs_assert(lebs + c->lst.idx_lebs >= c->min_idx_lebs);
 	if (rsvd_idx_lebs < lebs)
 		/*
 		 * OK to allocate an empty LEB, but we still don't want to go
@@ -559,10 +546,10 @@ int ubifs_find_free_space(struct ubifs_info *c, int min_space, int *free,
 		spin_unlock(&c->space_lock);
 	}
 
-	*free = lprops->free;
+	*offs = c->leb_size - lprops->free;
 	ubifs_release_lprops(c);
 
-	if (*free == c->leb_size) {
+	if (*offs == 0) {
 		/*
 		 * Ensure that empty LEBs have been unmapped. They may not have
 		 * been, for example, because of an unclean unmount.  Also
@@ -574,8 +561,8 @@ int ubifs_find_free_space(struct ubifs_info *c, int min_space, int *free,
 			return err;
 	}
 
-	dbg_find("found LEB %d, free %d", lnum, *free);
-	ubifs_assert(*free >= min_space);
+	dbg_find("found LEB %d, free %d", lnum, c->leb_size - *offs);
+	ubifs_assert(c, *offs <= c->leb_size - min_space);
 	return lnum;
 
 out:
@@ -633,7 +620,7 @@ static int scan_for_idx_cb(struct ubifs_info *c,
  */
 static const struct ubifs_lprops *scan_for_leb_for_idx(struct ubifs_info *c)
 {
-	struct ubifs_lprops *lprops;
+	const struct ubifs_lprops *lprops;
 	struct scan_data data;
 	int err;
 
@@ -643,15 +630,15 @@ static const struct ubifs_lprops *scan_for_leb_for_idx(struct ubifs_info *c)
 				    &data);
 	if (err)
 		return ERR_PTR(err);
-	ubifs_assert(data.lnum >= c->main_first && data.lnum < c->leb_cnt);
+	ubifs_assert(c, data.lnum >= c->main_first && data.lnum < c->leb_cnt);
 	c->lscan_lnum = data.lnum;
 	lprops = ubifs_lpt_lookup_dirty(c, data.lnum);
 	if (IS_ERR(lprops))
 		return lprops;
-	ubifs_assert(lprops->lnum == data.lnum);
-	ubifs_assert(lprops->free + lprops->dirty == c->leb_size);
-	ubifs_assert(!(lprops->flags & LPROPS_TAKEN));
-	ubifs_assert(!(lprops->flags & LPROPS_INDEX));
+	ubifs_assert(c, lprops->lnum == data.lnum);
+	ubifs_assert(c, lprops->free + lprops->dirty == c->leb_size);
+	ubifs_assert(c, !(lprops->flags & LPROPS_TAKEN));
+	ubifs_assert(c, !(lprops->flags & LPROPS_INDEX));
 	return lprops;
 }
 
@@ -682,8 +669,16 @@ int ubifs_find_free_leb_for_idx(struct ubifs_info *c)
 	if (!lprops) {
 		lprops = ubifs_fast_find_freeable(c);
 		if (!lprops) {
-			ubifs_assert(c->freeable_cnt == 0);
-			if (c->lst.empty_lebs - c->lst.taken_empty_lebs > 0) {
+			/*
+			 * The first condition means the following: go scan the
+			 * LPT if there are uncategorized lprops, which means
+			 * there may be freeable LEBs there (UBIFS does not
+			 * store the information about freeable LEBs in the
+			 * master node).
+			 */
+			if (c->in_a_category_cnt != c->main_lebs ||
+			    c->lst.empty_lebs - c->lst.taken_empty_lebs > 0) {
+				ubifs_assert(c, c->freeable_cnt == 0);
 				lprops = scan_for_leb_for_idx(c);
 				if (IS_ERR(lprops)) {
 					err = PTR_ERR(lprops);
@@ -740,15 +735,6 @@ static int cmp_dirty_idx(const struct ubifs_lprops **a,
 	return lpa->dirty + lpa->free - lpb->dirty - lpb->free;
 }
 
-static void swap_dirty_idx(struct ubifs_lprops **a, struct ubifs_lprops **b,
-			   int size)
-{
-	struct ubifs_lprops *t = *a;
-
-	*a = *b;
-	*b = t;
-}
-
 /**
  * ubifs_save_dirty_idx_lnums - save an array of the most dirty index LEB nos.
  * @c: the UBIFS file-system description object
@@ -768,8 +754,7 @@ int ubifs_save_dirty_idx_lnums(struct ubifs_info *c)
 	       sizeof(void *) * c->dirty_idx.cnt);
 	/* Sort it so that the dirtiest is now at the end */
 	sort(c->dirty_idx.arr, c->dirty_idx.cnt, sizeof(void *),
-	     (int (*)(const void *, const void *))cmp_dirty_idx,
-	     (void (*)(void *, void *, int))swap_dirty_idx);
+	     (int (*)(const void *, const void *))cmp_dirty_idx, NULL);
 	dbg_find("found %d dirty index LEBs", c->dirty_idx.cnt);
 	if (c->dirty_idx.cnt)
 		dbg_find("dirtiest index LEB is %d with dirty %d and free %d",
@@ -863,15 +848,15 @@ static int find_dirty_idx_leb(struct ubifs_info *c)
 	if (err)
 		return err;
 found:
-	ubifs_assert(data.lnum >= c->main_first && data.lnum < c->leb_cnt);
+	ubifs_assert(c, data.lnum >= c->main_first && data.lnum < c->leb_cnt);
 	c->lscan_lnum = data.lnum;
 	lprops = ubifs_lpt_lookup_dirty(c, data.lnum);
 	if (IS_ERR(lprops))
 		return PTR_ERR(lprops);
-	ubifs_assert(lprops->lnum == data.lnum);
-	ubifs_assert(lprops->free + lprops->dirty >= c->min_idx_node_sz);
-	ubifs_assert(!(lprops->flags & LPROPS_TAKEN));
-	ubifs_assert((lprops->flags & LPROPS_INDEX));
+	ubifs_assert(c, lprops->lnum == data.lnum);
+	ubifs_assert(c, lprops->free + lprops->dirty >= c->min_idx_node_sz);
+	ubifs_assert(c, !(lprops->flags & LPROPS_TAKEN));
+	ubifs_assert(c, (lprops->flags & LPROPS_INDEX));
 
 	dbg_find("found dirty LEB %d, free %d, dirty %d, flags %#x",
 		 lprops->lnum, lprops->free, lprops->dirty, lprops->flags);
@@ -902,11 +887,11 @@ static int get_idx_gc_leb(struct ubifs_info *c)
 	 * it is needed now for this commit.
 	 */
 	lp = ubifs_lpt_lookup_dirty(c, lnum);
-	if (unlikely(IS_ERR(lp)))
+	if (IS_ERR(lp))
 		return PTR_ERR(lp);
 	lp = ubifs_change_lp(c, lp, LPROPS_NC, LPROPS_NC,
 			     lp->flags | LPROPS_INDEX, -1);
-	if (unlikely(IS_ERR(lp)))
+	if (IS_ERR(lp))
 		return PTR_ERR(lp);
 	dbg_find("LEB %d, dirty %d and free %d flags %#x",
 		 lp->lnum, lp->dirty, lp->free, lp->flags);
@@ -940,8 +925,8 @@ static int find_dirtiest_idx_leb(struct ubifs_info *c)
 	}
 	dbg_find("LEB %d, dirty %d and free %d flags %#x", lp->lnum, lp->dirty,
 		 lp->free, lp->flags);
-	ubifs_assert(lp->flags | LPROPS_TAKEN);
-	ubifs_assert(lp->flags | LPROPS_INDEX);
+	ubifs_assert(c, lp->flags & LPROPS_TAKEN);
+	ubifs_assert(c, lp->flags & LPROPS_INDEX);
 	return lnum;
 }
 

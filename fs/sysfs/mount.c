@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * fs/sysfs/symlink.c - operations for initializing and mounting sysfs
  *
@@ -5,113 +6,110 @@
  * Copyright (c) 2007 SUSE Linux Products GmbH
  * Copyright (c) 2007 Tejun Heo <teheo@suse.de>
  *
- * This file is released under the GPLv2.
- *
- * Please see Documentation/filesystems/sysfs.txt for more information.
+ * Please see Documentation/filesystems/sysfs.rst for more information.
  */
 
-#define DEBUG 
-
 #include <linux/fs.h>
+#include <linux/magic.h>
 #include <linux/mount.h>
-#include <linux/pagemap.h>
 #include <linux/init.h>
+#include <linux/slab.h>
+#include <linux/user_namespace.h>
+#include <linux/fs_context.h>
+#include <net/net_namespace.h>
 
 #include "sysfs.h"
 
-/* Random magic number */
-#define SYSFS_MAGIC 0x62656572
+static struct kernfs_root *sysfs_root;
+struct kernfs_node *sysfs_root_kn;
 
-static struct vfsmount *sysfs_mount;
-struct super_block * sysfs_sb = NULL;
-struct kmem_cache *sysfs_dir_cachep;
-
-static const struct super_operations sysfs_ops = {
-	.statfs		= simple_statfs,
-	.drop_inode	= generic_delete_inode,
-};
-
-struct sysfs_dirent sysfs_root = {
-	.s_name		= "",
-	.s_count	= ATOMIC_INIT(1),
-	.s_flags	= SYSFS_DIR,
-	.s_mode		= S_IFDIR | S_IRWXU | S_IRUGO | S_IXUGO,
-	.s_ino		= 1,
-};
-
-static int sysfs_fill_super(struct super_block *sb, void *data, int silent)
+static int sysfs_get_tree(struct fs_context *fc)
 {
-	struct inode *inode;
-	struct dentry *root;
+	struct kernfs_fs_context *kfc = fc->fs_private;
+	int ret;
 
-	sb->s_blocksize = PAGE_CACHE_SIZE;
-	sb->s_blocksize_bits = PAGE_CACHE_SHIFT;
-	sb->s_magic = SYSFS_MAGIC;
-	sb->s_op = &sysfs_ops;
-	sb->s_time_gran = 1;
-	sysfs_sb = sb;
+	ret = kernfs_get_tree(fc);
+	if (ret)
+		return ret;
 
-	/* get root inode, initialize and unlock it */
-	inode = sysfs_get_inode(&sysfs_root);
-	if (!inode) {
-		pr_debug("sysfs: could not get root inode\n");
-		return -ENOMEM;
-	}
-
-	/* instantiate and link root dentry */
-	root = d_alloc_root(inode);
-	if (!root) {
-		pr_debug("%s: could not get root dentry!\n",__func__);
-		iput(inode);
-		return -ENOMEM;
-	}
-	root->d_fsdata = &sysfs_root;
-	sb->s_root = root;
+	if (kfc->new_sb_created)
+		fc->root->d_sb->s_iflags |= SB_I_USERNS_VISIBLE;
 	return 0;
 }
 
-static int sysfs_get_sb(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data, struct vfsmount *mnt)
+static void sysfs_fs_context_free(struct fs_context *fc)
 {
-	return get_sb_single(fs_type, flags, data, sysfs_fill_super, mnt);
+	struct kernfs_fs_context *kfc = fc->fs_private;
+
+	if (kfc->ns_tag)
+		kobj_ns_drop(KOBJ_NS_TYPE_NET, kfc->ns_tag);
+	kernfs_free_fs_context(fc);
+	kfree(kfc);
+}
+
+static const struct fs_context_operations sysfs_fs_context_ops = {
+	.free		= sysfs_fs_context_free,
+	.get_tree	= sysfs_get_tree,
+};
+
+static int sysfs_init_fs_context(struct fs_context *fc)
+{
+	struct kernfs_fs_context *kfc;
+	struct net *netns;
+
+	if (!(fc->sb_flags & SB_KERNMOUNT)) {
+		if (!kobj_ns_current_may_mount(KOBJ_NS_TYPE_NET))
+			return -EPERM;
+	}
+
+	kfc = kzalloc(sizeof(struct kernfs_fs_context), GFP_KERNEL);
+	if (!kfc)
+		return -ENOMEM;
+
+	kfc->ns_tag = netns = kobj_ns_grab_current(KOBJ_NS_TYPE_NET);
+	kfc->root = sysfs_root;
+	kfc->magic = SYSFS_MAGIC;
+	fc->fs_private = kfc;
+	fc->ops = &sysfs_fs_context_ops;
+	if (netns) {
+		put_user_ns(fc->user_ns);
+		fc->user_ns = get_user_ns(netns->user_ns);
+	}
+	fc->global = true;
+	return 0;
+}
+
+static void sysfs_kill_sb(struct super_block *sb)
+{
+	void *ns = (void *)kernfs_super_ns(sb);
+
+	kernfs_kill_sb(sb);
+	kobj_ns_drop(KOBJ_NS_TYPE_NET, ns);
 }
 
 static struct file_system_type sysfs_fs_type = {
-	.name		= "sysfs",
-	.get_sb		= sysfs_get_sb,
-	.kill_sb	= kill_anon_super,
+	.name			= "sysfs",
+	.init_fs_context	= sysfs_init_fs_context,
+	.kill_sb		= sysfs_kill_sb,
+	.fs_flags		= FS_USERNS_MOUNT,
 };
 
 int __init sysfs_init(void)
 {
-	int err = -ENOMEM;
+	int err;
 
-	sysfs_dir_cachep = kmem_cache_create("sysfs_dir_cache",
-					      sizeof(struct sysfs_dirent),
-					      0, 0, NULL);
-	if (!sysfs_dir_cachep)
-		goto out;
+	sysfs_root = kernfs_create_root(NULL, KERNFS_ROOT_EXTRA_OPEN_PERM_CHECK,
+					NULL);
+	if (IS_ERR(sysfs_root))
+		return PTR_ERR(sysfs_root);
 
-	err = sysfs_inode_init();
-	if (err)
-		goto out_err;
+	sysfs_root_kn = sysfs_root->kn;
 
 	err = register_filesystem(&sysfs_fs_type);
-	if (!err) {
-		sysfs_mount = kern_mount(&sysfs_fs_type);
-		if (IS_ERR(sysfs_mount)) {
-			printk(KERN_ERR "sysfs: could not mount!\n");
-			err = PTR_ERR(sysfs_mount);
-			sysfs_mount = NULL;
-			unregister_filesystem(&sysfs_fs_type);
-			goto out_err;
-		}
-	} else
-		goto out_err;
-out:
-	return err;
-out_err:
-	kmem_cache_destroy(sysfs_dir_cachep);
-	sysfs_dir_cachep = NULL;
-	goto out;
+	if (err) {
+		kernfs_destroy_root(sysfs_root);
+		return err;
+	}
+
+	return 0;
 }

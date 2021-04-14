@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /* ATM driver model support. */
 
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/kobject.h>
 #include <linux/atmdev.h>
@@ -13,97 +15,92 @@ static ssize_t show_type(struct device *cdev,
 			 struct device_attribute *attr, char *buf)
 {
 	struct atm_dev *adev = to_atm_dev(cdev);
-	return sprintf(buf, "%s\n", adev->type);
+
+	return scnprintf(buf, PAGE_SIZE, "%s\n", adev->type);
 }
 
 static ssize_t show_address(struct device *cdev,
 			    struct device_attribute *attr, char *buf)
 {
-	char *pos = buf;
 	struct atm_dev *adev = to_atm_dev(cdev);
-	int i;
 
-	for (i = 0; i < (ESI_LEN - 1); i++)
-		pos += sprintf(pos, "%02x:", adev->esi[i]);
-	pos += sprintf(pos, "%02x\n", adev->esi[i]);
-
-	return pos - buf;
+	return scnprintf(buf, PAGE_SIZE, "%pM\n", adev->esi);
 }
 
 static ssize_t show_atmaddress(struct device *cdev,
 			       struct device_attribute *attr, char *buf)
 {
 	unsigned long flags;
-	char *pos = buf;
 	struct atm_dev *adev = to_atm_dev(cdev);
 	struct atm_dev_addr *aaddr;
-	int bin[] = { 1, 2, 10, 6, 1 }, *fmt = bin;
-	int i, j;
+	int count = 0;
 
 	spin_lock_irqsave(&adev->lock, flags);
 	list_for_each_entry(aaddr, &adev->local, entry) {
-		for(i = 0, j = 0; i < ATM_ESA_LEN; ++i, ++j) {
-			if (j == *fmt) {
-				pos += sprintf(pos, ".");
-				++fmt;
-				j = 0;
-			}
-			pos += sprintf(pos, "%02x", aaddr->addr.sas_addr.prv[i]);
-		}
-		pos += sprintf(pos, "\n");
+		count += scnprintf(buf + count, PAGE_SIZE - count,
+				   "%1phN.%2phN.%10phN.%6phN.%1phN\n",
+				   &aaddr->addr.sas_addr.prv[0],
+				   &aaddr->addr.sas_addr.prv[1],
+				   &aaddr->addr.sas_addr.prv[3],
+				   &aaddr->addr.sas_addr.prv[13],
+				   &aaddr->addr.sas_addr.prv[19]);
 	}
 	spin_unlock_irqrestore(&adev->lock, flags);
 
-	return pos - buf;
+	return count;
+}
+
+static ssize_t show_atmindex(struct device *cdev,
+			     struct device_attribute *attr, char *buf)
+{
+	struct atm_dev *adev = to_atm_dev(cdev);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", adev->number);
 }
 
 static ssize_t show_carrier(struct device *cdev,
 			    struct device_attribute *attr, char *buf)
 {
-	char *pos = buf;
 	struct atm_dev *adev = to_atm_dev(cdev);
 
-	pos += sprintf(pos, "%d\n",
-		       adev->signal == ATM_PHY_SIG_LOST ? 0 : 1);
-
-	return pos - buf;
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 adev->signal == ATM_PHY_SIG_LOST ? 0 : 1);
 }
 
 static ssize_t show_link_rate(struct device *cdev,
 			      struct device_attribute *attr, char *buf)
 {
-	char *pos = buf;
 	struct atm_dev *adev = to_atm_dev(cdev);
 	int link_rate;
 
 	/* show the link rate, not the data rate */
 	switch (adev->link_rate) {
-		case ATM_OC3_PCR:
-			link_rate = 155520000;
-			break;
-		case ATM_OC12_PCR:
-			link_rate = 622080000;
-			break;
-		case ATM_25_PCR:
-			link_rate = 25600000;
-			break;
-		default:
-			link_rate = adev->link_rate * 8 * 53;
+	case ATM_OC3_PCR:
+		link_rate = 155520000;
+		break;
+	case ATM_OC12_PCR:
+		link_rate = 622080000;
+		break;
+	case ATM_25_PCR:
+		link_rate = 25600000;
+		break;
+	default:
+		link_rate = adev->link_rate * 8 * 53;
 	}
-	pos += sprintf(pos, "%d\n", link_rate);
-
-	return pos - buf;
+	return scnprintf(buf, PAGE_SIZE, "%d\n", link_rate);
 }
 
-static DEVICE_ATTR(address, S_IRUGO, show_address, NULL);
-static DEVICE_ATTR(atmaddress, S_IRUGO, show_atmaddress, NULL);
-static DEVICE_ATTR(carrier, S_IRUGO, show_carrier, NULL);
-static DEVICE_ATTR(type, S_IRUGO, show_type, NULL);
-static DEVICE_ATTR(link_rate, S_IRUGO, show_link_rate, NULL);
+static DEVICE_ATTR(address, 0444, show_address, NULL);
+static DEVICE_ATTR(atmaddress, 0444, show_atmaddress, NULL);
+static DEVICE_ATTR(atmindex, 0444, show_atmindex, NULL);
+static DEVICE_ATTR(carrier, 0444, show_carrier, NULL);
+static DEVICE_ATTR(type, 0444, show_type, NULL);
+static DEVICE_ATTR(link_rate, 0444, show_link_rate, NULL);
 
 static struct device_attribute *atm_attrs[] = {
 	&dev_attr_atmaddress,
 	&dev_attr_address,
+	&dev_attr_atmindex,
 	&dev_attr_carrier,
 	&dev_attr_type,
 	&dev_attr_link_rate,
@@ -141,15 +138,16 @@ static struct class atm_class = {
 	.dev_uevent		= atm_uevent,
 };
 
-int atm_register_sysfs(struct atm_dev *adev)
+int atm_register_sysfs(struct atm_dev *adev, struct device *parent)
 {
 	struct device *cdev = &adev->class_dev;
 	int i, j, err;
 
 	cdev->class = &atm_class;
+	cdev->parent = parent;
 	dev_set_drvdata(cdev, adev);
 
-	snprintf(cdev->bus_id, BUS_ID_SIZE, "%s%d", adev->type, adev->number);
+	dev_set_name(cdev, "%s%d", adev->type, adev->number);
 	err = device_register(cdev);
 	if (err < 0)
 		return err;

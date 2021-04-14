@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* drivers/video/backlight/ili9320.h
  *
  * ILI9320 LCD controller driver core.
@@ -6,10 +7,6 @@
  *	Ben Dooks <ben@simtec.co.uk>
  *
  * http://armlinux.simtec.co.uk/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
 */
 
 /* Holder for register and value pairs. */
@@ -63,7 +60,7 @@ extern int ili9320_write(struct ili9320 *ili,
 			 unsigned int reg, unsigned int value);
 
 extern int ili9320_write_regs(struct ili9320 *ili,
-			      struct ili9320_reg *values,
+			      const struct ili9320_reg *values,
 			      int nr_values);
 
 /* Device probe */
@@ -76,5 +73,5 @@ extern void ili9320_shutdown(struct ili9320 *lcd);
 
 /* PM */
 
-extern int ili9320_suspend(struct ili9320 *lcd, pm_message_t state);
+extern int ili9320_suspend(struct ili9320 *lcd);
 extern int ili9320_resume(struct ili9320 *lcd);

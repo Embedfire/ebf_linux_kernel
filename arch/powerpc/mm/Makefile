@@ -1,26 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for the linux ppc-specific parts of the memory manager.
 #
 
-ifeq ($(CONFIG_PPC64),y)
-EXTRA_CFLAGS	+= -mno-minimal-toc
-endif
+ccflags-$(CONFIG_PPC64)	:= $(NO_MINIMAL_TOC)
 
-obj-y				:= fault.o mem.o \
-				   init_$(CONFIG_WORD_SIZE).o \
-				   pgtable_$(CONFIG_WORD_SIZE).o \
-				   mmu_context_$(CONFIG_WORD_SIZE).o
-hash-$(CONFIG_PPC_NATIVE)	:= hash_native_64.o
-obj-$(CONFIG_PPC64)		+= hash_utils_64.o \
-				   slb_low.o slb.o stab.o \
-				   gup.o mmap.o $(hash-y)
-obj-$(CONFIG_PPC_STD_MMU_32)	+= ppc_mmu_32.o
-obj-$(CONFIG_PPC_STD_MMU)	+= hash_low_$(CONFIG_WORD_SIZE).o \
-				   tlb_$(CONFIG_WORD_SIZE).o
-obj-$(CONFIG_40x)		+= 40x_mmu.o
-obj-$(CONFIG_44x)		+= 44x_mmu.o
-obj-$(CONFIG_FSL_BOOKE)		+= fsl_booke_mmu.o
+obj-y				:= fault.o mem.o pgtable.o mmap.o maccess.o \
+				   init_$(BITS).o pgtable_$(BITS).o \
+				   pgtable-frag.o ioremap.o ioremap_$(BITS).o \
+				   init-common.o mmu_context.o drmem.o
+obj-$(CONFIG_PPC_MMU_NOHASH)	+= nohash/
+obj-$(CONFIG_PPC_BOOK3S_32)	+= book3s32/
+obj-$(CONFIG_PPC_BOOK3S_64)	+= book3s64/
 obj-$(CONFIG_NEED_MULTIPLE_NODES) += numa.o
 obj-$(CONFIG_PPC_MM_SLICES)	+= slice.o
 obj-$(CONFIG_HUGETLB_PAGE)	+= hugetlbpage.o
-obj-$(CONFIG_PPC_SUBPAGE_PROT)	+= subpage-prot.o
+obj-$(CONFIG_NOT_COHERENT_CACHE) += dma-noncoherent.o
+obj-$(CONFIG_HIGHMEM)		+= highmem.o
+obj-$(CONFIG_PPC_COPRO_BASE)	+= copro_fault.o
+obj-$(CONFIG_PPC_PTDUMP)	+= ptdump/
+obj-$(CONFIG_KASAN)		+= kasan/

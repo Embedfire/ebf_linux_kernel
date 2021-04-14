@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2007 David Gibson, IBM Corporation.
  *
@@ -8,10 +9,9 @@
  *   Eugene Surovegin <eugene.surovegin@zultys.com> or <ebs@ebshome.net>
  *   Copyright (c) 2003, 2004 Zultys Technologies
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
+ * Copyright (C) 2009 Wind River Systems, Inc.
+ *   Updated for supporting PPC405EX on Kilauea.
+ *   Tiejun Chen <tiejun.chen@windriver.com>
  */
 #include <stddef.h>
 #include "types.h"
@@ -158,6 +158,46 @@ void ibm440spe_fixup_memsize(void)
 
 #define DDR_GET_VAL(val, mask, shift)	(((val) >> (shift)) & (mask))
 
+/*
+ * Some U-Boot versions set the number of chipselects to two
+ * for Sequoia/Rainier boards while they only have one chipselect
+ * hardwired. Hardcode the number of chipselects to one
+ * for sequioa/rainer board models or read the actual value
+ * from the memory controller register DDR0_10 otherwise.
+ */
+static inline u32 ibm4xx_denali_get_cs(void)
+{
+	void *devp;
+	char model[64];
+	u32 val, cs;
+
+	devp = finddevice("/");
+	if (!devp)
+		goto read_cs;
+
+	if (getprop(devp, "model", model, sizeof(model)) <= 0)
+		goto read_cs;
+
+	model[sizeof(model)-1] = 0;
+
+	if (!strcmp(model, "amcc,sequoia") ||
+	    !strcmp(model, "amcc,rainier"))
+		return 1;
+
+read_cs:
+	/* get CS value */
+	val = SDRAM0_READ(DDR0_10);
+
+	val = DDR_GET_VAL(val, DDR_CS_MAP, DDR_CS_MAP_SHIFT);
+	cs = 0;
+	while (val) {
+		if (val & 0x1)
+			cs++;
+		val = val >> 1;
+	}
+	return cs;
+}
+
 void ibm4xx_denali_fixup_memsize(void)
 {
 	u32 val, max_cs, max_col, max_row;
@@ -173,17 +213,7 @@ void ibm4xx_denali_fixup_memsize(void)
 	max_col = DDR_GET_VAL(val, DDR_MAX_COL_REG, DDR_MAX_COL_REG_SHIFT);
 	max_row = DDR_GET_VAL(val, DDR_MAX_ROW_REG, DDR_MAX_ROW_REG_SHIFT);
 
-	/* get CS value */
-	val = SDRAM0_READ(DDR0_10);
-
-	val = DDR_GET_VAL(val, DDR_CS_MAP, DDR_CS_MAP_SHIFT);
-	cs = 0;
-	while (val) {
-		if (val & 0x1)
-			cs++;
-		val = val >> 1;
-	}
-
+	cs = ibm4xx_denali_get_cs();
 	if (!cs)
 		fatal("No memory installed\n");
 	if (cs > max_cs)
@@ -193,12 +223,12 @@ void ibm4xx_denali_fixup_memsize(void)
 	val = SDRAM0_READ(DDR0_14);
 
 	if (DDR_GET_VAL(val, DDR_REDUC, DDR_REDUC_SHIFT))
-		dpath = 8; /* 64 bits */
-	else
 		dpath = 4; /* 32 bits */
+	else
+		dpath = 8; /* 64 bits */
 
 	/* get address pins (rows) */
- 	val = SDRAM0_READ(DDR0_42);
+	val = SDRAM0_READ(DDR0_42);
 
 	row = DDR_GET_VAL(val, DDR_APIN, DDR_APIN_SHIFT);
 	if (row > max_row)
@@ -485,7 +515,7 @@ void ibm440ep_fixup_clocks(unsigned int sys_clk,
 {
 	unsigned int plb_clk = __ibm440eplike_fixup_clocks(sys_clk, tmr_clk, 0);
 
-	/* serial clocks beed fixup based on int/ext */
+	/* serial clocks need fixup based on int/ext */
 	eplike_fixup_uart_clk(0, "/plb/opb/serial@ef600300", ser_clk, plb_clk);
 	eplike_fixup_uart_clk(1, "/plb/opb/serial@ef600400", ser_clk, plb_clk);
 	eplike_fixup_uart_clk(2, "/plb/opb/serial@ef600500", ser_clk, plb_clk);
@@ -498,7 +528,7 @@ void ibm440gx_fixup_clocks(unsigned int sys_clk,
 {
 	unsigned int plb_clk = __ibm440eplike_fixup_clocks(sys_clk, tmr_clk, 1);
 
-	/* serial clocks beed fixup based on int/ext */
+	/* serial clocks need fixup based on int/ext */
 	eplike_fixup_uart_clk(0, "/plb/opb/serial@40000200", ser_clk, plb_clk);
 	eplike_fixup_uart_clk(1, "/plb/opb/serial@40000300", ser_clk, plb_clk);
 }
@@ -509,10 +539,10 @@ void ibm440spe_fixup_clocks(unsigned int sys_clk,
 {
 	unsigned int plb_clk = __ibm440eplike_fixup_clocks(sys_clk, tmr_clk, 1);
 
-	/* serial clocks beed fixup based on int/ext */
-	eplike_fixup_uart_clk(0, "/plb/opb/serial@10000200", ser_clk, plb_clk);
-	eplike_fixup_uart_clk(1, "/plb/opb/serial@10000300", ser_clk, plb_clk);
-	eplike_fixup_uart_clk(2, "/plb/opb/serial@10000600", ser_clk, plb_clk);
+	/* serial clocks need fixup based on int/ext */
+	eplike_fixup_uart_clk(0, "/plb/opb/serial@f0000200", ser_clk, plb_clk);
+	eplike_fixup_uart_clk(1, "/plb/opb/serial@f0000300", ser_clk, plb_clk);
+	eplike_fixup_uart_clk(2, "/plb/opb/serial@f0000600", ser_clk, plb_clk);
 }
 
 void ibm405gp_fixup_clocks(unsigned int sys_clk, unsigned int ser_clk)
@@ -530,7 +560,7 @@ void ibm405gp_fixup_clocks(unsigned int sys_clk, unsigned int ser_clk)
 		fbdv = 16;
 	cbdv = ((pllmr & 0x00060000) >> 17) + 1; /* CPU:PLB */
 	opdv = ((pllmr & 0x00018000) >> 15) + 1; /* PLB:OPB */
-	ppdv = ((pllmr & 0x00001800) >> 13) + 1; /* PLB:PCI */
+	ppdv = ((pllmr & 0x00006000) >> 13) + 1; /* PLB:PCI */
 	epdv = ((pllmr & 0x00001800) >> 11) + 2; /* PLB:EBC */
 	udiv = ((cpc0_cr0 & 0x3e) >> 1) + 1;
 
@@ -628,4 +658,142 @@ void ibm405ep_fixup_clocks(unsigned int sys_clk)
 	dt_fixup_clock("/plb/ebc", ebc);
 	dt_fixup_clock("/plb/opb/serial@ef600300", uart0);
 	dt_fixup_clock("/plb/opb/serial@ef600400", uart1);
+}
+
+static u8 ibm405ex_fwdv_multi_bits[] = {
+	/* values for:  1 - 16 */
+	0x01, 0x02, 0x0e, 0x09, 0x04, 0x0b, 0x10, 0x0d, 0x0c, 0x05,
+	0x06, 0x0f, 0x0a, 0x07, 0x08, 0x03
+};
+
+u32 ibm405ex_get_fwdva(unsigned long cpr_fwdv)
+{
+	u32 index;
+
+	for (index = 0; index < ARRAY_SIZE(ibm405ex_fwdv_multi_bits); index++)
+		if (cpr_fwdv == (u32)ibm405ex_fwdv_multi_bits[index])
+			return index + 1;
+
+	return 0;
+}
+
+static u8 ibm405ex_fbdv_multi_bits[] = {
+	/* values for:  1 - 100 */
+	0x00, 0xff, 0x7e, 0xfd, 0x7a, 0xf5, 0x6a, 0xd5, 0x2a, 0xd4,
+	0x29, 0xd3, 0x26, 0xcc, 0x19, 0xb3, 0x67, 0xce, 0x1d, 0xbb,
+	0x77, 0xee, 0x5d, 0xba, 0x74, 0xe9, 0x52, 0xa5, 0x4b, 0x96,
+	0x2c, 0xd8, 0x31, 0xe3, 0x46, 0x8d, 0x1b, 0xb7, 0x6f, 0xde,
+	0x3d, 0xfb, 0x76, 0xed, 0x5a, 0xb5, 0x6b, 0xd6, 0x2d, 0xdb,
+	0x36, 0xec, 0x59, 0xb2, 0x64, 0xc9, 0x12, 0xa4, 0x48, 0x91,
+	0x23, 0xc7, 0x0e, 0x9c, 0x38, 0xf0, 0x61, 0xc2, 0x05, 0x8b,
+	0x17, 0xaf, 0x5f, 0xbe, 0x7c, 0xf9, 0x72, 0xe5, 0x4a, 0x95,
+	0x2b, 0xd7, 0x2e, 0xdc, 0x39, 0xf3, 0x66, 0xcd, 0x1a, 0xb4,
+	0x68, 0xd1, 0x22, 0xc4, 0x09, 0x93, 0x27, 0xcf, 0x1e, 0xbc,
+	/* values for:  101 - 200 */
+	0x78, 0xf1, 0x62, 0xc5, 0x0a, 0x94, 0x28, 0xd0, 0x21, 0xc3,
+	0x06, 0x8c, 0x18, 0xb0, 0x60, 0xc1, 0x02, 0x84, 0x08, 0x90,
+	0x20, 0xc0, 0x01, 0x83, 0x07, 0x8f, 0x1f, 0xbf, 0x7f, 0xfe,
+	0x7d, 0xfa, 0x75, 0xea, 0x55, 0xaa, 0x54, 0xa9, 0x53, 0xa6,
+	0x4c, 0x99, 0x33, 0xe7, 0x4e, 0x9d, 0x3b, 0xf7, 0x6e, 0xdd,
+	0x3a, 0xf4, 0x69, 0xd2, 0x25, 0xcb, 0x16, 0xac, 0x58, 0xb1,
+	0x63, 0xc6, 0x0d, 0x9b, 0x37, 0xef, 0x5e, 0xbd, 0x7b, 0xf6,
+	0x6d, 0xda, 0x35, 0xeb, 0x56, 0xad, 0x5b, 0xb6, 0x6c, 0xd9,
+	0x32, 0xe4, 0x49, 0x92, 0x24, 0xc8, 0x11, 0xa3, 0x47, 0x8e,
+	0x1c, 0xb8, 0x70, 0xe1, 0x42, 0x85, 0x0b, 0x97, 0x2f, 0xdf,
+	/* values for:  201 - 255 */
+	0x3e, 0xfc, 0x79, 0xf2, 0x65, 0xca, 0x15, 0xab, 0x57, 0xae,
+	0x5c, 0xb9, 0x73, 0xe6, 0x4d, 0x9a, 0x34, 0xe8, 0x51, 0xa2,
+	0x44, 0x89, 0x13, 0xa7, 0x4f, 0x9e, 0x3c, 0xf8, 0x71, 0xe2,
+	0x45, 0x8a, 0x14, 0xa8, 0x50, 0xa1, 0x43, 0x86, 0x0c, 0x98,
+	0x30, 0xe0, 0x41, 0x82, 0x04, 0x88, 0x10, 0xa0, 0x40, 0x81,
+	0x03, 0x87, 0x0f, 0x9f, 0x3f  /* END */
+};
+
+u32 ibm405ex_get_fbdv(unsigned long cpr_fbdv)
+{
+	u32 index;
+
+	for (index = 0; index < ARRAY_SIZE(ibm405ex_fbdv_multi_bits); index++)
+		if (cpr_fbdv == (u32)ibm405ex_fbdv_multi_bits[index])
+			return index + 1;
+
+	return 0;
+}
+
+void ibm405ex_fixup_clocks(unsigned int sys_clk, unsigned int uart_clk)
+{
+	/* PLL config */
+	u32 pllc  = CPR0_READ(DCRN_CPR0_PLLC);
+	u32 plld  = CPR0_READ(DCRN_CPR0_PLLD);
+	u32 cpud  = CPR0_READ(DCRN_CPR0_PRIMAD);
+	u32 plbd  = CPR0_READ(DCRN_CPR0_PRIMBD);
+	u32 opbd  = CPR0_READ(DCRN_CPR0_OPBD);
+	u32 perd  = CPR0_READ(DCRN_CPR0_PERD);
+
+	/* Dividers */
+	u32 fbdv   = ibm405ex_get_fbdv(__fix_zero((plld >> 24) & 0xff, 1));
+
+	u32 fwdva  = ibm405ex_get_fwdva(__fix_zero((plld >> 16) & 0x0f, 1));
+
+	u32 cpudv0 = __fix_zero((cpud >> 24) & 7, 8);
+
+	/* PLBDV0 is hardwared to 010. */
+	u32 plbdv0 = 2;
+	u32 plb2xdv0 = __fix_zero((plbd >> 16) & 7, 8);
+
+	u32 opbdv0 = __fix_zero((opbd >> 24) & 3, 4);
+
+	u32 perdv0 = __fix_zero((perd >> 24) & 3, 4);
+
+	/* Resulting clocks */
+	u32 cpu, plb, opb, ebc, vco, tb, uart0, uart1;
+
+	/* PLL's VCO is the source for primary forward ? */
+	if (pllc & 0x40000000) {
+		u32 m;
+
+		/* Feedback path */
+		switch ((pllc >> 24) & 7) {
+		case 0:
+			/* PLLOUTx */
+			m = fbdv;
+			break;
+		case 1:
+			/* CPU */
+			m = fbdv * fwdva * cpudv0;
+			break;
+		case 5:
+			/* PERClk */
+			m = fbdv * fwdva * plb2xdv0 * plbdv0 * opbdv0 * perdv0;
+			break;
+		default:
+			printf("WARNING ! Invalid PLL feedback source !\n");
+			goto bypass;
+		}
+
+		vco = (unsigned int)(sys_clk * m);
+	} else {
+bypass:
+		/* Bypass system PLL */
+		vco = 0;
+	}
+
+	/* CPU = VCO / ( FWDVA x CPUDV0) */
+	cpu = vco / (fwdva * cpudv0);
+	/* PLB = VCO / ( FWDVA x PLB2XDV0 x PLBDV0) */
+	plb = vco / (fwdva * plb2xdv0 * plbdv0);
+	/* OPB = PLB / OPBDV0 */
+	opb = plb / opbdv0;
+	/* EBC = OPB / PERDV0 */
+	ebc = opb / perdv0;
+
+	tb = cpu;
+	uart0 = uart1 = uart_clk;
+
+	dt_fixup_cpu_clocks(cpu, tb, 0);
+	dt_fixup_clock("/plb", plb);
+	dt_fixup_clock("/plb/opb", opb);
+	dt_fixup_clock("/plb/opb/ebc", ebc);
+	dt_fixup_clock("/plb/opb/serial@ef600200", uart0);
+	dt_fixup_clock("/plb/opb/serial@ef600300", uart1);
 }

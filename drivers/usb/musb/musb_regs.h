@@ -1,132 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * MUSB OTG driver register defines
  *
  * Copyright 2005 Mentor Graphics Corporation
  * Copyright (C) 2005-2006 by Texas Instruments
  * Copyright (C) 2006-2007 Nokia Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
- * THIS SOFTWARE IS PROVIDED "AS IS" AND ANY EXPRESS OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN
- * NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
- * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
  */
 
 #ifndef __MUSB_REGS_H__
 #define __MUSB_REGS_H__
 
 #define MUSB_EP0_FIFOSIZE	64	/* This is non-configurable */
-
-/*
- * Common USB registers
- */
-
-#define MUSB_FADDR		0x00	/* 8-bit */
-#define MUSB_POWER		0x01	/* 8-bit */
-
-#define MUSB_INTRTX		0x02	/* 16-bit */
-#define MUSB_INTRRX		0x04
-#define MUSB_INTRTXE		0x06
-#define MUSB_INTRRXE		0x08
-#define MUSB_INTRUSB		0x0A	/* 8 bit */
-#define MUSB_INTRUSBE		0x0B	/* 8 bit */
-#define MUSB_FRAME		0x0C
-#define MUSB_INDEX		0x0E	/* 8 bit */
-#define MUSB_TESTMODE		0x0F	/* 8 bit */
-
-/* Get offset for a given FIFO from musb->mregs */
-#ifdef	CONFIG_USB_TUSB6010
-#define MUSB_FIFO_OFFSET(epnum)	(0x200 + ((epnum) * 0x20))
-#else
-#define MUSB_FIFO_OFFSET(epnum)	(0x20 + ((epnum) * 4))
-#endif
-
-/*
- * Additional Control Registers
- */
-
-#define MUSB_DEVCTL		0x60	/* 8 bit */
-
-/* These are always controlled through the INDEX register */
-#define MUSB_TXFIFOSZ		0x62	/* 8-bit (see masks) */
-#define MUSB_RXFIFOSZ		0x63	/* 8-bit (see masks) */
-#define MUSB_TXFIFOADD		0x64	/* 16-bit offset shifted right 3 */
-#define MUSB_RXFIFOADD		0x66	/* 16-bit offset shifted right 3 */
-
-/* REVISIT: vctrl/vstatus: optional vendor utmi+phy register at 0x68 */
-#define MUSB_HWVERS		0x6C	/* 8 bit */
-
-#define MUSB_EPINFO		0x78	/* 8 bit */
-#define MUSB_RAMINFO		0x79	/* 8 bit */
-#define MUSB_LINKINFO		0x7a	/* 8 bit */
-#define MUSB_VPLEN		0x7b	/* 8 bit */
-#define MUSB_HS_EOF1		0x7c	/* 8 bit */
-#define MUSB_FS_EOF1		0x7d	/* 8 bit */
-#define MUSB_LS_EOF1		0x7e	/* 8 bit */
-
-/* Offsets to endpoint registers */
-#define MUSB_TXMAXP		0x00
-#define MUSB_TXCSR		0x02
-#define MUSB_CSR0		MUSB_TXCSR	/* Re-used for EP0 */
-#define MUSB_RXMAXP		0x04
-#define MUSB_RXCSR		0x06
-#define MUSB_RXCOUNT		0x08
-#define MUSB_COUNT0		MUSB_RXCOUNT	/* Re-used for EP0 */
-#define MUSB_TXTYPE		0x0A
-#define MUSB_TYPE0		MUSB_TXTYPE	/* Re-used for EP0 */
-#define MUSB_TXINTERVAL		0x0B
-#define MUSB_NAKLIMIT0		MUSB_TXINTERVAL	/* Re-used for EP0 */
-#define MUSB_RXTYPE		0x0C
-#define MUSB_RXINTERVAL		0x0D
-#define MUSB_FIFOSIZE		0x0F
-#define MUSB_CONFIGDATA		MUSB_FIFOSIZE	/* Re-used for EP0 */
-
-/* Offsets to endpoint registers in indexed model (using INDEX register) */
-#define MUSB_INDEXED_OFFSET(_epnum, _offset)	\
-	(0x10 + (_offset))
-
-/* Offsets to endpoint registers in flat models */
-#define MUSB_FLAT_OFFSET(_epnum, _offset)	\
-	(0x100 + (0x10*(_epnum)) + (_offset))
-
-#ifdef CONFIG_USB_TUSB6010
-/* TUSB6010 EP0 configuration register is special */
-#define MUSB_TUSB_OFFSET(_epnum, _offset)	\
-	(0x10 + _offset)
-#include "tusb6010.h"		/* Needed "only" for TUSB_EP0_CONF */
-#endif
-
-/* "bus control"/target registers, for host side multipoint (external hubs) */
-#define MUSB_TXFUNCADDR		0x00
-#define MUSB_TXHUBADDR		0x02
-#define MUSB_TXHUBPORT		0x03
-
-#define MUSB_RXFUNCADDR		0x04
-#define MUSB_RXHUBADDR		0x06
-#define MUSB_RXHUBPORT		0x07
-
-#define MUSB_BUSCTL_OFFSET(_epnum, _offset) \
-	(0x80 + (8*(_epnum)) + (_offset))
 
 /*
  * MUSB Register bits
@@ -162,6 +46,20 @@
 #define MUSB_DEVCTL_HM		0x04
 #define MUSB_DEVCTL_HR		0x02
 #define MUSB_DEVCTL_SESSION	0x01
+
+/* BABBLE_CTL */
+#define MUSB_BABBLE_FORCE_TXIDLE	0x80
+#define MUSB_BABBLE_SW_SESSION_CTRL	0x40
+#define MUSB_BABBLE_STUCK_J		0x20
+#define MUSB_BABBLE_RCV_DISABLE		0x04
+
+/* MUSB ULPI VBUSCONTROL */
+#define MUSB_ULPI_USE_EXTVBUS	0x01
+#define MUSB_ULPI_USE_EXTVBUSIND 0x02
+/* ULPI_REG_CONTROL */
+#define MUSB_ULPI_REG_REQ	(1 << 0)
+#define MUSB_ULPI_REG_CMPLT	(1 << 1)
+#define MUSB_ULPI_RDN_WR	(1 << 2)
 
 /* TESTMODE */
 #define MUSB_TEST_FORCE_HOST	0x80
@@ -228,7 +126,6 @@
 
 /* TXCSR in Peripheral and Host mode */
 #define MUSB_TXCSR_AUTOSET		0x8000
-#define MUSB_TXCSR_MODE			0x2000
 #define MUSB_TXCSR_DMAENAB		0x1000
 #define MUSB_TXCSR_FRCDATATOG		0x0800
 #define MUSB_TXCSR_DMAMODE		0x0400
@@ -296,5 +193,170 @@
 
 /* HUBADDR */
 #define MUSB_HUBADDR_MULTI_TT		0x80
+
+
+/*
+ * Common USB registers
+ */
+
+#define MUSB_FADDR		0x00	/* 8-bit */
+#define MUSB_POWER		0x01	/* 8-bit */
+
+#define MUSB_INTRTX		0x02	/* 16-bit */
+#define MUSB_INTRRX		0x04
+#define MUSB_INTRTXE		0x06
+#define MUSB_INTRRXE		0x08
+#define MUSB_INTRUSB		0x0A	/* 8 bit */
+#define MUSB_INTRUSBE		0x0B	/* 8 bit */
+#define MUSB_FRAME		0x0C
+#define MUSB_INDEX		0x0E	/* 8 bit */
+#define MUSB_TESTMODE		0x0F	/* 8 bit */
+
+/*
+ * Additional Control Registers
+ */
+
+#define MUSB_DEVCTL		0x60	/* 8 bit */
+#define MUSB_BABBLE_CTL		0x61	/* 8 bit */
+
+/* These are always controlled through the INDEX register */
+#define MUSB_TXFIFOSZ		0x62	/* 8-bit (see masks) */
+#define MUSB_RXFIFOSZ		0x63	/* 8-bit (see masks) */
+#define MUSB_TXFIFOADD		0x64	/* 16-bit offset shifted right 3 */
+#define MUSB_RXFIFOADD		0x66	/* 16-bit offset shifted right 3 */
+
+/* REVISIT: vctrl/vstatus: optional vendor utmi+phy register at 0x68 */
+#define MUSB_HWVERS		0x6C	/* 8 bit */
+#define MUSB_ULPI_BUSCONTROL	0x70	/* 8 bit */
+#define MUSB_ULPI_INT_MASK	0x72	/* 8 bit */
+#define MUSB_ULPI_INT_SRC	0x73	/* 8 bit */
+#define MUSB_ULPI_REG_DATA	0x74	/* 8 bit */
+#define MUSB_ULPI_REG_ADDR	0x75	/* 8 bit */
+#define MUSB_ULPI_REG_CONTROL	0x76	/* 8 bit */
+#define MUSB_ULPI_RAW_DATA	0x77	/* 8 bit */
+
+#define MUSB_EPINFO		0x78	/* 8 bit */
+#define MUSB_RAMINFO		0x79	/* 8 bit */
+#define MUSB_LINKINFO		0x7a	/* 8 bit */
+#define MUSB_VPLEN		0x7b	/* 8 bit */
+#define MUSB_HS_EOF1		0x7c	/* 8 bit */
+#define MUSB_FS_EOF1		0x7d	/* 8 bit */
+#define MUSB_LS_EOF1		0x7e	/* 8 bit */
+
+/* Offsets to endpoint registers */
+#define MUSB_TXMAXP		0x00
+#define MUSB_TXCSR		0x02
+#define MUSB_CSR0		MUSB_TXCSR	/* Re-used for EP0 */
+#define MUSB_RXMAXP		0x04
+#define MUSB_RXCSR		0x06
+#define MUSB_RXCOUNT		0x08
+#define MUSB_COUNT0		MUSB_RXCOUNT	/* Re-used for EP0 */
+#define MUSB_TXTYPE		0x0A
+#define MUSB_TYPE0		MUSB_TXTYPE	/* Re-used for EP0 */
+#define MUSB_TXINTERVAL		0x0B
+#define MUSB_NAKLIMIT0		MUSB_TXINTERVAL	/* Re-used for EP0 */
+#define MUSB_RXTYPE		0x0C
+#define MUSB_RXINTERVAL		0x0D
+#define MUSB_FIFOSIZE		0x0F
+#define MUSB_CONFIGDATA		MUSB_FIFOSIZE	/* Re-used for EP0 */
+
+#include "tusb6010.h"		/* Needed "only" for TUSB_EP0_CONF */
+
+#define MUSB_TXCSR_MODE			0x2000
+
+/* "bus control"/target registers, for host side multipoint (external hubs) */
+#define MUSB_TXFUNCADDR		0x00
+#define MUSB_TXHUBADDR		0x02
+#define MUSB_TXHUBPORT		0x03
+
+#define MUSB_RXFUNCADDR		0x04
+#define MUSB_RXHUBADDR		0x06
+#define MUSB_RXHUBPORT		0x07
+
+static inline u8 musb_read_configdata(void __iomem *mbase)
+{
+	musb_writeb(mbase, MUSB_INDEX, 0);
+	return musb_readb(mbase, 0x10 + MUSB_CONFIGDATA);
+}
+
+static inline void musb_write_rxfunaddr(struct musb *musb, u8 epnum,
+		u8 qh_addr_reg)
+{
+	musb_writeb(musb->mregs,
+		    musb->io.busctl_offset(epnum, MUSB_RXFUNCADDR),
+		    qh_addr_reg);
+}
+
+static inline void musb_write_rxhubaddr(struct musb *musb, u8 epnum,
+		u8 qh_h_addr_reg)
+{
+	musb_writeb(musb->mregs, musb->io.busctl_offset(epnum, MUSB_RXHUBADDR),
+			qh_h_addr_reg);
+}
+
+static inline void musb_write_rxhubport(struct musb *musb, u8 epnum,
+		u8 qh_h_port_reg)
+{
+	musb_writeb(musb->mregs, musb->io.busctl_offset(epnum, MUSB_RXHUBPORT),
+			qh_h_port_reg);
+}
+
+static inline void musb_write_txfunaddr(struct musb *musb, u8 epnum,
+		u8 qh_addr_reg)
+{
+	musb_writeb(musb->mregs,
+		    musb->io.busctl_offset(epnum, MUSB_TXFUNCADDR),
+		    qh_addr_reg);
+}
+
+static inline void musb_write_txhubaddr(struct musb *musb, u8 epnum,
+		u8 qh_addr_reg)
+{
+	musb_writeb(musb->mregs, musb->io.busctl_offset(epnum, MUSB_TXHUBADDR),
+			qh_addr_reg);
+}
+
+static inline void musb_write_txhubport(struct musb *musb, u8 epnum,
+		u8 qh_h_port_reg)
+{
+	musb_writeb(musb->mregs, musb->io.busctl_offset(epnum, MUSB_TXHUBPORT),
+			qh_h_port_reg);
+}
+
+static inline u8 musb_read_rxfunaddr(struct musb *musb, u8 epnum)
+{
+	return musb_readb(musb->mregs,
+			  musb->io.busctl_offset(epnum, MUSB_RXFUNCADDR));
+}
+
+static inline u8 musb_read_rxhubaddr(struct musb *musb, u8 epnum)
+{
+	return musb_readb(musb->mregs,
+			  musb->io.busctl_offset(epnum, MUSB_RXHUBADDR));
+}
+
+static inline u8 musb_read_rxhubport(struct musb *musb, u8 epnum)
+{
+	return musb_readb(musb->mregs,
+			  musb->io.busctl_offset(epnum, MUSB_RXHUBPORT));
+}
+
+static inline u8 musb_read_txfunaddr(struct musb *musb, u8 epnum)
+{
+	return musb_readb(musb->mregs,
+			  musb->io.busctl_offset(epnum, MUSB_TXFUNCADDR));
+}
+
+static inline u8 musb_read_txhubaddr(struct musb *musb, u8 epnum)
+{
+	return musb_readb(musb->mregs,
+			  musb->io.busctl_offset(epnum, MUSB_TXHUBADDR));
+}
+
+static inline u8 musb_read_txhubport(struct musb *musb, u8 epnum)
+{
+	return musb_readb(musb->mregs,
+			  musb->io.busctl_offset(epnum, MUSB_TXHUBPORT));
+}
 
 #endif	/* __MUSB_REGS_H__ */

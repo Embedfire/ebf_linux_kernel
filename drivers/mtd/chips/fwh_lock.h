@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef FWH_LOCK_H
 #define FWH_LOCK_H
 
@@ -34,8 +35,7 @@ static int fwh_xxlock_oneblock(struct map_info *map, struct flchip *chip,
 
 	/* Refuse the operation if the we cannot look behind the chip */
 	if (chip->start < 0x400000) {
-		DEBUG( MTD_DEBUG_LEVEL3,
-			"MTD %s(): chip->start: %lx wanted >= 0x400000\n",
+		pr_debug( "MTD %s(): chip->start: %lx wanted >= 0x400000\n",
 			__func__, chip->start );
 		return -EIO;
 	}
@@ -58,10 +58,10 @@ static int fwh_xxlock_oneblock(struct map_info *map, struct flchip *chip,
 	 * to flash memory - that means that we don't have to check status
 	 * and timeout.
 	 */
-	spin_lock(chip->mutex);
+	mutex_lock(&chip->mutex);
 	ret = get_chip(map, chip, adr, FL_LOCKING);
 	if (ret) {
-		spin_unlock(chip->mutex);
+		mutex_unlock(&chip->mutex);
 		return ret;
 	}
 
@@ -72,12 +72,12 @@ static int fwh_xxlock_oneblock(struct map_info *map, struct flchip *chip,
 	/* Done and happy. */
 	chip->state = chip->oldstate;
 	put_chip(map, chip, adr);
-	spin_unlock(chip->mutex);
+	mutex_unlock(&chip->mutex);
 	return 0;
 }
 
 
-static int fwh_lock_varsize(struct mtd_info *mtd, loff_t ofs, size_t len)
+static int fwh_lock_varsize(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
 	int ret;
 
@@ -88,7 +88,7 @@ static int fwh_lock_varsize(struct mtd_info *mtd, loff_t ofs, size_t len)
 }
 
 
-static int fwh_unlock_varsize(struct mtd_info *mtd, loff_t ofs, size_t len)
+static int fwh_unlock_varsize(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
 	int ret;
 
@@ -98,11 +98,11 @@ static int fwh_unlock_varsize(struct mtd_info *mtd, loff_t ofs, size_t len)
 	return ret;
 }
 
-static void fixup_use_fwh_lock(struct mtd_info *mtd, void *param)
+static void fixup_use_fwh_lock(struct mtd_info *mtd)
 {
 	printk(KERN_NOTICE "using fwh lock/unlock method\n");
 	/* Setup for the chips with the fwh lock method */
-	mtd->lock   = fwh_lock_varsize;
-	mtd->unlock = fwh_unlock_varsize;
+	mtd->_lock   = fwh_lock_varsize;
+	mtd->_unlock = fwh_unlock_varsize;
 }
 #endif /* FWH_LOCK_H */

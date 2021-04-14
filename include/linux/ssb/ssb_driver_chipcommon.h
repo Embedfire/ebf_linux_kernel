@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef LINUX_SSB_CHIPCO_H_
 #define LINUX_SSB_CHIPCO_H_
 
@@ -8,9 +9,7 @@
  * gpio interface, extbus, and support for serial and parallel flashes.
  *
  * Copyright 2005, Broadcom Corporation
- * Copyright 2006, Michael Buesch <mb@bu3sch.de>
- *
- * Licensed under the GPL version 2. See COPYING for details.
+ * Copyright 2006, Michael Buesch <m@bues.ch>
  */
 
 /** ChipCommon core registers. **/
@@ -53,6 +52,7 @@
 #define  SSB_CHIPCO_CAP_64BIT		0x08000000	/* 64-bit Backplane */
 #define  SSB_CHIPCO_CAP_PMU		0x10000000	/* PMU available (rev >= 20) */
 #define  SSB_CHIPCO_CAP_ECI		0x20000000	/* ECI available (rev >= 20) */
+#define  SSB_CHIPCO_CAP_SPROM		0x40000000	/* SPROM present */
 #define SSB_CHIPCO_CORECTL		0x0008
 #define  SSB_CHIPCO_CORECTL_UARTCLK0	0x00000001	/* Drive UART with internal clock */
 #define	 SSB_CHIPCO_CORECTL_SE		0x00000002	/* sync clk out enable (corerev >= 3) */
@@ -122,6 +122,8 @@
 #define SSB_CHIPCO_FLASHDATA		0x0048
 #define SSB_CHIPCO_BCAST_ADDR		0x0050
 #define SSB_CHIPCO_BCAST_DATA		0x0054
+#define SSB_CHIPCO_GPIOPULLUP		0x0058		/* Rev >= 20 only */
+#define SSB_CHIPCO_GPIOPULLDOWN		0x005C		/* Rev >= 20 only */
 #define SSB_CHIPCO_GPIOIN		0x0060
 #define SSB_CHIPCO_GPIOOUT		0x0064
 #define SSB_CHIPCO_GPIOOUTEN		0x0068
@@ -130,6 +132,9 @@
 #define SSB_CHIPCO_GPIOIRQ		0x0074
 #define SSB_CHIPCO_WATCHDOG		0x0080
 #define SSB_CHIPCO_GPIOTIMER		0x0088		/* LED powersave (corerev >= 16) */
+#define  SSB_CHIPCO_GPIOTIMER_OFFTIME	0x0000FFFF
+#define  SSB_CHIPCO_GPIOTIMER_OFFTIME_SHIFT	0
+#define  SSB_CHIPCO_GPIOTIMER_ONTIME	0xFFFF0000
 #define  SSB_CHIPCO_GPIOTIMER_ONTIME_SHIFT	16
 #define SSB_CHIPCO_GPIOTOUTM		0x008C		/* LED powersave (corerev >= 16) */
 #define SSB_CHIPCO_CLOCK_N		0x0090
@@ -181,6 +186,18 @@
 #define SSB_CHIPCO_PROG_WAITCNT		0x0124
 #define SSB_CHIPCO_FLASH_CFG		0x0128
 #define SSB_CHIPCO_FLASH_WAITCNT	0x012C
+#define SSB_CHIPCO_CLKCTLST		0x01E0 /* Clock control and status (rev >= 20) */
+#define  SSB_CHIPCO_CLKCTLST_FORCEALP	0x00000001 /* Force ALP request */
+#define  SSB_CHIPCO_CLKCTLST_FORCEHT	0x00000002 /* Force HT request */
+#define  SSB_CHIPCO_CLKCTLST_FORCEILP	0x00000004 /* Force ILP request */
+#define  SSB_CHIPCO_CLKCTLST_HAVEALPREQ	0x00000008 /* ALP available request */
+#define  SSB_CHIPCO_CLKCTLST_HAVEHTREQ	0x00000010 /* HT available request */
+#define  SSB_CHIPCO_CLKCTLST_HWCROFF	0x00000020 /* Force HW clock request off */
+#define  SSB_CHIPCO_CLKCTLST_HAVEALP	0x00010000 /* ALP available */
+#define  SSB_CHIPCO_CLKCTLST_HAVEHT	0x00020000 /* HT available */
+#define  SSB_CHIPCO_CLKCTLST_4328A0_HAVEHT	0x00010000 /* 4328a0 has reversed bits */
+#define  SSB_CHIPCO_CLKCTLST_4328A0_HAVEALP	0x00020000 /* 4328a0 has reversed bits */
+#define SSB_CHIPCO_HW_WORKAROUND	0x01E4 /* Hardware workaround (rev >= 20) */
 #define SSB_CHIPCO_UART0_DATA		0x0300
 #define SSB_CHIPCO_UART0_IMR		0x0304
 #define SSB_CHIPCO_UART0_FCR		0x0308
@@ -197,6 +214,210 @@
 #define SSB_CHIPCO_UART1_LSR		0x0414
 #define SSB_CHIPCO_UART1_MSR		0x0418
 #define SSB_CHIPCO_UART1_SCRATCH	0x041C
+/* PMU registers (rev >= 20) */
+#define SSB_CHIPCO_PMU_CTL			0x0600 /* PMU control */
+#define  SSB_CHIPCO_PMU_CTL_ILP_DIV		0xFFFF0000 /* ILP div mask */
+#define  SSB_CHIPCO_PMU_CTL_ILP_DIV_SHIFT	16
+#define  SSB_CHIPCO_PMU_CTL_PLL_UPD		0x00000400
+#define  SSB_CHIPCO_PMU_CTL_NOILPONW		0x00000200 /* No ILP on wait */
+#define  SSB_CHIPCO_PMU_CTL_HTREQEN		0x00000100 /* HT req enable */
+#define  SSB_CHIPCO_PMU_CTL_ALPREQEN		0x00000080 /* ALP req enable */
+#define  SSB_CHIPCO_PMU_CTL_XTALFREQ		0x0000007C /* Crystal freq */
+#define  SSB_CHIPCO_PMU_CTL_XTALFREQ_SHIFT	2
+#define  SSB_CHIPCO_PMU_CTL_ILPDIVEN		0x00000002 /* ILP div enable */
+#define  SSB_CHIPCO_PMU_CTL_LPOSEL		0x00000001 /* LPO sel */
+#define SSB_CHIPCO_PMU_CAP			0x0604 /* PMU capabilities */
+#define  SSB_CHIPCO_PMU_CAP_REVISION		0x000000FF /* Revision mask */
+#define SSB_CHIPCO_PMU_STAT			0x0608 /* PMU status */
+#define  SSB_CHIPCO_PMU_STAT_INTPEND		0x00000040 /* Interrupt pending */
+#define  SSB_CHIPCO_PMU_STAT_SBCLKST		0x00000030 /* Backplane clock status? */
+#define  SSB_CHIPCO_PMU_STAT_HAVEALP		0x00000008 /* ALP available */
+#define  SSB_CHIPCO_PMU_STAT_HAVEHT		0x00000004 /* HT available */
+#define  SSB_CHIPCO_PMU_STAT_RESINIT		0x00000003 /* Res init */
+#define SSB_CHIPCO_PMU_RES_STAT			0x060C /* PMU res status */
+#define SSB_CHIPCO_PMU_RES_PEND			0x0610 /* PMU res pending */
+#define SSB_CHIPCO_PMU_TIMER			0x0614 /* PMU timer */
+#define SSB_CHIPCO_PMU_MINRES_MSK		0x0618 /* PMU min res mask */
+#define SSB_CHIPCO_PMU_MAXRES_MSK		0x061C /* PMU max res mask */
+#define SSB_CHIPCO_PMU_RES_TABSEL		0x0620 /* PMU res table sel */
+#define SSB_CHIPCO_PMU_RES_DEPMSK		0x0624 /* PMU res dep mask */
+#define SSB_CHIPCO_PMU_RES_UPDNTM		0x0628 /* PMU res updown timer */
+#define SSB_CHIPCO_PMU_RES_TIMER		0x062C /* PMU res timer */
+#define SSB_CHIPCO_PMU_CLKSTRETCH		0x0630 /* PMU clockstretch */
+#define SSB_CHIPCO_PMU_WATCHDOG			0x0634 /* PMU watchdog */
+#define SSB_CHIPCO_PMU_RES_REQTS		0x0640 /* PMU res req timer sel */
+#define SSB_CHIPCO_PMU_RES_REQT			0x0644 /* PMU res req timer */
+#define SSB_CHIPCO_PMU_RES_REQM			0x0648 /* PMU res req mask */
+#define SSB_CHIPCO_CHIPCTL_ADDR			0x0650
+#define SSB_CHIPCO_CHIPCTL_DATA			0x0654
+#define SSB_CHIPCO_REGCTL_ADDR			0x0658
+#define SSB_CHIPCO_REGCTL_DATA			0x065C
+#define SSB_CHIPCO_PLLCTL_ADDR			0x0660
+#define SSB_CHIPCO_PLLCTL_DATA			0x0664
+
+
+
+/** PMU PLL registers */
+
+/* PMU rev 0 PLL registers */
+#define SSB_PMU0_PLLCTL0			0
+#define  SSB_PMU0_PLLCTL0_PDIV_MSK		0x00000001
+#define  SSB_PMU0_PLLCTL0_PDIV_FREQ		25000 /* kHz */
+#define SSB_PMU0_PLLCTL1			1
+#define  SSB_PMU0_PLLCTL1_WILD_IMSK		0xF0000000 /* Wild int mask (low nibble) */
+#define  SSB_PMU0_PLLCTL1_WILD_IMSK_SHIFT	28
+#define  SSB_PMU0_PLLCTL1_WILD_FMSK		0x0FFFFF00 /* Wild frac mask */
+#define  SSB_PMU0_PLLCTL1_WILD_FMSK_SHIFT	8
+#define  SSB_PMU0_PLLCTL1_STOPMOD		0x00000040 /* Stop mod */
+#define SSB_PMU0_PLLCTL2			2
+#define  SSB_PMU0_PLLCTL2_WILD_IMSKHI		0x0000000F /* Wild int mask (high nibble) */
+#define  SSB_PMU0_PLLCTL2_WILD_IMSKHI_SHIFT	0
+
+/* PMU rev 1 PLL registers */
+#define SSB_PMU1_PLLCTL0			0
+#define  SSB_PMU1_PLLCTL0_P1DIV			0x00F00000 /* P1 div */
+#define  SSB_PMU1_PLLCTL0_P1DIV_SHIFT		20
+#define  SSB_PMU1_PLLCTL0_P2DIV			0x0F000000 /* P2 div */
+#define  SSB_PMU1_PLLCTL0_P2DIV_SHIFT		24
+#define SSB_PMU1_PLLCTL1			1
+#define  SSB_PMU1_PLLCTL1_M1DIV			0x000000FF /* M1 div */
+#define  SSB_PMU1_PLLCTL1_M1DIV_SHIFT		0
+#define  SSB_PMU1_PLLCTL1_M2DIV			0x0000FF00 /* M2 div */
+#define  SSB_PMU1_PLLCTL1_M2DIV_SHIFT		8
+#define  SSB_PMU1_PLLCTL1_M3DIV			0x00FF0000 /* M3 div */
+#define  SSB_PMU1_PLLCTL1_M3DIV_SHIFT		16
+#define  SSB_PMU1_PLLCTL1_M4DIV			0xFF000000 /* M4 div */
+#define  SSB_PMU1_PLLCTL1_M4DIV_SHIFT		24
+#define SSB_PMU1_PLLCTL2			2
+#define  SSB_PMU1_PLLCTL2_M5DIV			0x000000FF /* M5 div */
+#define  SSB_PMU1_PLLCTL2_M5DIV_SHIFT		0
+#define  SSB_PMU1_PLLCTL2_M6DIV			0x0000FF00 /* M6 div */
+#define  SSB_PMU1_PLLCTL2_M6DIV_SHIFT		8
+#define  SSB_PMU1_PLLCTL2_NDIVMODE		0x000E0000 /* NDIV mode */
+#define  SSB_PMU1_PLLCTL2_NDIVMODE_SHIFT	17
+#define  SSB_PMU1_PLLCTL2_NDIVINT		0x1FF00000 /* NDIV int */
+#define  SSB_PMU1_PLLCTL2_NDIVINT_SHIFT		20
+#define SSB_PMU1_PLLCTL3			3
+#define  SSB_PMU1_PLLCTL3_NDIVFRAC		0x00FFFFFF /* NDIV frac */
+#define  SSB_PMU1_PLLCTL3_NDIVFRAC_SHIFT	0
+#define SSB_PMU1_PLLCTL4			4
+#define SSB_PMU1_PLLCTL5			5
+#define  SSB_PMU1_PLLCTL5_CLKDRV		0xFFFFFF00 /* clk drv */
+#define  SSB_PMU1_PLLCTL5_CLKDRV_SHIFT		8
+
+/* BCM4312 PLL resource numbers. */
+#define SSB_PMURES_4312_SWITCHER_BURST		0
+#define SSB_PMURES_4312_SWITCHER_PWM    	1
+#define SSB_PMURES_4312_PA_REF_LDO		2
+#define SSB_PMURES_4312_CORE_LDO_BURST		3
+#define SSB_PMURES_4312_CORE_LDO_PWM		4
+#define SSB_PMURES_4312_RADIO_LDO		5
+#define SSB_PMURES_4312_ILP_REQUEST		6
+#define SSB_PMURES_4312_BG_FILTBYP		7
+#define SSB_PMURES_4312_TX_FILTBYP		8
+#define SSB_PMURES_4312_RX_FILTBYP		9
+#define SSB_PMURES_4312_XTAL_PU			10
+#define SSB_PMURES_4312_ALP_AVAIL		11
+#define SSB_PMURES_4312_BB_PLL_FILTBYP		12
+#define SSB_PMURES_4312_RF_PLL_FILTBYP		13
+#define SSB_PMURES_4312_HT_AVAIL		14
+
+/* BCM4325 PLL resource numbers. */
+#define SSB_PMURES_4325_BUCK_BOOST_BURST	0
+#define SSB_PMURES_4325_CBUCK_BURST		1
+#define SSB_PMURES_4325_CBUCK_PWM		2
+#define SSB_PMURES_4325_CLDO_CBUCK_BURST	3
+#define SSB_PMURES_4325_CLDO_CBUCK_PWM		4
+#define SSB_PMURES_4325_BUCK_BOOST_PWM		5
+#define SSB_PMURES_4325_ILP_REQUEST		6
+#define SSB_PMURES_4325_ABUCK_BURST		7
+#define SSB_PMURES_4325_ABUCK_PWM		8
+#define SSB_PMURES_4325_LNLDO1_PU		9
+#define SSB_PMURES_4325_LNLDO2_PU		10
+#define SSB_PMURES_4325_LNLDO3_PU		11
+#define SSB_PMURES_4325_LNLDO4_PU		12
+#define SSB_PMURES_4325_XTAL_PU			13
+#define SSB_PMURES_4325_ALP_AVAIL		14
+#define SSB_PMURES_4325_RX_PWRSW_PU		15
+#define SSB_PMURES_4325_TX_PWRSW_PU		16
+#define SSB_PMURES_4325_RFPLL_PWRSW_PU		17
+#define SSB_PMURES_4325_LOGEN_PWRSW_PU		18
+#define SSB_PMURES_4325_AFE_PWRSW_PU		19
+#define SSB_PMURES_4325_BBPLL_PWRSW_PU		20
+#define SSB_PMURES_4325_HT_AVAIL		21
+
+/* BCM4328 PLL resource numbers. */
+#define SSB_PMURES_4328_EXT_SWITCHER_PWM	0
+#define SSB_PMURES_4328_BB_SWITCHER_PWM		1
+#define SSB_PMURES_4328_BB_SWITCHER_BURST	2
+#define SSB_PMURES_4328_BB_EXT_SWITCHER_BURST	3
+#define SSB_PMURES_4328_ILP_REQUEST		4
+#define SSB_PMURES_4328_RADIO_SWITCHER_PWM	5
+#define SSB_PMURES_4328_RADIO_SWITCHER_BURST	6
+#define SSB_PMURES_4328_ROM_SWITCH		7
+#define SSB_PMURES_4328_PA_REF_LDO		8
+#define SSB_PMURES_4328_RADIO_LDO		9
+#define SSB_PMURES_4328_AFE_LDO			10
+#define SSB_PMURES_4328_PLL_LDO			11
+#define SSB_PMURES_4328_BG_FILTBYP		12
+#define SSB_PMURES_4328_TX_FILTBYP		13
+#define SSB_PMURES_4328_RX_FILTBYP		14
+#define SSB_PMURES_4328_XTAL_PU			15
+#define SSB_PMURES_4328_XTAL_EN			16
+#define SSB_PMURES_4328_BB_PLL_FILTBYP		17
+#define SSB_PMURES_4328_RF_PLL_FILTBYP		18
+#define SSB_PMURES_4328_BB_PLL_PU		19
+
+/* BCM5354 PLL resource numbers. */
+#define SSB_PMURES_5354_EXT_SWITCHER_PWM	0
+#define SSB_PMURES_5354_BB_SWITCHER_PWM		1
+#define SSB_PMURES_5354_BB_SWITCHER_BURST	2
+#define SSB_PMURES_5354_BB_EXT_SWITCHER_BURST	3
+#define SSB_PMURES_5354_ILP_REQUEST		4
+#define SSB_PMURES_5354_RADIO_SWITCHER_PWM	5
+#define SSB_PMURES_5354_RADIO_SWITCHER_BURST	6
+#define SSB_PMURES_5354_ROM_SWITCH		7
+#define SSB_PMURES_5354_PA_REF_LDO		8
+#define SSB_PMURES_5354_RADIO_LDO		9
+#define SSB_PMURES_5354_AFE_LDO			10
+#define SSB_PMURES_5354_PLL_LDO			11
+#define SSB_PMURES_5354_BG_FILTBYP		12
+#define SSB_PMURES_5354_TX_FILTBYP		13
+#define SSB_PMURES_5354_RX_FILTBYP		14
+#define SSB_PMURES_5354_XTAL_PU			15
+#define SSB_PMURES_5354_XTAL_EN			16
+#define SSB_PMURES_5354_BB_PLL_FILTBYP		17
+#define SSB_PMURES_5354_RF_PLL_FILTBYP		18
+#define SSB_PMURES_5354_BB_PLL_PU		19
+
+
+
+/** Chip specific Chip-Status register contents. */
+#define SSB_CHIPCO_CHST_4322_SPROM_EXISTS	0x00000040 /* SPROM present */
+#define SSB_CHIPCO_CHST_4325_SPROM_OTP_SEL	0x00000003
+#define SSB_CHIPCO_CHST_4325_DEFCIS_SEL		0 /* OTP is powered up, use def. CIS, no SPROM */
+#define SSB_CHIPCO_CHST_4325_SPROM_SEL		1 /* OTP is powered up, SPROM is present */
+#define SSB_CHIPCO_CHST_4325_OTP_SEL		2 /* OTP is powered up, no SPROM */
+#define SSB_CHIPCO_CHST_4325_OTP_PWRDN		3 /* OTP is powered down, SPROM is present */
+#define SSB_CHIPCO_CHST_4325_SDIO_USB_MODE	0x00000004
+#define SSB_CHIPCO_CHST_4325_SDIO_USB_MODE_SHIFT  2
+#define SSB_CHIPCO_CHST_4325_RCAL_VALID		0x00000008
+#define SSB_CHIPCO_CHST_4325_RCAL_VALID_SHIFT	3
+#define SSB_CHIPCO_CHST_4325_RCAL_VALUE		0x000001F0
+#define SSB_CHIPCO_CHST_4325_RCAL_VALUE_SHIFT	4
+#define SSB_CHIPCO_CHST_4325_PMUTOP_2B 		0x00000200 /* 1 for 2b, 0 for to 2a */
+
+/** Macros to determine SPROM presence based on Chip-Status register. */
+#define SSB_CHIPCO_CHST_4312_SPROM_PRESENT(status) \
+	((status & SSB_CHIPCO_CHST_4325_SPROM_OTP_SEL) != \
+		SSB_CHIPCO_CHST_4325_OTP_SEL)
+#define SSB_CHIPCO_CHST_4322_SPROM_PRESENT(status) \
+	(status & SSB_CHIPCO_CHST_4322_SPROM_EXISTS)
+#define SSB_CHIPCO_CHST_4325_SPROM_PRESENT(status) \
+	(((status & SSB_CHIPCO_CHST_4325_SPROM_OTP_SEL) != \
+		SSB_CHIPCO_CHST_4325_DEFCIS_SEL) && \
+	 ((status & SSB_CHIPCO_CHST_4325_SPROM_OTP_SEL) != \
+		SSB_CHIPCO_CHST_4325_OTP_SEL))
 
 
 
@@ -283,7 +504,9 @@
 #define SSB_CHIPCO_FLASHCTL_ST_SE	0x02D8		/* Sector Erase */
 #define SSB_CHIPCO_FLASHCTL_ST_BE	0x00C7		/* Bulk Erase */
 #define SSB_CHIPCO_FLASHCTL_ST_DP	0x00B9		/* Deep Power-down */
-#define SSB_CHIPCO_FLASHCTL_ST_RSIG	0x03AB		/* Read Electronic Signature */
+#define SSB_CHIPCO_FLASHCTL_ST_RES	0x03AB		/* Read Electronic Signature */
+#define SSB_CHIPCO_FLASHCTL_ST_CSA	0x1000		/* Keep chip select asserted */
+#define SSB_CHIPCO_FLASHCTL_ST_SSE	0x0220		/* Sub-sector Erase */
 
 /* Status register bits for ST flashes */
 #define SSB_CHIPCO_FLASHSTA_ST_WIP	0x01		/* Write In Progress */
@@ -353,17 +576,41 @@
 struct ssb_device;
 struct ssb_serial_port;
 
+/* Data for the PMU, if available.
+ * Check availability with ((struct ssb_chipcommon)->capabilities & SSB_CHIPCO_CAP_PMU)
+ */
+struct ssb_chipcommon_pmu {
+	u8 rev;			/* PMU revision */
+	u32 crystalfreq;	/* The active crystal frequency (in kHz) */
+};
+
 struct ssb_chipcommon {
 	struct ssb_device *dev;
 	u32 capabilities;
+	u32 status;
 	/* Fast Powerup Delay constant */
 	u16 fast_pwrup_delay;
+	spinlock_t gpio_lock;
+	struct ssb_chipcommon_pmu pmu;
+	u32 ticks_per_ms;
+	u32 max_timer_ms;
 };
 
 static inline bool ssb_chipco_available(struct ssb_chipcommon *cc)
 {
 	return (cc->dev != NULL);
 }
+
+/* Register access */
+#define chipco_read32(cc, offset)	ssb_read32((cc)->dev, offset)
+#define chipco_write32(cc, offset, val)	ssb_write32((cc)->dev, offset, val)
+
+#define chipco_mask32(cc, offset, mask) \
+		chipco_write32(cc, offset, chipco_read32(cc, offset) & (mask))
+#define chipco_set32(cc, offset, set) \
+		chipco_write32(cc, offset, chipco_read32(cc, offset) | (set))
+#define chipco_maskset32(cc, offset, mask, set) \
+		chipco_write32(cc, offset, (chipco_read32(cc, offset) & (mask)) | (set))
 
 extern void ssb_chipcommon_init(struct ssb_chipcommon *cc);
 
@@ -386,8 +633,7 @@ enum ssb_clkmode {
 extern void ssb_chipco_set_clockmode(struct ssb_chipcommon *cc,
 				     enum ssb_clkmode mode);
 
-extern void ssb_chipco_watchdog_timer_set(struct ssb_chipcommon *cc,
-					  u32 ticks);
+extern u32 ssb_chipco_watchdog_timer_set(struct ssb_chipcommon *cc, u32 ticks);
 
 void ssb_chipco_irq_mask(struct ssb_chipcommon *cc, u32 mask, u32 value);
 
@@ -400,10 +646,27 @@ u32 ssb_chipco_gpio_outen(struct ssb_chipcommon *cc, u32 mask, u32 value);
 u32 ssb_chipco_gpio_control(struct ssb_chipcommon *cc, u32 mask, u32 value);
 u32 ssb_chipco_gpio_intmask(struct ssb_chipcommon *cc, u32 mask, u32 value);
 u32 ssb_chipco_gpio_polarity(struct ssb_chipcommon *cc, u32 mask, u32 value);
+u32 ssb_chipco_gpio_pullup(struct ssb_chipcommon *cc, u32 mask, u32 value);
+u32 ssb_chipco_gpio_pulldown(struct ssb_chipcommon *cc, u32 mask, u32 value);
 
 #ifdef CONFIG_SSB_SERIAL
 extern int ssb_chipco_serial_init(struct ssb_chipcommon *cc,
 				  struct ssb_serial_port *ports);
 #endif /* CONFIG_SSB_SERIAL */
+
+/* PMU support */
+extern void ssb_pmu_init(struct ssb_chipcommon *cc);
+
+enum ssb_pmu_ldo_volt_id {
+	LDO_PAREF = 0,
+	LDO_VOLT1,
+	LDO_VOLT2,
+	LDO_VOLT3,
+};
+
+void ssb_pmu_set_ldo_voltage(struct ssb_chipcommon *cc,
+			     enum ssb_pmu_ldo_volt_id id, u32 voltage);
+void ssb_pmu_set_ldo_paref(struct ssb_chipcommon *cc, bool on);
+void ssb_pmu_spuravoid_pllupdate(struct ssb_chipcommon *cc, int spuravoid);
 
 #endif /* LINUX_SSB_CHIPCO_H_ */

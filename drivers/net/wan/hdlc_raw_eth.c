@@ -1,16 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Generic HDLC support routines for Linux
  * HDLC Ethernet emulation support
  *
  * Copyright (C) 2002-2006 Krzysztof Halasa <khc@pm.waw.pl>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License
- * as published by the Free Software Foundation.
  */
 
 #include <linux/errno.h>
 #include <linux/etherdevice.h>
+#include <linux/gfp.h>
 #include <linux/hdlc.h>
 #include <linux/if_arp.h>
 #include <linux/inetdevice.h>
@@ -21,11 +19,10 @@
 #include <linux/poll.h>
 #include <linux/rtnetlink.h>
 #include <linux/skbuff.h>
-#include <linux/slab.h>
 
 static int raw_eth_ioctl(struct net_device *dev, struct ifreq *ifr);
 
-static int eth_tx(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t eth_tx(struct sk_buff *skb, struct net_device *dev)
 {
 	int pad = ETH_ZLEN - skb->len;
 	if (pad > 0) {		/* Pad the frame with zeros */
@@ -45,6 +42,7 @@ static int eth_tx(struct sk_buff *skb, struct net_device *dev)
 
 static struct hdlc_proto proto = {
 	.type_trans	= eth_type_trans,
+	.xmit		= eth_tx,
 	.ioctl		= raw_eth_ioctl,
 	.module		= THIS_MODULE,
 };
@@ -56,9 +54,8 @@ static int raw_eth_ioctl(struct net_device *dev, struct ifreq *ifr)
 	const size_t size = sizeof(raw_hdlc_proto);
 	raw_hdlc_proto new_settings;
 	hdlc_device *hdlc = dev_to_hdlc(dev);
+	unsigned int old_qlen;
 	int result;
-	int (*old_ch_mtu)(struct net_device *, int);
-	int old_qlen;
 
 	switch (ifr->ifr_settings.type) {
 	case IF_GET_PROTO:
@@ -99,13 +96,12 @@ static int raw_eth_ioctl(struct net_device *dev, struct ifreq *ifr)
 		if (result)
 			return result;
 		memcpy(hdlc->state, &new_settings, size);
-		dev->hard_start_xmit = eth_tx;
-		old_ch_mtu = dev->change_mtu;
 		old_qlen = dev->tx_queue_len;
 		ether_setup(dev);
-		dev->change_mtu = old_ch_mtu;
 		dev->tx_queue_len = old_qlen;
-		random_ether_addr(dev->dev_addr);
+		dev->priv_flags &= ~IFF_TX_SKB_SHARING;
+		eth_hw_addr_random(dev);
+		call_netdevice_notifiers(NETDEV_POST_TYPE_CHANGE, dev);
 		netif_dormant_off(dev);
 		return 0;
 	}

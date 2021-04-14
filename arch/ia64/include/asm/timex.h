@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_IA64_TIMEX_H
 #define _ASM_IA64_TIMEX_H
 
@@ -38,5 +39,8 @@ get_cycles (void)
 	ret = ia64_getreg(_IA64_REG_AR_ITC);
 	return ret;
 }
+
+extern void ia64_cpu_local_tick (void);
+extern unsigned long long ia64_native_sched_clock (void);
 
 #endif /* _ASM_IA64_TIMEX_H */

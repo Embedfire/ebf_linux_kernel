@@ -1,48 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Interface for hwdep device
  *
  *  Copyright (C) 2004 Takashi Iwai <tiwai@suse.de>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <sound/core.h>
 #include <sound/hwdep.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
+#include <linux/nospec.h>
 #include "emux_voice.h"
-
-/*
- * open the hwdep device
- */
-static int
-snd_emux_hwdep_open(struct snd_hwdep *hw, struct file *file)
-{
-	return 0;
-}
-
-
-/*
- * close the device
- */
-static int
-snd_emux_hwdep_release(struct snd_hwdep *hw, struct file *file)
-{
-	return 0;
-}
-
 
 #define TMP_CLIENT_ID	0x1001
 
@@ -57,6 +24,11 @@ snd_emux_hwdep_load_patch(struct snd_emux *emu, void __user *arg)
 
 	if (copy_from_user(&patch, arg, sizeof(patch)))
 		return -EFAULT;
+
+	if (patch.key == GUS_PATCH)
+		return snd_soundfont_load_guspatch(emu->sflist, arg,
+						   patch.len + sizeof(patch),
+						   TMP_CLIENT_ID);
 
 	if (patch.type >= SNDRV_SFNT_LOAD_INFO &&
 	    patch.type <= SNDRV_SFNT_PROBE_DATA) {
@@ -85,13 +57,16 @@ snd_emux_hwdep_misc_mode(struct snd_emux *emu, void __user *arg)
 		return -EFAULT;
 	if (info.mode < 0 || info.mode >= EMUX_MD_END)
 		return -EINVAL;
+	info.mode = array_index_nospec(info.mode, EMUX_MD_END);
 
 	if (info.port < 0) {
 		for (i = 0; i < emu->num_ports; i++)
 			emu->portptrs[i]->ctrls[info.mode] = info.value;
 	} else {
-		if (info.port < emu->num_ports)
+		if (info.port < emu->num_ports) {
+			info.port = array_index_nospec(info.port, emu->num_ports);
 			emu->portptrs[info.port]->ctrls[info.mode] = info.value;
+		}
 	}
 	return 0;
 }
@@ -146,9 +121,10 @@ snd_emux_init_hwdep(struct snd_emux *emu)
 	emu->hwdep = hw;
 	strcpy(hw->name, SNDRV_EMUX_HWDEP_NAME);
 	hw->iface = SNDRV_HWDEP_IFACE_EMUX_WAVETABLE;
-	hw->ops.open = snd_emux_hwdep_open;
-	hw->ops.release = snd_emux_hwdep_release;
 	hw->ops.ioctl = snd_emux_hwdep_ioctl;
+	/* The ioctl parameter types are compatible between 32- and
+	 * 64-bit architectures, so use the same function. */
+	hw->ops.ioctl_compat = snd_emux_hwdep_ioctl;
 	hw->exclusive = 1;
 	hw->private_data = emu;
 	if ((err = snd_card_register(emu->card)) < 0)

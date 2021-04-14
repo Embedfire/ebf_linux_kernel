@@ -1,46 +1,34 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/boards/renesas/sdk7780/setup.c
  *
  * Renesas Solutions SH7780 SDK Support
  * Copyright (C) 2008 Nicholas Beck <nbeck@mpc-data.co.uk>
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/platform_device.h>
 #include <linux/ata_platform.h>
 #include <asm/machvec.h>
-#include <asm/sdk7780.h>
+#include <mach/sdk7780.h>
 #include <asm/heartbeat.h>
 #include <asm/io.h>
 #include <asm/addrspace.h>
 
 #define GPIO_PECR        0xFFEA0008
 
-//* Heartbeat */
-static struct heartbeat_data heartbeat_data = {
-	.regsize = 16,
-};
-
-static struct resource heartbeat_resources[] = {
-	[0] = {
-		.start  = PA_LED,
-		.end    = PA_LED,
-		.flags  = IORESOURCE_MEM,
-	},
+/* Heartbeat */
+static struct resource heartbeat_resource = {
+	.start  = PA_LED,
+	.end    = PA_LED,
+	.flags  = IORESOURCE_MEM | IORESOURCE_MEM_16BIT,
 };
 
 static struct platform_device heartbeat_device = {
 	.name           = "heartbeat",
 	.id             = -1,
-	.dev = {
-		.platform_data = &heartbeat_data,
-	},
-	.num_resources  = ARRAY_SIZE(heartbeat_resources),
-	.resource       = heartbeat_resources,
+	.num_resources  = 1,
+	.resource       = &heartbeat_resource,
 };
 
 /* SMC91x */
@@ -83,8 +71,8 @@ device_initcall(sdk7780_devices_setup);
 
 static void __init sdk7780_setup(char **cmdline_p)
 {
-	u16 ver = ctrl_inw(FPGA_FPVERR);
-	u16 dateStamp = ctrl_inw(FPGA_FPDATER);
+	u16 ver = __raw_readw(FPGA_FPVERR);
+	u16 dateStamp = __raw_readw(FPGA_FPDATER);
 
 	printk(KERN_INFO "Renesas Technology Europe SDK7780 support.\n");
 	printk(KERN_INFO "Board version: %d (revision %d), "
@@ -94,7 +82,7 @@ static void __init sdk7780_setup(char **cmdline_p)
 			 dateStamp);
 
 	/* Setup pin mux'ing for PCIC */
-	ctrl_outw(0x0000, GPIO_PECR);
+	__raw_writew(0x0000, GPIO_PECR);
 }
 
 /*
@@ -103,7 +91,6 @@ static void __init sdk7780_setup(char **cmdline_p)
 static struct sh_machine_vector mv_se7780 __initmv = {
 	.mv_name        = "Renesas SDK7780-R3" ,
 	.mv_setup		= sdk7780_setup,
-	.mv_nr_irqs		= 111,
 	.mv_init_irq	= init_sdk7780_IRQ,
 };
 

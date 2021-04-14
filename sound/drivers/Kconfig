@@ -1,19 +1,34 @@
+# SPDX-License-Identifier: GPL-2.0-only
 config SND_MPU401_UART
-        tristate
-        select SND_RAWMIDI
+	tristate
+	select SND_RAWMIDI
 
 config SND_OPL3_LIB
 	tristate
 	select SND_TIMER
 	select SND_HWDEP
+	select SND_SEQ_DEVICE if SND_SEQUENCER != n
 
 config SND_OPL4_LIB
 	tristate
 	select SND_TIMER
 	select SND_HWDEP
+	select SND_SEQ_DEVICE if SND_SEQUENCER != n
+
+# select SEQ stuff to min(SND_SEQUENCER,SND_XXX)
+config SND_OPL3_LIB_SEQ
+	def_tristate SND_SEQUENCER && SND_OPL3_LIB
+	select SND_SEQ_MIDI_EMUL
+	select SND_SEQ_MIDI_EVENT
+
+config SND_OPL4_LIB_SEQ
+	def_tristate SND_SEQUENCER && SND_OPL4_LIB
+	select SND_SEQ_MIDI_EMUL
+	select SND_SEQ_MIDI_EVENT
 
 config SND_VX_LIB
 	tristate
+	select FW_LOADER
 	select SND_HWDEP
 	select SND_PCM
 
@@ -33,9 +48,8 @@ if SND_DRIVERS
 
 config SND_PCSP
 	tristate "PC-Speaker support (READ HELP!)"
-	depends on PCSPKR_PLATFORM && X86_PC && HIGH_RES_TIMERS
+	depends on PCSPKR_PLATFORM && X86 && HIGH_RES_TIMERS
 	depends on INPUT
-	depends on EXPERIMENTAL
 	select SND_PCM
 	help
 	  If you don't have a sound card in your computer, you can include a
@@ -50,7 +64,8 @@ config SND_PCSP
 	  before the other sound driver of yours, making the
 	  pc-speaker a default sound device. Which is likely not
 	  what you want. To make this driver play nicely with other
-	  sound driver, you can add this into your /etc/modprobe.conf:
+	  sound driver, you can add this in a configuration file under
+	  /etc/modprobe.d/ directory:
 	  options snd-pcsp index=2
 
 	  You don't need this driver if you only want your pc-speaker to beep.
@@ -74,11 +89,33 @@ config SND_DUMMY
 	  To compile this driver as a module, choose M here: the module
 	  will be called snd-dummy.
 
+config SND_ALOOP
+	tristate "Generic loopback driver (PCM)"
+	select SND_PCM
+	select SND_TIMER
+	help
+	  Say 'Y' or 'M' to include support for the PCM loopback device.
+	  This module returns played samples back to the user space using
+	  the standard ALSA PCM device. The devices are routed 0->1 and
+	  1->0, where first number is the playback PCM device and second
+	  number is the capture device. Module creates two PCM devices and
+	  configured number of substreams (see the pcm_substreams module
+	  parameter).
+
+	  The loopback device allows time sychronization with an external
+	  timing source using the time shift universal control (+-20%
+	  of system time).
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called snd-aloop.
+
 config SND_VIRMIDI
 	tristate "Virtual MIDI soundcard"
 	depends on SND_SEQUENCER
 	select SND_TIMER
 	select SND_RAWMIDI
+	select SND_SEQ_VIRMIDI
+	select SND_SEQ_MIDI_EVENT
 	help
 	  Say Y here to include the virtual MIDI driver.  This driver
 	  allows to connect applications using raw MIDI devices to
@@ -106,19 +143,19 @@ config SND_MTS64
 	select SND_RAWMIDI
 	help
 	  The ESI Miditerminal 4140 is a 4 In 4 Out MIDI Interface with 
-          additional SMPTE Timecode capabilities for the parallel port.
+	  additional SMPTE Timecode capabilities for the parallel port.
 
 	  Say 'Y' to include support for this device.
 
 	  To compile this driver as a module, chose 'M' here: the module 
-          will be called snd-mts64.
+	  will be called snd-mts64.
 
 config SND_SERIAL_U16550
 	tristate "UART16550 serial MIDI driver"
 	select SND_RAWMIDI
 	help
 	  To include support for MIDI serial port interfaces, say Y here
-	  and read <file:Documentation/sound/alsa/serial-u16550.txt>.
+	  and read <file:Documentation/sound/cards/serial-u16550.rst>.
 	  This driver works with serial UARTs 16550 and better.
 
 	  This driver accesses the serial port hardware directly, so
@@ -149,30 +186,34 @@ config SND_PORTMAN2X4
 	  To compile this driver as a module, choose M here: the module
 	  will be called snd-portman2x4.
 
-config SND_ML403_AC97CR
-	tristate "Xilinx ML403 AC97 Controller Reference"
-	depends on XILINX_VIRTEX
-	select SND_AC97_CODEC
-	help
-	  Say Y here to include support for the
-	  opb_ac97_controller_ref_v1_00_a ip core found in Xilinx' ML403
-	  reference design.
-
-	  To compile this driver as a module, choose M here: the module
-	  will be called snd-ml403_ac97cr.
-
 config SND_AC97_POWER_SAVE
 	bool "AC97 Power-Saving Mode"
-	depends on SND_AC97_CODEC && EXPERIMENTAL
+	depends on SND_AC97_CODEC
 	default n
 	help
 	  Say Y here to enable the aggressive power-saving support of
 	  AC97 codecs.  In this mode, the power-mode is dynamically
 	  controlled at each open/close.
 
-	  The mode is activated by passing power_save=1 option to
-	  snd-ac97-codec driver.  You can toggle it dynamically over
-	  sysfs, too.
+	  The mode is activated by passing 'power_save=X' to the
+	  snd-ac97-codec driver module, where 'X' is the time-out
+	  value, a nonnegative integer that specifies how many
+	  seconds of idle time the driver must count before it may
+	  put the AC97 into power-save mode;  a value of 0 (zero)
+	  disables the use of this power-save mode.
+
+	  After the snd-ac97-codec driver module has been loaded,
+	  the 'power_save' parameter can be set via sysfs as follows:
+
+	    echo 10 > /sys/module/snd_ac97_codec/parameters/power_save
+
+	  In this case, the time-out is set to 10 seconds; setting
+	  the time-out to 1 second (the minimum activation value)
+	  isn't recommended because many applications try to reopen
+	  the device frequently.  A value of 10 seconds would be a
+	  good choice for normal operations.
+
+	  See Documentation/sound/designs/powersave.rst for more details.
 
 config SND_AC97_POWER_SAVE_DEFAULT
 	int "Default time-out for AC97 power-save mode"
@@ -181,5 +222,7 @@ config SND_AC97_POWER_SAVE_DEFAULT
 	help
 	  The default time-out value in seconds for AC97 automatic
 	  power-save mode.  0 means to disable the power-save mode.
+
+	  See SND_AC97_POWER_SAVE for more details.
 
 endif	# SND_DRIVERS

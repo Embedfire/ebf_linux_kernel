@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Kernel module to match connection tracking information. */
 
 /* (C) 1999-2001 Paul `Rusty' Russell
  * (C) 2002-2005 Netfilter Core Team <coreteam@netfilter.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -21,72 +18,57 @@ MODULE_ALIAS("ipt_state");
 MODULE_ALIAS("ip6t_state");
 
 static bool
-state_mt(const struct sk_buff *skb, const struct net_device *in,
-         const struct net_device *out, const struct xt_match *match,
-         const void *matchinfo, int offset, unsigned int protoff,
-         bool *hotdrop)
+state_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
-	const struct xt_state_info *sinfo = matchinfo;
+	const struct xt_state_info *sinfo = par->matchinfo;
 	enum ip_conntrack_info ctinfo;
 	unsigned int statebit;
+	struct nf_conn *ct = nf_ct_get(skb, &ctinfo);
 
-	if (nf_ct_is_untracked(skb))
-		statebit = XT_STATE_UNTRACKED;
-	else if (!nf_ct_get(skb, &ctinfo))
-		statebit = XT_STATE_INVALID;
-	else
+	if (ct)
 		statebit = XT_STATE_BIT(ctinfo);
+	else if (ctinfo == IP_CT_UNTRACKED)
+		statebit = XT_STATE_UNTRACKED;
+	else
+		statebit = XT_STATE_INVALID;
 
 	return (sinfo->statemask & statebit);
 }
 
-static bool
-state_mt_check(const char *tablename, const void *inf,
-               const struct xt_match *match, void *matchinfo,
-               unsigned int hook_mask)
+static int state_mt_check(const struct xt_mtchk_param *par)
 {
-	if (nf_ct_l3proto_try_module_get(match->family) < 0) {
-		printk(KERN_WARNING "can't load conntrack support for "
-				    "proto=%u\n", match->family);
-		return false;
-	}
-	return true;
+	int ret;
+
+	ret = nf_ct_netns_get(par->net, par->family);
+	if (ret < 0)
+		pr_info_ratelimited("cannot load conntrack support for proto=%u\n",
+				    par->family);
+	return ret;
 }
 
-static void state_mt_destroy(const struct xt_match *match, void *matchinfo)
+static void state_mt_destroy(const struct xt_mtdtor_param *par)
 {
-	nf_ct_l3proto_module_put(match->family);
+	nf_ct_netns_put(par->net, par->family);
 }
 
-static struct xt_match state_mt_reg[] __read_mostly = {
-	{
-		.name		= "state",
-		.family		= AF_INET,
-		.checkentry	= state_mt_check,
-		.match		= state_mt,
-		.destroy	= state_mt_destroy,
-		.matchsize	= sizeof(struct xt_state_info),
-		.me		= THIS_MODULE,
-	},
-	{
-		.name		= "state",
-		.family		= AF_INET6,
-		.checkentry	= state_mt_check,
-		.match		= state_mt,
-		.destroy	= state_mt_destroy,
-		.matchsize	= sizeof(struct xt_state_info),
-		.me		= THIS_MODULE,
-	},
+static struct xt_match state_mt_reg __read_mostly = {
+	.name       = "state",
+	.family     = NFPROTO_UNSPEC,
+	.checkentry = state_mt_check,
+	.match      = state_mt,
+	.destroy    = state_mt_destroy,
+	.matchsize  = sizeof(struct xt_state_info),
+	.me         = THIS_MODULE,
 };
 
 static int __init state_mt_init(void)
 {
-	return xt_register_matches(state_mt_reg, ARRAY_SIZE(state_mt_reg));
+	return xt_register_match(&state_mt_reg);
 }
 
 static void __exit state_mt_exit(void)
 {
-	xt_unregister_matches(state_mt_reg, ARRAY_SIZE(state_mt_reg));
+	xt_unregister_match(&state_mt_reg);
 }
 
 module_init(state_mt_init);

@@ -2,6 +2,7 @@
  * JFFS2 -- Journalling Flash File System, Version 2.
  *
  * Copyright © 2001-2007 Red Hat, Inc.
+ * Copyright © 2004-2010 David Woodhouse <dwmw2@infradead.org>
  *
  * Created by David Woodhouse <dwmw2@infradead.org>
  *
@@ -9,12 +10,15 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/pagemap.h>
 #include <linux/crc32.h>
 #include <linux/jffs2.h>
 #include <linux/mtd/mtd.h>
+#include <linux/slab.h>
 #include "nodelist.h"
 #include "debug.h"
 
@@ -91,15 +95,15 @@ __jffs2_dbg_fragtree_paranoia_check_nolock(struct jffs2_inode_info *f)
 			   rather than mucking around with actually reading the node
 			   and checking the compression type, which is the real way
 			   to tell a hole node. */
-			if (frag->ofs & (PAGE_CACHE_SIZE-1) && frag_prev(frag)
-					&& frag_prev(frag)->size < PAGE_CACHE_SIZE && frag_prev(frag)->node) {
+			if (frag->ofs & (PAGE_SIZE-1) && frag_prev(frag)
+					&& frag_prev(frag)->size < PAGE_SIZE && frag_prev(frag)->node) {
 				JFFS2_ERROR("REF_PRISTINE node at 0x%08x had a previous non-hole frag in the same page. Tell dwmw2.\n",
 					ref_offset(fn->raw));
 				bitched = 1;
 			}
 
-			if ((frag->ofs+frag->size) & (PAGE_CACHE_SIZE-1) && frag_next(frag)
-					&& frag_next(frag)->size < PAGE_CACHE_SIZE && frag_next(frag)->node) {
+			if ((frag->ofs+frag->size) & (PAGE_SIZE-1) && frag_next(frag)
+					&& frag_next(frag)->size < PAGE_SIZE && frag_next(frag)->node) {
 				JFFS2_ERROR("REF_PRISTINE node at 0x%08x (%08x-%08x) had a following non-hole frag in the same page. Tell dwmw2.\n",
 				       ref_offset(fn->raw), frag->ofs, frag->ofs+frag->size);
 				bitched = 1;
@@ -259,12 +263,15 @@ void __jffs2_dbg_superblock_counts(struct jffs2_sb_info *c)
 		bad += c->sector_size;
 	}
 
-#define check(sz) \
-	if (sz != c->sz##_size) {			\
-		printk(KERN_WARNING #sz "_size mismatch counted 0x%x, c->" #sz "_size 0x%x\n", \
-		       sz, c->sz##_size);		\
-		dump = 1;				\
-	}
+#define check(sz)							\
+do {									\
+	if (sz != c->sz##_size) {					\
+		pr_warn("%s_size mismatch counted 0x%x, c->%s_size 0x%x\n", \
+			#sz, sz, #sz, c->sz##_size);			\
+		dump = 1;						\
+	}								\
+} while (0)
+
 	check(free);
 	check(dirty);
 	check(used);
@@ -272,11 +279,12 @@ void __jffs2_dbg_superblock_counts(struct jffs2_sb_info *c)
 	check(unchecked);
 	check(bad);
 	check(erasing);
+
 #undef check
 
 	if (nr_counted != c->nr_blocks) {
-		printk(KERN_WARNING "%s counted only 0x%x blocks of 0x%x. Where are the others?\n",
-		       __func__, nr_counted, c->nr_blocks);
+		pr_warn("%s counted only 0x%x blocks of 0x%x. Where are the others?\n",
+			__func__, nr_counted, c->nr_blocks);
 		dump = 1;
 	}
 

@@ -1,17 +1,7 @@
-menu "Kernel hacking"
+# SPDX-License-Identifier: GPL-2.0
 
 config TRACE_IRQFLAGS_SUPPORT
-	bool
-	default y
+	def_bool y
 
-source "lib/Kconfig.debug"
-
-config DEBUG_PAGEALLOC
-	bool "Debug page memory allocations"
-	depends on DEBUG_KERNEL
-	help
-	  Unmap pages from the kernel linear mapping after free_pages().
-	  This results in a slowdown, but helps to find certain types of
-	  memory corruptions.
-
-endmenu
+config EARLY_PRINTK
+	def_bool y

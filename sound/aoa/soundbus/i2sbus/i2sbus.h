@@ -1,9 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * i2sbus driver -- private definitions
  *
  * Copyright 2006 Johannes Berg <johannes@sipsolutions.net>
- *
- * GPL v2, can be found in COPYING.
  */
 #ifndef __I2SBUS_H
 #define __I2SBUS_H
@@ -18,7 +17,7 @@
 #include <asm/pmac_feature.h>
 #include <asm/dbdma.h>
 
-#include "i2sbus-interface.h"
+#include "interface.h"
 #include "../soundbus.h"
 
 struct i2sbus_control {

@@ -3,18 +3,24 @@
  * Broadcom PCI-core driver
  *
  * Copyright 2005, Broadcom Corporation
- * Copyright 2006, 2007, Michael Buesch <mb@bu3sch.de>
+ * Copyright 2006, 2007, Michael Buesch <m@bues.ch>
  *
  * Licensed under the GNU/GPL. See COPYING for details.
  */
 
+#include "ssb_private.h"
+
 #include <linux/ssb/ssb.h>
 #include <linux/pci.h>
+#include <linux/export.h>
 #include <linux/delay.h>
 #include <linux/ssb/ssb_embedded.h>
 
-#include "ssb_private.h"
-
+static u32 ssb_pcie_read(struct ssb_pcicore *pc, u32 address);
+static void ssb_pcie_write(struct ssb_pcicore *pc, u32 address, u32 data);
+static u16 ssb_pcie_mdio_read(struct ssb_pcicore *pc, u8 device, u8 address);
+static void ssb_pcie_mdio_write(struct ssb_pcicore *pc, u8 device,
+				u8 address, u16 data);
 
 static inline
 u32 pcicore_read32(struct ssb_pcicore *pc, u16 offset)
@@ -69,7 +75,7 @@ static u32 get_cfgspace_addr(struct ssb_pcicore *pc,
 	u32 tmp;
 
 	/* We do only have one cardbus device behind the bridge. */
-	if (pc->cardbusmode && (dev >= 1))
+	if (pc->cardbusmode && (dev > 1))
 		goto out;
 
 	if (bus == 0) {
@@ -109,14 +115,14 @@ static int ssb_extpci_read_config(struct ssb_pcicore *pc,
 	u32 addr, val;
 	void __iomem *mmio;
 
-	SSB_WARN_ON(!pc->hostmode);
+	WARN_ON(!pc->hostmode);
 	if (unlikely(len != 1 && len != 2 && len != 4))
 		goto out;
 	addr = get_cfgspace_addr(pc, bus, dev, func, off);
 	if (unlikely(!addr))
 		goto out;
 	err = -ENOMEM;
-	mmio = ioremap_nocache(addr, len);
+	mmio = ioremap(addr, len);
 	if (!mmio)
 		goto out;
 
@@ -155,14 +161,14 @@ static int ssb_extpci_write_config(struct ssb_pcicore *pc,
 	u32 addr, val = 0;
 	void __iomem *mmio;
 
-	SSB_WARN_ON(!pc->hostmode);
+	WARN_ON(!pc->hostmode);
 	if (unlikely(len != 1 && len != 2 && len != 4))
 		goto out;
 	addr = get_cfgspace_addr(pc, bus, dev, func, off);
 	if (unlikely(!addr))
 		goto out;
 	err = -ENOMEM;
-	mmio = ioremap_nocache(addr, len);
+	mmio = ioremap(addr, len);
 	if (!mmio)
 		goto out;
 
@@ -246,49 +252,19 @@ static struct pci_controller ssb_pcicore_controller = {
 	.pci_ops	= &ssb_pcicore_pciops,
 	.io_resource	= &ssb_pcicore_io_resource,
 	.mem_resource	= &ssb_pcicore_mem_resource,
-	.mem_offset	= 0x24000000,
 };
-
-static u32 ssb_pcicore_pcibus_iobase = 0x100;
-static u32 ssb_pcicore_pcibus_membase = SSB_PCI_DMA;
 
 /* This function is called when doing a pci_enable_device().
  * We must first check if the device is a device on the PCI-core bridge. */
 int ssb_pcicore_plat_dev_init(struct pci_dev *d)
 {
-	struct resource *res;
-	int pos, size;
-	u32 *base;
-
 	if (d->bus->ops != &ssb_pcicore_pciops) {
 		/* This is not a device on the PCI-core bridge. */
 		return -ENODEV;
 	}
 
-	ssb_printk(KERN_INFO "PCI: Fixing up device %s\n",
-		   pci_name(d));
+	dev_info(&d->dev, "PCI: Fixing up device %s\n", pci_name(d));
 
-	/* Fix up resource bases */
-	for (pos = 0; pos < 6; pos++) {
-		res = &d->resource[pos];
-		if (res->flags & IORESOURCE_IO)
-			base = &ssb_pcicore_pcibus_iobase;
-		else
-			base = &ssb_pcicore_pcibus_membase;
-		res->flags |= IORESOURCE_PCI_FIXED;
-		if (res->end) {
-			size = res->end - res->start + 1;
-			if (*base & (size - 1))
-				*base = (*base + size) & ~(size - 1);
-			res->start = *base;
-			res->end = res->start + size - 1;
-			*base += size;
-			pci_write_config_dword(d, PCI_BASE_ADDRESS_0 + (pos << 2), res->start);
-		}
-		/* Fix up PCI bridge BAR0 only */
-		if (d->bus->number == 0 && PCI_SLOT(d->devfn) == 0)
-			break;
-	}
 	/* Fix up interrupt lines */
 	d->irq = ssb_mips_irq(extpci_core->dev) + 2;
 	pci_write_config_byte(d, PCI_INTERRUPT_LINE, d->irq);
@@ -308,12 +284,12 @@ static void ssb_pcicore_fixup_pcibridge(struct pci_dev *dev)
 	if (dev->bus->number != 0 || PCI_SLOT(dev->devfn) != 0)
 		return;
 
-	ssb_printk(KERN_INFO "PCI: Fixing up bridge %s\n", pci_name(dev));
+	dev_info(&dev->dev, "PCI: Fixing up bridge %s\n", pci_name(dev));
 
 	/* Enable PCI bridge bus mastering and memory space */
 	pci_set_master(dev);
 	if (pcibios_enable_device(dev, ~0) < 0) {
-		ssb_printk(KERN_ERR "PCI: SSB bridge enable failed\n");
+		dev_err(&dev->dev, "PCI: SSB bridge enable failed\n");
 		return;
 	}
 
@@ -322,8 +298,9 @@ static void ssb_pcicore_fixup_pcibridge(struct pci_dev *dev)
 
 	/* Make sure our latency is high enough to handle the devices behind us */
 	lat = 168;
-	ssb_printk(KERN_INFO "PCI: Fixing latency timer of device %s to %u\n",
-		   pci_name(dev), lat);
+	dev_info(&dev->dev,
+		 "PCI: Fixing latency timer of device %s to %u\n",
+		 pci_name(dev), lat);
 	pci_write_config_byte(dev, PCI_LATENCY_TIMER, lat);
 }
 DECLARE_PCI_FIXUP_EARLY(PCI_ANY_ID, PCI_ANY_ID, ssb_pcicore_fixup_pcibridge);
@@ -346,7 +323,7 @@ static void ssb_pcicore_init_hostmode(struct ssb_pcicore *pc)
 		return;
 	extpci_core = pc;
 
-	ssb_dprintk(KERN_INFO PFX "PCIcore in host mode found\n");
+	dev_dbg(pc->dev->dev, "PCIcore in host mode found\n");
 	/* Reset devices on the external PCI bus */
 	val = SSB_PCICORE_CTL_RST_OE;
 	val |= SSB_PCICORE_CTL_CLK_OE;
@@ -361,7 +338,7 @@ static void ssb_pcicore_init_hostmode(struct ssb_pcicore *pc)
 	udelay(1); /* Assertion time demanded by the PCI standard */
 
 	if (pc->dev->bus->has_cardbus_slot) {
-		ssb_dprintk(KERN_INFO PFX "CardBus slot detected\n");
+		dev_dbg(pc->dev->dev, "CardBus slot detected\n");
 		pc->cardbusmode = 1;
 		/* GPIO 1 resets the bridge */
 		ssb_gpio_out(pc->dev->bus, 1, 1);
@@ -381,6 +358,16 @@ static void ssb_pcicore_init_hostmode(struct ssb_pcicore *pc)
 	pcicore_write32(pc, SSB_PCICORE_SBTOPCI2,
 			SSB_PCICORE_SBTOPCI_MEM | SSB_PCI_DMA);
 
+	/*
+	 * Accessing PCI config without a proper delay after devices reset (not
+	 * GPIO reset) was causing reboots on WRT300N v1.0 (BCM4704).
+	 * Tested delay 850 us lowered reboot chance to 50-80%, 1000 us fixed it
+	 * completely. Flushing all writes was also tested but with no luck.
+	 * The same problem was reported for WRT350N v1 (BCM4705), so we just
+	 * sleep here unconditionally.
+	 */
+	usleep_range(1000, 2000);
+
 	/* Enable PCI bridge BAR0 prefetch and burst */
 	val = PCI_COMMAND_MASTER | PCI_COMMAND_MEMORY;
 	ssb_extpci_write_config(pc, 0, 0, 0, PCI_COMMAND, &val, 2);
@@ -395,7 +382,7 @@ static void ssb_pcicore_init_hostmode(struct ssb_pcicore *pc)
 	/* Ok, ready to run, register it to the system.
 	 * The following needs change, if we want to port hostmode
 	 * to non-MIPS platform. */
-	ssb_pcicore_controller.io_map_base = (unsigned long)ioremap_nocache(SSB_PCI_MEM, 0x04000000);
+	ssb_pcicore_controller.io_map_base = (unsigned long)ioremap(SSB_PCI_MEM, 0x04000000);
 	set_io_port_base(ssb_pcicore_controller.io_map_base);
 	/* Give some time to the PCI controller to configure itself with the new
 	 * values. Not waiting at this point causes crashes of the machine. */
@@ -432,6 +419,107 @@ static int pcicore_is_in_hostmode(struct ssb_pcicore *pc)
 }
 #endif /* CONFIG_SSB_PCICORE_HOSTMODE */
 
+/**************************************************
+ * Workarounds.
+ **************************************************/
+
+static void ssb_pcicore_fix_sprom_core_index(struct ssb_pcicore *pc)
+{
+	u16 tmp = pcicore_read16(pc, SSB_PCICORE_SPROM(0));
+	if (((tmp & 0xF000) >> 12) != pc->dev->core_index) {
+		tmp &= ~0xF000;
+		tmp |= (pc->dev->core_index << 12);
+		pcicore_write16(pc, SSB_PCICORE_SPROM(0), tmp);
+	}
+}
+
+static u8 ssb_pcicore_polarity_workaround(struct ssb_pcicore *pc)
+{
+	return (ssb_pcie_read(pc, 0x204) & 0x10) ? 0xC0 : 0x80;
+}
+
+static void ssb_pcicore_serdes_workaround(struct ssb_pcicore *pc)
+{
+	const u8 serdes_pll_device = 0x1D;
+	const u8 serdes_rx_device = 0x1F;
+	u16 tmp;
+
+	ssb_pcie_mdio_write(pc, serdes_rx_device, 1 /* Control */,
+			    ssb_pcicore_polarity_workaround(pc));
+	tmp = ssb_pcie_mdio_read(pc, serdes_pll_device, 1 /* Control */);
+	if (tmp & 0x4000)
+		ssb_pcie_mdio_write(pc, serdes_pll_device, 1, tmp & ~0x4000);
+}
+
+static void ssb_pcicore_pci_setup_workarounds(struct ssb_pcicore *pc)
+{
+	struct ssb_device *pdev = pc->dev;
+	struct ssb_bus *bus = pdev->bus;
+	u32 tmp;
+
+	tmp = pcicore_read32(pc, SSB_PCICORE_SBTOPCI2);
+	tmp |= SSB_PCICORE_SBTOPCI_PREF;
+	tmp |= SSB_PCICORE_SBTOPCI_BURST;
+	pcicore_write32(pc, SSB_PCICORE_SBTOPCI2, tmp);
+
+	if (pdev->id.revision < 5) {
+		tmp = ssb_read32(pdev, SSB_IMCFGLO);
+		tmp &= ~SSB_IMCFGLO_SERTO;
+		tmp |= 2;
+		tmp &= ~SSB_IMCFGLO_REQTO;
+		tmp |= 3 << SSB_IMCFGLO_REQTO_SHIFT;
+		ssb_write32(pdev, SSB_IMCFGLO, tmp);
+		ssb_commit_settings(bus);
+	} else if (pdev->id.revision >= 11) {
+		tmp = pcicore_read32(pc, SSB_PCICORE_SBTOPCI2);
+		tmp |= SSB_PCICORE_SBTOPCI_MRM;
+		pcicore_write32(pc, SSB_PCICORE_SBTOPCI2, tmp);
+	}
+}
+
+static void ssb_pcicore_pcie_setup_workarounds(struct ssb_pcicore *pc)
+{
+	u32 tmp;
+	u8 rev = pc->dev->id.revision;
+
+	if (rev == 0 || rev == 1) {
+		/* TLP Workaround register. */
+		tmp = ssb_pcie_read(pc, 0x4);
+		tmp |= 0x8;
+		ssb_pcie_write(pc, 0x4, tmp);
+	}
+	if (rev == 1) {
+		/* DLLP Link Control register. */
+		tmp = ssb_pcie_read(pc, 0x100);
+		tmp |= 0x40;
+		ssb_pcie_write(pc, 0x100, tmp);
+	}
+
+	if (rev == 0) {
+		const u8 serdes_rx_device = 0x1F;
+
+		ssb_pcie_mdio_write(pc, serdes_rx_device,
+					2 /* Timer */, 0x8128);
+		ssb_pcie_mdio_write(pc, serdes_rx_device,
+					6 /* CDR */, 0x0100);
+		ssb_pcie_mdio_write(pc, serdes_rx_device,
+					7 /* CDR BW */, 0x1466);
+	} else if (rev == 3 || rev == 4 || rev == 5) {
+		/* TODO: DLLP Power Management Threshold */
+		ssb_pcicore_serdes_workaround(pc);
+		/* TODO: ASPM */
+	} else if (rev == 7) {
+		/* TODO: No PLL down */
+	}
+
+	if (rev >= 6) {
+		/* Miscellaneous Configuration Fixup */
+		tmp = pcicore_read16(pc, SSB_PCICORE_SPROM(5));
+		if (!(tmp & 0x8000))
+			pcicore_write16(pc, SSB_PCICORE_SPROM(5),
+					tmp | 0x8000);
+	}
+}
 
 /**************************************************
  * Generic and Clientmode operation code.
@@ -439,18 +527,29 @@ static int pcicore_is_in_hostmode(struct ssb_pcicore *pc)
 
 static void ssb_pcicore_init_clientmode(struct ssb_pcicore *pc)
 {
+	struct ssb_device *pdev = pc->dev;
+	struct ssb_bus *bus = pdev->bus;
+
+	if (bus->bustype == SSB_BUSTYPE_PCI)
+		ssb_pcicore_fix_sprom_core_index(pc);
+
 	/* Disable PCI interrupts. */
-	ssb_write32(pc->dev, SSB_INTVEC, 0);
+	ssb_write32(pdev, SSB_INTVEC, 0);
+
+	/* Additional PCIe always once-executed workarounds */
+	if (pc->dev->id.coreid == SSB_DEV_PCIE) {
+		ssb_pcicore_serdes_workaround(pc);
+		/* TODO: ASPM */
+		/* TODO: Clock Request Update */
+	}
 }
 
 void ssb_pcicore_init(struct ssb_pcicore *pc)
 {
 	struct ssb_device *dev = pc->dev;
-	struct ssb_bus *bus;
 
 	if (!dev)
 		return;
-	bus = dev->bus;
 	if (!ssb_device_is_enabled(dev))
 		ssb_device_enable(dev, 0);
 
@@ -475,11 +574,35 @@ static void ssb_pcie_write(struct ssb_pcicore *pc, u32 address, u32 data)
 	pcicore_write32(pc, 0x134, data);
 }
 
-static void ssb_pcie_mdio_write(struct ssb_pcicore *pc, u8 device,
-				u8 address, u16 data)
+static void ssb_pcie_mdio_set_phy(struct ssb_pcicore *pc, u8 phy)
 {
 	const u16 mdio_control = 0x128;
 	const u16 mdio_data = 0x12C;
+	u32 v;
+	int i;
+
+	v = (1 << 30); /* Start of Transaction */
+	v |= (1 << 28); /* Write Transaction */
+	v |= (1 << 17); /* Turnaround */
+	v |= (0x1F << 18);
+	v |= (phy << 4);
+	pcicore_write32(pc, mdio_data, v);
+
+	udelay(10);
+	for (i = 0; i < 200; i++) {
+		v = pcicore_read32(pc, mdio_control);
+		if (v & 0x100 /* Trans complete */)
+			break;
+		msleep(1);
+	}
+}
+
+static u16 ssb_pcie_mdio_read(struct ssb_pcicore *pc, u8 device, u8 address)
+{
+	const u16 mdio_control = 0x128;
+	const u16 mdio_data = 0x12C;
+	int max_retries = 10;
+	u16 ret = 0;
 	u32 v;
 	int i;
 
@@ -487,46 +610,68 @@ static void ssb_pcie_mdio_write(struct ssb_pcicore *pc, u8 device,
 	v |= 0x2; /* MDIO Clock Divisor */
 	pcicore_write32(pc, mdio_control, v);
 
+	if (pc->dev->id.revision >= 10) {
+		max_retries = 200;
+		ssb_pcie_mdio_set_phy(pc, device);
+	}
+
+	v = (1 << 30); /* Start of Transaction */
+	v |= (1 << 29); /* Read Transaction */
+	v |= (1 << 17); /* Turnaround */
+	if (pc->dev->id.revision < 10)
+		v |= (u32)device << 22;
+	v |= (u32)address << 18;
+	pcicore_write32(pc, mdio_data, v);
+	/* Wait for the device to complete the transaction */
+	udelay(10);
+	for (i = 0; i < max_retries; i++) {
+		v = pcicore_read32(pc, mdio_control);
+		if (v & 0x100 /* Trans complete */) {
+			udelay(10);
+			ret = pcicore_read32(pc, mdio_data);
+			break;
+		}
+		msleep(1);
+	}
+	pcicore_write32(pc, mdio_control, 0);
+	return ret;
+}
+
+static void ssb_pcie_mdio_write(struct ssb_pcicore *pc, u8 device,
+				u8 address, u16 data)
+{
+	const u16 mdio_control = 0x128;
+	const u16 mdio_data = 0x12C;
+	int max_retries = 10;
+	u32 v;
+	int i;
+
+	v = 0x80; /* Enable Preamble Sequence */
+	v |= 0x2; /* MDIO Clock Divisor */
+	pcicore_write32(pc, mdio_control, v);
+
+	if (pc->dev->id.revision >= 10) {
+		max_retries = 200;
+		ssb_pcie_mdio_set_phy(pc, device);
+	}
+
 	v = (1 << 30); /* Start of Transaction */
 	v |= (1 << 28); /* Write Transaction */
 	v |= (1 << 17); /* Turnaround */
-	v |= (u32)device << 22;
+	if (pc->dev->id.revision < 10)
+		v |= (u32)device << 22;
 	v |= (u32)address << 18;
 	v |= data;
 	pcicore_write32(pc, mdio_data, v);
 	/* Wait for the device to complete the transaction */
 	udelay(10);
-	for (i = 0; i < 10; i++) {
+	for (i = 0; i < max_retries; i++) {
 		v = pcicore_read32(pc, mdio_control);
 		if (v & 0x100 /* Trans complete */)
 			break;
 		msleep(1);
 	}
 	pcicore_write32(pc, mdio_control, 0);
-}
-
-static void ssb_broadcast_value(struct ssb_device *dev,
-				u32 address, u32 data)
-{
-	/* This is used for both, PCI and ChipCommon core, so be careful. */
-	BUILD_BUG_ON(SSB_PCICORE_BCAST_ADDR != SSB_CHIPCO_BCAST_ADDR);
-	BUILD_BUG_ON(SSB_PCICORE_BCAST_DATA != SSB_CHIPCO_BCAST_DATA);
-
-	ssb_write32(dev, SSB_PCICORE_BCAST_ADDR, address);
-	ssb_read32(dev, SSB_PCICORE_BCAST_ADDR); /* flush */
-	ssb_write32(dev, SSB_PCICORE_BCAST_DATA, data);
-	ssb_read32(dev, SSB_PCICORE_BCAST_DATA); /* flush */
-}
-
-static void ssb_commit_settings(struct ssb_bus *bus)
-{
-	struct ssb_device *dev;
-
-	dev = bus->chipco.dev ? bus->chipco.dev : bus->pcicore.dev;
-	if (WARN_ON(!dev))
-		return;
-	/* This forces an update of the cached registers. */
-	ssb_broadcast_value(dev, 0xFD8, 0);
 }
 
 int ssb_pcicore_dev_irqvecs_enable(struct ssb_pcicore *pc,
@@ -551,13 +696,13 @@ int ssb_pcicore_dev_irqvecs_enable(struct ssb_pcicore *pc,
 	might_sleep_if(pdev->id.coreid != SSB_DEV_PCI);
 
 	/* Enable interrupts for this device. */
-	if (bus->host_pci &&
-	    ((pdev->id.revision >= 6) || (pdev->id.coreid == SSB_DEV_PCIE))) {
+	if ((pdev->id.revision >= 6) || (pdev->id.coreid == SSB_DEV_PCIE)) {
 		u32 coremask;
 
 		/* Calculate the "coremask" for the device. */
 		coremask = (1 << dev->core_index);
 
+		WARN_ON(bus->bustype != SSB_BUSTYPE_PCI);
 		err = pci_read_config_dword(bus->host_pci, SSB_PCI_IRQMASK, &tmp);
 		if (err)
 			goto out;
@@ -579,48 +724,10 @@ int ssb_pcicore_dev_irqvecs_enable(struct ssb_pcicore *pc,
 	if (pc->setup_done)
 		goto out;
 	if (pdev->id.coreid == SSB_DEV_PCI) {
-		tmp = pcicore_read32(pc, SSB_PCICORE_SBTOPCI2);
-		tmp |= SSB_PCICORE_SBTOPCI_PREF;
-		tmp |= SSB_PCICORE_SBTOPCI_BURST;
-		pcicore_write32(pc, SSB_PCICORE_SBTOPCI2, tmp);
-
-		if (pdev->id.revision < 5) {
-			tmp = ssb_read32(pdev, SSB_IMCFGLO);
-			tmp &= ~SSB_IMCFGLO_SERTO;
-			tmp |= 2;
-			tmp &= ~SSB_IMCFGLO_REQTO;
-			tmp |= 3 << SSB_IMCFGLO_REQTO_SHIFT;
-			ssb_write32(pdev, SSB_IMCFGLO, tmp);
-			ssb_commit_settings(bus);
-		} else if (pdev->id.revision >= 11) {
-			tmp = pcicore_read32(pc, SSB_PCICORE_SBTOPCI2);
-			tmp |= SSB_PCICORE_SBTOPCI_MRM;
-			pcicore_write32(pc, SSB_PCICORE_SBTOPCI2, tmp);
-		}
+		ssb_pcicore_pci_setup_workarounds(pc);
 	} else {
 		WARN_ON(pdev->id.coreid != SSB_DEV_PCIE);
-		//TODO: Better make defines for all these magic PCIE values.
-		if ((pdev->id.revision == 0) || (pdev->id.revision == 1)) {
-			/* TLP Workaround register. */
-			tmp = ssb_pcie_read(pc, 0x4);
-			tmp |= 0x8;
-			ssb_pcie_write(pc, 0x4, tmp);
-		}
-		if (pdev->id.revision == 0) {
-			const u8 serdes_rx_device = 0x1F;
-
-			ssb_pcie_mdio_write(pc, serdes_rx_device,
-					    2 /* Timer */, 0x8128);
-			ssb_pcie_mdio_write(pc, serdes_rx_device,
-					    6 /* CDR */, 0x0100);
-			ssb_pcie_mdio_write(pc, serdes_rx_device,
-					    7 /* CDR BW */, 0x1466);
-		} else if (pdev->id.revision == 1) {
-			/* DLLP Link Control register. */
-			tmp = ssb_pcie_read(pc, 0x100);
-			tmp |= 0x40;
-			ssb_pcie_write(pc, 0x100, tmp);
-		}
+		ssb_pcicore_pcie_setup_workarounds(pc);
 	}
 	pc->setup_done = 1;
 out:

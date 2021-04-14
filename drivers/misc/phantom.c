@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (C) 2005-2007 Jiri Slaby <jirislaby@gmail.com>
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  You need an userspace library to cooperate with this driver. It (and other
+ *  You need a userspace library to cooperate with this driver. It (and other
  *  info) may be obtained here:
  *  http://www.fi.muni.cz/~xslaby/phantom.html
  *  or alternatively, you might use OpenHaptics provided by Sensable.
@@ -21,10 +17,12 @@
 #include <linux/poll.h>
 #include <linux/interrupt.h>
 #include <linux/cdev.h>
+#include <linux/slab.h>
 #include <linux/phantom.h>
-#include <linux/smp_lock.h>
+#include <linux/sched.h>
+#include <linux/mutex.h>
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/io.h>
 
 #define PHANTOM_VERSION		"n0.9.8"
@@ -36,6 +34,7 @@
 #define PHB_RUNNING		1
 #define PHB_NOT_OH		2
 
+static DEFINE_MUTEX(phantom_mutex);
 static struct class *phantom_class;
 static int phantom_major;
 
@@ -213,17 +212,17 @@ static int phantom_open(struct inode *inode, struct file *file)
 	struct phantom_device *dev = container_of(inode->i_cdev,
 			struct phantom_device, cdev);
 
-	lock_kernel();
+	mutex_lock(&phantom_mutex);
 	nonseekable_open(inode, file);
 
 	if (mutex_lock_interruptible(&dev->open_lock)) {
-		unlock_kernel();
+		mutex_unlock(&phantom_mutex);
 		return -ERESTARTSYS;
 	}
 
 	if (dev->opened) {
 		mutex_unlock(&dev->open_lock);
-		unlock_kernel();
+		mutex_unlock(&phantom_mutex);
 		return -EINVAL;
 	}
 
@@ -234,7 +233,7 @@ static int phantom_open(struct inode *inode, struct file *file)
 	atomic_set(&dev->counter, 0);
 	dev->opened++;
 	mutex_unlock(&dev->open_lock);
-	unlock_kernel();
+	mutex_unlock(&phantom_mutex);
 	return 0;
 }
 
@@ -253,30 +252,31 @@ static int phantom_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static unsigned int phantom_poll(struct file *file, poll_table *wait)
+static __poll_t phantom_poll(struct file *file, poll_table *wait)
 {
 	struct phantom_device *dev = file->private_data;
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 
 	pr_debug("phantom_poll: %d\n", atomic_read(&dev->counter));
 	poll_wait(file, &dev->wait, wait);
 
 	if (!(dev->status & PHB_RUNNING))
-		mask = POLLERR;
+		mask = EPOLLERR;
 	else if (atomic_read(&dev->counter))
-		mask = POLLIN | POLLRDNORM;
+		mask = EPOLLIN | EPOLLRDNORM;
 
 	pr_debug("phantom_poll end: %x/%d\n", mask, atomic_read(&dev->counter));
 
 	return mask;
 }
 
-static struct file_operations phantom_file_ops = {
+static const struct file_operations phantom_file_ops = {
 	.open = phantom_open,
 	.release = phantom_release,
 	.unlocked_ioctl = phantom_ioctl,
 	.compat_ioctl = phantom_compat_ioctl,
 	.poll = phantom_poll,
+	.llseek = no_llseek,
 };
 
 static irqreturn_t phantom_isr(int irq, void *data)
@@ -320,7 +320,7 @@ static irqreturn_t phantom_isr(int irq, void *data)
  * Init and deinit driver
  */
 
-static unsigned int __devinit phantom_get_free(void)
+static unsigned int phantom_get_free(void)
 {
 	unsigned int i;
 
@@ -331,7 +331,7 @@ static unsigned int __devinit phantom_get_free(void)
 	return i;
 }
 
-static int __devinit phantom_probe(struct pci_dev *pdev,
+static int phantom_probe(struct pci_dev *pdev,
 	const struct pci_device_id *pci_id)
 {
 	struct phantom_device *pht;
@@ -339,8 +339,10 @@ static int __devinit phantom_probe(struct pci_dev *pdev,
 	int retval;
 
 	retval = pci_enable_device(pdev);
-	if (retval)
+	if (retval) {
+		dev_err(&pdev->dev, "pci_enable_device failed!\n");
 		goto err;
+	}
 
 	minor = phantom_get_free();
 	if (minor == PHANTOM_MAX_MINORS) {
@@ -352,8 +354,10 @@ static int __devinit phantom_probe(struct pci_dev *pdev,
 	phantom_devices[minor] = 1;
 
 	retval = pci_request_regions(pdev, "phantom");
-	if (retval)
+	if (retval) {
+		dev_err(&pdev->dev, "pci_request_regions failed!\n");
 		goto err_null;
+	}
 
 	retval = -ENOMEM;
 	pht = kzalloc(sizeof(*pht), GFP_KERNEL);
@@ -387,7 +391,7 @@ static int __devinit phantom_probe(struct pci_dev *pdev,
 	iowrite32(0, pht->caddr + PHN_IRQCTL);
 	ioread32(pht->caddr + PHN_IRQCTL); /* PCI posting */
 	retval = request_irq(pdev->irq, phantom_isr,
-			IRQF_SHARED | IRQF_DISABLED, "phantom", pht);
+			IRQF_SHARED, "phantom", pht);
 	if (retval) {
 		dev_err(&pdev->dev, "can't establish ISR\n");
 		goto err_unmo;
@@ -399,9 +403,9 @@ static int __devinit phantom_probe(struct pci_dev *pdev,
 		goto err_irq;
 	}
 
-	if (IS_ERR(device_create_drvdata(phantom_class, &pdev->dev,
-					 MKDEV(phantom_major, minor),
-					 NULL, "phantom%u", minor)))
+	if (IS_ERR(device_create(phantom_class, &pdev->dev,
+				 MKDEV(phantom_major, minor), NULL,
+				 "phantom%u", minor)))
 		dev_err(&pdev->dev, "can't create device\n");
 
 	pci_set_drvdata(pdev, pht);
@@ -427,7 +431,7 @@ err:
 	return retval;
 }
 
-static void __devexit phantom_remove(struct pci_dev *pdev)
+static void phantom_remove(struct pci_dev *pdev)
 {
 	struct phantom_device *pht = pci_get_drvdata(pdev);
 	unsigned int minor = MINOR(pht->cdev.dev);
@@ -453,33 +457,28 @@ static void __devexit phantom_remove(struct pci_dev *pdev)
 	pci_disable_device(pdev);
 }
 
-#ifdef CONFIG_PM
-static int phantom_suspend(struct pci_dev *pdev, pm_message_t state)
+static int __maybe_unused phantom_suspend(struct device *dev_d)
 {
-	struct phantom_device *dev = pci_get_drvdata(pdev);
+	struct phantom_device *dev = dev_get_drvdata(dev_d);
 
 	iowrite32(0, dev->caddr + PHN_IRQCTL);
 	ioread32(dev->caddr + PHN_IRQCTL); /* PCI posting */
 
-	synchronize_irq(pdev->irq);
+	synchronize_irq(to_pci_dev(dev_d)->irq);
 
 	return 0;
 }
 
-static int phantom_resume(struct pci_dev *pdev)
+static int __maybe_unused phantom_resume(struct device *dev_d)
 {
-	struct phantom_device *dev = pci_get_drvdata(pdev);
+	struct phantom_device *dev = dev_get_drvdata(dev_d);
 
 	iowrite32(0, dev->caddr + PHN_IRQCTL);
 
 	return 0;
 }
-#else
-#define phantom_suspend	NULL
-#define phantom_resume	NULL
-#endif
 
-static struct pci_device_id phantom_pci_tbl[] __devinitdata = {
+static struct pci_device_id phantom_pci_tbl[] = {
 	{ .vendor = PCI_VENDOR_ID_PLX, .device = PCI_DEVICE_ID_PLX_9050,
 	  .subvendor = PCI_VENDOR_ID_PLX, .subdevice = PCI_DEVICE_ID_PLX_9050,
 	  .class = PCI_CLASS_BRIDGE_OTHER << 8, .class_mask = 0xffff00 },
@@ -487,21 +486,17 @@ static struct pci_device_id phantom_pci_tbl[] __devinitdata = {
 };
 MODULE_DEVICE_TABLE(pci, phantom_pci_tbl);
 
+static SIMPLE_DEV_PM_OPS(phantom_pm_ops, phantom_suspend, phantom_resume);
+
 static struct pci_driver phantom_pci_driver = {
 	.name = "phantom",
 	.id_table = phantom_pci_tbl,
 	.probe = phantom_probe,
-	.remove = __devexit_p(phantom_remove),
-	.suspend = phantom_suspend,
-	.resume = phantom_resume
+	.remove = phantom_remove,
+	.driver.pm = &phantom_pm_ops,
 };
 
-static ssize_t phantom_show_version(struct class *cls, char *buf)
-{
-	return sprintf(buf, PHANTOM_VERSION "\n");
-}
-
-static CLASS_ATTR(version, 0444, phantom_show_version, NULL);
+static CLASS_ATTR_STRING(version, 0444, PHANTOM_VERSION);
 
 static int __init phantom_init(void)
 {
@@ -514,7 +509,7 @@ static int __init phantom_init(void)
 		printk(KERN_ERR "phantom: can't register phantom class\n");
 		goto err;
 	}
-	retval = class_create_file(phantom_class, &class_attr_version);
+	retval = class_create_file(phantom_class, &class_attr_version.attr);
 	if (retval) {
 		printk(KERN_ERR "phantom: can't create sysfs version file\n");
 		goto err_class;
@@ -540,7 +535,7 @@ static int __init phantom_init(void)
 err_unchr:
 	unregister_chrdev_region(dev, PHANTOM_MAX_MINORS);
 err_attr:
-	class_remove_file(phantom_class, &class_attr_version);
+	class_remove_file(phantom_class, &class_attr_version.attr);
 err_class:
 	class_destroy(phantom_class);
 err:
@@ -553,7 +548,7 @@ static void __exit phantom_exit(void)
 
 	unregister_chrdev_region(MKDEV(phantom_major, 0), PHANTOM_MAX_MINORS);
 
-	class_remove_file(phantom_class, &class_attr_version);
+	class_remove_file(phantom_class, &class_attr_version.attr);
 	class_destroy(phantom_class);
 
 	pr_debug("phantom: module successfully removed\n");

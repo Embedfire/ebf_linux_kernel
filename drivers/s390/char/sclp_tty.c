@@ -1,23 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *  drivers/s390/char/sclp_tty.c
  *    SCLP line mode terminal driver.
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 1999
  *    Author(s): Martin Peschke <mpeschke@de.ibm.com>
  *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
-#include <linux/module.h>
 #include <linux/kmod.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
-#include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <asm/uaccess.h>
+#include <linux/gfp.h>
+#include <linux/uaccess.h>
 
 #include "ctrlchar.h"
 #include "sclp.h"
@@ -48,7 +47,7 @@ static struct sclp_buffer *sclp_ttybuf;
 /* Timer for delayed output of console messages. */
 static struct timer_list sclp_tty_timer;
 
-static struct tty_struct *sclp_tty;
+static struct tty_port sclp_port;
 static unsigned char sclp_tty_chars[SCLP_TTY_BUF_SIZE];
 static unsigned short int sclp_tty_chars_count;
 
@@ -64,9 +63,9 @@ static int sclp_tty_columns = 80;
 static int
 sclp_tty_open(struct tty_struct *tty, struct file *filp)
 {
-	sclp_tty = tty;
+	tty_port_tty_set(&sclp_port, tty);
 	tty->driver_data = NULL;
-	tty->low_latency = 0;
+	sclp_port.low_latency = 0;
 	return 0;
 }
 
@@ -76,7 +75,7 @@ sclp_tty_close(struct tty_struct *tty, struct file *filp)
 {
 	if (tty->count > 1)
 		return;
-	sclp_tty = NULL;
+	tty_port_tty_set(&sclp_port, NULL);
 }
 
 /*
@@ -85,8 +84,8 @@ sclp_tty_close(struct tty_struct *tty, struct file *filp)
  * to change as output buffers get emptied, or if the output flow
  * control is acted. This is not an exact number because not every
  * character needs the same space in the sccb. The worst case is
- * a string of newlines. Every newlines creates a new mto which
- * needs 8 bytes.
+ * a string of newlines. Every newline creates a new message which
+ * needs 82 bytes.
  */
 static int
 sclp_tty_write_room (struct tty_struct *tty)
@@ -98,9 +97,9 @@ sclp_tty_write_room (struct tty_struct *tty)
 	spin_lock_irqsave(&sclp_tty_lock, flags);
 	count = 0;
 	if (sclp_ttybuf != NULL)
-		count = sclp_buffer_space(sclp_ttybuf) / sizeof(struct mto);
+		count = sclp_buffer_space(sclp_ttybuf) / sizeof(struct msg_buf);
 	list_for_each(l, &sclp_tty_pages)
-		count += NR_EMPTY_MTO_PER_SCCB;
+		count += NR_EMPTY_MSG_PER_SCCB;
 	spin_unlock_irqrestore(&sclp_tty_lock, flags);
 	return count;
 }
@@ -125,10 +124,8 @@ sclp_ttybuf_callback(struct sclp_buffer *buffer, int rc)
 					    struct sclp_buffer, list);
 		spin_unlock_irqrestore(&sclp_tty_lock, flags);
 	} while (buffer && sclp_emit_buffer(buffer, sclp_ttybuf_callback));
-	/* check if the tty needs a wake up call */
-	if (sclp_tty != NULL) {
-		tty_wakeup(sclp_tty);
-	}
+
+	tty_port_tty_wakeup(&sclp_port);
 }
 
 static inline void
@@ -154,7 +151,7 @@ __sclp_ttybuf_emit(struct sclp_buffer *buffer)
  * temporary write buffer.
  */
 static void
-sclp_tty_timeout(unsigned long data)
+sclp_tty_timeout(struct timer_list *unused)
 {
 	unsigned long flags;
 	struct sclp_buffer *buf;
@@ -221,11 +218,7 @@ static int sclp_tty_write_string(const unsigned char *str, int count, int may_fa
 	/* Setup timer to output current console buffer after 1/10 second */
 	if (sclp_ttybuf && sclp_chars_in_buffer(sclp_ttybuf) &&
 	    !timer_pending(&sclp_tty_timer)) {
-		init_timer(&sclp_tty_timer);
-		sclp_tty_timer.function = sclp_tty_timeout;
-		sclp_tty_timer.data = 0UL;
-		sclp_tty_timer.expires = jiffies + HZ/10;
-		add_timer(&sclp_tty_timer);
+		mod_timer(&sclp_tty_timer, jiffies + HZ / 10);
 	}
 	spin_unlock_irqrestore(&sclp_tty_lock, flags);
 out:
@@ -326,21 +319,22 @@ sclp_tty_flush_buffer(struct tty_struct *tty)
 static void
 sclp_tty_input(unsigned char* buf, unsigned int count)
 {
+	struct tty_struct *tty = tty_port_tty_get(&sclp_port);
 	unsigned int cchar;
 
 	/*
 	 * If this tty driver is currently closed
 	 * then throw the received input away.
 	 */
-	if (sclp_tty == NULL)
+	if (tty == NULL)
 		return;
-	cchar = ctrlchar_handle(buf, count, sclp_tty);
+	cchar = ctrlchar_handle(buf, count, tty);
 	switch (cchar & CTRLCHAR_MASK) {
 	case CTRLCHAR_SYSRQ:
 		break;
 	case CTRLCHAR_CTRL:
-		tty_insert_flip_char(sclp_tty, cchar, TTY_NORMAL);
-		tty_flip_buffer_push(sclp_tty);
+		tty_insert_flip_char(&sclp_port, cchar, TTY_NORMAL);
+		tty_flip_buffer_push(&sclp_port);
 		break;
 	case CTRLCHAR_NONE:
 		/* send (normal) input to line discipline */
@@ -348,13 +342,14 @@ sclp_tty_input(unsigned char* buf, unsigned int count)
 		    (strncmp((const char *) buf + count - 2, "^n", 2) &&
 		     strncmp((const char *) buf + count - 2, "\252n", 2))) {
 			/* add the auto \n */
-			tty_insert_flip_string(sclp_tty, buf, count);
-			tty_insert_flip_char(sclp_tty, '\n', TTY_NORMAL);
+			tty_insert_flip_string(&sclp_port, buf, count);
+			tty_insert_flip_char(&sclp_port, '\n', TTY_NORMAL);
 		} else
-			tty_insert_flip_string(sclp_tty, buf, count - 2);
-		tty_flip_buffer_push(sclp_tty);
+			tty_insert_flip_string(&sclp_port, buf, count - 2);
+		tty_flip_buffer_push(&sclp_port);
 		break;
 	}
+	tty_kref_put(tty);
 }
 
 /*
@@ -408,118 +403,72 @@ static int sclp_switch_cases(unsigned char *buf, int count)
 	return op - buf;
 }
 
-static void
-sclp_get_input(unsigned char *start, unsigned char *end)
+static void sclp_get_input(struct gds_subvector *sv)
 {
+	unsigned char *str;
 	int count;
 
-	count = end - start;
+	str = (unsigned char *) (sv + 1);
+	count = sv->length - sizeof(*sv);
 	if (sclp_tty_tolower)
-		EBC_TOLOWER(start, count);
-	count = sclp_switch_cases(start, count);
+		EBC_TOLOWER(str, count);
+	count = sclp_switch_cases(str, count);
 	/* convert EBCDIC to ASCII (modify original input in SCCB) */
-	sclp_ebcasc_str(start, count);
+	sclp_ebcasc_str(str, count);
 
 	/* transfer input to high level driver */
-	sclp_tty_input(start, count);
+	sclp_tty_input(str, count);
 }
 
-static inline struct gds_vector *
-find_gds_vector(struct gds_vector *start, struct gds_vector *end, u16 id)
+static inline void sclp_eval_selfdeftextmsg(struct gds_subvector *sv)
 {
-	struct gds_vector *vec;
+	void *end;
 
-	for (vec = start; vec < end; vec = (void *) vec + vec->length)
-		if (vec->gds_id == id)
-			return vec;
-	return NULL;
+	end = (void *) sv + sv->length;
+	for (sv = sv + 1; (void *) sv < end; sv = (void *) sv + sv->length)
+		if (sv->key == 0x30)
+			sclp_get_input(sv);
 }
 
-static inline struct gds_subvector *
-find_gds_subvector(struct gds_subvector *start,
-		   struct gds_subvector *end, u8 key)
+static inline void sclp_eval_textcmd(struct gds_vector *v)
 {
-	struct gds_subvector *subvec;
+	struct gds_subvector *sv;
+	void *end;
 
-	for (subvec = start; subvec < end;
-	     subvec = (void *) subvec + subvec->length)
-		if (subvec->key == key)
-			return subvec;
-	return NULL;
+	end = (void *) v + v->length;
+	for (sv = (struct gds_subvector *) (v + 1);
+	     (void *) sv < end; sv = (void *) sv + sv->length)
+		if (sv->key == GDS_KEY_SELFDEFTEXTMSG)
+			sclp_eval_selfdeftextmsg(sv);
+
 }
 
-static inline void
-sclp_eval_selfdeftextmsg(struct gds_subvector *start,
-			 struct gds_subvector *end)
+static inline void sclp_eval_cpmsu(struct gds_vector *v)
 {
-	struct gds_subvector *subvec;
+	void *end;
 
-	subvec = start;
-	while (subvec < end) {
-		subvec = find_gds_subvector(subvec, end, 0x30);
-		if (!subvec)
-			break;
-		sclp_get_input((unsigned char *)(subvec + 1),
-			       (unsigned char *) subvec + subvec->length);
-		subvec = (void *) subvec + subvec->length;
-	}
-}
-
-static inline void
-sclp_eval_textcmd(struct gds_subvector *start,
-		  struct gds_subvector *end)
-{
-	struct gds_subvector *subvec;
-
-	subvec = start;
-	while (subvec < end) {
-		subvec = find_gds_subvector(subvec, end,
-					    GDS_KEY_SELFDEFTEXTMSG);
-		if (!subvec)
-			break;
-		sclp_eval_selfdeftextmsg((struct gds_subvector *)(subvec + 1),
-					 (void *)subvec + subvec->length);
-		subvec = (void *) subvec + subvec->length;
-	}
-}
-
-static inline void
-sclp_eval_cpmsu(struct gds_vector *start, struct gds_vector *end)
-{
-	struct gds_vector *vec;
-
-	vec = start;
-	while (vec < end) {
-		vec = find_gds_vector(vec, end, GDS_ID_TEXTCMD);
-		if (!vec)
-			break;
-		sclp_eval_textcmd((struct gds_subvector *)(vec + 1),
-				  (void *) vec + vec->length);
-		vec = (void *) vec + vec->length;
-	}
+	end = (void *) v + v->length;
+	for (v = v + 1; (void *) v < end; v = (void *) v + v->length)
+		if (v->gds_id == GDS_ID_TEXTCMD)
+			sclp_eval_textcmd(v);
 }
 
 
-static inline void
-sclp_eval_mdsmu(struct gds_vector *start, void *end)
+static inline void sclp_eval_mdsmu(struct gds_vector *v)
 {
-	struct gds_vector *vec;
-
-	vec = find_gds_vector(start, end, GDS_ID_CPMSU);
-	if (vec)
-		sclp_eval_cpmsu(vec + 1, (void *) vec + vec->length);
+	v = sclp_find_gds_vector(v + 1, (void *) v + v->length, GDS_ID_CPMSU);
+	if (v)
+		sclp_eval_cpmsu(v);
 }
 
-static void
-sclp_tty_receiver(struct evbuf_header *evbuf)
+static void sclp_tty_receiver(struct evbuf_header *evbuf)
 {
-	struct gds_vector *start, *end, *vec;
+	struct gds_vector *v;
 
-	start = (struct gds_vector *)(evbuf + 1);
-	end = (void *) evbuf + evbuf->length;
-	vec = find_gds_vector(start, end, GDS_ID_MDSMU);
-	if (vec)
-		sclp_eval_mdsmu(vec + 1, (void *) vec + vec->length);
+	v = sclp_find_gds_vector(evbuf + 1, (void *) evbuf + evbuf->length,
+				 GDS_ID_MDSMU);
+	if (v)
+		sclp_eval_mdsmu(v);
 }
 
 static void
@@ -553,7 +502,10 @@ sclp_tty_init(void)
 	int i;
 	int rc;
 
-	if (!CONSOLE_IS_SCLP)
+	/* z/VM multiplexes the line mode output on the 32xx screen */
+	if (MACHINE_IS_VM && !CONSOLE_IS_SCLP)
+		return 0;
+	if (!sclp.has_linemode)
 		return 0;
 	driver = alloc_tty_driver(1);
 	if (!driver)
@@ -576,7 +528,7 @@ sclp_tty_init(void)
 	}
 	INIT_LIST_HEAD(&sclp_tty_outqueue);
 	spin_lock_init(&sclp_tty_lock);
-	init_timer(&sclp_tty_timer);
+	timer_setup(&sclp_tty_timer, sclp_tty_timeout, 0);
 	sclp_ttybuf = NULL;
 	sclp_tty_buffer_count = 0;
 	if (MACHINE_IS_VM) {
@@ -589,7 +541,6 @@ sclp_tty_init(void)
 		sclp_tty_tolower = 1;
 	}
 	sclp_tty_chars_count = 0;
-	sclp_tty = NULL;
 
 	rc = sclp_register(&sclp_input_event);
 	if (rc) {
@@ -597,7 +548,8 @@ sclp_tty_init(void)
 		return rc;
 	}
 
-	driver->owner = THIS_MODULE;
+	tty_port_init(&sclp_port);
+
 	driver->driver_name = "sclp_line";
 	driver->name = "sclp_line";
 	driver->major = TTY_MAJOR;
@@ -606,16 +558,18 @@ sclp_tty_init(void)
 	driver->subtype = SYSTEM_TYPE_TTY;
 	driver->init_termios = tty_std_termios;
 	driver->init_termios.c_iflag = IGNBRK | IGNPAR;
-	driver->init_termios.c_oflag = ONLCR | XTABS;
+	driver->init_termios.c_oflag = ONLCR;
 	driver->init_termios.c_lflag = ISIG | ECHO;
 	driver->flags = TTY_DRIVER_REAL_RAW;
 	tty_set_operations(driver, &sclp_ops);
+	tty_port_link_device(&sclp_port, driver, 0);
 	rc = tty_register_driver(driver);
 	if (rc) {
 		put_tty_driver(driver);
+		tty_port_destroy(&sclp_port);
 		return rc;
 	}
 	sclp_tty_driver = driver;
 	return 0;
 }
-module_init(sclp_tty_init);
+device_initcall(sclp_tty_init);

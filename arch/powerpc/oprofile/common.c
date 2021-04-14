@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * PPC 64 oprofile support:
  * Copyright (C) 2004 Anton Blanchard <anton@au.ibm.com>, IBM
@@ -6,11 +7,6 @@
  *	Author: Andy Fleming
  *
  * Based on alpha version.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/oprofile.h>
@@ -18,7 +14,6 @@
 #include <linux/smp.h>
 #include <linux/errno.h>
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/pmc.h>
 #include <asm/cputable.h>
 #include <asm/oprofile_impl.h>
@@ -120,7 +115,7 @@ static void op_powerpc_stop(void)
                 model->global_stop();
 }
 
-static int op_powerpc_create_files(struct super_block *sb, struct dentry *root)
+static int op_powerpc_create_files(struct dentry *root)
 {
 	int i;
 
@@ -129,9 +124,31 @@ static int op_powerpc_create_files(struct super_block *sb, struct dentry *root)
 	 * There is one mmcr0, mmcr1 and mmcra for setting the events for
 	 * all of the counters.
 	 */
-	oprofilefs_create_ulong(sb, root, "mmcr0", &sys.mmcr0);
-	oprofilefs_create_ulong(sb, root, "mmcr1", &sys.mmcr1);
-	oprofilefs_create_ulong(sb, root, "mmcra", &sys.mmcra);
+	oprofilefs_create_ulong(root, "mmcr0", &sys.mmcr0);
+	oprofilefs_create_ulong(root, "mmcr1", &sys.mmcr1);
+	oprofilefs_create_ulong(root, "mmcra", &sys.mmcra);
+#ifdef CONFIG_OPROFILE_CELL
+	/* create a file the user tool can check to see what level of profiling
+	 * support exits with this kernel. Initialize bit mask to indicate
+	 * what support the kernel has:
+	 * bit 0      -  Supports SPU event profiling in addition to PPU
+	 *               event and cycles; and SPU cycle profiling
+	 * bits 1-31  -  Currently unused.
+	 *
+	 * If the file does not exist, then the kernel only supports SPU
+	 * cycle profiling, PPU event and cycle profiling.
+	 */
+	oprofilefs_create_ulong(root, "cell_support", &sys.cell_support);
+	sys.cell_support = 0x1; /* Note, the user OProfile tool must check
+				 * that this bit is set before attempting to
+				 * user SPU event profiling.  Older kernels
+				 * will not have this file, hence the user
+				 * tool is not allowed to do SPU event
+				 * profiling on older kernels.  Older kernels
+				 * will accept SPU events but collected data
+				 * is garbage.
+				 */
+#endif
 #endif
 
 	for (i = 0; i < model->num_counters; ++i) {
@@ -139,11 +156,11 @@ static int op_powerpc_create_files(struct super_block *sb, struct dentry *root)
 		char buf[4];
 
 		snprintf(buf, sizeof buf, "%d", i);
-		dir = oprofilefs_mkdir(sb, root, buf);
+		dir = oprofilefs_mkdir(root, buf);
 
-		oprofilefs_create_ulong(sb, dir, "enabled", &ctr[i].enabled);
-		oprofilefs_create_ulong(sb, dir, "event", &ctr[i].event);
-		oprofilefs_create_ulong(sb, dir, "count", &ctr[i].count);
+		oprofilefs_create_ulong(dir, "enabled", &ctr[i].enabled);
+		oprofilefs_create_ulong(dir, "event", &ctr[i].event);
+		oprofilefs_create_ulong(dir, "count", &ctr[i].count);
 
 		/*
 		 * Classic PowerPC doesn't support per-counter
@@ -152,14 +169,14 @@ static int op_powerpc_create_files(struct super_block *sb, struct dentry *root)
 		 * Book-E style performance monitors, we do
 		 * support them.
 		 */
-		oprofilefs_create_ulong(sb, dir, "kernel", &ctr[i].kernel);
-		oprofilefs_create_ulong(sb, dir, "user", &ctr[i].user);
+		oprofilefs_create_ulong(dir, "kernel", &ctr[i].kernel);
+		oprofilefs_create_ulong(dir, "user", &ctr[i].user);
 
-		oprofilefs_create_ulong(sb, dir, "unit_mask", &ctr[i].unit_mask);
+		oprofilefs_create_ulong(dir, "unit_mask", &ctr[i].unit_mask);
 	}
 
-	oprofilefs_create_ulong(sb, root, "enable_kernel", &sys.enable_kernel);
-	oprofilefs_create_ulong(sb, root, "enable_user", &sys.enable_user);
+	oprofilefs_create_ulong(root, "enable_kernel", &sys.enable_kernel);
+	oprofilefs_create_ulong(root, "enable_user", &sys.enable_user);
 
 	/* Default to tracing both kernel and user */
 	sys.enable_kernel = 1;
@@ -173,11 +190,8 @@ int __init oprofile_arch_init(struct oprofile_operations *ops)
 	if (!cur_cpu_spec->oprofile_cpu_type)
 		return -ENODEV;
 
-	if (firmware_has_feature(FW_FEATURE_ISERIES))
-		return -ENODEV;
-
 	switch (cur_cpu_spec->oprofile_type) {
-#ifdef CONFIG_PPC64
+#ifdef CONFIG_PPC_BOOK3S_64
 #ifdef CONFIG_OPROFILE_CELL
 		case PPC_OPROFILE_CELL:
 			if (firmware_has_feature(FW_FEATURE_LPAR))
@@ -187,9 +201,6 @@ int __init oprofile_arch_init(struct oprofile_operations *ops)
 			ops->sync_stop = model->sync_stop;
 			break;
 #endif
-		case PPC_OPROFILE_RS64:
-			model = &op_model_rs64;
-			break;
 		case PPC_OPROFILE_POWER4:
 			model = &op_model_power4;
 			break;
@@ -197,7 +208,7 @@ int __init oprofile_arch_init(struct oprofile_operations *ops)
 			model = &op_model_pa6t;
 			break;
 #endif
-#ifdef CONFIG_6xx
+#ifdef CONFIG_PPC_BOOK3S_32
 		case PPC_OPROFILE_G4:
 			model = &op_model_7450;
 			break;

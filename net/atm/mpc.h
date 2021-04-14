@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _MPC_H_
 #define _MPC_H_
 
@@ -15,22 +16,25 @@ struct mpoa_client {
 	struct mpoa_client *next;
 	struct net_device *dev;      /* lec in question                     */
 	int dev_num;                 /* e.g. 2 for lec2                     */
-	int (*old_hard_start_xmit)(struct sk_buff *skb, struct net_device *dev);
+
 	struct atm_vcc *mpoad_vcc;   /* control channel to mpoad            */
 	uint8_t mps_ctrl_addr[ATM_ESA_LEN];  /* MPS control ATM address     */
 	uint8_t our_ctrl_addr[ATM_ESA_LEN];  /* MPC's control ATM address   */
 
 	rwlock_t ingress_lock;
-	struct in_cache_ops *in_ops; /* ingress cache operations            */
+	const struct in_cache_ops *in_ops; /* ingress cache operations      */
 	in_cache_entry *in_cache;    /* the ingress cache of this MPC       */
 
 	rwlock_t egress_lock;
-	struct eg_cache_ops *eg_ops; /* egress cache operations             */
+	const struct eg_cache_ops *eg_ops; /* egress cache operations       */
 	eg_cache_entry *eg_cache;    /* the egress  cache of this MPC       */
 
 	uint8_t *mps_macs;           /* array of MPS MAC addresses, >=1     */
 	int number_of_mps_macs;      /* number of the above MAC addresses   */
 	struct mpc_parameters parameters;  /* parameters for this client    */
+
+	const struct net_device_ops *old_ops;
+	struct net_device_ops new_ops;
 };
 
 

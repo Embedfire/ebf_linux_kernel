@@ -1,21 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * xfrm_proc.c
  *
  * Copyright (C)2006-2007 USAGI/WIDE Project
  *
  * Authors:	Masahide NAKAMURA <nakam@linux-ipv6.org>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/export.h>
 #include <net/snmp.h>
 #include <net/xfrm.h>
 
-static struct snmp_mib xfrm_mib_list[] = {
+static const struct snmp_mib xfrm_mib_list[] = {
 	SNMP_MIB_ITEM("XfrmInError", LINUX_MIB_XFRMINERROR),
 	SNMP_MIB_ITEM("XfrmInBufferError", LINUX_MIB_XFRMINBUFFERERROR),
 	SNMP_MIB_ITEM("XfrmInHdrError", LINUX_MIB_XFRMINHDRERROR),
@@ -41,57 +38,38 @@ static struct snmp_mib xfrm_mib_list[] = {
 	SNMP_MIB_ITEM("XfrmOutPolBlock", LINUX_MIB_XFRMOUTPOLBLOCK),
 	SNMP_MIB_ITEM("XfrmOutPolDead", LINUX_MIB_XFRMOUTPOLDEAD),
 	SNMP_MIB_ITEM("XfrmOutPolError", LINUX_MIB_XFRMOUTPOLERROR),
+	SNMP_MIB_ITEM("XfrmFwdHdrError", LINUX_MIB_XFRMFWDHDRERROR),
+	SNMP_MIB_ITEM("XfrmOutStateInvalid", LINUX_MIB_XFRMOUTSTATEINVALID),
+	SNMP_MIB_ITEM("XfrmAcquireError", LINUX_MIB_XFRMACQUIREERROR),
 	SNMP_MIB_SENTINEL
 };
 
-static unsigned long
-fold_field(void *mib[], int offt)
-{
-        unsigned long res = 0;
-        int i;
-
-        for_each_possible_cpu(i) {
-                res += *(((unsigned long *)per_cpu_ptr(mib[0], i)) + offt);
-                res += *(((unsigned long *)per_cpu_ptr(mib[1], i)) + offt);
-        }
-        return res;
-}
-
 static int xfrm_statistics_seq_show(struct seq_file *seq, void *v)
 {
+	unsigned long buff[LINUX_MIB_XFRMMAX];
+	struct net *net = seq->private;
 	int i;
-	for (i=0; xfrm_mib_list[i].name; i++)
+
+	memset(buff, 0, sizeof(unsigned long) * LINUX_MIB_XFRMMAX);
+
+	snmp_get_cpu_field_batch(buff, xfrm_mib_list,
+				 net->mib.xfrm_statistics);
+	for (i = 0; xfrm_mib_list[i].name; i++)
 		seq_printf(seq, "%-24s\t%lu\n", xfrm_mib_list[i].name,
-			   fold_field((void **)xfrm_statistics,
-				      xfrm_mib_list[i].entry));
+						buff[i]);
+
 	return 0;
 }
 
-static int xfrm_statistics_seq_open(struct inode *inode, struct file *file)
+int __net_init xfrm_proc_init(struct net *net)
 {
-	return single_open(file, xfrm_statistics_seq_show, NULL);
+	if (!proc_create_net_single("xfrm_stat", 0444, net->proc_net,
+			 xfrm_statistics_seq_show, NULL))
+		return -ENOMEM;
+	return 0;
 }
 
-static struct file_operations xfrm_statistics_seq_fops = {
-	.owner	 = THIS_MODULE,
-	.open	 = xfrm_statistics_seq_open,
-	.read	 = seq_read,
-	.llseek	 = seq_lseek,
-	.release = single_release,
-};
-
-int __init xfrm_proc_init(void)
+void xfrm_proc_fini(struct net *net)
 {
-	int rc = 0;
-
-	if (!proc_net_fops_create(&init_net, "xfrm_stat", S_IRUGO,
-				  &xfrm_statistics_seq_fops))
-		goto stat_fail;
-
- out:
-	return rc;
-
- stat_fail:
-	rc = -ENOMEM;
-	goto out;
+	remove_proc_entry("xfrm_stat", net->proc_net);
 }

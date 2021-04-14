@@ -1,21 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/kernel/xscale-cp0.c
  *
  * XScale DSP and iWMMXt coprocessor context switching and handling
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
-#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/init.h>
+#include <linux/io.h>
 #include <asm/thread_notify.h>
-#include <asm/io.h>
+#include <asm/cputype.h>
+
+asm("	.arch armv5te\n");
 
 static inline void dsp_save_state(u32 *state)
 {
@@ -70,7 +69,7 @@ static int iwmmxt_do(struct notifier_block *self, unsigned long cmd, void *t)
 		 * initialised state information on the first fault.
 		 */
 
-	case THREAD_NOTIFY_RELEASE:
+	case THREAD_NOTIFY_EXIT:
 		iwmmxt_task_release(thread);
 		break;
 
@@ -153,20 +152,23 @@ static int __init xscale_cp0_init(void)
 {
 	u32 cp_access;
 
+	/* do not attempt to probe iwmmxt on non-xscale family CPUs */
+	if (!cpu_is_xscale_family())
+		return 0;
+
 	cp_access = xscale_cp_access_read() & ~3;
 	xscale_cp_access_write(cp_access | 1);
 
 	if (cpu_has_iwmmxt()) {
 #ifndef CONFIG_IWMMXT
-		printk(KERN_WARNING "CAUTION: XScale iWMMXt coprocessor "
-			"detected, but kernel support is missing.\n");
+		pr_warn("CAUTION: XScale iWMMXt coprocessor detected, but kernel support is missing.\n");
 #else
-		printk(KERN_INFO "XScale iWMMXt coprocessor detected.\n");
+		pr_info("XScale iWMMXt coprocessor detected.\n");
 		elf_hwcap |= HWCAP_IWMMXT;
 		thread_register_notifier(&iwmmxt_notifier_block);
 #endif
 	} else {
-		printk(KERN_INFO "XScale DSP coprocessor detected.\n");
+		pr_info("XScale DSP coprocessor detected.\n");
 		thread_register_notifier(&dsp_notifier_block);
 		cp_access |= 1;
 	}

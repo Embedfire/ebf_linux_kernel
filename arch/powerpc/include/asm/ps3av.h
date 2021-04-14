@@ -1,21 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  PS3 AV backend support.
  *
  *  Copyright (C) 2007 Sony Computer Entertainment Inc.
  *  Copyright 2007 Sony Corp.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef _ASM_POWERPC_PS3AV_H_
@@ -104,7 +92,7 @@
 #define PS3AV_CMD_AV_INPUTLEN_16			0x02
 #define PS3AV_CMD_AV_INPUTLEN_20			0x0a
 #define PS3AV_CMD_AV_INPUTLEN_24			0x0b
-/* alayout */
+/* av_layout */
 #define PS3AV_CMD_AV_LAYOUT_32				(1 << 0)
 #define PS3AV_CMD_AV_LAYOUT_44				(1 << 1)
 #define PS3AV_CMD_AV_LAYOUT_48				(1 << 2)
@@ -678,6 +666,8 @@ struct ps3av_pkt_avb_param {
 	u8 buf[PS3AV_PKT_AVB_PARAM_MAX_BUF_SIZE];
 };
 
+/* channel status */
+extern u8 ps3av_mode_cs_info[];
 
 /** command status **/
 #define PS3AV_STATUS_SUCCESS			0x0000	/* success */
@@ -728,17 +718,14 @@ extern int ps3av_cmd_av_get_hw_conf(struct ps3av_pkt_av_get_hw_conf *);
 extern int ps3av_cmd_video_get_monitor_info(struct ps3av_pkt_av_get_monitor_info *,
 					    u32);
 
-extern int ps3av_set_video_mode(u32);
+extern int ps3av_set_video_mode(int);
 extern int ps3av_set_audio_mode(u32, u32, u32, u32, u32);
 extern int ps3av_get_auto_mode(void);
 extern int ps3av_get_mode(void);
 extern int ps3av_video_mode2res(u32, u32 *, u32 *);
 extern int ps3av_video_mute(int);
 extern int ps3av_audio_mute(int);
+extern int ps3av_audio_mute_analog(int);
 extern int ps3av_dev_open(void);
 extern int ps3av_dev_close(void);
-extern void ps3av_register_flip_ctl(void (*flip_ctl)(int on, void *data),
-				    void *flip_data);
-extern void ps3av_flip_ctl(int on);
-
 #endif	/* _ASM_POWERPC_PS3AV_H_ */

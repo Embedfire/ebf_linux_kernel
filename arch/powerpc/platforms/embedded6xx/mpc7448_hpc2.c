@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * mpc7448_hpc2.c
  *
@@ -11,11 +12,6 @@
  * 	Add Flat Device Tree support fot mpc7448hpc2 board
  *
  * Copyright 2004-2006 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/stddef.h>
@@ -23,6 +19,7 @@
 #include <linux/pci.h>
 #include <linux/kdev_t.h>
 #include <linux/console.h>
+#include <linux/extable.h>
 #include <linux/delay.h>
 #include <linux/irq.h>
 #include <linux/seq_file.h>
@@ -31,7 +28,6 @@
 #include <linux/tty.h>
 #include <linux/serial_core.h>
 
-#include <asm/system.h>
 #include <asm/time.h>
 #include <asm/machdep.h>
 #include <asm/prom.h>
@@ -101,39 +97,20 @@ static void __init mpc7448_hpc2_setup_arch(void)
 static void __init mpc7448_hpc2_init_IRQ(void)
 {
 	struct mpic *mpic;
-	phys_addr_t mpic_paddr = 0;
-	struct device_node *tsi_pic;
 #ifdef CONFIG_PCI
 	unsigned int cascade_pci_irq;
 	struct device_node *tsi_pci;
 	struct device_node *cascade_node = NULL;
 #endif
 
-	tsi_pic = of_find_node_by_type(NULL, "open-pic");
-	if (tsi_pic) {
-		unsigned int size;
-		const void *prop = of_get_property(tsi_pic, "reg", &size);
-		mpic_paddr = of_translate_address(tsi_pic, prop);
-	}
-
-	if (mpic_paddr == 0) {
-		printk("%s: No tsi108 PIC found !\n", __func__);
-		return;
-	}
-
-	DBG("%s: tsi108 pic phys_addr = 0x%x\n", __func__,
-	    (u32) mpic_paddr);
-
-	mpic = mpic_alloc(tsi_pic, mpic_paddr,
-			MPIC_PRIMARY | MPIC_BIG_ENDIAN | MPIC_WANTS_RESET |
+	mpic = mpic_alloc(NULL, 0, MPIC_BIG_ENDIAN |
 			MPIC_SPV_EOI | MPIC_NO_PTHROU_DIS | MPIC_REGSET_TSI108,
-			24,
-			NR_IRQS-4, /* num_sources used */
+			24, 0,
 			"Tsi108_PIC");
 
 	BUG_ON(mpic == NULL);
 
-	mpic_assign_isu(mpic, 0, mpic_paddr + 0x100);
+	mpic_assign_isu(mpic, 0, mpic->paddr + 0x100);
 
 	mpic_init(mpic);
 
@@ -153,39 +130,27 @@ static void __init mpc7448_hpc2_init_IRQ(void)
 	DBG("%s: tsi108 cascade_pci_irq = 0x%x\n", __func__,
 	    (u32) cascade_pci_irq);
 	tsi108_pci_int_init(cascade_node);
-	set_irq_data(cascade_pci_irq, mpic);
-	set_irq_chained_handler(cascade_pci_irq, tsi108_irq_cascade);
+	irq_set_handler_data(cascade_pci_irq, mpic);
+	irq_set_chained_handler(cascade_pci_irq, tsi108_irq_cascade);
 #endif
 	/* Configure MPIC outputs to CPU0 */
 	tsi108_write_reg(TSI108_MPIC_OFFSET + 0x30c, 0);
-	of_node_put(tsi_pic);
 }
 
 void mpc7448_hpc2_show_cpuinfo(struct seq_file *m)
 {
 	seq_printf(m, "vendor\t\t: Freescale Semiconductor\n");
-	seq_printf(m, "machine\t\t: MPC7448hpc2\n");
 }
 
-void mpc7448_hpc2_restart(char *cmd)
+static void __noreturn mpc7448_hpc2_restart(char *cmd)
 {
 	local_irq_disable();
 
 	/* Set exception prefix high - to the firmware */
-	_nmask_and_or_msr(0, MSR_IP);
+	mtmsr(mfmsr() | MSR_IP);
+	isync();
 
 	for (;;) ;		/* Spin until reset happens */
-}
-
-void mpc7448_hpc2_power_off(void)
-{
-	local_irq_disable();
-	for (;;) ;		/* No way to shut power off with software */
-}
-
-void mpc7448_hpc2_halt(void)
-{
-	mpc7448_hpc2_power_off();
 }
 
 /*
@@ -193,9 +158,7 @@ void mpc7448_hpc2_halt(void)
  */
 static int __init mpc7448_hpc2_probe(void)
 {
-	unsigned long root = of_get_flat_dt_root();
-
-	if (!of_flat_dt_is_compatible(root, "mpc74xx"))
+	if (!of_machine_is_compatible("mpc74xx"))
 		return 0;
 	return 1;
 }
@@ -208,7 +171,7 @@ static int mpc7448_machine_check_exception(struct pt_regs *regs)
 	if ((entry = search_exception_tables(regs->nip)) != NULL) {
 		tsi108_clear_pci_cfg_error();
 		regs->msr |= MSR_RI;
-		regs->nip = entry->fixup;
+		regs->nip = extable_fixup(entry);
 		return 1;
 	}
 	return 0;

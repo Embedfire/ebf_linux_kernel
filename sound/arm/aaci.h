@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  linux/sound/arm/aaci.c - ARM PrimeCell AACI PL041 driver
  *
  *  Copyright (C) 2003 Deep Blue Solutions, Ltd, All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #ifndef AACI_H
 #define AACI_H
@@ -202,12 +199,15 @@
 struct aaci_runtime {
 	void			__iomem *base;
 	void			__iomem *fifo;
+	spinlock_t		lock;
 
 	struct ac97_pcm		*pcm;
 	int			pcm_open;
 
 	u32			cr;
 	struct snd_pcm_substream	*substream;
+
+	unsigned int		period;	/* byte size of a "period" */
 
 	/*
 	 * PIO support
@@ -216,15 +216,16 @@ struct aaci_runtime {
 	void			*end;
 	void			*ptr;
 	int			bytes;
-	unsigned int		period;
-	unsigned int		fifosz;
+	unsigned int		fifo_bytes;
 };
 
 struct aaci {
 	struct amba_device	*dev;
 	struct snd_card		*card;
 	void			__iomem *base;
-	unsigned int		fifosize;
+	unsigned int		fifo_depth;
+	unsigned int		users;
+	struct mutex		irq_lock;
 
 	/* AC'97 */
 	struct mutex		ac97_sem;
@@ -232,7 +233,6 @@ struct aaci {
 	struct snd_ac97		*ac97;
 
 	u32			maincr;
-	spinlock_t		lock;
 
 	struct aaci_runtime	playback;
 	struct aaci_runtime	capture;

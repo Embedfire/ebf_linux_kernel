@@ -1,25 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 1998-2002 by Paul Davis <pbd@op.net>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <asm/io.h>
+#include <linux/io.h>
 #include <linux/init.h>
 #include <linux/time.h>
 #include <linux/wait.h>
+#include <linux/slab.h>
+#include <linux/module.h>
 #include <linux/firmware.h>
 #include <sound/core.h>
 #include <sound/snd_wavefront.h>
@@ -33,14 +22,6 @@
 #define FX_AUTO_INCR    0x04    /* auto-increment DSP address after transfer */
 
 #define WAIT_IDLE	0xff
-
-#ifdef CONFIG_SND_WAVEFRONT_FIRMWARE_IN_KERNEL
-#include "yss225.c"
-static const struct firmware yss225_registers_firmware = {
-	.data = (u8 *)yss225_registers,
-	.size = sizeof yss225_registers
-};
-#endif
 
 static int
 wavefront_fx_idle (snd_wavefront_t *dev)
@@ -85,13 +66,13 @@ wavefront_fx_memset (snd_wavefront_t *dev,
 	if (page < 0 || page > 7) {
 		snd_printk ("FX memset: "
 			"page must be >= 0 and <= 7\n");
-		return -(EINVAL);
+		return -EINVAL;
 	}
 
 	if (addr < 0 || addr > 0x7f) {
 		snd_printk ("FX memset: "
 			"addr must be >= 0 and <= 7f\n");
-		return -(EINVAL);
+		return -EINVAL;
 	}
 
 	if (cnt == 1) {
@@ -124,7 +105,7 @@ wavefront_fx_memset (snd_wavefront_t *dev,
 			snd_printk ("FX memset "
 				    "(0x%x, 0x%x, 0x%lx, %d) incomplete\n",
 				    page, addr, (unsigned long) data, cnt);
-			return -(EIO);
+			return -EIO;
 		}
 	}
 
@@ -180,11 +161,11 @@ snd_wavefront_fx_ioctl (struct snd_hwdep *sdev, struct file *file,
 	unsigned short *pd;
 	int err = 0;
 
-	snd_assert(sdev->card != NULL, return -ENODEV);
-	
 	card = sdev->card;
-
-	snd_assert(card->private_data != NULL, return -ENODEV);
+	if (snd_BUG_ON(!card))
+		return -ENODEV;
+	if (snd_BUG_ON(!card->private_data))
+		return -ENODEV;
 
 	acard = card->private_data;
 	dev = &acard->wavefront;
@@ -210,15 +191,11 @@ snd_wavefront_fx_ioctl (struct snd_hwdep *sdev, struct file *file,
 					    "> 512 bytes to FX\n");
 				return -EIO;
 			}
-			page_data = kmalloc(r.data[2] * sizeof(short), GFP_KERNEL);
-			if (!page_data)
-				return -ENOMEM;
-			if (copy_from_user (page_data,
-					    (unsigned char __user *) r.data[3],
-					    r.data[2] * sizeof(short))) {
-				kfree(page_data);
-				return -EFAULT;
-			}
+			page_data = memdup_user((unsigned char __user *)
+						r.data[3],
+						r.data[2] * sizeof(short));
+			if (IS_ERR(page_data))
+				return PTR_ERR(page_data);
 			pd = page_data;
 		}
 
@@ -250,7 +227,7 @@ snd_wavefront_fx_ioctl (struct snd_hwdep *sdev, struct file *file,
    that outputs it.
 */
 
-int __devinit
+int
 snd_wavefront_fx_start (snd_wavefront_t *dev)
 {
 	unsigned int i;
@@ -260,16 +237,12 @@ snd_wavefront_fx_start (snd_wavefront_t *dev)
 	if (dev->fx_initialized)
 		return 0;
 
-#ifdef CONFIG_SND_WAVEFRONT_FIRMWARE_IN_KERNEL
-	firmware = &yss225_registers_firmware;
-#else
 	err = request_firmware(&firmware, "yamaha/yss225_registers.bin",
 			       dev->card->dev);
 	if (err < 0) {
 		err = -1;
 		goto out;
 	}
-#endif
 
 	for (i = 0; i + 1 < firmware->size; i += 2) {
 		if (firmware->data[i] >= 8 && firmware->data[i] < 16) {
@@ -292,12 +265,8 @@ snd_wavefront_fx_start (snd_wavefront_t *dev)
 	err = 0;
 
 out:
-#ifndef CONFIG_SND_WAVEFRONT_FIRMWARE_IN_KERNEL
 	release_firmware(firmware);
-#endif
 	return err;
 }
 
-#ifndef CONFIG_SND_WAVEFRONT_FIRMWARE_IN_KERNEL
 MODULE_FIRMWARE("yamaha/yss225_registers.bin");
-#endif

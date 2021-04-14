@@ -10,9 +10,10 @@
  */
 
 #include <linux/init.h>
-#include <linux/utsrelease.h>
+#include <generated/utsrelease.h>
 #include <linux/pci.h>
 #include <linux/of.h>
+#include <asm/dma.h>
 #include <asm/prom.h>
 #include <asm/time.h>
 #include <asm/machdep.h>
@@ -34,7 +35,7 @@
 static int rtas_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 			    int len, u32 * val)
 {
-	struct pci_controller *hose = bus->sysdata;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 	unsigned long addr = (offset & 0xff) | ((devfn & 0xff) << 8)
 	    | (((bus->number - hose->first_busno) & 0xff) << 16)
 	    | (hose->global_number << 24);
@@ -49,7 +50,7 @@ static int rtas_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 static int rtas_write_config(struct pci_bus *bus, unsigned int devfn,
 			     int offset, int len, u32 val)
 {
-	struct pci_controller *hose = bus->sysdata;
+	struct pci_controller *hose = pci_bus_to_host(bus);
 	unsigned long addr = (offset & 0xff) | ((devfn & 0xff) << 8)
 	    | (((bus->number - hose->first_busno) & 0xff) << 16)
 	    | (hose->global_number << 24);
@@ -81,11 +82,9 @@ static void __init efika_pcisetup(void)
 		return;
 	}
 
-	for (pcictrl = NULL;;) {
-		pcictrl = of_get_next_child(root, pcictrl);
-		if ((pcictrl == NULL) || (strcmp(pcictrl->name, "pci") == 0))
+	for_each_child_of_node(root, pcictrl)
+		if (of_node_name_eq(pcictrl, "pci"))
 			break;
-	}
 
 	of_node_put(root);
 
@@ -98,8 +97,8 @@ static void __init efika_pcisetup(void)
 	bus_range = of_get_property(pcictrl, "bus-range", &len);
 	if (bus_range == NULL || len < 2 * sizeof(int)) {
 		printk(KERN_WARNING EFIKA_PLATFORM_NAME
-		       ": Can't get bus-range for %s\n", pcictrl->full_name);
-		return;
+		       ": Can't get bus-range for %pOF\n", pcictrl);
+		goto out_put;
 	}
 
 	if (bus_range[1] == bus_range[0])
@@ -108,15 +107,15 @@ static void __init efika_pcisetup(void)
 	else
 		printk(KERN_INFO EFIKA_PLATFORM_NAME ": PCI buses %d..%d",
 		       bus_range[0], bus_range[1]);
-	printk(" controlled by %s\n", pcictrl->full_name);
+	printk(" controlled by %pOF\n", pcictrl);
 	printk("\n");
 
-	hose = pcibios_alloc_controller(of_node_get(pcictrl));
+	hose = pcibios_alloc_controller(pcictrl);
 	if (!hose) {
 		printk(KERN_WARNING EFIKA_PLATFORM_NAME
-		       ": Can't allocate PCI controller structure for %s\n",
-		       pcictrl->full_name);
-		return;
+		       ": Can't allocate PCI controller structure for %pOF\n",
+		       pcictrl);
+		goto out_put;
 	}
 
 	hose->first_busno = bus_range[0];
@@ -124,6 +123,9 @@ static void __init efika_pcisetup(void)
 	hose->ops = &rtas_pci_ops;
 
 	pci_process_bridge_OF_ranges(hose, pcictrl, 0);
+	return;
+out_put:
+	of_node_put(pcictrl);
 }
 
 #else
@@ -196,17 +198,17 @@ static void __init efika_setup_arch(void)
 
 static int __init efika_probe(void)
 {
-	char *model = of_get_flat_dt_prop(of_get_flat_dt_root(),
-					  "model", NULL);
+	const char *model = of_get_property(of_root, "model", NULL);
 
 	if (model == NULL)
 		return 0;
 	if (strcmp(model, "EFIKA5K2"))
 		return 0;
 
-	ISA_DMA_THRESHOLD = ~0L;
 	DMA_MODE_READ = 0x44;
 	DMA_MODE_WRITE = 0x48;
+
+	pm_power_off = rtas_power_off;
 
 	return 1;
 }
@@ -221,7 +223,6 @@ define_machine(efika)
 	.init_IRQ		= mpc52xx_init_irq,
 	.get_irq		= mpc52xx_get_irq,
 	.restart		= rtas_restart,
-	.power_off		= rtas_power_off,
 	.halt			= rtas_halt,
 	.set_rtc_time		= rtas_set_rtc_time,
 	.get_rtc_time		= rtas_get_rtc_time,

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *
  * Author	Karsten Keil <kkeil@novell.com>
@@ -5,16 +6,6 @@
  *   Basic declarations for the mISDN HW channels
  *
  * Copyright 2008  by Karsten Keil <kkeil@novell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #ifndef MISDNHW_H
@@ -57,21 +48,24 @@
 #define FLG_L2DATA		14	/* channel use L2 DATA primitivs */
 #define FLG_ORIGIN		15	/* channel is on origin site */
 /* channel specific stuff */
+#define FLG_FILLEMPTY		16	/* fill fifo on first frame (empty) */
 /* arcofi specific */
-#define FLG_ARCOFI_TIMER	16
-#define FLG_ARCOFI_ERROR	17
+#define FLG_ARCOFI_TIMER	17
+#define FLG_ARCOFI_ERROR	18
 /* isar specific */
-#define FLG_INITIALIZED		16
-#define FLG_DLEETX		17
-#define FLG_LASTDLE		18
-#define FLG_FIRST		19
-#define FLG_LASTDATA		20
-#define FLG_NMD_DATA		21
-#define FLG_FTI_RUN		22
-#define FLG_LL_OK		23
-#define FLG_LL_CONN		24
-#define FLG_DTMFSEND		25
-
+#define FLG_INITIALIZED		17
+#define FLG_DLEETX		18
+#define FLG_LASTDLE		19
+#define FLG_FIRST		20
+#define FLG_LASTDATA		21
+#define FLG_NMD_DATA		22
+#define FLG_FTI_RUN		23
+#define FLG_LL_OK		24
+#define FLG_LL_CONN		25
+#define FLG_DTMFSEND		26
+#define FLG_TX_EMPTY		27
+/* stop sending received data upstream */
+#define FLG_RX_OFF		28
 /* workq events */
 #define FLG_RECVQUEUE		30
 #define	FLG_PHCHANGE		31
@@ -88,11 +82,6 @@ struct dchannel {
 	void			(*phfunc) (struct dchannel *);
 	u_int			state;
 	void			*l1;
-	/* HW access */
-	u_char			(*read_reg) (void *, u_char);
-	void			(*write_reg) (void *, u_char, u_char);
-	void			(*read_fifo) (void *, u_char *, int);
-	void			(*write_fifo) (void *, u_char *, int);
 	void			*hw;
 	int			slot;	/* multiport card channel slot */
 	struct timer_list	timer;
@@ -139,10 +128,14 @@ extern int	create_l1(struct dchannel *, dchannel_l1callback *);
 #define HW_TESTRX_RAW	0x9602
 #define HW_TESTRX_HDLC	0x9702
 #define HW_TESTRX_OFF	0x9802
+#define HW_TIMER3_IND	0x9902
+#define HW_TIMER3_VALUE	0x9a00
+#define HW_TIMER3_VMASK	0x00FF
 
 struct layer1;
 extern int	l1_event(struct layer1 *, u_int);
 
+#define MISDN_BCH_FILL_SIZE	4
 
 struct bchannel {
 	struct mISDNchannel	ch;
@@ -150,17 +143,18 @@ struct bchannel {
 	u_long			Flags;
 	struct work_struct	workq;
 	u_int			state;
-	/* HW access */
-	u_char			(*read_reg) (void *, u_char);
-	void			(*write_reg) (void *, u_char, u_char);
-	void			(*read_fifo) (void *, u_char *, int);
-	void			(*write_fifo) (void *, u_char *, int);
 	void			*hw;
 	int			slot;	/* multiport card channel slot */
 	struct timer_list	timer;
 	/* receive data */
+	u8			fill[MISDN_BCH_FILL_SIZE];
 	struct sk_buff		*rx_skb;
-	int			maxlen;
+	unsigned short		maxlen;
+	unsigned short		init_maxlen; /* initial value */
+	unsigned short		next_maxlen; /* pending value */
+	unsigned short		minlen; /* for transparent data */
+	unsigned short		init_minlen; /* initial value */
+	unsigned short		next_minlen; /* pending value */
 	/* send data */
 	struct sk_buff		*next_skb;
 	struct sk_buff		*tx_skb;
@@ -172,21 +166,26 @@ struct bchannel {
 	int			err_crc;
 	int			err_tx;
 	int			err_rx;
+	int			dropcnt;
 };
 
 extern int	mISDN_initdchannel(struct dchannel *, int, void *);
-extern int	mISDN_initbchannel(struct bchannel *, int);
+extern int	mISDN_initbchannel(struct bchannel *, unsigned short,
+				   unsigned short);
 extern int	mISDN_freedchannel(struct dchannel *);
-extern int	mISDN_freebchannel(struct bchannel *);
+extern void	mISDN_clear_bchannel(struct bchannel *);
+extern void	mISDN_freebchannel(struct bchannel *);
+extern int	mISDN_ctrl_bchannel(struct bchannel *, struct mISDN_ctrl_req *);
 extern void	queue_ch_frame(struct mISDNchannel *, u_int,
 			int, struct sk_buff *);
 extern int	dchannel_senddata(struct dchannel *, struct sk_buff *);
 extern int	bchannel_senddata(struct bchannel *, struct sk_buff *);
+extern int      bchannel_get_rxbuf(struct bchannel *, int);
 extern void	recv_Dchannel(struct dchannel *);
-extern void	recv_Bchannel(struct bchannel *);
+extern void	recv_Echannel(struct dchannel *, struct dchannel *);
+extern void	recv_Bchannel(struct bchannel *, unsigned int, bool);
 extern void	recv_Dchannel_skb(struct dchannel *, struct sk_buff *);
 extern void	recv_Bchannel_skb(struct bchannel *, struct sk_buff *);
-extern void	confirm_Bsend(struct bchannel *bch);
 extern int	get_next_bframe(struct bchannel *);
 extern int	get_next_dframe(struct dchannel *);
 

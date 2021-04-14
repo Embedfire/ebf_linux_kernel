@@ -22,30 +22,6 @@
 #include <linux/kernel.h>
 #include <linux/cache.h>
 
-#undef DEBUG_RELOCATE
-
-void *module_alloc(unsigned long size)
-{
-	if (size == 0)
-		return NULL;
-	return vmalloc_exec(size);
-}
-
-void module_free(struct module *mod, void *module_region)
-{
-	vfree(module_region);
-	/* FIXME: If module_region == mod->init_region, trim exception
-	   table entries. */
-}
-
-int module_frob_arch_sections(Elf32_Ehdr *hdr,
-    			      Elf32_Shdr *sechdrs,
-			      char *secstrings,
-			      struct module *mod)
-{
-	return 0;
-}
-
 static int
 decode_calln_opcode (unsigned char *location)
 {
@@ -68,18 +44,6 @@ decode_l32r_opcode (unsigned char *location)
 #endif
 }
 
-int apply_relocate(Elf32_Shdr *sechdrs,
-    		   const char *strtab,
-		   unsigned int symindex,
-		   unsigned int relsec,
-		   struct module *mod)
-{
-        printk(KERN_ERR "module %s: REL RELOCATION unsupported\n",
-               mod->name);
-        return -ENOEXEC;
-
-}
-
 int apply_relocate_add(Elf32_Shdr *sechdrs,
 		       const char *strtab,
 		       unsigned int symindex,
@@ -87,15 +51,14 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 		       struct module *mod)
 {
 	unsigned int i;
-        Elf32_Rela *rela = (void *)sechdrs[relsec].sh_addr;
+	Elf32_Rela *rela = (void *)sechdrs[relsec].sh_addr;
 	Elf32_Sym *sym;
 	unsigned char *location;
 	uint32_t value;
 
-#ifdef DEBUG_RELOCATE
-	printk("Applying relocate section %u to %u\n", relsec,
-	       sechdrs[relsec].sh_info);
-#endif
+	pr_debug("Applying relocate section %u to %u\n", relsec,
+		 sechdrs[relsec].sh_info);
+
 	for (i = 0; i < sechdrs[relsec].sh_size / sizeof(*rela); i++) {
 		location = (char *)sechdrs[sechdrs[relsec].sh_info].sh_addr
 			+ rela[i].r_offset;
@@ -121,7 +84,7 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 				value -= ((unsigned long)location & -4) + 4;
 				if ((value & 3) != 0 ||
 				    ((value + (1 << 19)) >> 20) != 0) {
-					printk("%s: relocation out of range, "
+					pr_err("%s: relocation out of range, "
 					       "section %d reloc %d "
 					       "sym '%s'\n",
 					       mod->name, relsec, i,
@@ -145,7 +108,7 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 				value -= (((unsigned long)location + 3) & -4);
 				if ((value & 3) != 0 ||
 				    (signed int)value >> 18 != -1) {
-					printk("%s: relocation out of range, "
+					pr_err("%s: relocation out of range, "
 					       "section %d reloc %d "
 					       "sym '%s'\n",
 					       mod->name, relsec, i,
@@ -190,7 +153,7 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 		case R_XTENSA_SLOT12_OP:
 		case R_XTENSA_SLOT13_OP:
 		case R_XTENSA_SLOT14_OP:
-			printk("%s: unexpected FLIX relocation: %u\n",
+			pr_err("%s: unexpected FLIX relocation: %u\n",
 			       mod->name,
 			       ELF32_R_TYPE(rela[i].r_info));
 			return -ENOEXEC;
@@ -210,28 +173,17 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 		case R_XTENSA_SLOT12_ALT:
 		case R_XTENSA_SLOT13_ALT:
 		case R_XTENSA_SLOT14_ALT:
-			printk("%s: unexpected ALT relocation: %u\n",
+			pr_err("%s: unexpected ALT relocation: %u\n",
 			       mod->name,
 			       ELF32_R_TYPE(rela[i].r_info));
 			return -ENOEXEC;
 
 		default:
-			printk("%s: unexpected relocation: %u\n",
+			pr_err("%s: unexpected relocation: %u\n",
 			       mod->name,
 			       ELF32_R_TYPE(rela[i].r_info));
 			return -ENOEXEC;
 		}
 	}
 	return 0;
-}
-
-int module_finalize(const Elf_Ehdr *hdr,
-    		    const Elf_Shdr *sechdrs,
-		    struct module *mod)
-{
-	return 0;
-}
-
-void module_arch_cleanup(struct module *mod)
-{
 }

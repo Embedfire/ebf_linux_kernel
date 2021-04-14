@@ -1,19 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *   Copyright (C) International Business Machines Corp., 2000-2002
- *
- *   This program is free software;  you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY;  without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
- *   the GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program;  if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 #ifndef	_H_JFS_DMAP
 #define _H_JFS_DMAP
@@ -196,7 +183,7 @@ typedef union dmtree {
 #define	dmt_leafidx	t1.leafidx
 #define	dmt_height	t1.height
 #define	dmt_budmin	t1.budmin
-#define	dmt_stree	t1.stree
+#define	dmt_stree	t2.stree
 
 /*
  *	on-disk aggregate disk allocation map descriptor.
@@ -210,7 +197,7 @@ struct dbmap_disk {
 	__le32 dn_maxag;	/* 4: max active alloc group number	*/
 	__le32 dn_agpref;	/* 4: preferred alloc group (hint)	*/
 	__le32 dn_aglevel;	/* 4: dmapctl level holding the AG	*/
-	__le32 dn_agheigth;	/* 4: height in dmapctl of the AG	*/
+	__le32 dn_agheight;	/* 4: height in dmapctl of the AG	*/
 	__le32 dn_agwidth;	/* 4: width in dmapctl of the AG	*/
 	__le32 dn_agstart;	/* 4: start tree index at AG height	*/
 	__le32 dn_agl2size;	/* 4: l2 num of blks per alloc group	*/
@@ -229,7 +216,7 @@ struct dbmap {
 	int dn_maxag;		/* max active alloc group number	*/
 	int dn_agpref;		/* preferred alloc group (hint)		*/
 	int dn_aglevel;		/* dmapctl level holding the AG		*/
-	int dn_agheigth;	/* height in dmapctl of the AG		*/
+	int dn_agheight;	/* height in dmapctl of the AG		*/
 	int dn_agwidth;		/* width in dmapctl of the AG		*/
 	int dn_agstart;		/* start tree index at AG height	*/
 	int dn_agl2size;	/* l2 num of blks per alloc group	*/
@@ -255,7 +242,7 @@ struct bmap {
 #define	db_agsize	db_bmap.dn_agsize
 #define	db_agl2size	db_bmap.dn_agl2size
 #define	db_agwidth	db_bmap.dn_agwidth
-#define	db_agheigth	db_bmap.dn_agheigth
+#define	db_agheight	db_bmap.dn_agheight
 #define	db_agstart	db_bmap.dn_agstart
 #define	db_numag	db_bmap.dn_numag
 #define	db_maxlevel	db_bmap.dn_maxlevel
@@ -311,4 +298,6 @@ extern int dbAllocBottomUp(struct inode *ip, s64 blkno, s64 nblocks);
 extern int dbExtendFS(struct inode *ipbmap, s64 blkno, s64 nblocks);
 extern void dbFinalizeBmap(struct inode *ipbmap);
 extern s64 dbMapFileSizeToMapSize(struct inode *ipbmap);
+extern s64 dbDiscardAG(struct inode *ip, int agno, s64 minlen);
+
 #endif				/* _H_JFS_DMAP */

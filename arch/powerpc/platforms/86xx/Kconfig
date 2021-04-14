@@ -1,7 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
 config PPC_86xx
 menuconfig PPC_86xx
 	bool "86xx-based boards"
-	depends on 6xx && PPC_MULTIPLATFORM
+	depends on PPC_BOOK3S_32
 	select FSL_SOC
 	select ALTIVEC
 	help
@@ -13,8 +14,9 @@ config MPC8641_HPCN
 	bool "Freescale MPC8641 HPCN"
 	select PPC_I8259
 	select DEFAULT_UIMAGE
-	select FSL_ULI1575
-	select HAS_RAPIDIO
+	select FSL_ULI1575 if PCI
+	select HAVE_RAPIDIO
+	select SWIOTLB
 	help
 	  This option enables support for the MPC8641 HPCN board.
 
@@ -27,23 +29,57 @@ config SBC8641D
 config MPC8610_HPCD
 	bool "Freescale MPC8610 HPCD"
 	select DEFAULT_UIMAGE
-	select FSL_ULI1575
+	select FSL_ULI1575 if PCI
 	help
 	  This option enables support for the MPC8610 HPCD board.
+
+config GEF_PPC9A
+	bool "GE PPC9A"
+	select DEFAULT_UIMAGE
+	select MMIO_NVRAM
+	select GPIOLIB
+	select GE_FPGA
+	help
+	  This option enables support for the GE PPC9A.
+
+config GEF_SBC310
+	bool "GE SBC310"
+	select DEFAULT_UIMAGE
+	select MMIO_NVRAM
+	select GPIOLIB
+	select GE_FPGA
+	help
+	  This option enables support for the GE SBC310.
+
+config GEF_SBC610
+	bool "GE SBC610"
+	select DEFAULT_UIMAGE
+	select MMIO_NVRAM
+	select GPIOLIB
+	select GE_FPGA
+	select HAVE_RAPIDIO
+	help
+	  This option enables support for the GE SBC610.
+
+config MVME7100
+	bool "Artesyn MVME7100"
+	help
+	  This option enables support for the Emerson/Artesyn MVME7100 board.
 
 endif
 
 config MPC8641
 	bool
-	select PPC_PCI_CHOICE
+	select HAVE_PCI
 	select FSL_PCI if PCI
 	select PPC_UDBG_16550
 	select MPIC
-	default y if MPC8641_HPCN || SBC8641D
+	default y if MPC8641_HPCN || SBC8641D || GEF_SBC610 || GEF_SBC310 || GEF_PPC9A \
+			|| MVME7100
 
 config MPC8610
 	bool
-	select PPC_PCI_CHOICE
+	select HAVE_PCI
 	select FSL_PCI if PCI
 	select PPC_UDBG_16550
 	select MPIC

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # RF switch subsystem configuration
 #
@@ -10,22 +11,24 @@ menuconfig RFKILL
 	  To compile this driver as a module, choose M here: the
 	  module will be called rfkill.
 
-config RFKILL_INPUT
-	tristate "Input layer to RF switch connector"
-	depends on RFKILL && INPUT
-	help
-	  Say Y here if you want kernel automatically toggle state
-	  of RF switches on and off when user presses appropriate
-	  button or a key on the keyboard. Without this module you
-	  need a some kind of userspace application to control
-	  state of the switches.
-
-	  To compile this driver as a module, choose M here: the
-	  module will be called rfkill-input.
-
 # LED trigger support
 config RFKILL_LEDS
 	bool
-	depends on RFKILL && LEDS_TRIGGERS
+	depends on RFKILL
+	depends on LEDS_TRIGGERS = y || RFKILL = LEDS_TRIGGERS
 	default y
 
+config RFKILL_INPUT
+	bool "RF switch input support" if EXPERT
+	depends on RFKILL
+	depends on INPUT = y || RFKILL = INPUT
+	default y if !EXPERT
+
+config RFKILL_GPIO
+	tristate "GPIO RFKILL driver"
+	depends on RFKILL
+	depends on GPIOLIB || COMPILE_TEST
+	default n
+	help
+	  If you say yes here you get support of a generic gpio RFKILL
+	  driver.

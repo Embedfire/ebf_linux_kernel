@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* memory.c: Prom routine for acquiring various bits of information
  *           about RAM on the machine, both virtual and physical.
  *
@@ -10,7 +11,6 @@
 #include <linux/init.h>
 
 #include <asm/openprom.h>
-#include <asm/sun4prom.h>
 #include <asm/oplib.h>
 #include <asm/page.h>
 
@@ -32,7 +32,8 @@ static int __init prom_meminit_v0(void)
 static int __init prom_meminit_v2(void)
 {
 	struct linux_prom_registers reg[64];
-	int node, size, num_ents, i;
+	phandle node;
+	int size, num_ents, i;
 
 	node = prom_searchsiblings(prom_getchild(prom_root_node), "memory");
 	size = prom_getproperty(node, "available", (char *) reg, sizeof(reg));
@@ -44,15 +45,6 @@ static int __init prom_meminit_v2(void)
 	}
 
 	return num_ents;
-}
-
-static int __init prom_meminit_sun4(void)
-{
-#ifdef CONFIG_SUN4
-	sp_banks[0].base_addr = 0;
-	sp_banks[0].num_bytes = *(sun4_romvec->memoryavail);
-#endif
-	return 1;
 }
 
 static int sp_banks_cmp(const void *a, const void *b)
@@ -79,10 +71,6 @@ void __init prom_meminit(void)
 	case PROM_V2:
 	case PROM_V3:
 		num_ents = prom_meminit_v2();
-		break;
-
-	case PROM_SUN4:
-		num_ents = prom_meminit_sun4();
 		break;
 
 	default:

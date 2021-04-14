@@ -1,41 +1,25 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  pdc_adma.c - Pacific Digital Corporation ADMA
  *
- *  Maintained by:  Mark Lord <mlord@pobox.com>
+ *  Maintained by:  Tejun Heo <tj@kernel.org>
  *
  *  Copyright 2005 Mark Lord
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2, or (at your option)
- *  any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; see the file COPYING.  If not, write to
- *  the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- *
  *  libata documentation is available via 'make {ps|pdf}docs',
- *  as Documentation/DocBook/libata.*
- *
+ *  as Documentation/driver-api/libata.rst
  *
  *  Supports ATA disks in single-packet ADMA mode.
  *  Uses PIO for everything else.
  *
  *  TODO:  Use ADMA transfers for ATAPI devices, when possible.
  *  This requires careful attention to a number of quirks of the chip.
- *
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/gfp.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -132,7 +116,7 @@ static int adma_ata_init_one(struct pci_dev *pdev,
 				const struct pci_device_id *ent);
 static int adma_port_start(struct ata_port *ap);
 static void adma_port_stop(struct ata_port *ap);
-static void adma_qc_prep(struct ata_queued_cmd *qc);
+static enum ata_completion_errors adma_qc_prep(struct ata_queued_cmd *qc);
 static unsigned int adma_qc_issue(struct ata_queued_cmd *qc);
 static int adma_check_atapi_dma(struct ata_queued_cmd *qc);
 static void adma_freeze(struct ata_port *ap);
@@ -147,6 +131,8 @@ static struct scsi_host_template adma_ata_sht = {
 
 static struct ata_port_operations adma_ata_ops = {
 	.inherits		= &ata_sff_port_ops,
+
+	.lost_interrupt		= ATA_OP_NULL,
 
 	.check_atapi_dma	= adma_check_atapi_dma,
 	.qc_prep		= adma_qc_prep,
@@ -163,10 +149,8 @@ static struct ata_port_operations adma_ata_ops = {
 static struct ata_port_info adma_port_info[] = {
 	/* board_1841_idx */
 	{
-		.flags		= ATA_FLAG_SLAVE_POSS |
-				  ATA_FLAG_NO_LEGACY | ATA_FLAG_MMIO |
-				  ATA_FLAG_PIO_POLLING,
-		.pio_mask	= 0x10, /* pio4 */
+		.flags		= ATA_FLAG_SLAVE_POSS | ATA_FLAG_PIO_POLLING,
+		.pio_mask	= ATA_PIO4_ONLY,
 		.udma_mask	= ATA_UDMA4,
 		.port_ops	= &adma_ata_ops,
 	},
@@ -311,7 +295,7 @@ static int adma_fill_sg(struct ata_queued_cmd *qc)
 	return i;
 }
 
-static void adma_qc_prep(struct ata_queued_cmd *qc)
+static enum ata_completion_errors adma_qc_prep(struct ata_queued_cmd *qc)
 {
 	struct adma_port_priv *pp = qc->ap->private_data;
 	u8  *buf = pp->pkt;
@@ -321,10 +305,8 @@ static void adma_qc_prep(struct ata_queued_cmd *qc)
 	VPRINTK("ENTER\n");
 
 	adma_enter_reg_mode(qc->ap);
-	if (qc->tf.protocol != ATA_PROT_DMA) {
-		ata_sff_qc_prep(qc);
-		return;
-	}
+	if (qc->tf.protocol != ATA_PROT_DMA)
+		return AC_ERR_OK;
 
 	buf[i++] = 0;	/* Response flags */
 	buf[i++] = 0;	/* reserved */
@@ -389,6 +371,7 @@ static void adma_qc_prep(struct ata_queued_cmd *qc)
 			printk("%s\n", obuf);
 	}
 #endif
+	return AC_ERR_OK;
 }
 
 static inline void adma_packet_start(struct ata_queued_cmd *qc)
@@ -439,8 +422,6 @@ static inline unsigned int adma_intr_pkt(struct ata_host *host)
 			continue;
 		handled = 1;
 		adma_enter_reg_mode(ap);
-		if (ap->flags & ATA_FLAG_DISABLED)
-			continue;
 		pp = ap->private_data;
 		if (!pp || pp->state != adma_state_pkt)
 			continue;
@@ -481,42 +462,38 @@ static inline unsigned int adma_intr_mmio(struct ata_host *host)
 	unsigned int handled = 0, port_no;
 
 	for (port_no = 0; port_no < host->n_ports; ++port_no) {
-		struct ata_port *ap;
-		ap = host->ports[port_no];
-		if (ap && (!(ap->flags & ATA_FLAG_DISABLED))) {
-			struct ata_queued_cmd *qc;
-			struct adma_port_priv *pp = ap->private_data;
-			if (!pp || pp->state != adma_state_mmio)
+		struct ata_port *ap = host->ports[port_no];
+		struct adma_port_priv *pp = ap->private_data;
+		struct ata_queued_cmd *qc;
+
+		if (!pp || pp->state != adma_state_mmio)
+			continue;
+		qc = ata_qc_from_tag(ap, ap->link.active_tag);
+		if (qc && (!(qc->tf.flags & ATA_TFLAG_POLLING))) {
+
+			/* check main status, clearing INTRQ */
+			u8 status = ata_sff_check_status(ap);
+			if ((status & ATA_BUSY))
 				continue;
-			qc = ata_qc_from_tag(ap, ap->link.active_tag);
-			if (qc && (!(qc->tf.flags & ATA_TFLAG_POLLING))) {
+			DPRINTK("ata%u: protocol %d (dev_stat 0x%X)\n",
+				ap->print_id, qc->tf.protocol, status);
 
-				/* check main status, clearing INTRQ */
-				u8 status = ata_sff_check_status(ap);
-				if ((status & ATA_BUSY))
-					continue;
-				DPRINTK("ata%u: protocol %d (dev_stat 0x%X)\n",
-					ap->print_id, qc->tf.protocol, status);
+			/* complete taskfile transaction */
+			pp->state = adma_state_idle;
+			qc->err_mask |= ac_err_mask(status);
+			if (!qc->err_mask)
+				ata_qc_complete(qc);
+			else {
+				struct ata_eh_info *ehi = &ap->link.eh_info;
+				ata_ehi_clear_desc(ehi);
+				ata_ehi_push_desc(ehi, "status 0x%02X", status);
 
-				/* complete taskfile transaction */
-				pp->state = adma_state_idle;
-				qc->err_mask |= ac_err_mask(status);
-				if (!qc->err_mask)
-					ata_qc_complete(qc);
-				else {
-					struct ata_eh_info *ehi =
-						&ap->link.eh_info;
-					ata_ehi_clear_desc(ehi);
-					ata_ehi_push_desc(ehi,
-						"status 0x%02X", status);
-
-					if (qc->err_mask == AC_ERR_DEV)
-						ata_port_abort(ap);
-					else
-						ata_port_freeze(ap);
-				}
-				handled = 1;
+				if (qc->err_mask == AC_ERR_DEV)
+					ata_port_abort(ap);
+				else
+					ata_port_freeze(ap);
 			}
+			handled = 1;
 		}
 	}
 	return handled;
@@ -559,11 +536,7 @@ static int adma_port_start(struct ata_port *ap)
 {
 	struct device *dev = ap->host->dev;
 	struct adma_port_priv *pp;
-	int rc;
 
-	rc = ata_port_start(ap);
-	if (rc)
-		return rc;
 	adma_enter_reg_mode(ap);
 	pp = devm_kzalloc(dev, sizeof(*pp), GFP_KERNEL);
 	if (!pp)
@@ -578,7 +551,6 @@ static int adma_port_start(struct ata_port *ap)
 						(u32)pp->pkt_dma);
 		return -ENOMEM;
 	}
-	memset(pp->pkt, 0, ADMA_PKT_BYTES);
 	ap->private_data = pp;
 	adma_reinit_engine(ap);
 	return 0;
@@ -601,37 +573,16 @@ static void adma_host_init(struct ata_host *host, unsigned int chip_id)
 		adma_reset_engine(host->ports[port_no]);
 }
 
-static int adma_set_dma_masks(struct pci_dev *pdev, void __iomem *mmio_base)
-{
-	int rc;
-
-	rc = pci_set_dma_mask(pdev, DMA_32BIT_MASK);
-	if (rc) {
-		dev_printk(KERN_ERR, &pdev->dev,
-			"32-bit DMA enable failed\n");
-		return rc;
-	}
-	rc = pci_set_consistent_dma_mask(pdev, DMA_32BIT_MASK);
-	if (rc) {
-		dev_printk(KERN_ERR, &pdev->dev,
-			"32-bit consistent DMA enable failed\n");
-		return rc;
-	}
-	return 0;
-}
-
 static int adma_ata_init_one(struct pci_dev *pdev,
 			     const struct pci_device_id *ent)
 {
-	static int printed_version;
 	unsigned int board_idx = (unsigned int) ent->driver_data;
 	const struct ata_port_info *ppi[] = { &adma_port_info[board_idx], NULL };
 	struct ata_host *host;
 	void __iomem *mmio_base;
 	int rc, port_no;
 
-	if (!printed_version++)
-		dev_printk(KERN_DEBUG, &pdev->dev, "version " DRV_VERSION "\n");
+	ata_print_version_once(&pdev->dev, DRV_VERSION);
 
 	/* alloc host */
 	host = ata_host_alloc_pinfo(&pdev->dev, ppi, ADMA_PORTS);
@@ -652,9 +603,11 @@ static int adma_ata_init_one(struct pci_dev *pdev,
 	host->iomap = pcim_iomap_table(pdev);
 	mmio_base = host->iomap[ADMA_MMIO_BAR];
 
-	rc = adma_set_dma_masks(pdev, mmio_base);
-	if (rc)
+	rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+	if (rc) {
+		dev_err(&pdev->dev, "32-bit DMA enable failed\n");
 		return rc;
+	}
 
 	for (port_no = 0; port_no < ADMA_PORTS; ++port_no) {
 		struct ata_port *ap = host->ports[port_no];
@@ -675,21 +628,10 @@ static int adma_ata_init_one(struct pci_dev *pdev,
 				 &adma_ata_sht);
 }
 
-static int __init adma_ata_init(void)
-{
-	return pci_register_driver(&adma_ata_pci_driver);
-}
-
-static void __exit adma_ata_exit(void)
-{
-	pci_unregister_driver(&adma_ata_pci_driver);
-}
+module_pci_driver(adma_ata_pci_driver);
 
 MODULE_AUTHOR("Mark Lord");
 MODULE_DESCRIPTION("Pacific Digital Corporation ADMA low-level driver");
 MODULE_LICENSE("GPL");
 MODULE_DEVICE_TABLE(pci, adma_ata_pci_tbl);
 MODULE_VERSION(DRV_VERSION);
-
-module_init(adma_ata_init);
-module_exit(adma_ata_exit);

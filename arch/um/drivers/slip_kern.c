@@ -1,12 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
- * Licensed under the GPL.
  */
 
 #include <linux/if_arp.h>
 #include <linux/init.h>
 #include <linux/netdevice.h>
-#include "net_kern.h"
+#include <net_kern.h>
 #include "slip.h"
 
 struct slip_init {
@@ -19,7 +19,7 @@ static void slip_init(struct net_device *dev, void *data)
 	struct slip_data *spri;
 	struct slip_init *init = data;
 
-	private = dev->priv;
+	private = netdev_priv(dev);
 	spri = (struct slip_data *) private->user;
 
 	memset(spri->name, 0, sizeof(spri->name));
@@ -30,7 +30,6 @@ static void slip_init(struct net_device *dev, void *data)
 
 	slip_proto_init(&spri->slip);
 
-	dev->init = NULL;
 	dev->hard_header_len = 0;
 	dev->header_ops = NULL;
 	dev->addr_len = 0;

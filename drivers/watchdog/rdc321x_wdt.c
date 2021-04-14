@@ -1,24 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * RDC321x watchdog driver
  *
- * Copyright (C) 2007 Florian Fainelli <florian@openwrt.org>
+ * Copyright (C) 2007-2010 Florian Fainelli <florian@openwrt.org>
  *
  * This driver is highly inspired from the cpu5_wdt driver
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
 #include <linux/module.h>
@@ -27,7 +13,6 @@
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
-#include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/timer.h>
 #include <linux/completion.h>
@@ -36,8 +21,7 @@
 #include <linux/watchdog.h>
 #include <linux/io.h>
 #include <linux/uaccess.h>
-
-#include <asm/mach-rdc321x/rdc321x_defs.h>
+#include <linux/mfd/rdc321x.h>
 
 #define RDC_WDT_MASK	0x80000000 /* Mask */
 #define RDC_WDT_EN	0x00800000 /* Enable bit */
@@ -63,21 +47,27 @@ static struct {
 	int default_ticks;
 	unsigned long inuse;
 	spinlock_t lock;
+	struct pci_dev *sb_pdev;
+	int base_reg;
 } rdc321x_wdt_device;
 
 /* generic helper functions */
 
-static void rdc321x_wdt_trigger(unsigned long unused)
+static void rdc321x_wdt_trigger(struct timer_list *unused)
 {
 	unsigned long flags;
+	u32 val;
 
 	if (rdc321x_wdt_device.running)
 		ticks--;
 
 	/* keep watchdog alive */
 	spin_lock_irqsave(&rdc321x_wdt_device.lock, flags);
-	outl(RDC_WDT_EN | inl(RDC3210_CFGREG_DATA),
-		RDC3210_CFGREG_DATA);
+	pci_read_config_dword(rdc321x_wdt_device.sb_pdev,
+					rdc321x_wdt_device.base_reg, &val);
+	val |= RDC_WDT_EN;
+	pci_write_config_dword(rdc321x_wdt_device.sb_pdev,
+					rdc321x_wdt_device.base_reg, val);
 	spin_unlock_irqrestore(&rdc321x_wdt_device.lock, flags);
 
 	/* requeue?? */
@@ -105,10 +95,13 @@ static void rdc321x_wdt_start(void)
 
 		/* Clear the timer */
 		spin_lock_irqsave(&rdc321x_wdt_device.lock, flags);
-		outl(RDC_CLS_TMR, RDC3210_CFGREG_ADDR);
+		pci_write_config_dword(rdc321x_wdt_device.sb_pdev,
+				rdc321x_wdt_device.base_reg, RDC_CLS_TMR);
 
 		/* Enable watchdog and set the timeout to 81.92 us */
-		outl(RDC_WDT_EN | RDC_WDT_CNT, RDC3210_CFGREG_DATA);
+		pci_write_config_dword(rdc321x_wdt_device.sb_pdev,
+					rdc321x_wdt_device.base_reg,
+					RDC_WDT_EN | RDC_WDT_CNT);
 		spin_unlock_irqrestore(&rdc321x_wdt_device.lock, flags);
 
 		mod_timer(&rdc321x_wdt_device.timer,
@@ -135,7 +128,7 @@ static int rdc321x_wdt_open(struct inode *inode, struct file *file)
 	if (test_and_set_bit(0, &rdc321x_wdt_device.inuse))
 		return -EBUSY;
 
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int rdc321x_wdt_release(struct inode *inode, struct file *file)
@@ -144,12 +137,12 @@ static int rdc321x_wdt_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int rdc321x_wdt_ioctl(struct inode *inode, struct file *file,
-				unsigned int cmd, unsigned long arg)
+static long rdc321x_wdt_ioctl(struct file *file, unsigned int cmd,
+				unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
-	unsigned int value;
-	static struct watchdog_info ident = {
+	u32 value;
+	static const struct watchdog_info ident = {
 		.options = WDIOF_CARDRESET,
 		.identity = "RDC321x WDT",
 	};
@@ -162,9 +155,10 @@ static int rdc321x_wdt_ioctl(struct inode *inode, struct file *file,
 	case WDIOC_GETSTATUS:
 		/* Read the value from the DATA register */
 		spin_lock_irqsave(&rdc321x_wdt_device.lock, flags);
-		value = inl(RDC3210_CFGREG_DATA);
+		pci_read_config_dword(rdc321x_wdt_device.sb_pdev,
+					rdc321x_wdt_device.base_reg, &value);
 		spin_unlock_irqrestore(&rdc321x_wdt_device.lock, flags);
-		if (copy_to_user(argp, &value, sizeof(int)))
+		if (copy_to_user(argp, &value, sizeof(u32)))
 			return -EFAULT;
 		break;
 	case WDIOC_GETSUPPORT:
@@ -204,7 +198,8 @@ static ssize_t rdc321x_wdt_write(struct file *file, const char __user *buf,
 static const struct file_operations rdc321x_wdt_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
-	.ioctl		= rdc321x_wdt_ioctl,
+	.unlocked_ioctl	= rdc321x_wdt_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= rdc321x_wdt_open,
 	.write		= rdc321x_wdt_write,
 	.release	= rdc321x_wdt_release,
@@ -216,31 +211,48 @@ static struct miscdevice rdc321x_wdt_misc = {
 	.fops	= &rdc321x_wdt_fops,
 };
 
-static int __devinit rdc321x_wdt_probe(struct platform_device *pdev)
+static int rdc321x_wdt_probe(struct platform_device *pdev)
 {
 	int err;
+	struct resource *r;
+	struct rdc321x_wdt_pdata *pdata;
+
+	pdata = dev_get_platdata(&pdev->dev);
+	if (!pdata) {
+		dev_err(&pdev->dev, "no platform data supplied\n");
+		return -ENODEV;
+	}
+
+	r = platform_get_resource_byname(pdev, IORESOURCE_IO, "wdt-reg");
+	if (!r) {
+		dev_err(&pdev->dev, "failed to get wdt-reg resource\n");
+		return -ENODEV;
+	}
+
+	rdc321x_wdt_device.sb_pdev = pdata->sb_pdev;
+	rdc321x_wdt_device.base_reg = r->start;
+	rdc321x_wdt_device.queue = 0;
+	rdc321x_wdt_device.default_ticks = ticks;
 
 	err = misc_register(&rdc321x_wdt_misc);
 	if (err < 0) {
-		printk(KERN_ERR PFX "watchdog misc_register failed\n");
+		dev_err(&pdev->dev, "misc_register failed\n");
 		return err;
 	}
 
 	spin_lock_init(&rdc321x_wdt_device.lock);
 
 	/* Reset the watchdog */
-	outl(RDC_WDT_RST, RDC3210_CFGREG_DATA);
+	pci_write_config_dword(rdc321x_wdt_device.sb_pdev,
+				rdc321x_wdt_device.base_reg, RDC_WDT_RST);
 
 	init_completion(&rdc321x_wdt_device.stop);
-	rdc321x_wdt_device.queue = 0;
 
 	clear_bit(0, &rdc321x_wdt_device.inuse);
 
-	setup_timer(&rdc321x_wdt_device.timer, rdc321x_wdt_trigger, 0);
+	timer_setup(&rdc321x_wdt_device.timer, rdc321x_wdt_trigger, 0);
 
-	rdc321x_wdt_device.default_ticks = ticks;
-
-	printk(KERN_INFO PFX "watchdog init success\n");
+	dev_info(&pdev->dev, "watchdog init success\n");
 
 	return 0;
 }
@@ -261,25 +273,12 @@ static struct platform_driver rdc321x_wdt_driver = {
 	.probe = rdc321x_wdt_probe,
 	.remove = rdc321x_wdt_remove,
 	.driver = {
-		.owner = THIS_MODULE,
 		.name = "rdc321x-wdt",
 	},
 };
 
-static int __init rdc321x_wdt_init(void)
-{
-	return platform_driver_register(&rdc321x_wdt_driver);
-}
-
-static void __exit rdc321x_wdt_exit(void)
-{
-	platform_driver_unregister(&rdc321x_wdt_driver);
-}
-
-module_init(rdc321x_wdt_init);
-module_exit(rdc321x_wdt_exit);
+module_platform_driver(rdc321x_wdt_driver);
 
 MODULE_AUTHOR("Florian Fainelli <florian@openwrt.org>");
 MODULE_DESCRIPTION("RDC321x watchdog driver");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);

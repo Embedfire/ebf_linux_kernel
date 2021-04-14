@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	Low-Level PCI Support for PC
  *
@@ -6,28 +7,35 @@
 
 #include <linux/sched.h>
 #include <linux/pci.h>
+#include <linux/pci-acpi.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/dmi.h>
+#include <linux/slab.h>
 
 #include <asm/acpi.h>
 #include <asm/segment.h>
 #include <asm/io.h>
 #include <asm/smp.h>
-
-#include "pci.h"
+#include <asm/pci_x86.h>
+#include <asm/setup.h>
+#include <asm/irqdomain.h>
 
 unsigned int pci_probe = PCI_PROBE_BIOS | PCI_PROBE_CONF1 | PCI_PROBE_CONF2 |
 				PCI_PROBE_MMCONF;
 
-unsigned int pci_early_dump_regs;
 static int pci_bf_sort;
 int pci_routeirq;
+int noioapicquirk;
+#ifdef CONFIG_X86_REROUTE_FOR_BROKEN_BOOT_IRQS
+int noioapicreroute = 0;
+#else
+int noioapicreroute = 1;
+#endif
 int pcibios_last_bus = -1;
 unsigned long pirq_table_addr;
-struct pci_bus *pci_root_bus;
-struct pci_raw_ops *raw_pci_ops;
-struct pci_raw_ops *raw_pci_ext_ops;
+const struct pci_raw_ops *__read_mostly raw_pci_ops;
+const struct pci_raw_ops *__read_mostly raw_pci_ext_ops;
 
 int raw_pci_read(unsigned int domain, unsigned int bus, unsigned int devfn,
 						int reg, int len, u32 *val)
@@ -67,25 +75,19 @@ struct pci_ops pci_root_ops = {
 };
 
 /*
- * legacy, numa, and acpi all want to call pcibios_scan_root
- * from their initcalls. This flag prevents that.
+ * This interrupt-safe spinlock protects all accesses to PCI configuration
+ * space, except for the mmconfig (ECAM) based operations.
  */
-int pcibios_scanned;
+DEFINE_RAW_SPINLOCK(pci_config_lock);
 
-/*
- * This interrupt-safe spinlock protects all accesses to PCI
- * configuration space.
- */
-DEFINE_SPINLOCK(pci_config_lock);
-
-static int __devinit can_skip_ioresource_align(const struct dmi_system_id *d)
+static int __init can_skip_ioresource_align(const struct dmi_system_id *d)
 {
 	pci_probe |= PCI_CAN_SKIP_ISA_ALIGN;
 	printk(KERN_INFO "PCI: %s detected, can skip ISA alignment\n", d->ident);
 	return 0;
 }
 
-static struct dmi_system_id can_skip_pciprobe_dmi_table[] __devinitdata = {
+static const struct dmi_system_id can_skip_pciprobe_dmi_table[] __initconst = {
 /*
  * Systems where PCI IO resource ISA alignment can be skipped
  * when the ISA enable bit in the bridge control is not set
@@ -122,9 +124,26 @@ void __init dmi_check_skip_isa_align(void)
 	dmi_check_system(can_skip_pciprobe_dmi_table);
 }
 
-static void __devinit pcibios_fixup_device_resources(struct pci_dev *dev)
+static void pcibios_fixup_device_resources(struct pci_dev *dev)
 {
 	struct resource *rom_r = &dev->resource[PCI_ROM_RESOURCE];
+	struct resource *bar_r;
+	int bar;
+
+	if (pci_probe & PCI_NOASSIGN_BARS) {
+		/*
+		* If the BIOS did not assign the BAR, zero out the
+		* resource so the kernel doesn't attempt to assign
+		* it later on in pci_assign_unassigned_resources
+		*/
+		for (bar = 0; bar < PCI_STD_NUM_BARS; bar++) {
+			bar_r = &dev->resource[bar];
+			if (bar_r->start == 0 && bar_r->end != 0) {
+				bar_r->flags = 0;
+				bar_r->end = 0;
+			}
+		}
+	}
 
 	if (pci_probe & PCI_NOASSIGN_ROMS) {
 		if (rom_r->parent)
@@ -142,7 +161,7 @@ static void __devinit pcibios_fixup_device_resources(struct pci_dev *dev)
  *  are examined.
  */
 
-void __devinit  pcibios_fixup_bus(struct pci_bus *b)
+void pcibios_fixup_bus(struct pci_bus *b)
 {
 	struct pci_dev *dev;
 
@@ -151,12 +170,22 @@ void __devinit  pcibios_fixup_bus(struct pci_bus *b)
 		pcibios_fixup_device_resources(dev);
 }
 
+void pcibios_add_bus(struct pci_bus *bus)
+{
+	acpi_pci_add_bus(bus);
+}
+
+void pcibios_remove_bus(struct pci_bus *bus)
+{
+	acpi_pci_remove_bus(bus);
+}
+
 /*
  * Only use DMI information to set this if nothing was passed
  * on the kernel command line (which was parsed earlier).
  */
 
-static int __devinit set_bf_sort(const struct dmi_system_id *d)
+static int __init set_bf_sort(const struct dmi_system_id *d)
 {
 	if (pci_bf_sort == pci_bf_sort_default) {
 		pci_bf_sort = pci_dmi_bf;
@@ -165,11 +194,28 @@ static int __devinit set_bf_sort(const struct dmi_system_id *d)
 	return 0;
 }
 
+static void __init read_dmi_type_b1(const struct dmi_header *dm,
+				    void *private_data)
+{
+	u8 *data = (u8 *)dm + 4;
+
+	if (dm->type != 0xB1)
+		return;
+	if ((((*(u32 *)data) >> 9) & 0x03) == 0x01)
+		set_bf_sort((const struct dmi_system_id *)private_data);
+}
+
+static int __init find_sort_method(const struct dmi_system_id *d)
+{
+	dmi_walk(read_dmi_type_b1, (void *)d);
+	return 0;
+}
+
 /*
  * Enable renumbering of PCI bus# ranges to reach all PCI busses (Cardbus)
  */
 #ifdef __i386__
-static int __devinit assign_all_busses(const struct dmi_system_id *d)
+static int __init assign_all_busses(const struct dmi_system_id *d)
 {
 	pci_probe |= PCI_ASSIGN_ALL_BUSSES;
 	printk(KERN_INFO "%s detected: enabling PCI bus# renumbering"
@@ -178,7 +224,15 @@ static int __devinit assign_all_busses(const struct dmi_system_id *d)
 }
 #endif
 
-static struct dmi_system_id __devinitdata pciprobe_dmi_table[] = {
+static int __init set_scan_all(const struct dmi_system_id *d)
+{
+	printk(KERN_INFO "PCI: %s detected, enabling pci=pcie_scan_all\n",
+	       d->ident);
+	pci_add_flags(PCI_SCAN_ALL_PCIE_DEVS);
+	return 0;
+}
+
+static const struct dmi_system_id pciprobe_dmi_table[] __initconst = {
 #ifdef __i386__
 /*
  * Laptops which need pci=assign-busses to see Cardbus cards
@@ -230,6 +284,13 @@ static struct dmi_system_id __devinitdata pciprobe_dmi_table[] = {
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Dell"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "PowerEdge R900"),
+		},
+	},
+	{
+		.callback = find_sort_method,
+		.ident = "Dell System",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc"),
 		},
 	},
 	{
@@ -362,6 +423,30 @@ static struct dmi_system_id __devinitdata pciprobe_dmi_table[] = {
 			DMI_MATCH(DMI_PRODUCT_NAME, "ProLiant DL585 G2"),
 		},
 	},
+	{
+		.callback = set_scan_all,
+		.ident = "Stratus/NEC ftServer",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Stratus"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "ftServer"),
+		},
+	},
+        {
+                .callback = set_scan_all,
+                .ident = "Stratus/NEC ftServer",
+                .matches = {
+                        DMI_MATCH(DMI_SYS_VENDOR, "NEC"),
+                        DMI_MATCH(DMI_PRODUCT_NAME, "Express5800/R32"),
+                },
+        },
+        {
+                .callback = set_scan_all,
+                .ident = "Stratus/NEC ftServer",
+                .matches = {
+                        DMI_MATCH(DMI_SYS_VENDOR, "NEC"),
+                        DMI_MATCH(DMI_PRODUCT_NAME, "Express5800/R31"),
+                },
+        },
 	{}
 };
 
@@ -370,60 +455,57 @@ void __init dmi_check_pciprobe(void)
 	dmi_check_system(pciprobe_dmi_table);
 }
 
-struct pci_bus * __devinit pcibios_scan_root(int busnum)
+void pcibios_scan_root(int busnum)
 {
-	struct pci_bus *bus = NULL;
+	struct pci_bus *bus;
 	struct pci_sysdata *sd;
+	LIST_HEAD(resources);
 
-	while ((bus = pci_find_next_bus(bus)) != NULL) {
-		if (bus->number == busnum) {
-			/* Already scanned */
-			return bus;
-		}
-	}
-
-	/* Allocate per-root-bus (not per bus) arch-specific data.
-	 * TODO: leak; this memory is never freed.
-	 * It's arguable whether it's worth the trouble to care.
-	 */
 	sd = kzalloc(sizeof(*sd), GFP_KERNEL);
 	if (!sd) {
-		printk(KERN_ERR "PCI: OOM, not probing PCI bus %02x\n", busnum);
-		return NULL;
+		printk(KERN_ERR "PCI: OOM, skipping PCI bus %02x\n", busnum);
+		return;
 	}
-
-	sd->node = get_mp_bus_to_node(busnum);
-
+	sd->node = x86_pci_root_bus_node(busnum);
+	x86_pci_root_bus_resources(busnum, &resources);
 	printk(KERN_DEBUG "PCI: Probing PCI hardware (bus %02x)\n", busnum);
-	bus = pci_scan_bus_parented(NULL, busnum, &pci_root_ops, sd);
-	if (!bus)
+	bus = pci_scan_root_bus(NULL, busnum, &pci_root_ops, sd, &resources);
+	if (!bus) {
+		pci_free_resource_list(&resources);
 		kfree(sd);
-
-	return bus;
+		return;
+	}
+	pci_bus_add_devices(bus);
 }
 
-extern u8 pci_cache_line_size;
-
-int __init pcibios_init(void)
+void __init pcibios_set_cache_line_size(void)
 {
 	struct cpuinfo_x86 *c = &boot_cpu_data;
 
-	if (!raw_pci_ops) {
+	/*
+	 * Set PCI cacheline size to that of the CPU if the CPU has reported it.
+	 * (For older CPUs that don't support cpuid, we se it to 32 bytes
+	 * It's also good for 386/486s (which actually have 16)
+	 * as quite a few PCI devices do not support smaller values.
+	 */
+	if (c->x86_clflush_size > 0) {
+		pci_dfl_cache_line_size = c->x86_clflush_size >> 2;
+		printk(KERN_DEBUG "PCI: pci_cache_line_size set to %d bytes\n",
+			pci_dfl_cache_line_size << 2);
+	} else {
+ 		pci_dfl_cache_line_size = 32 >> 2;
+		printk(KERN_DEBUG "PCI: Unknown cacheline size. Setting to 32 bytes\n");
+	}
+}
+
+int __init pcibios_init(void)
+{
+	if (!raw_pci_ops && !raw_pci_ext_ops) {
 		printk(KERN_WARNING "PCI: System does not support PCI\n");
 		return 0;
 	}
 
-	/*
-	 * Assume PCI cacheline size of 32 bytes for all x86s except K7/K8
-	 * and P4. It's also good for 386/486s (which actually have 16)
-	 * as quite a few PCI devices do not support smaller values.
-	 */
-	pci_cache_line_size = 32 >> 2;
-	if (c->x86 >= 6 && c->x86_vendor == X86_VENDOR_AMD)
-		pci_cache_line_size = 64 >> 2;	/* K7 & K8 */
-	else if (c->x86 > 6 && c->x86_vendor == X86_VENDOR_INTEL)
-		pci_cache_line_size = 128 >> 2;	/* P4 */
-
+	pcibios_set_cache_line_size();
 	pcibios_resource_survey();
 
 	if (pci_bf_sort >= pci_force_bf)
@@ -431,7 +513,7 @@ int __init pcibios_init(void)
 	return 0;
 }
 
-char * __devinit  pcibios_setup(char *str)
+char *__init pcibios_setup(char *str)
 {
 	if (!strcmp(str, "off")) {
 		pci_probe = 0;
@@ -486,7 +568,6 @@ char * __devinit  pcibios_setup(char *str)
 		pci_probe |= PCI_PROBE_NOEARLY;
 		return NULL;
 	}
-#ifndef CONFIG_X86_VISWS
 	else if (!strcmp(str, "usepirqmask")) {
 		pci_probe |= PCI_USE_PIRQ_MASK;
 		return NULL;
@@ -496,13 +577,14 @@ char * __devinit  pcibios_setup(char *str)
 	} else if (!strncmp(str, "lastbus=", 8)) {
 		pcibios_last_bus = simple_strtol(str+8, NULL, 0);
 		return NULL;
-	}
-#endif
-	else if (!strcmp(str, "rom")) {
+	} else if (!strcmp(str, "rom")) {
 		pci_probe |= PCI_ASSIGN_ROMS;
 		return NULL;
 	} else if (!strcmp(str, "norom")) {
 		pci_probe |= PCI_NOASSIGN_ROMS;
+		return NULL;
+	} else if (!strcmp(str, "nobar")) {
+		pci_probe |= PCI_NOASSIGN_BARS;
 		return NULL;
 	} else if (!strcmp(str, "assign-busses")) {
 		pci_probe |= PCI_ASSIGN_ALL_BUSSES;
@@ -510,14 +592,30 @@ char * __devinit  pcibios_setup(char *str)
 	} else if (!strcmp(str, "use_crs")) {
 		pci_probe |= PCI_USE__CRS;
 		return NULL;
-	} else if (!strcmp(str, "earlydump")) {
-		pci_early_dump_regs = 1;
+	} else if (!strcmp(str, "nocrs")) {
+		pci_probe |= PCI_ROOT_NO_CRS;
 		return NULL;
+#ifdef CONFIG_PHYS_ADDR_T_64BIT
+	} else if (!strcmp(str, "big_root_window")) {
+		pci_probe |= PCI_BIG_ROOT_WINDOW;
+		return NULL;
+#endif
 	} else if (!strcmp(str, "routeirq")) {
 		pci_routeirq = 1;
 		return NULL;
 	} else if (!strcmp(str, "skip_isa_align")) {
 		pci_probe |= PCI_CAN_SKIP_ISA_ALIGN;
+		return NULL;
+	} else if (!strcmp(str, "noioapicquirk")) {
+		noioapicquirk = 1;
+		return NULL;
+	} else if (!strcmp(str, "ioapicreroute")) {
+		if (noioapicreroute != -1)
+			noioapicreroute = 0;
+		return NULL;
+	} else if (!strcmp(str, "noioapicreroute")) {
+		if (noioapicreroute != -1)
+			noioapicreroute = 1;
 		return NULL;
 	}
 	return str;
@@ -528,6 +626,60 @@ unsigned int pcibios_assign_all_busses(void)
 	return (pci_probe & PCI_ASSIGN_ALL_BUSSES) ? 1 : 0;
 }
 
+static void set_dev_domain_options(struct pci_dev *pdev)
+{
+	if (is_vmd(pdev->bus))
+		pdev->hotplug_user_indicators = 1;
+}
+
+int pcibios_add_device(struct pci_dev *dev)
+{
+	struct pci_setup_rom *rom;
+	struct irq_domain *msidom;
+	struct setup_data *data;
+	u64 pa_data;
+
+	pa_data = boot_params.hdr.setup_data;
+	while (pa_data) {
+		data = memremap(pa_data, sizeof(*rom), MEMREMAP_WB);
+		if (!data)
+			return -ENOMEM;
+
+		if (data->type == SETUP_PCI) {
+			rom = (struct pci_setup_rom *)data;
+
+			if ((pci_domain_nr(dev->bus) == rom->segment) &&
+			    (dev->bus->number == rom->bus) &&
+			    (PCI_SLOT(dev->devfn) == rom->device) &&
+			    (PCI_FUNC(dev->devfn) == rom->function) &&
+			    (dev->vendor == rom->vendor) &&
+			    (dev->device == rom->devid)) {
+				dev->rom = pa_data +
+				      offsetof(struct pci_setup_rom, romdata);
+				dev->romlen = rom->pcilen;
+			}
+		}
+		pa_data = data->next;
+		memunmap(data);
+	}
+	set_dev_domain_options(dev);
+
+	/*
+	 * Setup the initial MSI domain of the device. If the underlying
+	 * bus has a PCI/MSI irqdomain associated use the bus domain,
+	 * otherwise set the default domain. This ensures that special irq
+	 * domains e.g. VMD are preserved. The default ensures initial
+	 * operation if irq remapping is not active. If irq remapping is
+	 * active it will overwrite the domain pointer when the device is
+	 * associated to a remapping domain.
+	 */
+	msidom = dev_get_msi_domain(&dev->bus->dev);
+	if (!msidom)
+		msidom = x86_pci_msi_default_domain;
+	dev_set_msi_domain(&dev->dev, msidom);
+	return 0;
+}
+
 int pcibios_enable_device(struct pci_dev *dev, int mask)
 {
 	int err;
@@ -535,41 +687,40 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 	if ((err = pci_enable_resources(dev, mask)) < 0)
 		return err;
 
-	if (!dev->msi_enabled)
+	if (!pci_dev_msi_enabled(dev))
 		return pcibios_enable_irq(dev);
 	return 0;
 }
 
 void pcibios_disable_device (struct pci_dev *dev)
 {
-	if (!dev->msi_enabled && pcibios_disable_irq)
+	if (!pci_dev_msi_enabled(dev) && pcibios_disable_irq)
 		pcibios_disable_irq(dev);
 }
 
-struct pci_bus * __devinit pci_scan_bus_on_node(int busno, struct pci_ops *ops, int node)
+#ifdef CONFIG_ACPI_HOTPLUG_IOAPIC
+void pcibios_release_device(struct pci_dev *dev)
 {
-	struct pci_bus *bus = NULL;
-	struct pci_sysdata *sd;
+	if (atomic_dec_return(&dev->enable_cnt) >= 0)
+		pcibios_disable_device(dev);
 
-	/*
-	 * Allocate per-root-bus (not per bus) arch-specific data.
-	 * TODO: leak; this memory is never freed.
-	 * It's arguable whether it's worth the trouble to care.
-	 */
-	sd = kzalloc(sizeof(*sd), GFP_KERNEL);
-	if (!sd) {
-		printk(KERN_ERR "PCI: OOM, skipping PCI bus %02x\n", busno);
-		return NULL;
-	}
-	sd->node = node;
-	bus = pci_scan_bus(busno, ops, sd);
-	if (!bus)
-		kfree(sd);
+}
+#endif
 
-	return bus;
+int pci_ext_cfg_avail(void)
+{
+	if (raw_pci_ext_ops)
+		return 1;
+	else
+		return 0;
 }
 
-struct pci_bus * __devinit pci_scan_bus_with_sysdata(int busno)
+#if IS_ENABLED(CONFIG_VMD)
+struct pci_dev *pci_real_dma_dev(struct pci_dev *dev)
 {
-	return pci_scan_bus_on_node(busno, &pci_root_ops, -1);
+	if (is_vmd(dev->bus))
+		return to_pci_sysdata(dev->bus)->vmd_dev;
+
+	return dev;
 }
+#endif

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
     i2c-isch.c - Linux kernel driver for Intel SCH chipset SMBus
     - Based on i2c-piix4.c
@@ -6,18 +7,6 @@
     - Intel SCH support
     Copyright (c) 2007 - 2008 Jacob Jun Pan <jacob.jun.pan@intel.com>
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 as
-    published by the Free Software Foundation.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
 /*
@@ -27,33 +16,26 @@
 */
 
 #include <linux/module.h>
-#include <linux/pci.h>
+#include <linux/platform_device.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/stddef.h>
 #include <linux/ioport.h>
 #include <linux/i2c.h>
-#include <linux/init.h>
 #include <linux/io.h>
-#include <linux/acpi.h>
 
 /* SCH SMBus address offsets */
 #define SMBHSTCNT	(0 + sch_smba)
 #define SMBHSTSTS	(1 + sch_smba)
+#define SMBHSTCLK	(2 + sch_smba)
 #define SMBHSTADD	(4 + sch_smba) /* TSA */
 #define SMBHSTCMD	(5 + sch_smba)
 #define SMBHSTDAT0	(6 + sch_smba)
 #define SMBHSTDAT1	(7 + sch_smba)
 #define SMBBLKDAT	(0x20 + sch_smba)
 
-/* count for request_region */
-#define SMBIOSIZE	64
-
-/* PCI Address Constants */
-#define SMBBA_SCH	0x40
-
 /* Other settings */
-#define MAX_TIMEOUT	500
+#define MAX_RETRIES	5000
 
 /* I2C constants */
 #define SCH_QUICK		0x00
@@ -63,8 +45,10 @@
 #define SCH_BLOCK_DATA		0x05
 
 static unsigned short sch_smba;
-static struct pci_driver sch_driver;
 static struct i2c_adapter sch_adapter;
+static int backbone_speed = 33000; /* backbone speed in kHz */
+module_param(backbone_speed, int, S_IRUSR | S_IWUSR);
+MODULE_PARM_DESC(backbone_speed, "Backbone speed in kHz, (default = 33000)");
 
 /*
  * Start the i2c transaction -- the i2c_access will prepare the transaction
@@ -75,7 +59,7 @@ static int sch_transaction(void)
 {
 	int temp;
 	int result = 0;
-	int timeout = 0;
+	int retries = 0;
 
 	dev_dbg(&sch_adapter.dev, "Transaction (pre): CNT=%02x, CMD=%02x, "
 		"ADD=%02x, DAT0=%02x, DAT1=%02x\n", inb(SMBHSTCNT),
@@ -107,12 +91,12 @@ static int sch_transaction(void)
 	outb(inb(SMBHSTCNT) | 0x10, SMBHSTCNT);
 
 	do {
-		msleep(1);
+		usleep_range(100, 200);
 		temp = inb(SMBHSTSTS) & 0x0f;
-	} while ((temp & 0x08) && (timeout++ < MAX_TIMEOUT));
+	} while ((temp & 0x08) && (retries++ < MAX_RETRIES));
 
 	/* If the SMBus is still busy, we give up */
-	if (timeout >= MAX_TIMEOUT) {
+	if (retries > MAX_RETRIES) {
 		dev_err(&sch_adapter.dev, "SMBus Timeout!\n");
 		result = -ETIMEDOUT;
 	}
@@ -148,7 +132,7 @@ static int sch_transaction(void)
  * This is the main access entry for i2c-sch access
  * adap is i2c_adapter pointer, addr is the i2c device bus address, read_write
  * (0 for read and 1 for write), size is i2c transaction type and data is the
- * union of transaction for data to be transfered or data read from bus.
+ * union of transaction for data to be transferred or data read from bus.
  * return 0 for success and others for failure.
  */
 static s32 sch_access(struct i2c_adapter *adap, u16 addr,
@@ -163,6 +147,19 @@ static s32 sch_access(struct i2c_adapter *adap, u16 addr,
 		dev_dbg(&sch_adapter.dev, "SMBus busy (%02x)\n", temp);
 		return -EAGAIN;
 	}
+	temp = inw(SMBHSTCLK);
+	if (!temp) {
+		/*
+		 * We can't determine if we have 33 or 25 MHz clock for
+		 * SMBus, so expect 33 MHz and calculate a bus clock of
+		 * 100 kHz. If we actually run at 25 MHz the bus will be
+		 * run ~75 kHz instead which should do no harm.
+		 */
+		dev_notice(&sch_adapter.dev,
+			"Clock divider uninitialized. Setting defaults\n");
+		outw(backbone_speed / (4 * 100), SMBHSTCLK);
+	}
+
 	dev_dbg(&sch_adapter.dev, "access size: %d %s\n", size,
 		(read_write)?"READ":"WRITE");
 	switch (size) {
@@ -256,37 +253,24 @@ static struct i2c_adapter sch_adapter = {
 	.algo		= &smbus_algorithm,
 };
 
-static struct pci_device_id sch_ids[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_SCH_LPC) },
-	{ 0, }
-};
-
-MODULE_DEVICE_TABLE(pci, sch_ids);
-
-static int __devinit sch_probe(struct pci_dev *dev,
-				const struct pci_device_id *id)
+static int smbus_sch_probe(struct platform_device *dev)
 {
+	struct resource *res;
 	int retval;
-	unsigned int smba;
 
-	pci_read_config_dword(dev, SMBBA_SCH, &smba);
-	if (!(smba & (1 << 31))) {
-		dev_err(&dev->dev, "SMBus I/O space disabled!\n");
-		return -ENODEV;
-	}
-
-	sch_smba = (unsigned short)smba;
-	if (sch_smba == 0) {
-		dev_err(&dev->dev, "SMBus base address uninitialized!\n");
-		return -ENODEV;
-	}
-	if (acpi_check_region(sch_smba, SMBIOSIZE, sch_driver.name))
+	res = platform_get_resource(dev, IORESOURCE_IO, 0);
+	if (!res)
 		return -EBUSY;
-	if (!request_region(sch_smba, SMBIOSIZE, sch_driver.name)) {
+
+	if (!devm_request_region(&dev->dev, res->start, resource_size(res),
+				 dev->name)) {
 		dev_err(&dev->dev, "SMBus region 0x%x already in use!\n",
 			sch_smba);
 		return -EBUSY;
 	}
+
+	sch_smba = res->start;
+
 	dev_dbg(&dev->dev, "SMBA = 0x%X\n", sch_smba);
 
 	/* set up the sysfs linkage to our parent device */
@@ -296,44 +280,33 @@ static int __devinit sch_probe(struct pci_dev *dev,
 		"SMBus SCH adapter at %04x", sch_smba);
 
 	retval = i2c_add_adapter(&sch_adapter);
-	if (retval) {
-		dev_err(&dev->dev, "Couldn't register adapter!\n");
-		release_region(sch_smba, SMBIOSIZE);
+	if (retval)
 		sch_smba = 0;
-	}
 
 	return retval;
 }
 
-static void __devexit sch_remove(struct pci_dev *dev)
+static int smbus_sch_remove(struct platform_device *pdev)
 {
 	if (sch_smba) {
 		i2c_del_adapter(&sch_adapter);
-		release_region(sch_smba, SMBIOSIZE);
 		sch_smba = 0;
 	}
+
+	return 0;
 }
 
-static struct pci_driver sch_driver = {
-	.name		= "isch_smbus",
-	.id_table	= sch_ids,
-	.probe		= sch_probe,
-	.remove		= __devexit_p(sch_remove),
+static struct platform_driver smbus_sch_driver = {
+	.driver = {
+		.name = "isch_smbus",
+	},
+	.probe		= smbus_sch_probe,
+	.remove		= smbus_sch_remove,
 };
 
-static int __init i2c_sch_init(void)
-{
-	return pci_register_driver(&sch_driver);
-}
-
-static void __exit i2c_sch_exit(void)
-{
-	pci_unregister_driver(&sch_driver);
-}
+module_platform_driver(smbus_sch_driver);
 
 MODULE_AUTHOR("Jacob Pan <jacob.jun.pan@intel.com>");
 MODULE_DESCRIPTION("Intel SCH SMBus driver");
 MODULE_LICENSE("GPL");
-
-module_init(i2c_sch_init);
-module_exit(i2c_sch_exit);
+MODULE_ALIAS("platform:isch_smbus");

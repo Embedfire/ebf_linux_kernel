@@ -1,22 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/drivers/dma/dma-api.c
  *
  * SuperH-specific DMA management API
  *
  * Copyright (C) 2003, 2004, 2005  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/list.h>
 #include <linux/platform_device.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <asm/dma.h>
 
 DEFINE_SPINLOCK(dma_spin_lock);
@@ -307,11 +306,9 @@ int dma_extend(unsigned int chan, unsigned long op, void *param)
 }
 EXPORT_SYMBOL(dma_extend);
 
-static int dma_read_proc(char *buf, char **start, off_t off,
-			 int len, int *eof, void *data)
+static int dma_proc_show(struct seq_file *m, void *v)
 {
-	struct dma_info *info;
-	char *p = buf;
+	struct dma_info *info = v;
 
 	if (list_empty(&registered_dmac_list))
 		return 0;
@@ -331,12 +328,12 @@ static int dma_read_proc(char *buf, char **start, off_t off,
 			if (!(channel->flags & DMA_CONFIGURED))
 				continue;
 
-			p += sprintf(p, "%2d: %14s    %s\n", i,
-				     info->name, channel->dev_id);
+			seq_printf(m, "%2d: %14s    %s\n", i,
+				   info->name, channel->dev_id);
 		}
 	}
 
-	return p - buf;
+	return 0;
 }
 
 int register_dmac(struct dma_info *info)
@@ -411,11 +408,10 @@ EXPORT_SYMBOL(unregister_dmac);
 static int __init dma_api_init(void)
 {
 	printk(KERN_NOTICE "DMA: Registering DMA API.\n");
-	create_proc_read_entry("dma", 0, 0, dma_read_proc, 0);
-	return 0;
+	return proc_create_single("dma", 0, NULL, dma_proc_show) ? 0 : -ENOMEM;
 }
 subsys_initcall(dma_api_init);
 
 MODULE_AUTHOR("Paul Mundt <lethal@linux-sh.org>");
 MODULE_DESCRIPTION("DMA API for SuperH");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");

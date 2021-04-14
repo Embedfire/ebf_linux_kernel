@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*  Kernel module help for SH.
 
     SHcompact version by Kaz Kojima and Paul Mundt.
@@ -9,20 +10,6 @@
 
 	Based on the sh version, and on code from the sh64-specific parts of
 	modutils, originally written by Richard Curnow and Ben Gaster.
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 #include <linux/moduleloader.h>
 #include <linux/elf.h>
@@ -32,32 +19,7 @@
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <asm/unaligned.h>
-
-void *module_alloc(unsigned long size)
-{
-	if (size == 0)
-		return NULL;
-
-	return vmalloc_exec(size);
-}
-
-
-/* Free memory returned from module_alloc */
-void module_free(struct module *mod, void *module_region)
-{
-	vfree(module_region);
-	/* FIXME: If module_region == mod->init_region, trim exception
-           table entries. */
-}
-
-/* We don't need anything special. */
-int module_frob_arch_sections(Elf_Ehdr *hdr,
-			      Elf_Shdr *sechdrs,
-			      char *secstrings,
-			      struct module *mod)
-{
-	return 0;
-}
+#include <asm/dwarf.h>
 
 int apply_relocate_add(Elf32_Shdr *sechdrs,
 		   const char *strtab,
@@ -84,16 +46,9 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 			+ ELF32_R_SYM(rel[i].r_info);
 		relocation = sym->st_value + rel[i].r_addend;
 
-#ifdef CONFIG_SUPERH64
-		/* For text addresses, bit2 of the st_other field indicates
-		 * whether the symbol is SHmedia (1) or SHcompact (0).  If
-		 * SHmedia, the LSB of the symbol needs to be asserted
-		 * for the CPU to be in SHmedia mode when it starts executing
-		 * the branch target. */
-		relocation |= (sym->st_other & 4);
-#endif
-
 		switch (ELF32_R_TYPE(rel[i].r_info)) {
+		case R_SH_NONE:
+			break;
 		case R_SH_DIR32:
 			value = get_unaligned(location);
 			value += relocation;
@@ -132,25 +87,18 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 	return 0;
 }
 
-int apply_relocate(Elf32_Shdr *sechdrs,
-		       const char *strtab,
-		       unsigned int symindex,
-		       unsigned int relsec,
-		       struct module *me)
-{
-	printk(KERN_ERR "module %s: REL RELOCATION unsupported\n",
-	       me->name);
-	return -ENOEXEC;
-}
-
 int module_finalize(const Elf_Ehdr *hdr,
 		    const Elf_Shdr *sechdrs,
 		    struct module *me)
 {
-	return module_bug_finalize(hdr, sechdrs, me);
+	int ret = 0;
+
+	ret |= module_dwarf_finalize(hdr, sechdrs, me);
+
+	return ret;
 }
 
 void module_arch_cleanup(struct module *mod)
 {
-	module_bug_cleanup(mod);
+	module_dwarf_cleanup(mod);
 }

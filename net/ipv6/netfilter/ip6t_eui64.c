@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Kernel module to match EUI64 address parameters. */
 
 /* (C) 2001-2002 Andras Kis-Szabo <kisza@sch.bme.hu>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -20,18 +17,14 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Andras Kis-Szabo <kisza@sch.bme.hu>");
 
 static bool
-eui64_mt6(const struct sk_buff *skb, const struct net_device *in,
-          const struct net_device *out, const struct xt_match *match,
-          const void *matchinfo, int offset, unsigned int protoff,
-          bool *hotdrop)
+eui64_mt6(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	unsigned char eui64[8];
-	int i = 0;
 
 	if (!(skb_mac_header(skb) >= skb->head &&
 	      skb_mac_header(skb) + ETH_HLEN <= skb->data) &&
-	    offset != 0) {
-		*hotdrop = true;
+	    par->fragoff != 0) {
+		par->hotdrop = true;
 		return false;
 	}
 
@@ -45,12 +38,8 @@ eui64_mt6(const struct sk_buff *skb, const struct net_device *in,
 			eui64[4] = 0xfe;
 			eui64[0] ^= 0x02;
 
-			i = 0;
-			while (ipv6_hdr(skb)->saddr.s6_addr[8 + i] == eui64[i]
-			       && i < 8)
-				i++;
-
-			if (i == 8)
+			if (!memcmp(ipv6_hdr(skb)->saddr.s6_addr + 8, eui64,
+				    sizeof(eui64)))
 				return true;
 		}
 	}
@@ -60,7 +49,7 @@ eui64_mt6(const struct sk_buff *skb, const struct net_device *in,
 
 static struct xt_match eui64_mt6_reg __read_mostly = {
 	.name		= "eui64",
-	.family		= AF_INET6,
+	.family		= NFPROTO_IPV6,
 	.match		= eui64_mt6,
 	.matchsize	= sizeof(int),
 	.hooks		= (1 << NF_INET_PRE_ROUTING) | (1 << NF_INET_LOCAL_IN) |

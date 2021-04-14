@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/core_t2.c
  *
@@ -21,6 +22,7 @@
 
 #include <asm/ptrace.h>
 #include <asm/delay.h>
+#include <asm/mce.h>
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -73,8 +75,6 @@
 #else
 # define DBG(args)
 #endif
-
-DEFINE_SPINLOCK(t2_hae_lock);
 
 static volatile unsigned int t2_mcheck_any_expected;
 static volatile unsigned int t2_mcheck_last_taken;
@@ -351,7 +351,7 @@ t2_sg_map_window2(struct pci_controller *hose,
 
 	/* Note we can only do 1 SG window, as the other is for direct, so
 	   do an ISA SG area, especially for the floppy. */
-	hose->sg_isa = iommu_arena_new(hose, base, length, 0);
+	hose->sg_isa = iommu_arena_new(hose, base, length, SMP_CACHE_BYTES);
 	hose->sg_pci = NULL;
 
 	temp = (base & 0xfff00000UL) | ((base + length - 1) >> 20);
@@ -406,6 +406,7 @@ void __init
 t2_init_arch(void)
 {
 	struct pci_controller *hose;
+	struct resource *hae_mem;
 	unsigned long temp;
 	unsigned int i;
 
@@ -433,7 +434,13 @@ t2_init_arch(void)
 	 */
 	pci_isa_hose = hose = alloc_pci_controller();
 	hose->io_space = &ioport_resource;
-	hose->mem_space = &iomem_resource;
+	hae_mem = alloc_resource();
+	hae_mem->start = 0;
+	hae_mem->end = T2_MEM_R1_MASK;
+	hae_mem->name = pci_hae0_name;
+	if (request_resource(&iomem_resource, hae_mem) < 0)
+		printk(KERN_ERR "Failed to request HAE_MEM\n");
+	hose->mem_space = hae_mem;
 	hose->index = 0;
 
 	hose->sparse_mem_base = T2_SPARSE_MEM - IDENT_ADDR;

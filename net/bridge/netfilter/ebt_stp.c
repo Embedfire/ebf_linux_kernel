@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  ebt_stp
  *
@@ -7,137 +8,133 @@
  *
  *  July, 2003
  */
-
-#include <linux/netfilter_bridge/ebtables.h>
-#include <linux/netfilter_bridge/ebt_stp.h>
 #include <linux/etherdevice.h>
 #include <linux/module.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter_bridge/ebtables.h>
+#include <linux/netfilter_bridge/ebt_stp.h>
 
 #define BPDU_TYPE_CONFIG 0
-#define BPDU_TYPE_TCN 0x80
 
 struct stp_header {
-	uint8_t dsap;
-	uint8_t ssap;
-	uint8_t ctrl;
-	uint8_t pid;
-	uint8_t vers;
-	uint8_t type;
+	u8 dsap;
+	u8 ssap;
+	u8 ctrl;
+	u8 pid;
+	u8 vers;
+	u8 type;
 };
 
 struct stp_config_pdu {
-	uint8_t flags;
-	uint8_t root[8];
-	uint8_t root_cost[4];
-	uint8_t sender[8];
-	uint8_t port[2];
-	uint8_t msg_age[2];
-	uint8_t max_age[2];
-	uint8_t hello_time[2];
-	uint8_t forward_delay[2];
+	u8 flags;
+	u8 root[8];
+	u8 root_cost[4];
+	u8 sender[8];
+	u8 port[2];
+	u8 msg_age[2];
+	u8 max_age[2];
+	u8 hello_time[2];
+	u8 forward_delay[2];
 };
 
 #define NR16(p) (p[0] << 8 | p[1])
 #define NR32(p) ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3])
 
-static int ebt_filter_config(const struct ebt_stp_info *info,
-   const struct stp_config_pdu *stpc)
+static bool ebt_filter_config(const struct ebt_stp_info *info,
+			      const struct stp_config_pdu *stpc)
 {
 	const struct ebt_stp_config_info *c;
-	uint16_t v16;
-	uint32_t v32;
-	int verdict, i;
+	u16 v16;
+	u32 v32;
 
 	c = &info->config;
 	if ((info->bitmask & EBT_STP_FLAGS) &&
-	    FWINV(c->flags != stpc->flags, EBT_STP_FLAGS))
-		return EBT_NOMATCH;
+	    NF_INVF(info, EBT_STP_FLAGS, c->flags != stpc->flags))
+		return false;
 	if (info->bitmask & EBT_STP_ROOTPRIO) {
 		v16 = NR16(stpc->root);
-		if (FWINV(v16 < c->root_priol ||
-		    v16 > c->root_priou, EBT_STP_ROOTPRIO))
-			return EBT_NOMATCH;
+		if (NF_INVF(info, EBT_STP_ROOTPRIO,
+			    v16 < c->root_priol || v16 > c->root_priou))
+			return false;
 	}
 	if (info->bitmask & EBT_STP_ROOTADDR) {
-		verdict = 0;
-		for (i = 0; i < 6; i++)
-			verdict |= (stpc->root[2+i] ^ c->root_addr[i]) &
-				   c->root_addrmsk[i];
-		if (FWINV(verdict != 0, EBT_STP_ROOTADDR))
-			return EBT_NOMATCH;
+		if (NF_INVF(info, EBT_STP_ROOTADDR,
+			    !ether_addr_equal_masked(&stpc->root[2],
+						     c->root_addr,
+						     c->root_addrmsk)))
+			return false;
 	}
 	if (info->bitmask & EBT_STP_ROOTCOST) {
 		v32 = NR32(stpc->root_cost);
-		if (FWINV(v32 < c->root_costl ||
-		    v32 > c->root_costu, EBT_STP_ROOTCOST))
-			return EBT_NOMATCH;
+		if (NF_INVF(info, EBT_STP_ROOTCOST,
+			    v32 < c->root_costl || v32 > c->root_costu))
+			return false;
 	}
 	if (info->bitmask & EBT_STP_SENDERPRIO) {
 		v16 = NR16(stpc->sender);
-		if (FWINV(v16 < c->sender_priol ||
-		    v16 > c->sender_priou, EBT_STP_SENDERPRIO))
-			return EBT_NOMATCH;
+		if (NF_INVF(info, EBT_STP_SENDERPRIO,
+			    v16 < c->sender_priol || v16 > c->sender_priou))
+			return false;
 	}
 	if (info->bitmask & EBT_STP_SENDERADDR) {
-		verdict = 0;
-		for (i = 0; i < 6; i++)
-			verdict |= (stpc->sender[2+i] ^ c->sender_addr[i]) &
-				   c->sender_addrmsk[i];
-		if (FWINV(verdict != 0, EBT_STP_SENDERADDR))
-			return EBT_NOMATCH;
+		if (NF_INVF(info, EBT_STP_SENDERADDR,
+			    !ether_addr_equal_masked(&stpc->sender[2],
+						     c->sender_addr,
+						     c->sender_addrmsk)))
+			return false;
 	}
 	if (info->bitmask & EBT_STP_PORT) {
 		v16 = NR16(stpc->port);
-		if (FWINV(v16 < c->portl ||
-		    v16 > c->portu, EBT_STP_PORT))
-			return EBT_NOMATCH;
+		if (NF_INVF(info, EBT_STP_PORT,
+			    v16 < c->portl || v16 > c->portu))
+			return false;
 	}
 	if (info->bitmask & EBT_STP_MSGAGE) {
 		v16 = NR16(stpc->msg_age);
-		if (FWINV(v16 < c->msg_agel ||
-		    v16 > c->msg_ageu, EBT_STP_MSGAGE))
-			return EBT_NOMATCH;
+		if (NF_INVF(info, EBT_STP_MSGAGE,
+			    v16 < c->msg_agel || v16 > c->msg_ageu))
+			return false;
 	}
 	if (info->bitmask & EBT_STP_MAXAGE) {
 		v16 = NR16(stpc->max_age);
-		if (FWINV(v16 < c->max_agel ||
-		    v16 > c->max_ageu, EBT_STP_MAXAGE))
-			return EBT_NOMATCH;
+		if (NF_INVF(info, EBT_STP_MAXAGE,
+			    v16 < c->max_agel || v16 > c->max_ageu))
+			return false;
 	}
 	if (info->bitmask & EBT_STP_HELLOTIME) {
 		v16 = NR16(stpc->hello_time);
-		if (FWINV(v16 < c->hello_timel ||
-		    v16 > c->hello_timeu, EBT_STP_HELLOTIME))
-			return EBT_NOMATCH;
+		if (NF_INVF(info, EBT_STP_HELLOTIME,
+			    v16 < c->hello_timel || v16 > c->hello_timeu))
+			return false;
 	}
 	if (info->bitmask & EBT_STP_FWDD) {
 		v16 = NR16(stpc->forward_delay);
-		if (FWINV(v16 < c->forward_delayl ||
-		    v16 > c->forward_delayu, EBT_STP_FWDD))
-			return EBT_NOMATCH;
+		if (NF_INVF(info, EBT_STP_FWDD,
+			    v16 < c->forward_delayl || v16 > c->forward_delayu))
+			return false;
 	}
-	return EBT_MATCH;
+	return true;
 }
 
-static int ebt_filter_stp(const struct sk_buff *skb, const struct net_device *in,
-   const struct net_device *out, const void *data, unsigned int datalen)
+static bool
+ebt_stp_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
-	const struct ebt_stp_info *info = data;
+	const struct ebt_stp_info *info = par->matchinfo;
 	const struct stp_header *sp;
 	struct stp_header _stph;
-	const uint8_t header[6] = {0x42, 0x42, 0x03, 0x00, 0x00, 0x00};
+	const u8 header[6] = {0x42, 0x42, 0x03, 0x00, 0x00, 0x00};
 
 	sp = skb_header_pointer(skb, 0, sizeof(_stph), &_stph);
 	if (sp == NULL)
-		return EBT_NOMATCH;
+		return false;
 
 	/* The stp code only considers these */
 	if (memcmp(sp, header, sizeof(header)))
-		return EBT_NOMATCH;
+		return false;
 
-	if (info->bitmask & EBT_STP_TYPE
-	    && FWINV(info->type != sp->type, EBT_STP_TYPE))
-		return EBT_NOMATCH;
+	if ((info->bitmask & EBT_STP_TYPE) &&
+	    NF_INVF(info, EBT_STP_TYPE, info->type != sp->type))
+		return false;
 
 	if (sp->type == BPDU_TYPE_CONFIG &&
 	    info->bitmask & EBT_STP_CONFIG_MASK) {
@@ -147,48 +144,48 @@ static int ebt_filter_stp(const struct sk_buff *skb, const struct net_device *in
 		st = skb_header_pointer(skb, sizeof(_stph),
 					sizeof(_stpc), &_stpc);
 		if (st == NULL)
-			return EBT_NOMATCH;
+			return false;
 		return ebt_filter_config(info, st);
 	}
-	return EBT_MATCH;
+	return true;
 }
 
-static int ebt_stp_check(const char *tablename, unsigned int hookmask,
-   const struct ebt_entry *e, void *data, unsigned int datalen)
+static int ebt_stp_mt_check(const struct xt_mtchk_param *par)
 {
-	const struct ebt_stp_info *info = data;
-	const unsigned int len = EBT_ALIGN(sizeof(struct ebt_stp_info));
-	const uint8_t bridge_ula[6] = {0x01, 0x80, 0xc2, 0x00, 0x00, 0x00};
-	const uint8_t msk[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+	const struct ebt_stp_info *info = par->matchinfo;
+	const struct ebt_entry *e = par->entryinfo;
 
 	if (info->bitmask & ~EBT_STP_MASK || info->invflags & ~EBT_STP_MASK ||
 	    !(info->bitmask & EBT_STP_MASK))
 		return -EINVAL;
-	if (datalen != len)
-		return -EINVAL;
 	/* Make sure the match only receives stp frames */
-	if (compare_ether_addr(e->destmac, bridge_ula) ||
-	    compare_ether_addr(e->destmsk, msk) || !(e->bitmask & EBT_DESTMAC))
+	if (!par->nft_compat &&
+	    (!ether_addr_equal(e->destmac, eth_stp_addr) ||
+	     !(e->bitmask & EBT_DESTMAC) ||
+	     !is_broadcast_ether_addr(e->destmsk)))
 		return -EINVAL;
 
 	return 0;
 }
 
-static struct ebt_match filter_stp __read_mostly = {
-	.name		= EBT_STP_MATCH,
-	.match		= ebt_filter_stp,
-	.check		= ebt_stp_check,
+static struct xt_match ebt_stp_mt_reg __read_mostly = {
+	.name		= "stp",
+	.revision	= 0,
+	.family		= NFPROTO_BRIDGE,
+	.match		= ebt_stp_mt,
+	.checkentry	= ebt_stp_mt_check,
+	.matchsize	= sizeof(struct ebt_stp_info),
 	.me		= THIS_MODULE,
 };
 
 static int __init ebt_stp_init(void)
 {
-	return ebt_register_match(&filter_stp);
+	return xt_register_match(&ebt_stp_mt_reg);
 }
 
 static void __exit ebt_stp_fini(void)
 {
-	ebt_unregister_match(&filter_stp);
+	xt_unregister_match(&ebt_stp_mt_reg);
 }
 
 module_init(ebt_stp_init);

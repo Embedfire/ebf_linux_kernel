@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Marvel systems use the IO7 I/O chip provides PCI/PCIX/AGP access
  *
@@ -12,7 +13,6 @@
 #define __ALPHA_MARVEL__H__
 
 #include <linux/types.h>
-#include <linux/pci.h>
 #include <linux/spinlock.h>
 
 #include <asm/compiler.h>
@@ -313,7 +313,7 @@ struct io7 {
 	io7_port7_csrs *csrs;
 	struct io7_port ports[IO7_NUM_PORTS];
 
-	spinlock_t irq_lock;
+	raw_spinlock_t irq_lock;
 };
 
 #ifndef __EXTERN_INLINE
@@ -332,10 +332,10 @@ struct io7 {
 #define vucp	volatile unsigned char __force *
 #define vusp	volatile unsigned short __force *
 
-extern unsigned int marvel_ioread8(void __iomem *);
+extern unsigned int marvel_ioread8(const void __iomem *);
 extern void marvel_iowrite8(u8 b, void __iomem *);
 
-__EXTERN_INLINE unsigned int marvel_ioread16(void __iomem *addr)
+__EXTERN_INLINE unsigned int marvel_ioread16(const void __iomem *addr)
 {
 	return __kernel_ldwu(*(vusp)addr);
 }

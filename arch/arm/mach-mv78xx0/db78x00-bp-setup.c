@@ -13,30 +13,37 @@
 #include <linux/platform_device.h>
 #include <linux/ata_platform.h>
 #include <linux/mv643xx_eth.h>
-#include <mach/mv78xx0.h>
+#include <linux/ethtool.h>
+#include <linux/i2c.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
+#include "mv78xx0.h"
 #include "common.h"
 
 static struct mv643xx_eth_platform_data db78x00_ge00_data = {
-	.phy_addr	= 8,
+	.phy_addr	= MV643XX_ETH_PHY_ADDR(8),
 };
 
 static struct mv643xx_eth_platform_data db78x00_ge01_data = {
-	.phy_addr	= 9,
+	.phy_addr	= MV643XX_ETH_PHY_ADDR(9),
 };
 
 static struct mv643xx_eth_platform_data db78x00_ge10_data = {
-	.phy_addr	= -1,
+	.phy_addr	= MV643XX_ETH_PHY_ADDR(10),
 };
 
 static struct mv643xx_eth_platform_data db78x00_ge11_data = {
-	.phy_addr	= -1,
+	.phy_addr	= MV643XX_ETH_PHY_ADDR(11),
 };
 
 static struct mv_sata_platform_data db78x00_sata_data = {
 	.n_ports	= 2,
 };
+
+static struct i2c_board_info __initdata db78x00_i2c_rtc = {
+	I2C_BOARD_INFO("ds1338", 0x68),
+};
+
 
 static void __init db78x00_init(void)
 {
@@ -59,6 +66,8 @@ static void __init db78x00_init(void)
 		mv78xx0_sata_init(&db78x00_sata_data);
 		mv78xx0_uart0_init();
 		mv78xx0_uart2_init();
+		mv78xx0_i2c_init();
+		i2c_register_board_info(0, &db78x00_i2c_rtc, 1);
 	} else {
 		mv78xx0_uart1_init();
 		mv78xx0_uart3_init();
@@ -84,11 +93,12 @@ subsys_initcall(db78x00_pci_init);
 
 MACHINE_START(DB78X00_BP, "Marvell DB-78x00-BP Development Board")
 	/* Maintainer: Lennert Buytenhek <buytenh@marvell.com> */
-	.phys_io	= MV78XX0_REGS_PHYS_BASE,
-	.io_pg_offst	= ((MV78XX0_REGS_VIRT_BASE) >> 18) & 0xfffc,
-	.boot_params	= 0x00000100,
+	.atag_offset	= 0x100,
+	.nr_irqs	= MV78XX0_NR_IRQS,
 	.init_machine	= db78x00_init,
 	.map_io		= mv78xx0_map_io,
+	.init_early	= mv78xx0_init_early,
 	.init_irq	= mv78xx0_init_irq,
-	.timer		= &mv78xx0_timer,
+	.init_time	= mv78xx0_timer_init,
+	.restart	= mv78xx0_restart,
 MACHINE_END

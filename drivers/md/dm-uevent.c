@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Device Mapper Uevent Support (dm-uevent)
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright IBM Corporation, 2007
  * 	Author: Mike Anderson <andmike@linux.vnet.ibm.com>
@@ -22,6 +9,7 @@
 #include <linux/slab.h>
 #include <linux/kobject.h>
 #include <linux/dm-ioctl.h>
+#include <linux/export.h>
 
 #include "dm.h"
 #include "dm-uevent.h"
@@ -139,14 +127,13 @@ void dm_send_uevents(struct list_head *events, struct kobject *kobj)
 		list_del_init(&event->elist);
 
 		/*
-		 * Need to call dm_copy_name_and_uuid from here for now.
-		 * Context of previous var adds and locking used for
-		 * hash_cell not compatable.
+		 * When a device is being removed this copy fails and we
+		 * discard these unsent events.
 		 */
 		if (dm_copy_name_and_uuid(event->md, event->name,
 					  event->uuid)) {
-			DMERR("%s: dm_copy_name_and_uuid() failed",
-			      __func__);
+			DMINFO("%s: skipping sending uevent for lost device",
+			       __func__);
 			goto uevent_free;
 		}
 
@@ -188,7 +175,7 @@ void dm_path_uevent(enum dm_uevent_type event_type, struct dm_target *ti,
 
 	if (event_type >= ARRAY_SIZE(_dm_uevent_type_names)) {
 		DMERR("%s: Invalid event_type %d", __func__, event_type);
-		goto out;
+		return;
 	}
 
 	event = dm_build_path_uevent(md, ti,
@@ -196,12 +183,9 @@ void dm_path_uevent(enum dm_uevent_type event_type, struct dm_target *ti,
 				     _dm_uevent_type_names[event_type].name,
 				     path, nr_valid_paths);
 	if (IS_ERR(event))
-		goto out;
+		return;
 
 	dm_uevent_add(md, &event->elist);
-
-out:
-	dm_put(md);
 }
 EXPORT_SYMBOL_GPL(dm_path_uevent);
 

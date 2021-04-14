@@ -11,80 +11,116 @@
 #include <linux/oprofile.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/compat.h>
+#include <linux/uaccess.h>
+
 #include <asm/ptrace.h>
-#include <asm/uaccess.h>
 #include <asm/stacktrace.h>
+#include <asm/unwind.h>
 
-static void backtrace_warning_symbol(void *data, char *msg,
-				     unsigned long symbol)
+#ifdef CONFIG_COMPAT
+static struct stack_frame_ia32 *
+dump_user_backtrace_32(struct stack_frame_ia32 *head)
 {
-	/* Ignore warnings */
+	/* Also check accessibility of one struct frame_head beyond: */
+	struct stack_frame_ia32 bufhead[2];
+	struct stack_frame_ia32 *fp;
+	unsigned long bytes;
+
+	bytes = copy_from_user_nmi(bufhead, head, sizeof(bufhead));
+	if (bytes != 0)
+		return NULL;
+
+	fp = (struct stack_frame_ia32 *) compat_ptr(bufhead[0].next_frame);
+
+	oprofile_add_trace(bufhead[0].return_address);
+
+	/* frame pointers should strictly progress back up the stack
+	* (towards higher addresses) */
+	if (head >= fp)
+		return NULL;
+
+	return fp;
 }
 
-static void backtrace_warning(void *data, char *msg)
+static inline int
+x86_backtrace_32(struct pt_regs * const regs, unsigned int depth)
 {
-	/* Ignore warnings */
+	struct stack_frame_ia32 *head;
+
+	/* User process is IA32 */
+	if (!current || !test_thread_flag(TIF_IA32))
+		return 0;
+
+	head = (struct stack_frame_ia32 *) regs->bp;
+	while (depth-- && head)
+		head = dump_user_backtrace_32(head);
+
+	return 1;
 }
 
-static int backtrace_stack(void *data, char *name)
+#else
+static inline int
+x86_backtrace_32(struct pt_regs * const regs, unsigned int depth)
 {
-	/* Yes, we want all stacks */
 	return 0;
 }
+#endif /* CONFIG_COMPAT */
 
-static void backtrace_address(void *data, unsigned long addr, int reliable)
+static struct stack_frame *dump_user_backtrace(struct stack_frame *head)
 {
-	unsigned int *depth = data;
+	/* Also check accessibility of one struct frame_head beyond: */
+	struct stack_frame bufhead[2];
+	unsigned long bytes;
 
-	if ((*depth)--)
-		oprofile_add_trace(addr);
-}
-
-static struct stacktrace_ops backtrace_ops = {
-	.warning = backtrace_warning,
-	.warning_symbol = backtrace_warning_symbol,
-	.stack = backtrace_stack,
-	.address = backtrace_address,
-};
-
-struct frame_head {
-	struct frame_head *bp;
-	unsigned long ret;
-} __attribute__((packed));
-
-static struct frame_head *
-dump_user_backtrace(struct frame_head * head)
-{
-	struct frame_head bufhead[2];
-
-	/* Also check accessibility of one struct frame_head beyond */
-	if (!access_ok(VERIFY_READ, head, sizeof(bufhead)))
-		return NULL;
-	if (__copy_from_user_inatomic(bufhead, head, sizeof(bufhead)))
+	bytes = copy_from_user_nmi(bufhead, head, sizeof(bufhead));
+	if (bytes != 0)
 		return NULL;
 
-	oprofile_add_trace(bufhead[0].ret);
+	oprofile_add_trace(bufhead[0].return_address);
 
 	/* frame pointers should strictly progress back up the stack
 	 * (towards higher addresses) */
-	if (head >= bufhead[0].bp)
+	if (head >= bufhead[0].next_frame)
 		return NULL;
 
-	return bufhead[0].bp;
+	return bufhead[0].next_frame;
 }
 
 void
 x86_backtrace(struct pt_regs * const regs, unsigned int depth)
 {
-	struct frame_head *head = (struct frame_head *)frame_pointer(regs);
-	unsigned long stack = kernel_trap_sp(regs);
+	struct stack_frame *head = (struct stack_frame *)frame_pointer(regs);
 
-	if (!user_mode_vm(regs)) {
-		if (depth)
-			dump_trace(NULL, regs, (unsigned long *)stack, 0,
-				   &backtrace_ops, &depth);
+	if (!user_mode(regs)) {
+		struct unwind_state state;
+		unsigned long addr;
+
+		if (!depth)
+			return;
+
+		oprofile_add_trace(regs->ip);
+
+		if (!--depth)
+			return;
+
+		for (unwind_start(&state, current, regs, NULL);
+		     !unwind_done(&state); unwind_next_frame(&state)) {
+			addr = unwind_get_return_address(&state);
+			if (!addr)
+				break;
+
+			oprofile_add_trace(addr);
+
+			if (!--depth)
+				break;
+		}
+
 		return;
 	}
+
+	if (x86_backtrace_32(regs, depth))
+		return;
 
 	while (depth-- && head)
 		head = dump_user_backtrace(head);

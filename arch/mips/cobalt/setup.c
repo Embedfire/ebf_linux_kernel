@@ -13,10 +13,12 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
+#include <linux/memblock.h>
 #include <linux/pm.h>
 
 #include <asm/bootinfo.h>
 #include <asm/reboot.h>
+#include <asm/setup.h>
 #include <asm/gt64120.h>
 
 #include <cobalt.h>
@@ -41,8 +43,8 @@ const char *get_system_type(void)
 
 /*
  * Cobalt doesn't have PS/2 keyboard/mouse interfaces,
- * keyboard conntroller is never used.
- * Also PCI-ISA bridge DMA contoroller is never used.
+ * keyboard controller is never used.
+ * Also PCI-ISA bridge DMA controller is never used.
  */
 static struct resource cobalt_reserved_resources[] = {
 	{	/* dma1 */
@@ -97,29 +99,23 @@ void __init plat_mem_setup(void)
 
 void __init prom_init(void)
 {
-	int narg, indx, posn, nchr;
 	unsigned long memsz;
+	int argc, i;
 	char **argv;
 
 	memsz = fw_arg0 & 0x7fff0000;
-	narg = fw_arg0 & 0x0000ffff;
+	argc = fw_arg0 & 0x0000ffff;
+	argv = (char **)fw_arg1;
 
-	if (narg) {
-		arcs_cmdline[0] = '\0';
-		argv = (char **) fw_arg1;
-		posn = 0;
-		for (indx = 1; indx < narg; ++indx) {
-			nchr = strlen(argv[indx]);
-			if (posn + 1 + nchr + 1 > sizeof(arcs_cmdline))
-				break;
-			if (posn)
-				arcs_cmdline[posn++] = ' ';
-			strcpy(arcs_cmdline + posn, argv[indx]);
-			posn += nchr;
-		}
+	for (i = 1; i < argc; i++) {
+		strlcat(arcs_cmdline, argv[i], COMMAND_LINE_SIZE);
+		if (i < (argc - 1))
+			strlcat(arcs_cmdline, " ", COMMAND_LINE_SIZE);
 	}
 
-	add_memory_region(0x0, memsz, BOOT_MEM_RAM);
+	memblock_add(0, memsz);
+
+	setup_8250_early_printk_port(CKSEG1ADDR(0x1c800000), 0, 0);
 }
 
 void __init prom_free_prom_memory(void)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 1998-2001 Vojtech Pavlik
  */
@@ -7,30 +8,12 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
- * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
  */
 
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/input.h>
 #include <linux/gameport.h>
 #include <linux/jiffies.h>
@@ -277,7 +260,7 @@ static int gf2k_connect(struct gameport *gameport, struct gameport_driver *drv)
 	}
 
 #ifdef RESET_WORKS
-	if ((gf2k->id != (GB(19,2,0) | GB(15,3,2) | GB(12,3,5))) ||
+	if ((gf2k->id != (GB(19,2,0) | GB(15,3,2) | GB(12,3,5))) &&
 	    (gf2k->id != (GB(31,2,0) | GB(27,3,2) | GB(24,3,5)))) {
 		err = -ENODEV;
 		goto fail2;
@@ -318,11 +301,8 @@ static int gf2k_connect(struct gameport *gameport, struct gameport_driver *drv)
 	for (i = 0; i < gf2k_axes[gf2k->id]; i++)
 		set_bit(gf2k_abs[i], input_dev->absbit);
 
-	for (i = 0; i < gf2k_hats[gf2k->id]; i++) {
-		set_bit(ABS_HAT0X + i, input_dev->absbit);
-		input_dev->absmin[ABS_HAT0X + i] = -1;
-		input_dev->absmax[ABS_HAT0X + i] = 1;
-	}
+	for (i = 0; i < gf2k_hats[gf2k->id]; i++)
+		input_set_abs_params(input_dev, ABS_HAT0X + i, -1, 1, 0, 0);
 
 	for (i = 0; i < gf2k_joys[gf2k->id]; i++)
 		set_bit(gf2k_btn_joy[i], input_dev->keybit);
@@ -334,11 +314,14 @@ static int gf2k_connect(struct gameport *gameport, struct gameport_driver *drv)
 	gf2k_read(gf2k, data);
 
 	for (i = 0; i < gf2k_axes[gf2k->id]; i++) {
-		input_dev->absmax[gf2k_abs[i]] = (i < 2) ? input_dev->abs[gf2k_abs[i]] * 2 - 32 :
-			  input_dev->abs[gf2k_abs[0]] + input_dev->abs[gf2k_abs[1]] - 32;
-		input_dev->absmin[gf2k_abs[i]] = 32;
-		input_dev->absfuzz[gf2k_abs[i]] = 8;
-		input_dev->absflat[gf2k_abs[i]] = (i < 2) ? 24 : 0;
+		int max = i < 2 ?
+			input_abs_get_val(input_dev, gf2k_abs[i]) * 2 :
+			input_abs_get_val(input_dev, gf2k_abs[0]) +
+				input_abs_get_val(input_dev, gf2k_abs[1]);
+		int flat = i < 2 ? 24 : 0;
+
+		input_set_abs_params(input_dev, gf2k_abs[i],
+				     32, max - 32, 8, flat);
 	}
 
 	err = input_register_device(gf2k->dev);
@@ -373,16 +356,4 @@ static struct gameport_driver gf2k_drv = {
 	.disconnect	= gf2k_disconnect,
 };
 
-static int __init gf2k_init(void)
-{
-	gameport_register_driver(&gf2k_drv);
-	return 0;
-}
-
-static void __exit gf2k_exit(void)
-{
-	gameport_unregister_driver(&gf2k_drv);
-}
-
-module_init(gf2k_init);
-module_exit(gf2k_exit);
+module_gameport_driver(gf2k_drv);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>,
  *                   Hannu Savolainen 1993-1996,
@@ -6,36 +7,21 @@
  *  Routines for control of AdLib FM cards (OPL2/OPL3/OPL4 chips)
  *
  *  Most if code is ported from OSS/Lite.
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <sound/opl3.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <linux/delay.h>
+#include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/ioport.h>
 #include <sound/minors.h>
+#include "opl3_voice.h"
 
 MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>, Hannu Savolainen 1993-1996, Rob Hooft");
 MODULE_DESCRIPTION("Routines for control of AdLib FM cards (OPL2/OPL3/OPL4 chips)");
 MODULE_LICENSE("GPL");
-
-extern char snd_opl3_regmap[MAX_OPL2_VOICES][4];
 
 static void snd_opl2_command(struct snd_opl3 * opl3, unsigned short cmd, unsigned char val)
 {
@@ -139,7 +125,8 @@ static int snd_opl3_detect(struct snd_opl3 * opl3)
 		 * If we had an OPL4 chip, opl3->hardware would have been set
 		 * by the OPL4 driver; so we can assume OPL3 here.
 		 */
-		snd_assert(opl3->r_port != 0, return -ENODEV);
+		if (snd_BUG_ON(!opl3->r_port))
+			return -ENODEV;
 		opl3->hardware = OPL3_HW_OPL3;
 	}
 	return 0;
@@ -227,7 +214,7 @@ static int snd_opl3_timer2_stop(struct snd_timer * timer)
 
  */
 
-static struct snd_timer_hardware snd_opl3_timer1 =
+static const struct snd_timer_hardware snd_opl3_timer1 =
 {
 	.flags =	SNDRV_TIMER_HW_STOP,
 	.resolution =	80000,
@@ -236,7 +223,7 @@ static struct snd_timer_hardware snd_opl3_timer1 =
 	.stop =		snd_opl3_timer1_stop,
 };
 
-static struct snd_timer_hardware snd_opl3_timer2 =
+static const struct snd_timer_hardware snd_opl3_timer2 =
 {
 	.flags =	SNDRV_TIMER_HW_STOP,
 	.resolution =	320000,
@@ -301,7 +288,7 @@ void snd_opl3_interrupt(struct snd_hwdep * hw)
 	opl3 = hw->private_data;
 	status = inb(opl3->l_port);
 #if 0
-	snd_printk("AdLib IRQ status = 0x%x\n", status);
+	snd_printk(KERN_DEBUG "AdLib IRQ status = 0x%x\n", status);
 #endif
 	if (!(status & 0x80))
 		return;
@@ -324,7 +311,8 @@ EXPORT_SYMBOL(snd_opl3_interrupt);
 
 static int snd_opl3_free(struct snd_opl3 *opl3)
 {
-	snd_assert(opl3 != NULL, return -ENXIO);
+	if (snd_BUG_ON(!opl3))
+		return -ENXIO;
 	if (opl3->private_free)
 		opl3->private_free(opl3);
 	snd_opl3_clear_patches(opl3);
@@ -344,7 +332,7 @@ int snd_opl3_new(struct snd_card *card,
 		 unsigned short hardware,
 		 struct snd_opl3 **ropl3)
 {
-	static struct snd_device_ops ops = {
+	static const struct snd_device_ops ops = {
 		.dev_free = snd_opl3_dev_free,
 	};
 	struct snd_opl3 *opl3;
@@ -352,10 +340,8 @@ int snd_opl3_new(struct snd_card *card,
 
 	*ropl3 = NULL;
 	opl3 = kzalloc(sizeof(*opl3), GFP_KERNEL);
-	if (opl3 == NULL) {
-		snd_printk(KERN_ERR "opl3: cannot allocate\n");
+	if (!opl3)
 		return -ENOMEM;
-	}
 
 	opl3->card = card;
 	opl3->hardware = hardware;
@@ -498,10 +484,8 @@ int snd_opl3_hwdep_new(struct snd_opl3 * opl3,
 	hw->private_data = opl3;
 	hw->exclusive = 1;
 #ifdef CONFIG_SND_OSSEMUL
-	if (device == 0) {
+	if (device == 0)
 		hw->oss_type = SNDRV_OSS_DEVICE_TYPE_DMFM;
-		sprintf(hw->oss_dev, "dmfm%i", card->number);
-	}
 #endif
 	strcpy(hw->name, hw->id);
 	switch (opl3->hardware & OPL3_HW_MASK) {
@@ -527,7 +511,7 @@ int snd_opl3_hwdep_new(struct snd_opl3 * opl3,
 
 	opl3->hwdep = hw;
 	opl3->seq_dev_num = seq_device;
-#if defined(CONFIG_SND_SEQUENCER) || (defined(MODULE) && defined(CONFIG_SND_SEQUENCER_MODULE))
+#if IS_ENABLED(CONFIG_SND_SEQUENCER)
 	if (snd_seq_device_new(card, seq_device, SNDRV_SEQ_DEV_ID_OPL3,
 			       sizeof(struct snd_opl3 *), &opl3->seq_dev) >= 0) {
 		strcpy(opl3->seq_dev->name, hw->name);
@@ -540,19 +524,3 @@ int snd_opl3_hwdep_new(struct snd_opl3 * opl3,
 }
 
 EXPORT_SYMBOL(snd_opl3_hwdep_new);
-
-/*
- *  INIT part
- */
-
-static int __init alsa_opl3_init(void)
-{
-	return 0;
-}
-
-static void __exit alsa_opl3_exit(void)
-{
-}
-
-module_init(alsa_opl3_init)
-module_exit(alsa_opl3_exit)

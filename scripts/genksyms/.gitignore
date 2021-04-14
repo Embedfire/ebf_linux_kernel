@@ -1,4 +1,2 @@
-keywords.c
-lex.c
-parse.[ch]
+# SPDX-License-Identifier: GPL-2.0-only
 genksyms

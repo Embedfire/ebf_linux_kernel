@@ -7,7 +7,7 @@
  * License version 2.  This program is licensed "as is" without any
  * warranty of any kind, whether express or implied.
  */
-
+#include <linux/gpio.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
@@ -17,14 +17,13 @@
 #include <linux/mv643xx_eth.h>
 #include <linux/ethtool.h>
 #include <linux/i2c.h>
+#include <linux/platform_data/dsa.h>
 #include <asm/mach-types.h>
-#include <asm/gpio.h>
-#include <asm/leds.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/pci.h>
-#include <mach/orion5x.h>
 #include "common.h"
 #include "mpp.h"
+#include "orion5x.h"
 
 /*****************************************************************************
  * RD-88F5181L GE Info
@@ -64,34 +63,43 @@ static struct platform_device rd88f5181l_ge_nor_boot_flash = {
 /*****************************************************************************
  * General Setup
  ****************************************************************************/
-static struct orion5x_mpp_mode rd88f5181l_ge_mpp_modes[] __initdata = {
-	{  0, MPP_GPIO },		/* LED1 */
-	{  1, MPP_GPIO },		/* LED5 */
-	{  2, MPP_GPIO },		/* LED4 */
-	{  3, MPP_GPIO },		/* LED3 */
-	{  4, MPP_GPIO },		/* PCI_intA */
-	{  5, MPP_GPIO },		/* RTC interrupt */
-	{  6, MPP_PCI_CLK },		/* CPU PCI refclk */
-	{  7, MPP_PCI_CLK },		/* PCI/PCIe refclk */
-	{  8, MPP_GPIO },		/* 88e6131 interrupt */
-	{  9, MPP_GPIO },		/* GE_RXERR */
-	{ 10, MPP_GPIO },		/* PCI_intB */
-	{ 11, MPP_GPIO },		/* LED2 */
-	{ 12, MPP_GIGE },		/* GE_TXD[4] */
-	{ 13, MPP_GIGE },		/* GE_TXD[5] */
-	{ 14, MPP_GIGE },		/* GE_TXD[6] */
-	{ 15, MPP_GIGE },		/* GE_TXD[7] */
-	{ 16, MPP_GIGE },		/* GE_RXD[4] */
-	{ 17, MPP_GIGE },		/* GE_RXD[5] */
-	{ 18, MPP_GIGE },		/* GE_RXD[6] */
-	{ 19, MPP_GIGE },		/* GE_RXD[7] */
-	{ -1 },
+static unsigned int rd88f5181l_ge_mpp_modes[] __initdata = {
+	MPP0_GPIO,		/* LED1 */
+	MPP1_GPIO,		/* LED5 */
+	MPP2_GPIO,		/* LED4 */
+	MPP3_GPIO,		/* LED3 */
+	MPP4_GPIO,		/* PCI_intA */
+	MPP5_GPIO,		/* RTC interrupt */
+	MPP6_PCI_CLK,		/* CPU PCI refclk */
+	MPP7_PCI_CLK,		/* PCI/PCIe refclk */
+	MPP8_GPIO,		/* 88e6131 interrupt */
+	MPP9_GPIO,		/* GE_RXERR */
+	MPP10_GPIO,		/* PCI_intB */
+	MPP11_GPIO,		/* LED2 */
+	MPP12_GIGE,		/* GE_TXD[4] */
+	MPP13_GIGE,		/* GE_TXD[5] */
+	MPP14_GIGE,		/* GE_TXD[6] */
+	MPP15_GIGE,		/* GE_TXD[7] */
+	MPP16_GIGE,		/* GE_RXD[4] */
+	MPP17_GIGE,		/* GE_RXD[5] */
+	MPP18_GIGE,		/* GE_RXD[6] */
+	MPP19_GIGE,		/* GE_RXD[7] */
+	0,
 };
 
 static struct mv643xx_eth_platform_data rd88f5181l_ge_eth_data = {
-	.phy_addr	= -1,
+	.phy_addr	= MV643XX_ETH_PHY_NONE,
 	.speed		= SPEED_1000,
 	.duplex		= DUPLEX_FULL,
+};
+
+static struct dsa_chip_data rd88f5181l_ge_switch_chip_data = {
+	.port_names[0]	= "lan2",
+	.port_names[1]	= "lan1",
+	.port_names[2]	= "wan",
+	.port_names[3]	= "cpu",
+	.port_names[5]	= "lan4",
+	.port_names[7]	= "lan3",
 };
 
 static struct i2c_board_info __initdata rd88f5181l_ge_i2c_rtc = {
@@ -112,18 +120,21 @@ static void __init rd88f5181l_ge_init(void)
 	 */
 	orion5x_ehci0_init();
 	orion5x_eth_init(&rd88f5181l_ge_eth_data);
+	orion5x_eth_switch_init(&rd88f5181l_ge_switch_chip_data);
 	orion5x_i2c_init();
 	orion5x_uart0_init();
 
-	orion5x_setup_dev_boot_win(RD88F5181L_GE_NOR_BOOT_BASE,
-				   RD88F5181L_GE_NOR_BOOT_SIZE);
+	mvebu_mbus_add_window_by_id(ORION_MBUS_DEVBUS_BOOT_TARGET,
+				    ORION_MBUS_DEVBUS_BOOT_ATTR,
+				    RD88F5181L_GE_NOR_BOOT_BASE,
+				    RD88F5181L_GE_NOR_BOOT_SIZE);
 	platform_device_register(&rd88f5181l_ge_nor_boot_flash);
 
 	i2c_register_board_info(0, &rd88f5181l_ge_i2c_rtc, 1);
 }
 
 static int __init
-rd88f5181l_ge_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+rd88f5181l_ge_pci_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	int irq;
 
@@ -145,7 +156,6 @@ rd88f5181l_ge_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 
 static struct hw_pci rd88f5181l_ge_pci __initdata = {
 	.nr_controllers	= 2,
-	.swizzle	= pci_std_swizzle,
 	.setup		= orion5x_pci_sys_setup,
 	.scan		= orion5x_pci_sys_scan_bus,
 	.map_irq	= rd88f5181l_ge_pci_map_irq,
@@ -164,12 +174,13 @@ subsys_initcall(rd88f5181l_ge_pci_init);
 
 MACHINE_START(RD88F5181L_GE, "Marvell Orion-VoIP GE Reference Design")
 	/* Maintainer: Lennert Buytenhek <buytenh@marvell.com> */
-	.phys_io	= ORION5X_REGS_PHYS_BASE,
-	.io_pg_offst	= ((ORION5X_REGS_VIRT_BASE) >> 18) & 0xFFFC,
-	.boot_params	= 0x00000100,
+	.atag_offset	= 0x100,
+	.nr_irqs	= ORION5X_NR_IRQS,
 	.init_machine	= rd88f5181l_ge_init,
 	.map_io		= orion5x_map_io,
+	.init_early	= orion5x_init_early,
 	.init_irq	= orion5x_init_irq,
-	.timer		= &orion5x_timer,
+	.init_time	= orion5x_timer_init,
 	.fixup		= tag_fixup_mem32,
+	.restart	= orion5x_restart,
 MACHINE_END

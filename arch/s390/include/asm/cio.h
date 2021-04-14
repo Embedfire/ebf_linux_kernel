@@ -1,247 +1,26 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- *  include/asm-s390/cio.h
- *  include/asm-s390x/cio.h
- *
  * Common interface for I/O on S/390
  */
 #ifndef _ASM_S390_CIO_H_
 #define _ASM_S390_CIO_H_
 
 #include <linux/spinlock.h>
+#include <linux/bitops.h>
+#include <linux/genalloc.h>
 #include <asm/types.h>
-
-#ifdef __KERNEL__
 
 #define LPM_ANYPATH 0xff
 #define __MAX_CSSID 0
+#define __MAX_SUBCHANNEL 65535
+#define __MAX_SSID 3
 
-/**
- * struct cmd_scsw - command-mode subchannel status word
- * @key: subchannel key
- * @sctl: suspend control
- * @eswf: esw format
- * @cc: deferred condition code
- * @fmt: format
- * @pfch: prefetch
- * @isic: initial-status interruption control
- * @alcc: address-limit checking control
- * @ssi: suppress-suspended interruption
- * @zcc: zero condition code
- * @ectl: extended control
- * @pno: path not operational
- * @res: reserved
- * @fctl: function control
- * @actl: activity control
- * @stctl: status control
- * @cpa: channel program address
- * @dstat: device status
- * @cstat: subchannel status
- * @count: residual count
- */
-struct cmd_scsw {
-	__u32 key  : 4;
-	__u32 sctl : 1;
-	__u32 eswf : 1;
-	__u32 cc   : 2;
-	__u32 fmt  : 1;
-	__u32 pfch : 1;
-	__u32 isic : 1;
-	__u32 alcc : 1;
-	__u32 ssi  : 1;
-	__u32 zcc  : 1;
-	__u32 ectl : 1;
-	__u32 pno  : 1;
-	__u32 res  : 1;
-	__u32 fctl : 3;
-	__u32 actl : 7;
-	__u32 stctl : 5;
-	__u32 cpa;
-	__u32 dstat : 8;
-	__u32 cstat : 8;
-	__u32 count : 16;
-} __attribute__ ((packed));
-
-/**
- * struct tm_scsw - transport-mode subchannel status word
- * @key: subchannel key
- * @eswf: esw format
- * @cc: deferred condition code
- * @fmt: format
- * @x: IRB-format control
- * @q: interrogate-complete
- * @ectl: extended control
- * @pno: path not operational
- * @fctl: function control
- * @actl: activity control
- * @stctl: status control
- * @tcw: TCW address
- * @dstat: device status
- * @cstat: subchannel status
- * @fcxs: FCX status
- * @schxs: subchannel-extended status
- */
-struct tm_scsw {
-	u32 key:4;
-	u32 :1;
-	u32 eswf:1;
-	u32 cc:2;
-	u32 fmt:3;
-	u32 x:1;
-	u32 q:1;
-	u32 :1;
-	u32 ectl:1;
-	u32 pno:1;
-	u32 :1;
-	u32 fctl:3;
-	u32 actl:7;
-	u32 stctl:5;
-	u32 tcw;
-	u32 dstat:8;
-	u32 cstat:8;
-	u32 fcxs:8;
-	u32 schxs:8;
-} __attribute__ ((packed));
-
-/**
- * union scsw - subchannel status word
- * @cmd: command-mode SCSW
- * @tm: transport-mode SCSW
- */
-union scsw {
-	struct cmd_scsw cmd;
-	struct tm_scsw tm;
-} __attribute__ ((packed));
-
-int scsw_is_tm(union scsw *scsw);
-u32 scsw_key(union scsw *scsw);
-u32 scsw_eswf(union scsw *scsw);
-u32 scsw_cc(union scsw *scsw);
-u32 scsw_ectl(union scsw *scsw);
-u32 scsw_pno(union scsw *scsw);
-u32 scsw_fctl(union scsw *scsw);
-u32 scsw_actl(union scsw *scsw);
-u32 scsw_stctl(union scsw *scsw);
-u32 scsw_dstat(union scsw *scsw);
-u32 scsw_cstat(union scsw *scsw);
-int scsw_is_solicited(union scsw *scsw);
-int scsw_is_valid_key(union scsw *scsw);
-int scsw_is_valid_eswf(union scsw *scsw);
-int scsw_is_valid_cc(union scsw *scsw);
-int scsw_is_valid_ectl(union scsw *scsw);
-int scsw_is_valid_pno(union scsw *scsw);
-int scsw_is_valid_fctl(union scsw *scsw);
-int scsw_is_valid_actl(union scsw *scsw);
-int scsw_is_valid_stctl(union scsw *scsw);
-int scsw_is_valid_dstat(union scsw *scsw);
-int scsw_is_valid_cstat(union scsw *scsw);
-int scsw_cmd_is_valid_key(union scsw *scsw);
-int scsw_cmd_is_valid_sctl(union scsw *scsw);
-int scsw_cmd_is_valid_eswf(union scsw *scsw);
-int scsw_cmd_is_valid_cc(union scsw *scsw);
-int scsw_cmd_is_valid_fmt(union scsw *scsw);
-int scsw_cmd_is_valid_pfch(union scsw *scsw);
-int scsw_cmd_is_valid_isic(union scsw *scsw);
-int scsw_cmd_is_valid_alcc(union scsw *scsw);
-int scsw_cmd_is_valid_ssi(union scsw *scsw);
-int scsw_cmd_is_valid_zcc(union scsw *scsw);
-int scsw_cmd_is_valid_ectl(union scsw *scsw);
-int scsw_cmd_is_valid_pno(union scsw *scsw);
-int scsw_cmd_is_valid_fctl(union scsw *scsw);
-int scsw_cmd_is_valid_actl(union scsw *scsw);
-int scsw_cmd_is_valid_stctl(union scsw *scsw);
-int scsw_cmd_is_valid_dstat(union scsw *scsw);
-int scsw_cmd_is_valid_cstat(union scsw *scsw);
-int scsw_cmd_is_solicited(union scsw *scsw);
-int scsw_tm_is_valid_key(union scsw *scsw);
-int scsw_tm_is_valid_eswf(union scsw *scsw);
-int scsw_tm_is_valid_cc(union scsw *scsw);
-int scsw_tm_is_valid_fmt(union scsw *scsw);
-int scsw_tm_is_valid_x(union scsw *scsw);
-int scsw_tm_is_valid_q(union scsw *scsw);
-int scsw_tm_is_valid_ectl(union scsw *scsw);
-int scsw_tm_is_valid_pno(union scsw *scsw);
-int scsw_tm_is_valid_fctl(union scsw *scsw);
-int scsw_tm_is_valid_actl(union scsw *scsw);
-int scsw_tm_is_valid_stctl(union scsw *scsw);
-int scsw_tm_is_valid_dstat(union scsw *scsw);
-int scsw_tm_is_valid_cstat(union scsw *scsw);
-int scsw_tm_is_valid_fcxs(union scsw *scsw);
-int scsw_tm_is_valid_schxs(union scsw *scsw);
-int scsw_tm_is_solicited(union scsw *scsw);
-
-#define SCSW_FCTL_CLEAR_FUNC	 0x1
-#define SCSW_FCTL_HALT_FUNC	 0x2
-#define SCSW_FCTL_START_FUNC	 0x4
-
-#define SCSW_ACTL_SUSPENDED	 0x1
-#define SCSW_ACTL_DEVACT	 0x2
-#define SCSW_ACTL_SCHACT	 0x4
-#define SCSW_ACTL_CLEAR_PEND	 0x8
-#define SCSW_ACTL_HALT_PEND	 0x10
-#define SCSW_ACTL_START_PEND	 0x20
-#define SCSW_ACTL_RESUME_PEND	 0x40
-
-#define SCSW_STCTL_STATUS_PEND	 0x1
-#define SCSW_STCTL_SEC_STATUS	 0x2
-#define SCSW_STCTL_PRIM_STATUS	 0x4
-#define SCSW_STCTL_INTER_STATUS	 0x8
-#define SCSW_STCTL_ALERT_STATUS	 0x10
-
-#define DEV_STAT_ATTENTION	 0x80
-#define DEV_STAT_STAT_MOD	 0x40
-#define DEV_STAT_CU_END		 0x20
-#define DEV_STAT_BUSY		 0x10
-#define DEV_STAT_CHN_END	 0x08
-#define DEV_STAT_DEV_END	 0x04
-#define DEV_STAT_UNIT_CHECK	 0x02
-#define DEV_STAT_UNIT_EXCEP	 0x01
-
-#define SCHN_STAT_PCI		 0x80
-#define SCHN_STAT_INCORR_LEN	 0x40
-#define SCHN_STAT_PROG_CHECK	 0x20
-#define SCHN_STAT_PROT_CHECK	 0x10
-#define SCHN_STAT_CHN_DATA_CHK	 0x08
-#define SCHN_STAT_CHN_CTRL_CHK	 0x04
-#define SCHN_STAT_INTF_CTRL_CHK	 0x02
-#define SCHN_STAT_CHAIN_CHECK	 0x01
-
-/*
- * architectured values for first sense byte
- */
-#define SNS0_CMD_REJECT		0x80
-#define SNS_CMD_REJECT		SNS0_CMD_REJEC
-#define SNS0_INTERVENTION_REQ	0x40
-#define SNS0_BUS_OUT_CHECK	0x20
-#define SNS0_EQUIPMENT_CHECK	0x10
-#define SNS0_DATA_CHECK		0x08
-#define SNS0_OVERRUN		0x04
-#define SNS0_INCOMPL_DOMAIN	0x01
-
-/*
- * architectured values for second sense byte
- */
-#define SNS1_PERM_ERR		0x80
-#define SNS1_INV_TRACK_FORMAT	0x40
-#define SNS1_EOC		0x20
-#define SNS1_MESSAGE_TO_OPER	0x10
-#define SNS1_NO_REC_FOUND	0x08
-#define SNS1_FILE_PROTECTED	0x04
-#define SNS1_WRITE_INHIBITED	0x02
-#define SNS1_INPRECISE_END	0x01
-
-/*
- * architectured values for third sense byte
- */
-#define SNS2_REQ_INH_WRITE	0x80
-#define SNS2_CORRECTABLE	0x40
-#define SNS2_FIRST_LOG_ERR	0x20
-#define SNS2_ENV_DATA_PRESENT	0x10
-#define SNS2_INPRECISE_END	0x04
+#include <asm/scsw.h>
 
 /**
  * struct ccw1 - channel command word
  * @cmd_code: command code
- * @flags: flags, like IDA adressing, etc.
+ * @flags: flags, like IDA addressing, etc.
  * @count: byte count
  * @cda: data address
  *
@@ -255,6 +34,24 @@ struct ccw1 {
 	__u16 count;
 	__u32 cda;
 } __attribute__ ((packed,aligned(8)));
+
+/**
+ * struct ccw0 - channel command word
+ * @cmd_code: command code
+ * @cda: data address
+ * @flags: flags, like IDA addressing, etc.
+ * @reserved: will be ignored
+ * @count: byte count
+ *
+ * The format-0 ccw structure.
+ */
+struct ccw0 {
+	__u8 cmd_code;
+	__u32 cda : 24;
+	__u8  flags;
+	__u8  reserved;
+	__u16 count;
+} __packed __aligned(8);
 
 #define CCW_FLAG_DC		0x80
 #define CCW_FLAG_CC		0x40
@@ -304,6 +101,18 @@ struct erw {
 	__u32 scnt  : 6;
 	__u32 res16 : 16;
 } __attribute__ ((packed));
+
+/**
+ * struct erw_eadm - EADM Subchannel extended report word
+ * @b: aob error
+ * @r: arsb error
+ */
+struct erw_eadm {
+	__u32 : 16;
+	__u32 b : 1;
+	__u32 r : 1;
+	__u32  : 14;
+} __packed;
 
 /**
  * struct sublog - subchannel logout area
@@ -396,17 +205,30 @@ struct esw3 {
 } __attribute__ ((packed));
 
 /**
+ * struct esw_eadm - EADM Subchannel Extended Status Word (ESW)
+ * @sublog: subchannel logout
+ * @erw: extended report word
+ */
+struct esw_eadm {
+	__u32 sublog;
+	struct erw_eadm erw;
+	__u32 : 32;
+	__u32 : 32;
+	__u32 : 32;
+} __packed;
+
+/**
  * struct irb - interruption response block
  * @scsw: subchannel status word
- * @esw: extened status word, 4 formats
+ * @esw: extended status word
  * @ecw: extended control word
  *
  * The irb that is handed to the device driver when an interrupt occurs. For
  * solicited interrupts, the common I/O layer already performs checks whether
  * a field is valid; a field not being valid is always passed as %0.
- * If a unit check occured, @ecw may contain sense data; this is retrieved
+ * If a unit check occurred, @ecw may contain sense data; this is retrieved
  * by the common I/O layer itself if the device doesn't support concurrent
- * sense (so that the device driver never needs to perform basic sene itself).
+ * sense (so that the device driver never needs to perform basic sense itself).
  * For unsolicited interrupts, the irb is passed as-is (expect for sense data,
  * if applicable).
  */
@@ -417,6 +239,7 @@ struct irb {
 		struct esw1 esw1;
 		struct esw2 esw2;
 		struct esw3 esw3;
+		struct esw_eadm eadm;
 	} esw;
 	__u8   ecw[32];
 } __attribute__ ((packed,aligned(4)));
@@ -442,6 +265,36 @@ struct ciw {
 #define CIW_TYPE_RNI	0x2    	/* read node identifier */
 
 /*
+ * Node Descriptor as defined in SA22-7204, "Common I/O-Device Commands"
+ */
+
+#define ND_VALIDITY_VALID	0
+#define ND_VALIDITY_OUTDATED	1
+#define ND_VALIDITY_INVALID	2
+
+struct node_descriptor {
+	/* Flags. */
+	union {
+		struct {
+			u32 validity:3;
+			u32 reserved:5;
+		} __packed;
+		u8 byte0;
+	} __packed;
+
+	/* Node parameters. */
+	u32 params:24;
+
+	/* Node ID. */
+	char type[6];
+	char model[3];
+	char manufacturer[3];
+	char plant[2];
+	char seq[12];
+	u16 tag;
+} __packed;
+
+/*
  * Flags used as input parameters for do_IO()
  */
 #define DOIO_ALLOW_SUSPEND	 0x0001 /* allow for channel prog. suspend */
@@ -456,6 +309,8 @@ struct ciw {
 #define CIO_OPER       0x0004
 /* Sick revalidation of device. */
 #define CIO_REVALIDATE 0x0008
+/* Device did not respond in time. */
+#define CIO_BOXED      0x0010
 
 /**
  * struct ccw_dev_id - unique identifier for ccw devices
@@ -492,23 +347,31 @@ static inline int ccw_dev_id_is_equal(struct ccw_dev_id *dev_id1,
 	return 0;
 }
 
-extern void wait_cons_dev(void);
+/**
+ * pathmask_to_pos() - find the position of the left-most bit in a pathmask
+ * @mask: pathmask with at least one bit set
+ */
+static inline u8 pathmask_to_pos(u8 mask)
+{
+	return 8 - ffs(mask);
+}
 
 extern void css_schedule_reprobe(void);
 
-extern void reipl_ccw_dev(struct ccw_dev_id *id);
+extern void *cio_dma_zalloc(size_t size);
+extern void cio_dma_free(void *cpu_addr, size_t size);
+extern struct device *cio_get_dma_css_dev(void);
 
-struct cio_iplinfo {
-	u16 devno;
-	int is_qdio;
-};
-
-extern int cio_get_iplinfo(struct cio_iplinfo *iplinfo);
+void *cio_gp_dma_zalloc(struct gen_pool *gp_dma, struct device *dma_dev,
+			size_t size);
+void cio_gp_dma_free(struct gen_pool *gp_dma, void *cpu_addr, size_t size);
+void cio_gp_dma_destroy(struct gen_pool *gp_dma, struct device *dma_dev);
+struct gen_pool *cio_gp_dma_create(struct device *dma_dev, int nr_pages);
 
 /* Function from drivers/s390/cio/chsc.c */
-int chsc_sstpc(void *page, unsigned int op, u16 ctrl);
+int chsc_sstpc(void *page, unsigned int op, u16 ctrl, u64 *clock_delta);
 int chsc_sstpi(void *page, void *result, size_t size);
-
-#endif
+int chsc_stzi(void *page, void *result, size_t size);
+int chsc_sgib(u32 origin);
 
 #endif

@@ -1,10 +1,11 @@
 /*
    3w-9xxx.h -- 3ware 9000 Storage Controller device driver for Linux.
 
-   Written By: Adam Radford <linuxraid@amcc.com>
-   Modifications By: Tom Couch <linuxraid@amcc.com>
+   Written By: Adam Radford <aradford@gmail.com>
+   Modifications By: Tom Couch
 
-   Copyright (C) 2004-2008 Applied Micro Circuits Corporation.
+   Copyright (C) 2004-2009 Applied Micro Circuits Corporation.
+   Copyright (C) 2010 LSI Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -40,10 +41,7 @@
    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
    Bugs/Comments/Suggestions should be mailed to:
-   linuxraid@amcc.com
-
-   For more information, goto:
-   http://www.amcc.com
+   aradford@gmail.com
 */
 
 #ifndef _3W_9XXX_H
@@ -60,7 +58,7 @@ static twa_message_type twa_aen_table[] = {
 	{0x0000, "AEN queue empty"},
 	{0x0001, "Controller reset occurred"},
 	{0x0002, "Degraded unit detected"},
-	{0x0003, "Controller error occured"},
+	{0x0003, "Controller error occurred"},
 	{0x0004, "Background rebuild failed"},
 	{0x0005, "Background rebuild done"},
 	{0x0006, "Incomplete unit detected"},
@@ -322,11 +320,6 @@ static twa_message_type twa_error_table[] = {
 #define TW_CURRENT_DRIVER_SRL 35
 #define TW_CURRENT_DRIVER_BUILD 0
 #define TW_CURRENT_DRIVER_BRANCH 0
-
-/* Phase defines */
-#define TW_PHASE_INITIAL 0
-#define TW_PHASE_SINGLE  1
-#define TW_PHASE_SGLIST  2
 
 /* Misc defines */
 #define TW_9550SX_DRAIN_COMPLETED	      0xFFFF
@@ -673,7 +666,7 @@ typedef struct TAG_TW_Device_Extension {
 	unsigned char		event_queue_wrapped;
 	unsigned int            error_sequence_id;
 	int                     ioctl_sem_lock;
-	u32                     ioctl_msec;
+	ktime_t                 ioctl_time;
 	int			chrdev_request_id;
 	wait_queue_head_t	ioctl_wqueue;
 	struct mutex		ioctl_lock;

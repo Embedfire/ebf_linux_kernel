@@ -6,33 +6,37 @@
 # for more details.
 #
 # Copyright (C) 1994 by Linus Torvalds
+# Changed by many, many contributors over the years.
 #
 
-# ROOT_DEV specifies the default root-device when making the image.
-# This can be either FLOPPY, CURRENT, /dev/xxxx or empty, in which case
-# the default of FLOPPY is used by 'build'.
+# Sanitizer runtimes are unavailable and cannot be linked for early boot code.
+KASAN_SANITIZE			:= n
+KCSAN_SANITIZE			:= n
+OBJECT_FILES_NON_STANDARD	:= y
 
-ROOT_DEV := CURRENT
+# Kernel does not boot with kcov instrumentation here.
+# One of the problems observed was insertion of __sanitizer_cov_trace_pc()
+# callback into middle of per-cpu data enabling code. Thus the callback observed
+# inconsistent state and crashed. We are interested mostly in syscall coverage,
+# so boot code is not interesting anyway.
+KCOV_INSTRUMENT		:= n
 
 # If you want to preset the SVGA mode, uncomment the next line and
 # set SVGA_MODE to whatever number you want.
 # Set it to -DSVGA_MODE=NORMAL_VGA if you just want the EGA/VGA mode.
 # The number is the same as you would ordinarily press at bootup.
 
-SVGA_MODE := -DSVGA_MODE=NORMAL_VGA
+SVGA_MODE	:= -DSVGA_MODE=NORMAL_VGA
 
-# If you want the RAM disk device, define this to be the size in blocks.
-
-#RAMDISK := -DRAMDISK=512
-
-targets		:= vmlinux.bin setup.bin setup.elf zImage bzImage
+targets		:= vmlinux.bin setup.bin setup.elf bzImage
+targets		+= fdimage fdimage144 fdimage288 image.iso mtools.conf
 subdir-		:= compressed
 
-setup-y		+= a20.o cmdline.o copy.o cpu.o cpucheck.o edd.o
-setup-y		+= header.o main.o mca.o memory.o pm.o pmjump.o
-setup-y		+= printf.o string.o tty.o video.o video-mode.o version.o
+setup-y		+= a20.o bioscall.o cmdline.o copy.o cpu.o cpuflags.o cpucheck.o
+setup-y		+= early_serial_console.o edd.o header.o main.o memory.o
+setup-y		+= pm.o pmjump.o printf.o regs.o string.o tty.o video.o
+setup-y		+= video-mode.o version.o
 setup-$(CONFIG_X86_APM_BOOT) += apm.o
-setup-$(CONFIG_X86_VOYAGER) += voyager.o
 
 # The link order of the video-*.o modules can matter.  In particular,
 # video-vga.o *must* be listed first, followed by video-vesa.o.
@@ -43,50 +47,42 @@ setup-y		+= video-vesa.o
 setup-y		+= video-bios.o
 
 targets		+= $(setup-y)
-hostprogs-y	:= mkcpustr tools/build
+hostprogs	:= tools/build
+hostprogs	+= mkcpustr
 
-HOST_EXTRACFLAGS += $(LINUXINCLUDE)
+HOST_EXTRACFLAGS += -I$(srctree)/tools/include \
+		    -include include/generated/autoconf.h \
+	            -D__EXPORTED_HEADERS__
 
+ifdef CONFIG_X86_FEATURE_NAMES
 $(obj)/cpu.o: $(obj)/cpustr.h
 
 quiet_cmd_cpustr = CPUSTR  $@
       cmd_cpustr = $(obj)/mkcpustr > $@
-targets		+= cpustr.h
 $(obj)/cpustr.h: $(obj)/mkcpustr FORCE
 	$(call if_changed,cpustr)
+endif
+targets += cpustr.h
 
 # ---------------------------------------------------------------------------
 
-# How to compile the 16-bit code.  Note we always compile for -march=i386,
-# that way we can complain to the user if the CPU is insufficient.
-KBUILD_CFLAGS	:= $(LINUXINCLUDE) -g -Os -D_SETUP -D__KERNEL__ \
-		   -Wall -Wstrict-prototypes \
-		   -march=i386 -mregparm=3 \
-		   -include $(srctree)/$(src)/code16gcc.h \
-		   -fno-strict-aliasing -fomit-frame-pointer \
-		   $(call cc-option, -ffreestanding) \
-		   $(call cc-option, -fno-toplevel-reorder,\
-			$(call cc-option, -fno-unit-at-a-time)) \
-		   $(call cc-option, -fno-stack-protector) \
-		   $(call cc-option, -mpreferred-stack-boundary=2)
-KBUILD_CFLAGS +=   $(call cc-option,-m32)
+KBUILD_CFLAGS	:= $(REALMODE_CFLAGS) -D_SETUP
 KBUILD_AFLAGS	:= $(KBUILD_CFLAGS) -D__ASSEMBLY__
+KBUILD_CFLAGS	+= $(call cc-option,-fmacro-prefix-map=$(srctree)/=)
+KBUILD_CFLAGS	+= -fno-asynchronous-unwind-tables
+GCOV_PROFILE := n
+UBSAN_SANITIZE := n
 
-$(obj)/zImage:  IMAGE_OFFSET := 0x1000
-$(obj)/zImage:  asflags-y := $(SVGA_MODE) $(RAMDISK)
-$(obj)/bzImage: IMAGE_OFFSET := 0x100000
-$(obj)/bzImage: ccflags-y := -D__BIG_KERNEL__
-$(obj)/bzImage: asflags-y := $(SVGA_MODE) $(RAMDISK) -D__BIG_KERNEL__
-$(obj)/bzImage: BUILDFLAGS   := -b
+$(obj)/bzImage: asflags-y  := $(SVGA_MODE)
 
 quiet_cmd_image = BUILD   $@
-cmd_image = $(obj)/tools/build $(BUILDFLAGS) $(obj)/setup.bin \
-	    $(obj)/vmlinux.bin $(ROOT_DEV) > $@
+silent_redirect_image = >/dev/null
+cmd_image = $(obj)/tools/build $(obj)/setup.bin $(obj)/vmlinux.bin \
+			       $(obj)/zoffset.h $@ $($(quiet)redirect_image)
 
-$(obj)/zImage $(obj)/bzImage: $(obj)/setup.bin \
-			      $(obj)/vmlinux.bin $(obj)/tools/build FORCE
+$(obj)/bzImage: $(obj)/setup.bin $(obj)/vmlinux.bin $(obj)/tools/build FORCE
 	$(call if_changed,image)
-	@echo 'Kernel: $@ is ready' ' (#'`cat .version`')'
+	@$(kecho) 'Kernel: $@ is ready' ' (#'`cat .version`')'
 
 OBJCOPYFLAGS_vmlinux.bin := -O binary -R .note -R .comment -S
 $(obj)/vmlinux.bin: $(obj)/compressed/vmlinux FORCE
@@ -94,21 +90,20 @@ $(obj)/vmlinux.bin: $(obj)/compressed/vmlinux FORCE
 
 SETUP_OBJS = $(addprefix $(obj)/,$(setup-y))
 
-sed-offsets := -e 's/^00*/0/' \
-        -e 's/^\([0-9a-fA-F]*\) . \(input_data\|input_data_end\)$$/\#define \2 0x\1/p'
+sed-zoffset := -e 's/^\([0-9a-fA-F]*\) [a-zA-Z] \(startup_32\|startup_64\|efi32_stub_entry\|efi64_stub_entry\|efi_pe_entry\|efi32_pe_entry\|input_data\|kernel_info\|_end\|_ehead\|_text\|z_.*\)$$/\#define ZO_\2 0x\1/p'
 
-quiet_cmd_offsets = OFFSETS $@
-      cmd_offsets = $(NM) $< | sed -n $(sed-offsets) > $@
+quiet_cmd_zoffset = ZOFFSET $@
+      cmd_zoffset = $(NM) $< | sed -n $(sed-zoffset) > $@
 
-$(obj)/offsets.h: $(obj)/compressed/vmlinux FORCE
-	$(call if_changed,offsets)
+targets += zoffset.h
+$(obj)/zoffset.h: $(obj)/compressed/vmlinux FORCE
+	$(call if_changed,zoffset)
 
-targets += offsets.h
 
-AFLAGS_header.o += -I$(obj)
-$(obj)/header.o: $(obj)/offsets.h
+AFLAGS_header.o += -I$(objtree)/$(obj)
+$(obj)/header.o: $(obj)/zoffset.h
 
-LDFLAGS_setup.elf	:= -T
+LDFLAGS_setup.elf	:= -m elf_i386 -T
 $(obj)/setup.elf: $(src)/setup.ld $(SETUP_OBJS) FORCE
 	$(call if_changed,ld)
 
@@ -117,11 +112,13 @@ $(obj)/setup.bin: $(obj)/setup.elf FORCE
 	$(call if_changed,objcopy)
 
 $(obj)/compressed/vmlinux: FORCE
-	$(Q)$(MAKE) $(build)=$(obj)/compressed IMAGE_OFFSET=$(IMAGE_OFFSET) $@
+	$(Q)$(MAKE) $(build)=$(obj)/compressed $@
 
-# Set this if you want to pass append arguments to the zdisk/fdimage/isoimage kernel
+# Set this if you want to pass append arguments to the
+# bzdisk/fdimage/isoimage kernel
 FDARGS =
-# Set this if you want an initrd included with the zdisk/fdimage/isoimage kernel
+# Set this if you want an initrd included with the
+# bzdisk/fdimage/isoimage kernel
 FDINITRD =
 
 image_cmdline = default linux $(FDARGS) $(if $(FDINITRD),initrd=initrd.img,)
@@ -129,66 +126,36 @@ image_cmdline = default linux $(FDARGS) $(if $(FDINITRD),initrd=initrd.img,)
 $(obj)/mtools.conf: $(src)/mtools.conf.in
 	sed -e 's|@OBJ@|$(obj)|g' < $< > $@
 
+quiet_cmd_genimage = GENIMAGE $3
+cmd_genimage = sh $(srctree)/$(src)/genimage.sh $2 $3 $(obj)/bzImage \
+			$(obj)/mtools.conf '$(image_cmdline)' $(FDINITRD)
+
+PHONY += bzdisk fdimage fdimage144 fdimage288 isoimage bzlilo install
+
 # This requires write access to /dev/fd0
-zdisk: $(BOOTIMAGE) $(obj)/mtools.conf
-	MTOOLSRC=$(obj)/mtools.conf mformat a:			; sync
-	syslinux /dev/fd0					; sync
-	echo '$(image_cmdline)' | \
-		MTOOLSRC=$(src)/mtools.conf mcopy - a:syslinux.cfg
-	if [ -f '$(FDINITRD)' ] ; then \
-		MTOOLSRC=$(obj)/mtools.conf mcopy '$(FDINITRD)' a:initrd.img ; \
-	fi
-	MTOOLSRC=$(obj)/mtools.conf mcopy $(BOOTIMAGE) a:linux	; sync
+bzdisk: $(obj)/bzImage $(obj)/mtools.conf
+	$(call cmd,genimage,bzdisk,/dev/fd0)
 
 # These require being root or having syslinux 2.02 or higher installed
-fdimage fdimage144: $(BOOTIMAGE) $(obj)/mtools.conf
-	dd if=/dev/zero of=$(obj)/fdimage bs=1024 count=1440
-	MTOOLSRC=$(obj)/mtools.conf mformat v:			; sync
-	syslinux $(obj)/fdimage					; sync
-	echo '$(image_cmdline)' | \
-		MTOOLSRC=$(obj)/mtools.conf mcopy - v:syslinux.cfg
-	if [ -f '$(FDINITRD)' ] ; then \
-		MTOOLSRC=$(obj)/mtools.conf mcopy '$(FDINITRD)' v:initrd.img ; \
-	fi
-	MTOOLSRC=$(obj)/mtools.conf mcopy $(BOOTIMAGE) v:linux	; sync
+fdimage fdimage144: $(obj)/bzImage $(obj)/mtools.conf
+	$(call cmd,genimage,fdimage144,$(obj)/fdimage)
+	@$(kecho) 'Kernel: $(obj)/fdimage is ready'
 
-fdimage288: $(BOOTIMAGE) $(obj)/mtools.conf
-	dd if=/dev/zero of=$(obj)/fdimage bs=1024 count=2880
-	MTOOLSRC=$(obj)/mtools.conf mformat w:			; sync
-	syslinux $(obj)/fdimage					; sync
-	echo '$(image_cmdline)' | \
-		MTOOLSRC=$(obj)/mtools.conf mcopy - w:syslinux.cfg
-	if [ -f '$(FDINITRD)' ] ; then \
-		MTOOLSRC=$(obj)/mtools.conf mcopy '$(FDINITRD)' w:initrd.img ; \
-	fi
-	MTOOLSRC=$(obj)/mtools.conf mcopy $(BOOTIMAGE) w:linux	; sync
+fdimage288: $(obj)/bzImage $(obj)/mtools.conf
+	$(call cmd,genimage,fdimage288,$(obj)/fdimage)
+	@$(kecho) 'Kernel: $(obj)/fdimage is ready'
 
-isoimage: $(BOOTIMAGE)
-	-rm -rf $(obj)/isoimage
-	mkdir $(obj)/isoimage
-	for i in lib lib64 share end ; do \
-		if [ -f /usr/$$i/syslinux/isolinux.bin ] ; then \
-			cp /usr/$$i/syslinux/isolinux.bin $(obj)/isoimage ; \
-			break ; \
-		fi ; \
-		if [ $$i = end ] ; then exit 1 ; fi ; \
-	done
-	cp $(BOOTIMAGE) $(obj)/isoimage/linux
-	echo '$(image_cmdline)' > $(obj)/isoimage/isolinux.cfg
-	if [ -f '$(FDINITRD)' ] ; then \
-		cp '$(FDINITRD)' $(obj)/isoimage/initrd.img ; \
-	fi
-	mkisofs -J -r -o $(obj)/image.iso -b isolinux.bin -c boot.cat \
-		-no-emul-boot -boot-load-size 4 -boot-info-table \
-		$(obj)/isoimage
-	rm -rf $(obj)/isoimage
+isoimage: $(obj)/bzImage
+	$(call cmd,genimage,isoimage,$(obj)/image.iso)
+	@$(kecho) 'Kernel: $(obj)/image.iso is ready'
 
-zlilo: $(BOOTIMAGE)
+bzlilo:
 	if [ -f $(INSTALL_PATH)/vmlinuz ]; then mv $(INSTALL_PATH)/vmlinuz $(INSTALL_PATH)/vmlinuz.old; fi
 	if [ -f $(INSTALL_PATH)/System.map ]; then mv $(INSTALL_PATH)/System.map $(INSTALL_PATH)/System.old; fi
-	cat $(BOOTIMAGE) > $(INSTALL_PATH)/vmlinuz
+	cat $(obj)/bzImage > $(INSTALL_PATH)/vmlinuz
 	cp System.map $(INSTALL_PATH)/
 	if [ -x /sbin/lilo ]; then /sbin/lilo; else /etc/lilo/install; fi
 
 install:
-	sh $(srctree)/$(src)/install.sh $(KERNELRELEASE) $(BOOTIMAGE) System.map "$(INSTALL_PATH)"
+	sh $(srctree)/$(src)/install.sh $(KERNELRELEASE) $(obj)/bzImage \
+		System.map "$(INSTALL_PATH)"

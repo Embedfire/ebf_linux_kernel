@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *
  * general timer device for using in ISDN stacks
@@ -5,26 +6,22 @@
  * Author	Karsten Keil <kkeil@novell.com>
  *
  * Copyright 2008  by Karsten Keil <kkeil@novell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/poll.h>
 #include <linux/vmalloc.h>
+#include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mISDNif.h>
+#include <linux/mutex.h>
+#include <linux/sched/signal.h>
 
-static int	*debug;
+#include "core.h"
+
+static DEFINE_MUTEX(mISDN_mutex);
+static u_int	*debug;
 
 
 struct mISDNtimerdev {
@@ -60,87 +57,86 @@ mISDN_open(struct inode *ino, struct file *filep)
 	dev->work = 0;
 	init_waitqueue_head(&dev->wait);
 	filep->private_data = dev;
-	__module_get(THIS_MODULE);
-	return 0;
+	return nonseekable_open(ino, filep);
 }
 
 static int
 mISDN_close(struct inode *ino, struct file *filep)
 {
 	struct mISDNtimerdev	*dev = filep->private_data;
+	struct list_head	*list = &dev->pending;
 	struct mISDNtimer	*timer, *next;
 
 	if (*debug & DEBUG_TIMER)
 		printk(KERN_DEBUG "%s(%p,%p)\n", __func__, ino, filep);
-	list_for_each_entry_safe(timer, next, &dev->pending, list) {
-		del_timer(&timer->tl);
+
+	spin_lock_irq(&dev->lock);
+	while (!list_empty(list)) {
+		timer = list_first_entry(list, struct mISDNtimer, list);
+		spin_unlock_irq(&dev->lock);
+		del_timer_sync(&timer->tl);
+		spin_lock_irq(&dev->lock);
+		/* it might have been moved to ->expired */
+		list_del(&timer->list);
 		kfree(timer);
 	}
+	spin_unlock_irq(&dev->lock);
+
 	list_for_each_entry_safe(timer, next, &dev->expired, list) {
 		kfree(timer);
 	}
 	kfree(dev);
-	module_put(THIS_MODULE);
 	return 0;
 }
 
 static ssize_t
-mISDN_read(struct file *filep, char *buf, size_t count, loff_t *off)
+mISDN_read(struct file *filep, char __user *buf, size_t count, loff_t *off)
 {
 	struct mISDNtimerdev	*dev = filep->private_data;
+	struct list_head *list = &dev->expired;
 	struct mISDNtimer	*timer;
-	u_long	flags;
 	int	ret = 0;
 
 	if (*debug & DEBUG_TIMER)
 		printk(KERN_DEBUG "%s(%p, %p, %d, %p)\n", __func__,
-			filep, buf, (int)count, off);
-	if (*off != filep->f_pos)
-		return -ESPIPE;
+		       filep, buf, (int)count, off);
 
-	if (list_empty(&dev->expired) && (dev->work == 0)) {
+	if (count < sizeof(int))
+		return -ENOSPC;
+
+	spin_lock_irq(&dev->lock);
+	while (list_empty(list) && (dev->work == 0)) {
+		spin_unlock_irq(&dev->lock);
 		if (filep->f_flags & O_NONBLOCK)
 			return -EAGAIN;
 		wait_event_interruptible(dev->wait, (dev->work ||
-		    !list_empty(&dev->expired)));
+						     !list_empty(list)));
 		if (signal_pending(current))
 			return -ERESTARTSYS;
+		spin_lock_irq(&dev->lock);
 	}
-	if (count < sizeof(int))
-		return -ENOSPC;
 	if (dev->work)
 		dev->work = 0;
-	if (!list_empty(&dev->expired)) {
-		spin_lock_irqsave(&dev->lock, flags);
-		timer = (struct mISDNtimer *)dev->expired.next;
+	if (!list_empty(list)) {
+		timer = list_first_entry(list, struct mISDNtimer, list);
 		list_del(&timer->list);
-		spin_unlock_irqrestore(&dev->lock, flags);
-		if (put_user(timer->id, (int *)buf))
+		spin_unlock_irq(&dev->lock);
+		if (put_user(timer->id, (int __user *)buf))
 			ret = -EFAULT;
 		else
 			ret = sizeof(int);
 		kfree(timer);
+	} else {
+		spin_unlock_irq(&dev->lock);
 	}
 	return ret;
 }
 
-static loff_t
-mISDN_llseek(struct file *filep, loff_t offset, int orig)
-{
-	return -ESPIPE;
-}
-
-static ssize_t
-mISDN_write(struct file *filep, const char *buf, size_t count, loff_t *off)
-{
-	return -EOPNOTSUPP;
-}
-
-static unsigned int
+static __poll_t
 mISDN_poll(struct file *filep, poll_table *wait)
 {
 	struct mISDNtimerdev	*dev = filep->private_data;
-	unsigned int		mask = POLLERR;
+	__poll_t		mask = EPOLLERR;
 
 	if (*debug & DEBUG_TIMER)
 		printk(KERN_DEBUG "%s(%p, %p)\n", __func__, filep, wait);
@@ -148,31 +144,31 @@ mISDN_poll(struct file *filep, poll_table *wait)
 		poll_wait(filep, &dev->wait, wait);
 		mask = 0;
 		if (dev->work || !list_empty(&dev->expired))
-			mask |= (POLLIN | POLLRDNORM);
+			mask |= (EPOLLIN | EPOLLRDNORM);
 		if (*debug & DEBUG_TIMER)
 			printk(KERN_DEBUG "%s work(%d) empty(%d)\n", __func__,
-				dev->work, list_empty(&dev->expired));
+			       dev->work, list_empty(&dev->expired));
 	}
 	return mask;
 }
 
 static void
-dev_expire_timer(struct mISDNtimer *timer)
+dev_expire_timer(struct timer_list *t)
 {
+	struct mISDNtimer *timer = from_timer(timer, t, tl);
 	u_long			flags;
 
 	spin_lock_irqsave(&timer->dev->lock, flags);
-	list_del(&timer->list);
-	list_add_tail(&timer->list, &timer->dev->expired);
-	spin_unlock_irqrestore(&timer->dev->lock, flags);
+	if (timer->id >= 0)
+		list_move_tail(&timer->list, &timer->dev->expired);
 	wake_up_interruptible(&timer->dev->wait);
+	spin_unlock_irqrestore(&timer->dev->lock, flags);
 }
 
 static int
 misdn_add_timer(struct mISDNtimerdev *dev, int timeout)
 {
-	int 			id;
-	u_long			flags;
+	int			id;
 	struct mISDNtimer	*timer;
 
 	if (!timeout) {
@@ -183,19 +179,16 @@ misdn_add_timer(struct mISDNtimerdev *dev, int timeout)
 		timer = kzalloc(sizeof(struct mISDNtimer), GFP_KERNEL);
 		if (!timer)
 			return -ENOMEM;
-		spin_lock_irqsave(&dev->lock, flags);
-		timer->id = dev->next_id++;
+		timer->dev = dev;
+		timer_setup(&timer->tl, dev_expire_timer, 0);
+		spin_lock_irq(&dev->lock);
+		id = timer->id = dev->next_id++;
 		if (dev->next_id < 0)
 			dev->next_id = 1;
 		list_add_tail(&timer->list, &dev->pending);
-		spin_unlock_irqrestore(&dev->lock, flags);
-		timer->dev = dev;
-		timer->tl.data = (long)timer;
-		timer->tl.function = (void *) dev_expire_timer;
-		init_timer(&timer->tl);
 		timer->tl.expires = jiffies + ((HZ * (u_long)timeout) / 1000);
 		add_timer(&timer->tl);
-		id = timer->id;
+		spin_unlock_irq(&dev->lock);
 	}
 	return id;
 }
@@ -203,28 +196,25 @@ misdn_add_timer(struct mISDNtimerdev *dev, int timeout)
 static int
 misdn_del_timer(struct mISDNtimerdev *dev, int id)
 {
-	u_long			flags;
 	struct mISDNtimer	*timer;
-	int			ret = 0;
 
-	spin_lock_irqsave(&dev->lock, flags);
+	spin_lock_irq(&dev->lock);
 	list_for_each_entry(timer, &dev->pending, list) {
 		if (timer->id == id) {
 			list_del_init(&timer->list);
-			del_timer(&timer->tl);
-			ret = timer->id;
+			timer->id = -1;
+			spin_unlock_irq(&dev->lock);
+			del_timer_sync(&timer->tl);
 			kfree(timer);
-			goto unlock;
+			return id;
 		}
 	}
-unlock:
-	spin_unlock_irqrestore(&dev->lock, flags);
-	return ret;
+	spin_unlock_irq(&dev->lock);
+	return 0;
 }
 
-static int
-mISDN_ioctl(struct inode *inode, struct file *filep, unsigned int cmd,
-    unsigned long arg)
+static long
+mISDN_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
 	struct mISDNtimerdev	*dev = filep->private_data;
 	int			id, tout, ret = 0;
@@ -232,7 +222,8 @@ mISDN_ioctl(struct inode *inode, struct file *filep, unsigned int cmd,
 
 	if (*debug & DEBUG_TIMER)
 		printk(KERN_DEBUG "%s(%p, %x, %lx)\n", __func__,
-		    filep, cmd, arg);
+		       filep, cmd, arg);
+	mutex_lock(&mISDN_mutex);
 	switch (cmd) {
 	case IMADDTIMER:
 		if (get_user(tout, (int __user *)arg)) {
@@ -242,7 +233,7 @@ mISDN_ioctl(struct inode *inode, struct file *filep, unsigned int cmd,
 		id = misdn_add_timer(dev, tout);
 		if (*debug & DEBUG_TIMER)
 			printk(KERN_DEBUG "%s add %d id %d\n", __func__,
-			    tout, id);
+			       tout, id);
 		if (id < 0) {
 			ret = id;
 			break;
@@ -264,17 +255,18 @@ mISDN_ioctl(struct inode *inode, struct file *filep, unsigned int cmd,
 	default:
 		ret = -EINVAL;
 	}
+	mutex_unlock(&mISDN_mutex);
 	return ret;
 }
 
-static struct file_operations mISDN_fops = {
-	.llseek		= mISDN_llseek,
+static const struct file_operations mISDN_fops = {
+	.owner		= THIS_MODULE,
 	.read		= mISDN_read,
-	.write		= mISDN_write,
 	.poll		= mISDN_poll,
-	.ioctl		= mISDN_ioctl,
+	.unlocked_ioctl	= mISDN_ioctl,
 	.open		= mISDN_open,
 	.release	= mISDN_close,
+	.llseek		= no_llseek,
 };
 
 static struct miscdevice mISDNtimer = {
@@ -284,7 +276,7 @@ static struct miscdevice mISDNtimer = {
 };
 
 int
-mISDN_inittimer(int *deb)
+mISDN_inittimer(u_int *deb)
 {
 	int	err;
 

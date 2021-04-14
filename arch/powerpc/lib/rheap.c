@@ -15,7 +15,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/mm.h>
 #include <linux/err.h>
 #include <linux/slab.h>
@@ -54,7 +54,7 @@ static int grow(rh_info_t * info, int max_blocks)
 
 	new_blocks = max_blocks - info->max_blocks;
 
-	block = kmalloc(sizeof(rh_block_t) * max_blocks, GFP_ATOMIC);
+	block = kmalloc_array(max_blocks, sizeof(rh_block_t), GFP_ATOMIC);
 	if (block == NULL)
 		return -ENOMEM;
 
@@ -284,7 +284,7 @@ EXPORT_SYMBOL_GPL(rh_create);
  */
 void rh_destroy(rh_info_t * info)
 {
-	if ((info->flags & RHIF_STATIC_BLOCK) == 0 && info->block != NULL)
+	if ((info->flags & RHIF_STATIC_BLOCK) == 0)
 		kfree(info->block);
 
 	if ((info->flags & RHIF_STATIC_INFO) == 0)
@@ -325,7 +325,7 @@ void rh_init(rh_info_t * info, unsigned int alignment, int max_blocks,
 }
 EXPORT_SYMBOL_GPL(rh_init);
 
-/* Attach a free memory region, coalesces regions if adjuscent */
+/* Attach a free memory region, coalesces regions if adjacent */
 int rh_attach_region(rh_info_t * info, unsigned long start, int size)
 {
 	rh_block_t *blk;
@@ -556,6 +556,7 @@ unsigned long rh_alloc_fixed(rh_info_t * info, unsigned long start, int size, co
 		be = blk->start + blk->size;
 		if (s >= bs && e <= be)
 			break;
+		blk = NULL;
 	}
 
 	if (blk == NULL)

@@ -29,8 +29,8 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
@@ -43,7 +43,6 @@ struct vr_nor_mtd {
 	void __iomem *csr_base;
 	struct map_info map;
 	struct mtd_info *info;
-	int nr_parts;
 	struct pci_dev *dev;
 };
 
@@ -63,59 +62,40 @@ struct vr_nor_mtd {
 #define TIMING_BYTE_EN		(1 <<  0)	/* 8-bit vs 16-bit bus */
 #define TIMING_MASK		0x3FFF0000
 
-static void __devexit vr_nor_destroy_partitions(struct vr_nor_mtd *p)
+static void vr_nor_destroy_partitions(struct vr_nor_mtd *p)
 {
-	if (p->nr_parts > 0) {
-#if defined(CONFIG_MTD_PARTITIONS) || defined(CONFIG_MTD_PARTITIONS_MODULE)
-		del_mtd_partitions(p->info);
-#endif
-	} else
-		del_mtd_device(p->info);
+	mtd_device_unregister(p->info);
 }
 
-static int __devinit vr_nor_init_partitions(struct vr_nor_mtd *p)
+static int vr_nor_init_partitions(struct vr_nor_mtd *p)
 {
-	int err = 0;
-#if defined(CONFIG_MTD_PARTITIONS) || defined(CONFIG_MTD_PARTITIONS_MODULE)
-	struct mtd_partition *parts;
-	static const char *part_probes[] = { "cmdlinepart", NULL };
-#endif
-
 	/* register the flash bank */
-#if defined(CONFIG_MTD_PARTITIONS) || defined(CONFIG_MTD_PARTITIONS_MODULE)
 	/* partition the flash bank */
-	p->nr_parts = parse_mtd_partitions(p->info, part_probes, &parts, 0);
-	if (p->nr_parts > 0)
-		err = add_mtd_partitions(p->info, parts, p->nr_parts);
-#endif
-	if (p->nr_parts <= 0)
-		err = add_mtd_device(p->info);
-
-	return err;
+	return mtd_device_register(p->info, NULL, 0);
 }
 
-static void __devexit vr_nor_destroy_mtd_setup(struct vr_nor_mtd *p)
+static void vr_nor_destroy_mtd_setup(struct vr_nor_mtd *p)
 {
 	map_destroy(p->info);
 }
 
-static int __devinit vr_nor_mtd_setup(struct vr_nor_mtd *p)
+static int vr_nor_mtd_setup(struct vr_nor_mtd *p)
 {
-	static const char *probe_types[] =
+	static const char * const probe_types[] =
 	    { "cfi_probe", "jedec_probe", NULL };
-	const char **type;
+	const char * const *type;
 
 	for (type = probe_types; !p->info && *type; type++)
 		p->info = do_map_probe(*type, &p->map);
 	if (!p->info)
 		return -ENODEV;
 
-	p->info->owner = THIS_MODULE;
+	p->info->dev.parent = &p->dev->dev;
 
 	return 0;
 }
 
-static void __devexit vr_nor_destroy_maps(struct vr_nor_mtd *p)
+static void vr_nor_destroy_maps(struct vr_nor_mtd *p)
 {
 	unsigned int exp_timing_cs0;
 
@@ -135,7 +115,7 @@ static void __devexit vr_nor_destroy_maps(struct vr_nor_mtd *p)
  * Initialize the map_info structure and map the flash.
  * Returns 0 on success, nonzero otherwise.
  */
-static int __devinit vr_nor_init_maps(struct vr_nor_mtd *p)
+static int vr_nor_init_maps(struct vr_nor_mtd *p)
 {
 	unsigned long csr_phys, csr_len;
 	unsigned long win_phys, win_len;
@@ -153,7 +133,7 @@ static int __devinit vr_nor_init_maps(struct vr_nor_mtd *p)
 	if (win_len < (CS0_START + CS0_SIZE))
 		return -ENXIO;
 
-	p->csr_base = ioremap_nocache(csr_phys, csr_len);
+	p->csr_base = ioremap(csr_phys, csr_len);
 	if (!p->csr_base)
 		return -ENOMEM;
 
@@ -172,7 +152,7 @@ static int __devinit vr_nor_init_maps(struct vr_nor_mtd *p)
 	p->map.bankwidth = (exp_timing_cs0 & TIMING_BYTE_EN) ? 1 : 2;
 	p->map.phys = win_phys + CS0_START;
 	p->map.size = CS0_SIZE;
-	p->map.virt = ioremap_nocache(p->map.phys, p->map.size);
+	p->map.virt = ioremap(p->map.phys, p->map.size);
 	if (!p->map.virt) {
 		err = -ENOMEM;
 		goto release;
@@ -190,16 +170,15 @@ static int __devinit vr_nor_init_maps(struct vr_nor_mtd *p)
 	return err;
 }
 
-static struct pci_device_id vr_nor_pci_ids[] = {
+static const struct pci_device_id vr_nor_pci_ids[] = {
 	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x500D)},
 	{0,}
 };
 
-static void __devexit vr_nor_pci_remove(struct pci_dev *dev)
+static void vr_nor_pci_remove(struct pci_dev *dev)
 {
 	struct vr_nor_mtd *p = pci_get_drvdata(dev);
 
-	pci_set_drvdata(dev, NULL);
 	vr_nor_destroy_partitions(p);
 	vr_nor_destroy_mtd_setup(p);
 	vr_nor_destroy_maps(p);
@@ -208,8 +187,7 @@ static void __devexit vr_nor_pci_remove(struct pci_dev *dev)
 	pci_disable_device(dev);
 }
 
-static int __devinit
-vr_nor_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
+static int vr_nor_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct vr_nor_mtd *p = NULL;
 	unsigned int exp_timing_cs0;
@@ -275,22 +253,11 @@ vr_nor_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 static struct pci_driver vr_nor_pci_driver = {
 	.name = DRV_NAME,
 	.probe = vr_nor_pci_probe,
-	.remove = __devexit_p(vr_nor_pci_remove),
+	.remove = vr_nor_pci_remove,
 	.id_table = vr_nor_pci_ids,
 };
 
-static int __init vr_nor_mtd_init(void)
-{
-	return pci_register_driver(&vr_nor_pci_driver);
-}
-
-static void __exit vr_nor_mtd_exit(void)
-{
-	pci_unregister_driver(&vr_nor_pci_driver);
-}
-
-module_init(vr_nor_mtd_init);
-module_exit(vr_nor_mtd_exit);
+module_pci_driver(vr_nor_pci_driver);
 
 MODULE_AUTHOR("Andy Lowe");
 MODULE_DESCRIPTION("MTD map driver for NOR flash on Intel Vermilion Range");

@@ -23,7 +23,7 @@
    Functions as standalone, loadable, and PCMCIA driver, the latter from
    Dave Hinds' PCMCIA package.
    
-   Cleaned up 26/10/2002 by Alan Cox <alan@redhat.com> as part of the 2.5
+   Cleaned up 26/10/2002 by Alan Cox <alan@lxorguk.ukuu.org.uk> as part of the 2.5
    SCSI driver cleanup and audit. This driver still needs work on the
    following
    	-	Non terminating hardware waits
@@ -139,7 +139,7 @@ static int ql_pdma(struct qlogicfas408_priv *priv, int phase, char *request, int
 	} else {		/* out */
 #if QL_TURBO_PDMA
 		rtrc(4)
-		    if (reqlen >= 128 && inb(qbase + 8) & 0x10) {	/* empty */
+		if (reqlen >= 128 && inb(qbase + 8) & 0x10) {	/* empty */
 			outsl(qbase + 4, request, 32);
 			reqlen -= 128;
 			request += 128;
@@ -240,7 +240,7 @@ static void ql_icmd(struct scsi_cmnd *cmd)
 	outb(0x40 | qlcfg8 | priv->qinitid, qbase + 8);
 	outb(qlcfg7, qbase + 7);
 	outb(qlcfg6, qbase + 6);
-	 /**/ outb(qlcfg5, qbase + 5);	/* select timer */
+	outb(qlcfg5, qbase + 5);	/* select timer */
 	outb(qlcfg9 & 7, qbase + 9);	/* prescaler */
 /*	outb(0x99, qbase + 5);	*/
 	outb(scmd_id(cmd), qbase + 4);
@@ -439,7 +439,7 @@ irqreturn_t qlogicfas408_ihandl(int irq, void *dev_id)
  *	Queued command
  */
 
-int qlogicfas408_queuecommand(struct scsi_cmnd *cmd,
+static int qlogicfas408_queuecommand_lck(struct scsi_cmnd *cmd,
 			      void (*done) (struct scsi_cmnd *))
 {
 	struct qlogicfas408_priv *priv = get_priv_by_cmd(cmd);
@@ -458,6 +458,8 @@ int qlogicfas408_queuecommand(struct scsi_cmnd *cmd,
 	ql_icmd(cmd);
 	return 0;
 }
+
+DEF_SCSI_QCMD(qlogicfas408_queuecommand)
 
 /* 
  *	Return bios parameters 
@@ -494,13 +496,13 @@ int qlogicfas408_abort(struct scsi_cmnd *cmd)
 	return SUCCESS;
 }
 
-/* 
+/*
  *	Reset SCSI bus
  *	FIXME: This function is invoked with cmd = NULL directly by
  *	the PCMCIA qlogic_stub code. This wants fixing
  */
 
-int qlogicfas408_bus_reset(struct scsi_cmnd *cmd)
+int qlogicfas408_host_reset(struct scsi_cmnd *cmd)
 {
 	struct qlogicfas408_priv *priv = get_priv_by_cmd(cmd);
 	unsigned long flags;
@@ -605,7 +607,7 @@ module_exit(qlogicfas408_exit);
 EXPORT_SYMBOL(qlogicfas408_info);
 EXPORT_SYMBOL(qlogicfas408_queuecommand);
 EXPORT_SYMBOL(qlogicfas408_abort);
-EXPORT_SYMBOL(qlogicfas408_bus_reset);
+EXPORT_SYMBOL(qlogicfas408_host_reset);
 EXPORT_SYMBOL(qlogicfas408_biosparam);
 EXPORT_SYMBOL(qlogicfas408_ihandl);
 EXPORT_SYMBOL(qlogicfas408_get_chip_type);

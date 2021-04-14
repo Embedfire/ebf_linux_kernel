@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * PMac DACA lowlevel functions
  *
  * Copyright (c) by Takashi Iwai <tiwai@suse.de>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 
@@ -82,7 +69,7 @@ static int daca_set_volume(struct pmac_daca *mix)
 	data[1] |= mix->deemphasis ? 0x40 : 0;
 	if (i2c_smbus_write_block_data(mix->i2c.client, DACA_REG_AVOL,
 				       2, data) < 0) {
-		snd_printk("failed to set volume \n");
+		snd_printk(KERN_ERR "failed to set volume \n");
 		return -EINVAL;
 	}
 	return 0;
@@ -199,7 +186,7 @@ static int daca_put_amp(struct snd_kcontrol *kcontrol,
 	return change;
 }
 
-static struct snd_kcontrol_new daca_mixers[] = {
+static const struct snd_kcontrol_new daca_mixers[] = {
 	{ .iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	  .name = "Deemphasis Switch",
 	  .info = daca_info_deemphasis,
@@ -244,7 +231,7 @@ static void daca_cleanup(struct snd_pmac *chip)
 }
 
 /* exported */
-int __init snd_pmac_daca_init(struct snd_pmac *chip)
+int snd_pmac_daca_init(struct snd_pmac *chip)
 {
 	int i, err;
 	struct pmac_daca *mix;

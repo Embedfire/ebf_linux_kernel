@@ -1,14 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/fs/ext4/acl.c
  *
  * Copyright (C) 2001-2003 Andreas Gruenbacher, <agruen@suse.de>
  */
 
-#include <linux/init.h>
-#include <linux/sched.h>
-#include <linux/slab.h>
-#include <linux/capability.h>
-#include <linux/fs.h>
+#include <linux/quotaops.h>
 #include "ext4_jbd2.h"
 #include "ext4.h"
 #include "xattr.h"
@@ -55,16 +52,23 @@ ext4_acl_from_disk(const void *value, size_t size)
 		case ACL_OTHER:
 			value = (char *)value +
 				sizeof(ext4_acl_entry_short);
-			acl->a_entries[n].e_id = ACL_UNDEFINED_ID;
 			break;
 
 		case ACL_USER:
+			value = (char *)value + sizeof(ext4_acl_entry);
+			if ((char *)value > end)
+				goto fail;
+			acl->a_entries[n].e_uid =
+				make_kuid(&init_user_ns,
+					  le32_to_cpu(entry->e_id));
+			break;
 		case ACL_GROUP:
 			value = (char *)value + sizeof(ext4_acl_entry);
 			if ((char *)value > end)
 				goto fail;
-			acl->a_entries[n].e_id =
-				le32_to_cpu(entry->e_id);
+			acl->a_entries[n].e_gid =
+				make_kgid(&init_user_ns,
+					  le32_to_cpu(entry->e_id));
 			break;
 
 		default:
@@ -98,13 +102,19 @@ ext4_acl_to_disk(const struct posix_acl *acl, size_t *size)
 	ext_acl->a_version = cpu_to_le32(EXT4_ACL_VERSION);
 	e = (char *)ext_acl + sizeof(ext4_acl_header);
 	for (n = 0; n < acl->a_count; n++) {
+		const struct posix_acl_entry *acl_e = &acl->a_entries[n];
 		ext4_acl_entry *entry = (ext4_acl_entry *)e;
-		entry->e_tag  = cpu_to_le16(acl->a_entries[n].e_tag);
-		entry->e_perm = cpu_to_le16(acl->a_entries[n].e_perm);
-		switch (acl->a_entries[n].e_tag) {
+		entry->e_tag  = cpu_to_le16(acl_e->e_tag);
+		entry->e_perm = cpu_to_le16(acl_e->e_perm);
+		switch (acl_e->e_tag) {
 		case ACL_USER:
+			entry->e_id = cpu_to_le32(
+				from_kuid(&init_user_ns, acl_e->e_uid));
+			e += sizeof(ext4_acl_entry);
+			break;
 		case ACL_GROUP:
-			entry->e_id = cpu_to_le32(acl->a_entries[n].e_id);
+			entry->e_id = cpu_to_le32(
+				from_kgid(&init_user_ns, acl_e->e_gid));
 			e += sizeof(ext4_acl_entry);
 			break;
 
@@ -126,64 +136,28 @@ fail:
 	return ERR_PTR(-EINVAL);
 }
 
-static inline struct posix_acl *
-ext4_iget_acl(struct inode *inode, struct posix_acl **i_acl)
-{
-	struct posix_acl *acl = EXT4_ACL_NOT_CACHED;
-
-	spin_lock(&inode->i_lock);
-	if (*i_acl != EXT4_ACL_NOT_CACHED)
-		acl = posix_acl_dup(*i_acl);
-	spin_unlock(&inode->i_lock);
-
-	return acl;
-}
-
-static inline void
-ext4_iset_acl(struct inode *inode, struct posix_acl **i_acl,
-		struct posix_acl *acl)
-{
-	spin_lock(&inode->i_lock);
-	if (*i_acl != EXT4_ACL_NOT_CACHED)
-		posix_acl_release(*i_acl);
-	*i_acl = posix_acl_dup(acl);
-	spin_unlock(&inode->i_lock);
-}
-
 /*
  * Inode operation get_posix_acl().
  *
  * inode->i_mutex: don't care
  */
-static struct posix_acl *
+struct posix_acl *
 ext4_get_acl(struct inode *inode, int type)
 {
-	struct ext4_inode_info *ei = EXT4_I(inode);
 	int name_index;
 	char *value = NULL;
 	struct posix_acl *acl;
 	int retval;
 
-	if (!test_opt(inode->i_sb, POSIX_ACL))
-		return NULL;
-
 	switch (type) {
 	case ACL_TYPE_ACCESS:
-		acl = ext4_iget_acl(inode, &ei->i_acl);
-		if (acl != EXT4_ACL_NOT_CACHED)
-			return acl;
 		name_index = EXT4_XATTR_INDEX_POSIX_ACL_ACCESS;
 		break;
-
 	case ACL_TYPE_DEFAULT:
-		acl = ext4_iget_acl(inode, &ei->i_default_acl);
-		if (acl != EXT4_ACL_NOT_CACHED)
-			return acl;
 		name_index = EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT;
 		break;
-
 	default:
-		return ERR_PTR(-EINVAL);
+		BUG();
 	}
 	retval = ext4_xattr_get(inode, name_index, "", NULL, 0);
 	if (retval > 0) {
@@ -200,17 +174,6 @@ ext4_get_acl(struct inode *inode, int type)
 		acl = ERR_PTR(retval);
 	kfree(value);
 
-	if (!IS_ERR(acl)) {
-		switch (type) {
-		case ACL_TYPE_ACCESS:
-			ext4_iset_acl(inode, &ei->i_acl, acl);
-			break;
-
-		case ACL_TYPE_DEFAULT:
-			ext4_iset_acl(inode, &ei->i_default_acl, acl);
-			break;
-		}
-	}
 	return acl;
 }
 
@@ -220,33 +183,17 @@ ext4_get_acl(struct inode *inode, int type)
  * inode->i_mutex: down unless called from ext4_new_inode
  */
 static int
-ext4_set_acl(handle_t *handle, struct inode *inode, int type,
-	     struct posix_acl *acl)
+__ext4_set_acl(handle_t *handle, struct inode *inode, int type,
+	     struct posix_acl *acl, int xattr_flags)
 {
-	struct ext4_inode_info *ei = EXT4_I(inode);
 	int name_index;
 	void *value = NULL;
 	size_t size = 0;
 	int error;
 
-	if (S_ISLNK(inode->i_mode))
-		return -EOPNOTSUPP;
-
 	switch (type) {
 	case ACL_TYPE_ACCESS:
 		name_index = EXT4_XATTR_INDEX_POSIX_ACL_ACCESS;
-		if (acl) {
-			mode_t mode = inode->i_mode;
-			error = posix_acl_equiv_mode(acl, &mode);
-			if (error < 0)
-				return error;
-			else {
-				inode->i_mode = mode;
-				ext4_mark_inode_dirty(handle, inode);
-				if (error == 0)
-					acl = NULL;
-			}
-		}
 		break;
 
 	case ACL_TYPE_DEFAULT:
@@ -265,43 +212,58 @@ ext4_set_acl(handle_t *handle, struct inode *inode, int type,
 	}
 
 	error = ext4_xattr_set_handle(handle, inode, name_index, "",
-				      value, size, 0);
+				      value, size, xattr_flags);
 
 	kfree(value);
-	if (!error) {
-		switch (type) {
-		case ACL_TYPE_ACCESS:
-			ext4_iset_acl(inode, &ei->i_acl, acl);
-			break;
+	if (!error)
+		set_cached_acl(inode, type, acl);
 
-		case ACL_TYPE_DEFAULT:
-			ext4_iset_acl(inode, &ei->i_default_acl, acl);
-			break;
-		}
-	}
 	return error;
 }
 
-static int
-ext4_check_acl(struct inode *inode, int mask)
+int
+ext4_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 {
-	struct posix_acl *acl = ext4_get_acl(inode, ACL_TYPE_ACCESS);
+	handle_t *handle;
+	int error, credits, retries = 0;
+	size_t acl_size = acl ? ext4_acl_size(acl->a_count) : 0;
+	umode_t mode = inode->i_mode;
+	int update_mode = 0;
 
-	if (IS_ERR(acl))
-		return PTR_ERR(acl);
-	if (acl) {
-		int error = posix_acl_permission(inode, acl, mask);
-		posix_acl_release(acl);
+	error = dquot_initialize(inode);
+	if (error)
 		return error;
+retry:
+	error = ext4_xattr_set_credits(inode, acl_size, false /* is_create */,
+				       &credits);
+	if (error)
+		return error;
+
+	handle = ext4_journal_start(inode, EXT4_HT_XATTR, credits);
+	if (IS_ERR(handle))
+		return PTR_ERR(handle);
+	ext4_fc_start_update(inode);
+
+	if ((type == ACL_TYPE_ACCESS) && acl) {
+		error = posix_acl_update_mode(inode, &mode, &acl);
+		if (error)
+			goto out_stop;
+		if (mode != inode->i_mode)
+			update_mode = 1;
 	}
 
-	return -EAGAIN;
-}
-
-int
-ext4_permission(struct inode *inode, int mask)
-{
-	return generic_permission(inode, mask, ext4_check_acl);
+	error = __ext4_set_acl(handle, inode, type, acl, 0 /* xattr_flags */);
+	if (!error && update_mode) {
+		inode->i_mode = mode;
+		inode->i_ctime = current_time(inode);
+		error = ext4_mark_inode_dirty(handle, inode);
+	}
+out_stop:
+	ext4_journal_stop(handle);
+	ext4_fc_stop_update(inode);
+	if (error == -ENOSPC && ext4_should_retry_alloc(inode->i_sb, &retries))
+		goto retry;
+	return error;
 }
 
 /*
@@ -313,239 +275,27 @@ ext4_permission(struct inode *inode, int mask)
 int
 ext4_init_acl(handle_t *handle, struct inode *inode, struct inode *dir)
 {
-	struct posix_acl *acl = NULL;
-	int error = 0;
-
-	if (!S_ISLNK(inode->i_mode)) {
-		if (test_opt(dir->i_sb, POSIX_ACL)) {
-			acl = ext4_get_acl(dir, ACL_TYPE_DEFAULT);
-			if (IS_ERR(acl))
-				return PTR_ERR(acl);
-		}
-		if (!acl)
-			inode->i_mode &= ~current->fs->umask;
-	}
-	if (test_opt(inode->i_sb, POSIX_ACL) && acl) {
-		struct posix_acl *clone;
-		mode_t mode;
-
-		if (S_ISDIR(inode->i_mode)) {
-			error = ext4_set_acl(handle, inode,
-					     ACL_TYPE_DEFAULT, acl);
-			if (error)
-				goto cleanup;
-		}
-		clone = posix_acl_clone(acl, GFP_NOFS);
-		error = -ENOMEM;
-		if (!clone)
-			goto cleanup;
-
-		mode = inode->i_mode;
-		error = posix_acl_create_masq(clone, &mode);
-		if (error >= 0) {
-			inode->i_mode = mode;
-			if (error > 0) {
-				/* This is an extended ACL */
-				error = ext4_set_acl(handle, inode,
-						     ACL_TYPE_ACCESS, clone);
-			}
-		}
-		posix_acl_release(clone);
-	}
-cleanup:
-	posix_acl_release(acl);
-	return error;
-}
-
-/*
- * Does chmod for an inode that may have an Access Control List. The
- * inode->i_mode field must be updated to the desired value by the caller
- * before calling this function.
- * Returns 0 on success, or a negative error number.
- *
- * We change the ACL rather than storing some ACL entries in the file
- * mode permission bits (which would be more efficient), because that
- * would break once additional permissions (like  ACL_APPEND, ACL_DELETE
- * for directories) are added. There are no more bits available in the
- * file mode.
- *
- * inode->i_mutex: down
- */
-int
-ext4_acl_chmod(struct inode *inode)
-{
-	struct posix_acl *acl, *clone;
+	struct posix_acl *default_acl, *acl;
 	int error;
 
-	if (S_ISLNK(inode->i_mode))
-		return -EOPNOTSUPP;
-	if (!test_opt(inode->i_sb, POSIX_ACL))
-		return 0;
-	acl = ext4_get_acl(inode, ACL_TYPE_ACCESS);
-	if (IS_ERR(acl) || !acl)
-		return PTR_ERR(acl);
-	clone = posix_acl_clone(acl, GFP_KERNEL);
-	posix_acl_release(acl);
-	if (!clone)
-		return -ENOMEM;
-	error = posix_acl_chmod_masq(clone, inode->i_mode);
-	if (!error) {
-		handle_t *handle;
-		int retries = 0;
+	error = posix_acl_create(dir, &inode->i_mode, &default_acl, &acl);
+	if (error)
+		return error;
 
-	retry:
-		handle = ext4_journal_start(inode,
-				EXT4_DATA_TRANS_BLOCKS(inode->i_sb));
-		if (IS_ERR(handle)) {
-			error = PTR_ERR(handle);
-			ext4_std_error(inode->i_sb, error);
-			goto out;
-		}
-		error = ext4_set_acl(handle, inode, ACL_TYPE_ACCESS, clone);
-		ext4_journal_stop(handle);
-		if (error == -ENOSPC &&
-		    ext4_should_retry_alloc(inode->i_sb, &retries))
-			goto retry;
+	if (default_acl) {
+		error = __ext4_set_acl(handle, inode, ACL_TYPE_DEFAULT,
+				       default_acl, XATTR_CREATE);
+		posix_acl_release(default_acl);
+	} else {
+		inode->i_default_acl = NULL;
 	}
-out:
-	posix_acl_release(clone);
+	if (acl) {
+		if (!error)
+			error = __ext4_set_acl(handle, inode, ACL_TYPE_ACCESS,
+					       acl, XATTR_CREATE);
+		posix_acl_release(acl);
+	} else {
+		inode->i_acl = NULL;
+	}
 	return error;
 }
-
-/*
- * Extended attribute handlers
- */
-static size_t
-ext4_xattr_list_acl_access(struct inode *inode, char *list, size_t list_len,
-			   const char *name, size_t name_len)
-{
-	const size_t size = sizeof(POSIX_ACL_XATTR_ACCESS);
-
-	if (!test_opt(inode->i_sb, POSIX_ACL))
-		return 0;
-	if (list && size <= list_len)
-		memcpy(list, POSIX_ACL_XATTR_ACCESS, size);
-	return size;
-}
-
-static size_t
-ext4_xattr_list_acl_default(struct inode *inode, char *list, size_t list_len,
-			    const char *name, size_t name_len)
-{
-	const size_t size = sizeof(POSIX_ACL_XATTR_DEFAULT);
-
-	if (!test_opt(inode->i_sb, POSIX_ACL))
-		return 0;
-	if (list && size <= list_len)
-		memcpy(list, POSIX_ACL_XATTR_DEFAULT, size);
-	return size;
-}
-
-static int
-ext4_xattr_get_acl(struct inode *inode, int type, void *buffer, size_t size)
-{
-	struct posix_acl *acl;
-	int error;
-
-	if (!test_opt(inode->i_sb, POSIX_ACL))
-		return -EOPNOTSUPP;
-
-	acl = ext4_get_acl(inode, type);
-	if (IS_ERR(acl))
-		return PTR_ERR(acl);
-	if (acl == NULL)
-		return -ENODATA;
-	error = posix_acl_to_xattr(acl, buffer, size);
-	posix_acl_release(acl);
-
-	return error;
-}
-
-static int
-ext4_xattr_get_acl_access(struct inode *inode, const char *name,
-			  void *buffer, size_t size)
-{
-	if (strcmp(name, "") != 0)
-		return -EINVAL;
-	return ext4_xattr_get_acl(inode, ACL_TYPE_ACCESS, buffer, size);
-}
-
-static int
-ext4_xattr_get_acl_default(struct inode *inode, const char *name,
-			   void *buffer, size_t size)
-{
-	if (strcmp(name, "") != 0)
-		return -EINVAL;
-	return ext4_xattr_get_acl(inode, ACL_TYPE_DEFAULT, buffer, size);
-}
-
-static int
-ext4_xattr_set_acl(struct inode *inode, int type, const void *value,
-		   size_t size)
-{
-	handle_t *handle;
-	struct posix_acl *acl;
-	int error, retries = 0;
-
-	if (!test_opt(inode->i_sb, POSIX_ACL))
-		return -EOPNOTSUPP;
-	if (!is_owner_or_cap(inode))
-		return -EPERM;
-
-	if (value) {
-		acl = posix_acl_from_xattr(value, size);
-		if (IS_ERR(acl))
-			return PTR_ERR(acl);
-		else if (acl) {
-			error = posix_acl_valid(acl);
-			if (error)
-				goto release_and_out;
-		}
-	} else
-		acl = NULL;
-
-retry:
-	handle = ext4_journal_start(inode, EXT4_DATA_TRANS_BLOCKS(inode->i_sb));
-	if (IS_ERR(handle))
-		return PTR_ERR(handle);
-	error = ext4_set_acl(handle, inode, type, acl);
-	ext4_journal_stop(handle);
-	if (error == -ENOSPC && ext4_should_retry_alloc(inode->i_sb, &retries))
-		goto retry;
-
-release_and_out:
-	posix_acl_release(acl);
-	return error;
-}
-
-static int
-ext4_xattr_set_acl_access(struct inode *inode, const char *name,
-			  const void *value, size_t size, int flags)
-{
-	if (strcmp(name, "") != 0)
-		return -EINVAL;
-	return ext4_xattr_set_acl(inode, ACL_TYPE_ACCESS, value, size);
-}
-
-static int
-ext4_xattr_set_acl_default(struct inode *inode, const char *name,
-			   const void *value, size_t size, int flags)
-{
-	if (strcmp(name, "") != 0)
-		return -EINVAL;
-	return ext4_xattr_set_acl(inode, ACL_TYPE_DEFAULT, value, size);
-}
-
-struct xattr_handler ext4_xattr_acl_access_handler = {
-	.prefix	= POSIX_ACL_XATTR_ACCESS,
-	.list	= ext4_xattr_list_acl_access,
-	.get	= ext4_xattr_get_acl_access,
-	.set	= ext4_xattr_set_acl_access,
-};
-
-struct xattr_handler ext4_xattr_acl_default_handler = {
-	.prefix	= POSIX_ACL_XATTR_DEFAULT,
-	.list	= ext4_xattr_list_acl_default,
-	.get	= ext4_xattr_get_acl_default,
-	.set	= ext4_xattr_set_acl_default,
-};

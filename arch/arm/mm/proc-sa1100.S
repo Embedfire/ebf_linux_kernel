@@ -1,12 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  linux/arch/arm/mm/proc-sa1100.S
  *
  *  Copyright (C) 1997-2002 Russell King
  *  hacked for non-paged-MM by Hyok S. Choi, 2003.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  MMU functions for SA110
  *
@@ -20,12 +17,12 @@
  */
 #include <linux/linkage.h>
 #include <linux/init.h>
+#include <linux/pgtable.h>
 #include <asm/assembler.h>
 #include <asm/asm-offsets.h>
-#include <asm/elf.h>
+#include <asm/hwcap.h>
 #include <mach/hardware.h>
 #include <asm/pgtable-hwdef.h>
-#include <asm/pgtable.h>
 
 #include "proc-macros.S"
 
@@ -34,7 +31,7 @@
  */
 #define DCACHELINESIZE	32
 
-	__INIT
+	.section .text
 
 /*
  * cpu_sa1100_proc_init()
@@ -43,9 +40,7 @@ ENTRY(cpu_sa1100_proc_init)
 	mov	r0, #0
 	mcr	p15, 0, r0, c15, c1, 2		@ Enable clock switching
 	mcr	p15, 0, r0, c9, c0, 5		@ Allow read-buffer operations from userland
-	mov	pc, lr
-
-	.previous
+	ret	lr
 
 /*
  * cpu_sa1100_proc_fin()
@@ -55,16 +50,12 @@ ENTRY(cpu_sa1100_proc_init)
  *  - Clean and turn off caches.
  */
 ENTRY(cpu_sa1100_proc_fin)
-	stmfd	sp!, {lr}
-	mov	ip, #PSR_F_BIT | PSR_I_BIT | SVC_MODE
-	msr	cpsr_c, ip
-	bl	v4wb_flush_kern_cache_all
 	mcr	p15, 0, ip, c15, c2, 2		@ Disable clock switching
 	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
 	bic	r0, r0, #0x1000			@ ...i............
 	bic	r0, r0, #0x000e			@ ............wca.
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
-	ldmfd	sp!, {pc}
+	ret	lr
 
 /*
  * cpu_sa1100_reset(loc)
@@ -76,6 +67,7 @@ ENTRY(cpu_sa1100_proc_fin)
  * loc: location to jump to for soft reset
  */
 	.align	5
+	.pushsection	.idmap.text, "ax"
 ENTRY(cpu_sa1100_reset)
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c7, 0		@ invalidate I,D caches
@@ -87,7 +79,9 @@ ENTRY(cpu_sa1100_reset)
 	bic	ip, ip, #0x000f			@ ............wcam
 	bic	ip, ip, #0x1100			@ ...i...s........
 	mcr	p15, 0, ip, c1, c0, 0		@ ctrl register
-	mov	pc, r0
+	ret	r0
+ENDPROC(cpu_sa1100_reset)
+	.popsection
 
 /*
  * cpu_sa1100_do_idle(type)
@@ -116,7 +110,7 @@ ENTRY(cpu_sa1100_do_idle)
 	mcr	p15, 0, r0, c15, c8, 2		@ wait for interrupt
 	mov	r0, r0				@ safety
 	mcr	p15, 0, r0, c15, c1, 2		@ enable clock switching
-	mov	pc, lr
+	ret	lr
 
 /* ================================= CACHE ================================ */
 
@@ -134,7 +128,7 @@ ENTRY(cpu_sa1100_dcache_clean_area)
 	add	r0, r0, #DCACHELINESIZE
 	subs	r1, r1, #DCACHELINESIZE
 	bhi	1b
-	mov	pc, lr
+	ret	lr
 
 /* =============================== PageTable ============================== */
 
@@ -155,7 +149,7 @@ ENTRY(cpu_sa1100_switch_mm)
 	mcr	p15, 0, ip, c8, c7, 0		@ invalidate I & D TLBs
 	ldr	pc, [sp], #4
 #else
-	mov	pc, lr
+	ret	lr
 #endif
 
 /*
@@ -166,31 +160,40 @@ ENTRY(cpu_sa1100_switch_mm)
 	.align	5
 ENTRY(cpu_sa1100_set_pte_ext)
 #ifdef CONFIG_MMU
-	str	r1, [r0], #-2048		@ linux version
-
-	eor	r1, r1, #L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_WRITE | L_PTE_DIRTY
-
-	bic	r2, r1, #PTE_SMALL_AP_MASK
-	bic	r2, r2, #PTE_TYPE_MASK
-	orr	r2, r2, #PTE_TYPE_SMALL
-
-	tst	r1, #L_PTE_USER			@ User?
-	orrne	r2, r2, #PTE_SMALL_AP_URO_SRW
-
-	tst	r1, #L_PTE_WRITE | L_PTE_DIRTY	@ Write and Dirty?
-	orreq	r2, r2, #PTE_SMALL_AP_UNO_SRW
-
-	tst	r1, #L_PTE_PRESENT | L_PTE_YOUNG	@ Present and Young?
-	movne	r2, #0
-
-	str	r2, [r0]			@ hardware version
+	armv3_set_pte_ext wc_disable=0
 	mov	r0, r0
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 #endif
-	mov	pc, lr
+	ret	lr
 
-	__INIT
+.globl	cpu_sa1100_suspend_size
+.equ	cpu_sa1100_suspend_size, 4 * 3
+#ifdef CONFIG_ARM_CPU_SUSPEND
+ENTRY(cpu_sa1100_do_suspend)
+	stmfd	sp!, {r4 - r6, lr}
+	mrc	p15, 0, r4, c3, c0, 0		@ domain ID
+	mrc	p15, 0, r5, c13, c0, 0		@ PID
+	mrc	p15, 0, r6, c1, c0, 0		@ control reg
+	stmia	r0, {r4 - r6}			@ store cp regs
+	ldmfd	sp!, {r4 - r6, pc}
+ENDPROC(cpu_sa1100_do_suspend)
+
+ENTRY(cpu_sa1100_do_resume)
+	ldmia	r0, {r4 - r6}			@ load cp regs
+	mov	ip, #0
+	mcr	p15, 0, ip, c8, c7, 0		@ flush I+D TLBs
+	mcr	p15, 0, ip, c7, c7, 0		@ flush I&D cache
+	mcr	p15, 0, ip, c9, c0, 0		@ invalidate RB
+	mcr	p15, 0, ip, c9, c0, 5		@ allow user space to use RB
+
+	mcr	p15, 0, r4, c3, c0, 0		@ domain ID
+	mcr	p15, 0, r1, c2, c0, 0		@ translation table base addr
+	mcr	p15, 0, r5, c13, c0, 0		@ PID
+	mov	r0, r6				@ control register
+	b	cpu_resume_mmu
+ENDPROC(cpu_sa1100_do_resume)
+#endif
 
 	.type	__sa1100_setup, #function
 __sa1100_setup:
@@ -205,7 +208,7 @@ __sa1100_setup:
 	mrc	p15, 0, r0, c1, c0		@ get control register v4
 	bic	r0, r0, r5
 	orr	r0, r0, r6
-	mov	pc, lr
+	ret	lr
 	.size	__sa1100_setup, . - __sa1100_setup
 
 	/*
@@ -221,56 +224,28 @@ sa1100_crval:
 	__INITDATA
 
 /*
- * Purpose : Function pointers used to access above functions - all calls
- *	     come through these
- */
-
-/*
  * SA1100 and SA1110 share the same function calls
  */
-	.type	sa1100_processor_functions, #object
-ENTRY(sa1100_processor_functions)
-	.word	v4_early_abort
-	.word	pabort_noifar
-	.word	cpu_sa1100_proc_init
-	.word	cpu_sa1100_proc_fin
-	.word	cpu_sa1100_reset
-	.word	cpu_sa1100_do_idle
-	.word	cpu_sa1100_dcache_clean_area
-	.word	cpu_sa1100_switch_mm
-	.word	cpu_sa1100_set_pte_ext
-	.size	sa1100_processor_functions, . - sa1100_processor_functions
+
+	@ define struct processor (see <asm/proc-fns.h> and proc-macros.S)
+	define_processor_functions sa1100, dabort=v4_early_abort, pabort=legacy_pabort, suspend=1
 
 	.section ".rodata"
 
-	.type	cpu_arch_name, #object
-cpu_arch_name:
-	.asciz	"armv4"
-	.size	cpu_arch_name, . - cpu_arch_name
-
-	.type	cpu_elf_name, #object
-cpu_elf_name:
-	.asciz	"v4"
-	.size	cpu_elf_name, . - cpu_elf_name
-
-	.type	cpu_sa1100_name, #object
-cpu_sa1100_name:
-	.asciz	"StrongARM-1100"
-	.size	cpu_sa1100_name, . - cpu_sa1100_name
-
-	.type	cpu_sa1110_name, #object
-cpu_sa1110_name:
-	.asciz	"StrongARM-1110"
-	.size	cpu_sa1110_name, . - cpu_sa1110_name
+	string	cpu_arch_name, "armv4"
+	string	cpu_elf_name, "v4"
+	string	cpu_sa1100_name, "StrongARM-1100"
+	string	cpu_sa1110_name, "StrongARM-1110"
 
 	.align
 
-	.section ".proc.info.init", #alloc, #execinstr
+	.section ".proc.info.init", "a"
 
-	.type	__sa1100_proc_info,#object
-__sa1100_proc_info:
-	.long	0x4401a110
-	.long	0xfffffff0
+.macro sa1100_proc_info name:req, cpu_val:req, cpu_mask:req, cpu_name:req
+	.type	__\name\()_proc_info,#object
+__\name\()_proc_info:
+	.long	\cpu_val
+	.long	\cpu_mask
 	.long   PMD_TYPE_SECT | \
 		PMD_SECT_BUFFERABLE | \
 		PMD_SECT_CACHEABLE | \
@@ -279,36 +254,17 @@ __sa1100_proc_info:
 	.long   PMD_TYPE_SECT | \
 		PMD_SECT_AP_WRITE | \
 		PMD_SECT_AP_READ
-	b	__sa1100_setup
+	initfn	__sa1100_setup, __\name\()_proc_info
 	.long	cpu_arch_name
 	.long	cpu_elf_name
 	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT | HWCAP_FAST_MULT
-	.long	cpu_sa1100_name
+	.long	\cpu_name
 	.long	sa1100_processor_functions
 	.long	v4wb_tlb_fns
 	.long	v4_mc_user_fns
 	.long	v4wb_cache_fns
-	.size	__sa1100_proc_info, . - __sa1100_proc_info
+	.size	__\name\()_proc_info, . - __\name\()_proc_info
+.endm
 
-	.type	__sa1110_proc_info,#object
-__sa1110_proc_info:
-	.long	0x6901b110
-	.long	0xfffffff0
-	.long   PMD_TYPE_SECT | \
-		PMD_SECT_BUFFERABLE | \
-		PMD_SECT_CACHEABLE | \
-		PMD_SECT_AP_WRITE | \
-		PMD_SECT_AP_READ
-	.long   PMD_TYPE_SECT | \
-		PMD_SECT_AP_WRITE | \
-		PMD_SECT_AP_READ
-	b	__sa1100_setup
-	.long	cpu_arch_name
-	.long	cpu_elf_name
-	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT | HWCAP_FAST_MULT
-	.long	cpu_sa1110_name
-	.long	sa1100_processor_functions
-	.long	v4wb_tlb_fns
-	.long	v4_mc_user_fns
-	.long	v4wb_cache_fns
-	.size	__sa1110_proc_info, . - __sa1110_proc_info
+	sa1100_proc_info sa1100, 0x4401a110, 0xfffffff0, cpu_sa1100_name
+	sa1100_proc_info sa1110, 0x6901b110, 0xfffffff0, cpu_sa1110_name

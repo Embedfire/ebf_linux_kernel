@@ -1,48 +1,118 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_GENERIC_BUG_H
 #define _ASM_GENERIC_BUG_H
 
 #include <linux/compiler.h>
+#include <linux/instrumentation.h>
+
+#define CUT_HERE		"------------[ cut here ]------------\n"
+
+#ifdef CONFIG_GENERIC_BUG
+#define BUGFLAG_WARNING		(1 << 0)
+#define BUGFLAG_ONCE		(1 << 1)
+#define BUGFLAG_DONE		(1 << 2)
+#define BUGFLAG_NO_CUT_HERE	(1 << 3)	/* CUT_HERE already sent */
+#define BUGFLAG_TAINT(taint)	((taint) << 8)
+#define BUG_GET_TAINT(bug)	((bug)->flags >> 8)
+#endif
+
+#ifndef __ASSEMBLY__
+#include <linux/kernel.h>
 
 #ifdef CONFIG_BUG
 
 #ifdef CONFIG_GENERIC_BUG
-#ifndef __ASSEMBLY__
 struct bug_entry {
+#ifndef CONFIG_GENERIC_BUG_RELATIVE_POINTERS
 	unsigned long	bug_addr;
+#else
+	signed int	bug_addr_disp;
+#endif
 #ifdef CONFIG_DEBUG_BUGVERBOSE
+#ifndef CONFIG_GENERIC_BUG_RELATIVE_POINTERS
 	const char	*file;
+#else
+	signed int	file_disp;
+#endif
 	unsigned short	line;
 #endif
 	unsigned short	flags;
 };
-#endif		/* __ASSEMBLY__ */
-
-#define BUGFLAG_WARNING	(1<<0)
 #endif	/* CONFIG_GENERIC_BUG */
 
+/*
+ * Don't use BUG() or BUG_ON() unless there's really no way out; one
+ * example might be detecting data structure corruption in the middle
+ * of an operation that can't be backed out of.  If the (sub)system
+ * can somehow continue operating, perhaps with reduced functionality,
+ * it's probably not BUG-worthy.
+ *
+ * If you're tempted to BUG(), think again:  is completely giving up
+ * really the *only* solution?  There are usually better options, where
+ * users don't need to reboot ASAP and can mostly shut down cleanly.
+ */
 #ifndef HAVE_ARCH_BUG
 #define BUG() do { \
-	printk("BUG: failure at %s:%d/%s()!\n", __FILE__, __LINE__, __FUNCTION__); \
+	printk("BUG: failure at %s:%d/%s()!\n", __FILE__, __LINE__, __func__); \
+	barrier_before_unreachable(); \
 	panic("BUG!"); \
 } while (0)
 #endif
 
 #ifndef HAVE_ARCH_BUG_ON
-#define BUG_ON(condition) do { if (unlikely(condition)) BUG(); } while(0)
+#define BUG_ON(condition) do { if (unlikely(condition)) BUG(); } while (0)
 #endif
 
-#ifndef __WARN
-#ifndef __ASSEMBLY__
-extern void warn_on_slowpath(const char *file, const int line);
-extern void warn_slowpath(const char *file, const int line,
-		const char *fmt, ...) __attribute__((format(printf, 3, 4)));
-#define WANT_WARN_ON_SLOWPATH
-#endif
-#define __WARN() warn_on_slowpath(__FILE__, __LINE__)
-#define __WARN_printf(arg...) warn_slowpath(__FILE__, __LINE__, arg)
+/*
+ * WARN(), WARN_ON(), WARN_ON_ONCE, and so on can be used to report
+ * significant kernel issues that need prompt attention if they should ever
+ * appear at runtime.
+ *
+ * Do not use these macros when checking for invalid external inputs
+ * (e.g. invalid system call arguments, or invalid data coming from
+ * network/devices), and on transient conditions like ENOMEM or EAGAIN.
+ * These macros should be used for recoverable kernel issues only.
+ * For invalid external inputs, transient conditions, etc use
+ * pr_err[_once/_ratelimited]() followed by dump_stack(), if necessary.
+ * Do not include "BUG"/"WARNING" in format strings manually to make these
+ * conditions distinguishable from kernel issues.
+ *
+ * Use the versions with printk format strings to provide better diagnostics.
+ */
+#ifndef __WARN_FLAGS
+extern __printf(4, 5)
+void warn_slowpath_fmt(const char *file, const int line, unsigned taint,
+		       const char *fmt, ...);
+#define __WARN()		__WARN_printf(TAINT_WARN, NULL)
+#define __WARN_printf(taint, arg...) do {				\
+		instrumentation_begin();				\
+		warn_slowpath_fmt(__FILE__, __LINE__, taint, arg);	\
+		instrumentation_end();					\
+	} while (0)
 #else
-#define __WARN_printf(arg...) __WARN()
+extern __printf(1, 2) void __warn_printk(const char *fmt, ...);
+#define __WARN()		__WARN_FLAGS(BUGFLAG_TAINT(TAINT_WARN))
+#define __WARN_printf(taint, arg...) do {				\
+		instrumentation_begin();				\
+		__warn_printk(arg);					\
+		__WARN_FLAGS(BUGFLAG_NO_CUT_HERE | BUGFLAG_TAINT(taint));\
+		instrumentation_end();					\
+	} while (0)
+#define WARN_ON_ONCE(condition) ({				\
+	int __ret_warn_on = !!(condition);			\
+	if (unlikely(__ret_warn_on))				\
+		__WARN_FLAGS(BUGFLAG_ONCE |			\
+			     BUGFLAG_TAINT(TAINT_WARN));	\
+	unlikely(__ret_warn_on);				\
+})
 #endif
+
+/* used internally by panic.c */
+struct warn_args;
+struct pt_regs;
+
+void __warn(const char *file, int line, void *caller, unsigned taint,
+	    struct pt_regs *regs, struct warn_args *args);
 
 #ifndef WARN_ON
 #define WARN_ON(condition) ({						\
@@ -54,21 +124,63 @@ extern void warn_slowpath(const char *file, const int line,
 #endif
 
 #ifndef WARN
-#define WARN(condition, format...) ({						\
+#define WARN(condition, format...) ({					\
 	int __ret_warn_on = !!(condition);				\
 	if (unlikely(__ret_warn_on))					\
-		__WARN_printf(format);					\
+		__WARN_printf(TAINT_WARN, format);			\
 	unlikely(__ret_warn_on);					\
 })
 #endif
 
+#define WARN_TAINT(condition, taint, format...) ({			\
+	int __ret_warn_on = !!(condition);				\
+	if (unlikely(__ret_warn_on))					\
+		__WARN_printf(taint, format);				\
+	unlikely(__ret_warn_on);					\
+})
+
+#ifndef WARN_ON_ONCE
+#define WARN_ON_ONCE(condition)	({				\
+	static bool __section(".data.once") __warned;		\
+	int __ret_warn_once = !!(condition);			\
+								\
+	if (unlikely(__ret_warn_once && !__warned)) {		\
+		__warned = true;				\
+		WARN_ON(1);					\
+	}							\
+	unlikely(__ret_warn_once);				\
+})
+#endif
+
+#define WARN_ONCE(condition, format...)	({			\
+	static bool __section(".data.once") __warned;		\
+	int __ret_warn_once = !!(condition);			\
+								\
+	if (unlikely(__ret_warn_once && !__warned)) {		\
+		__warned = true;				\
+		WARN(1, format);				\
+	}							\
+	unlikely(__ret_warn_once);				\
+})
+
+#define WARN_TAINT_ONCE(condition, taint, format...)	({	\
+	static bool __section(".data.once") __warned;		\
+	int __ret_warn_once = !!(condition);			\
+								\
+	if (unlikely(__ret_warn_once && !__warned)) {		\
+		__warned = true;				\
+		WARN_TAINT(1, taint, format);			\
+	}							\
+	unlikely(__ret_warn_once);				\
+})
+
 #else /* !CONFIG_BUG */
 #ifndef HAVE_ARCH_BUG
-#define BUG()
+#define BUG() do {} while (1)
 #endif
 
 #ifndef HAVE_ARCH_BUG_ON
-#define BUG_ON(condition) do { if (condition) ; } while(0)
+#define BUG_ON(condition) do { if (unlikely(condition)) BUG(); } while (0)
 #endif
 
 #ifndef HAVE_ARCH_WARN_ON
@@ -81,39 +193,54 @@ extern void warn_slowpath(const char *file, const int line,
 #ifndef WARN
 #define WARN(condition, format...) ({					\
 	int __ret_warn_on = !!(condition);				\
+	no_printk(format);						\
 	unlikely(__ret_warn_on);					\
 })
 #endif
 
+#define WARN_ON_ONCE(condition) WARN_ON(condition)
+#define WARN_ONCE(condition, format...) WARN(condition, format)
+#define WARN_TAINT(condition, taint, format...) WARN(condition, format)
+#define WARN_TAINT_ONCE(condition, taint, format...) WARN(condition, format)
+
 #endif
 
-#define WARN_ON_ONCE(condition)	({				\
-	static int __warned;					\
-	int __ret_warn_once = !!(condition);			\
-								\
-	if (unlikely(__ret_warn_once))				\
-		if (WARN_ON(!__warned)) 			\
-			__warned = 1;				\
-	unlikely(__ret_warn_once);				\
-})
-
-#define WARN_ONCE(condition, format...)	({			\
-	static int __warned;					\
-	int __ret_warn_once = !!(condition);			\
-								\
-	if (unlikely(__ret_warn_once))				\
-		if (WARN(!__warned, format)) 			\
-			__warned = 1;				\
-	unlikely(__ret_warn_once);				\
-})
-
-#define WARN_ON_RATELIMIT(condition, state)			\
-		WARN_ON((condition) && __ratelimit(state))
-
+/*
+ * WARN_ON_SMP() is for cases that the warning is either
+ * meaningless for !SMP or may even cause failures.
+ * It can also be used with values that are only defined
+ * on SMP:
+ *
+ * struct foo {
+ *  [...]
+ * #ifdef CONFIG_SMP
+ *	int bar;
+ * #endif
+ * };
+ *
+ * void func(struct foo *zoot)
+ * {
+ *	WARN_ON_SMP(!zoot->bar);
+ *
+ * For CONFIG_SMP, WARN_ON_SMP() should act the same as WARN_ON(),
+ * and should be a nop and return false for uniprocessor.
+ *
+ * if (WARN_ON_SMP(x)) returns true only when CONFIG_SMP is set
+ * and x is true.
+ */
 #ifdef CONFIG_SMP
 # define WARN_ON_SMP(x)			WARN_ON(x)
 #else
-# define WARN_ON_SMP(x)			do { } while (0)
+/*
+ * Use of ({0;}) because WARN_ON_SMP(x) may be used either as
+ * a stand alone line statement or as a condition in an if ()
+ * statement.
+ * A simple "0" would cause gcc to give a "statement has no effect"
+ * warning.
+ */
+# define WARN_ON_SMP(x)			({0;})
 #endif
+
+#endif /* __ASSEMBLY__ */
 
 #endif

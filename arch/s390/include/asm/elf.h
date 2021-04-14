@@ -1,6 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- *  include/asm-s390/elf.h
- *
  *  S390 version
  *
  *  Derived from "include/asm-i386/elf.h"
@@ -92,22 +91,48 @@
 /* Keep this the last entry.  */
 #define R_390_NUM	61
 
+/* Bits present in AT_HWCAP. */
+#define HWCAP_S390_ESAN3	1
+#define HWCAP_S390_ZARCH	2
+#define HWCAP_S390_STFLE	4
+#define HWCAP_S390_MSA		8
+#define HWCAP_S390_LDISP	16
+#define HWCAP_S390_EIMM		32
+#define HWCAP_S390_DFP		64
+#define HWCAP_S390_HPAGE	128
+#define HWCAP_S390_ETF3EH	256
+#define HWCAP_S390_HIGH_GPRS	512
+#define HWCAP_S390_TE		1024
+#define HWCAP_S390_VXRS		2048
+#define HWCAP_S390_VXRS_BCD	4096
+#define HWCAP_S390_VXRS_EXT	8192
+#define HWCAP_S390_GS		16384
+#define HWCAP_S390_VXRS_EXT2	32768
+#define HWCAP_S390_VXRS_PDE	65536
+#define HWCAP_S390_SORT		131072
+#define HWCAP_S390_DFLT		262144
+
+/* Internal bits, not exposed via elf */
+#define HWCAP_INT_SIE		1UL
+
 /*
  * These are used to set parameters in the core dumps.
  */
-#ifndef __s390x__
-#define ELF_CLASS	ELFCLASS32
-#else /* __s390x__ */
 #define ELF_CLASS	ELFCLASS64
-#endif /* __s390x__ */
 #define ELF_DATA	ELFDATA2MSB
 #define ELF_ARCH	EM_S390
+
+/* s390 specific phdr types */
+#define PT_S390_PGSTE	0x70000000
 
 /*
  * ELF register definitions..
  */
 
+#include <linux/compat.h>
+
 #include <asm/ptrace.h>
+#include <asm/syscall.h>
 #include <asm/user.h>
 
 typedef s390_fp_regs elf_fpregset_t;
@@ -116,9 +141,12 @@ typedef s390_regs elf_gregset_t;
 typedef s390_fp_regs compat_elf_fpregset_t;
 typedef s390_compat_regs compat_elf_gregset_t;
 
-#include <linux/sched.h>	/* for task_struct */
-#include <asm/system.h>		/* for save_access_regs */
+#include <linux/sched/mm.h>	/* for task_struct */
 #include <asm/mmu_context.h>
+
+#include <asm/vdso.h>
+
+extern unsigned int vdso_enabled;
 
 /*
  * This is used to ensure we don't load something for the wrong architecture.
@@ -131,6 +159,35 @@ typedef s390_compat_regs compat_elf_gregset_t;
 	 && (x)->e_ident[EI_CLASS] == ELF_CLASS)
 #define compat_start_thread	start_thread31
 
+struct arch_elf_state {
+	int rc;
+};
+
+#define INIT_ARCH_ELF_STATE { .rc = 0 }
+
+#define arch_check_elf(ehdr, interp, interp_ehdr, state) (0)
+#ifdef CONFIG_PGSTE
+#define arch_elf_pt_proc(ehdr, phdr, elf, interp, state)	\
+({								\
+	struct arch_elf_state *_state = state;			\
+	if ((phdr)->p_type == PT_S390_PGSTE &&			\
+	    !page_table_allocate_pgste &&			\
+	    !test_thread_flag(TIF_PGSTE) &&			\
+	    !current->mm->context.alloc_pgste) {		\
+		set_thread_flag(TIF_PGSTE);			\
+		set_pt_regs_flag(task_pt_regs(current),		\
+				 PIF_SYSCALL_RESTART);		\
+		_state->rc = -EAGAIN;				\
+	}							\
+	_state->rc;						\
+})
+#else
+#define arch_elf_pt_proc(ehdr, phdr, elf, interp, state)	\
+({								\
+	(state)->rc;						\
+})
+#endif
+
 /* For SVR4/S390 the function pointer to be registered with `atexit` is
    passed in R14. */
 #define ELF_PLAT_INIT(_r, load_addr) \
@@ -139,20 +196,26 @@ typedef s390_compat_regs compat_elf_gregset_t;
 	} while (0)
 
 #define CORE_DUMP_USE_REGSET
-#define USE_ELF_CORE_DUMP
-#define ELF_EXEC_PAGESIZE	4096
+#define ELF_EXEC_PAGESIZE	PAGE_SIZE
 
 /* This is the location that an ET_DYN program is loaded if exec'ed.  Typical
    use of this is to invoke "./ld.so someprog" to test out a new version of
    the loader.  We need to make sure that it is out of the way of the program
-   that it will "exec", and that there is sufficient room for the brk.  */
-#define ELF_ET_DYN_BASE		(STACK_TOP / 3 * 2)
+   that it will "exec", and that there is sufficient room for the brk. 64-bit
+   tasks are aligned to 4GB. */
+#define ELF_ET_DYN_BASE (is_compat_task() ? \
+				(STACK_TOP / 3 * 2) : \
+				(STACK_TOP / 3 * 2) & ~((1UL << 32) - 1))
 
 /* This yields a mask that user programs can use to figure out what
    instruction set this CPU supports. */
 
 extern unsigned long elf_hwcap;
 #define ELF_HWCAP (elf_hwcap)
+
+/* Internal hardware capabilities, not exposed via elf */
+
+extern unsigned long int_hwcap;
 
 /* This yields a string that ld.so will use to load implementation
    specific libraries for optimization.  This is more specific in
@@ -165,32 +228,57 @@ extern unsigned long elf_hwcap;
 extern char elf_platform[];
 #define ELF_PLATFORM (elf_platform)
 
-#ifndef __s390x__
-#define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)
-#else /* __s390x__ */
-#define SET_PERSONALITY(ex, ibcs2)			\
-do {							\
-	if (ibcs2)					\
-		set_personality(PER_SVR4);		\
-	else if (current->personality != PER_LINUX32)	\
-		set_personality(PER_LINUX);		\
-	if ((ex).e_ident[EI_CLASS] == ELFCLASS32)	\
-		set_thread_flag(TIF_31BIT);		\
-	else						\
-		clear_thread_flag(TIF_31BIT);		\
+#ifndef CONFIG_COMPAT
+#define SET_PERSONALITY(ex) \
+do {								\
+	set_personality(PER_LINUX |				\
+		(current->personality & (~PER_MASK)));		\
+	current->thread.sys_call_table =			\
+		(unsigned long) &sys_call_table;		\
 } while (0)
-#endif /* __s390x__ */
+#else /* CONFIG_COMPAT */
+#define SET_PERSONALITY(ex)					\
+do {								\
+	if (personality(current->personality) != PER_LINUX32)	\
+		set_personality(PER_LINUX |			\
+			(current->personality & ~PER_MASK));	\
+	if ((ex).e_ident[EI_CLASS] == ELFCLASS32) {		\
+		set_thread_flag(TIF_31BIT);			\
+		current->thread.sys_call_table =		\
+			(unsigned long)	&sys_call_table_emu;	\
+	} else {						\
+		clear_thread_flag(TIF_31BIT);			\
+		current->thread.sys_call_table =		\
+			(unsigned long) &sys_call_table;	\
+	}							\
+} while (0)
+#endif /* CONFIG_COMPAT */
 
 /*
- * An executable for which elf_read_implies_exec() returns TRUE will
- * have the READ_IMPLIES_EXEC personality flag set automatically.
+ * Cache aliasing on the latest machines calls for a mapping granularity
+ * of 512KB for the anonymous mapping base. For 64-bit processes use a
+ * 512KB alignment and a randomization of up to 1GB. For 31-bit processes
+ * the virtual address space is limited, use no alignment and limit the
+ * randomization to 8MB.
+ * For the additional randomization of the program break use 32MB for
+ * 64-bit and 8MB for 31-bit.
  */
-#define elf_read_implies_exec(ex, executable_stack)	\
-({							\
-	if (current->mm->context.noexec &&		\
-	    executable_stack != EXSTACK_DISABLE_X)	\
-		disable_noexec(current->mm, current);	\
-	current->mm->context.noexec == 0;		\
-})
+#define BRK_RND_MASK	(is_compat_task() ? 0x7ffUL : 0x1fffUL)
+#define MMAP_RND_MASK	(is_compat_task() ? 0x7ffUL : 0x3ff80UL)
+#define MMAP_ALIGN_MASK	(is_compat_task() ? 0 : 0x7fUL)
+#define STACK_RND_MASK	MMAP_RND_MASK
+
+/* update AT_VECTOR_SIZE_ARCH if the number of NEW_AUX_ENT entries changes */
+#define ARCH_DLINFO							    \
+do {									    \
+	if (vdso_enabled)						    \
+		NEW_AUX_ENT(AT_SYSINFO_EHDR,				    \
+			    (unsigned long)current->mm->context.vdso_base); \
+} while (0)
+
+struct linux_binprm;
+
+#define ARCH_HAS_SETUP_ADDITIONAL_PAGES 1
+int arch_setup_additional_pages(struct linux_binprm *, int);
 
 #endif

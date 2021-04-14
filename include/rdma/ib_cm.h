@@ -1,42 +1,18 @@
+/* SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB */
 /*
  * Copyright (c) 2004, 2005 Intel Corporation.  All rights reserved.
  * Copyright (c) 2004 Topspin Corporation.  All rights reserved.
  * Copyright (c) 2004 Voltaire Corporation.  All rights reserved.
  * Copyright (c) 2005 Sun Microsystems, Inc. All rights reserved.
- *
- * This software is available to you under a choice of one of two
- * licenses.  You may choose to be licensed under the terms of the GNU
- * General Public License (GPL) Version 2, available from the file
- * COPYING in the main directory of this source tree, or the
- * OpenIB.org BSD license below:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      - Redistributions of source code must retain the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer.
- *
- *      - Redistributions in binary form must reproduce the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer in the documentation and/or other materials
- *        provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright (c) 2019, Mellanox Technologies inc.  All rights reserved.
  */
-#if !defined(IB_CM_H)
+
+#ifndef IB_CM_H
 #define IB_CM_H
 
 #include <rdma/ib_mad.h>
 #include <rdma/ib_sa.h>
+#include <rdma/rdma_cm.h>
 
 enum ib_cm_state {
 	IB_CM_IDLE,
@@ -102,17 +78,27 @@ enum ib_cm_data_size {
 	IB_CM_SIDR_REQ_PRIVATE_DATA_SIZE = 216,
 	IB_CM_SIDR_REP_PRIVATE_DATA_SIZE = 136,
 	IB_CM_SIDR_REP_INFO_LENGTH	 = 72,
-	IB_CM_COMPARE_SIZE		 = 64
 };
 
 struct ib_cm_id;
 
 struct ib_cm_req_event_param {
 	struct ib_cm_id		*listen_id;
+
+	/* P_Key that was used by the GMP's BTH header */
+	u16			bth_pkey;
+
 	u8			port;
 
-	struct ib_sa_path_rec	*primary_path;
-	struct ib_sa_path_rec	*alternate_path;
+	struct sa_path_rec	*primary_path;
+	struct sa_path_rec	*alternate_path;
+
+	/*
+	 * SGID attribute of the primary path. Currently only
+	 * useful for RoCE. Alternate path GID attributes
+	 * are not yet supported.
+	 */
+	const struct ib_gid_attr *ppath_sgid_attr;
 
 	__be64			remote_ca_guid;
 	u32			remote_qkey;
@@ -128,6 +114,7 @@ struct ib_cm_req_event_param {
 	unsigned int		retry_count:3;
 	unsigned int		rnr_retry_count:3;
 	unsigned int		srq:1;
+	struct rdma_ucm_ece	ece;
 };
 
 struct ib_cm_rep_event_param {
@@ -142,6 +129,7 @@ struct ib_cm_rep_event_param {
 	unsigned int		flow_control:1;
 	unsigned int		rnr_retry_count:3;
 	unsigned int		srq:1;
+	struct rdma_ucm_ece	ece;
 };
 
 enum ib_cm_rej_reason {
@@ -177,7 +165,8 @@ enum ib_cm_rej_reason {
 	IB_CM_REJ_DUPLICATE_LOCAL_COMM_ID	= 30,
 	IB_CM_REJ_INVALID_CLASS_VERSION		= 31,
 	IB_CM_REJ_INVALID_FLOW_LABEL		= 32,
-	IB_CM_REJ_INVALID_ALT_FLOW_LABEL	= 33
+	IB_CM_REJ_INVALID_ALT_FLOW_LABEL	= 33,
+	IB_CM_REJ_VENDOR_OPTION_NOT_SUPPORTED	= 35,
 };
 
 struct ib_cm_rej_event_param {
@@ -191,7 +180,7 @@ struct ib_cm_mra_event_param {
 };
 
 struct ib_cm_lap_event_param {
-	struct ib_sa_path_rec	*alternate_path;
+	struct sa_path_rec	*alternate_path;
 };
 
 enum ib_cm_apr_status {
@@ -219,6 +208,15 @@ struct ib_cm_apr_event_param {
 
 struct ib_cm_sidr_req_event_param {
 	struct ib_cm_id		*listen_id;
+	__be64			service_id;
+
+	/*
+	 * SGID attribute of the request. Currently only
+	 * useful for RoCE.
+	 */
+	const struct ib_gid_attr *sgid_attr;
+	/* P_Key that was used by the GMP's BTH header */
+	u16			bth_pkey;
 	u8			port;
 	u16			pkey;
 };
@@ -237,6 +235,7 @@ struct ib_cm_sidr_rep_event_param {
 	u32			qkey;
 	u32			qpn;
 	void			*info;
+	const struct ib_gid_attr *sgid_attr;
 	u8			info_len;
 };
 
@@ -259,6 +258,18 @@ struct ib_cm_event {
 	void			*private_data;
 };
 
+#define CM_REQ_ATTR_ID		cpu_to_be16(0x0010)
+#define CM_MRA_ATTR_ID		cpu_to_be16(0x0011)
+#define CM_REJ_ATTR_ID		cpu_to_be16(0x0012)
+#define CM_REP_ATTR_ID		cpu_to_be16(0x0013)
+#define CM_RTU_ATTR_ID		cpu_to_be16(0x0014)
+#define CM_DREQ_ATTR_ID		cpu_to_be16(0x0015)
+#define CM_DREP_ATTR_ID		cpu_to_be16(0x0016)
+#define CM_SIDR_REQ_ATTR_ID	cpu_to_be16(0x0017)
+#define CM_SIDR_REP_ATTR_ID	cpu_to_be16(0x0018)
+#define CM_LAP_ATTR_ID		cpu_to_be16(0x0019)
+#define CM_APR_ATTR_ID		cpu_to_be16(0x001A)
+
 /**
  * ib_cm_handler - User-defined callback to process communication events.
  * @cm_id: Communication identifier associated with the reported event.
@@ -276,7 +287,7 @@ struct ib_cm_event {
  * destroy the @cm_id after the callback completes.
  */
 typedef int (*ib_cm_handler)(struct ib_cm_id *cm_id,
-			     struct ib_cm_event *event);
+			     const struct ib_cm_event *event);
 
 struct ib_cm_id {
 	ib_cm_handler		cm_handler;
@@ -314,17 +325,12 @@ struct ib_cm_id *ib_create_cm_id(struct ib_device *device,
  */
 void ib_destroy_cm_id(struct ib_cm_id *cm_id);
 
-#define IB_SERVICE_ID_AGN_MASK	__constant_cpu_to_be64(0xFF00000000000000ULL)
-#define IB_CM_ASSIGN_SERVICE_ID __constant_cpu_to_be64(0x0200000000000000ULL)
-#define IB_CMA_SERVICE_ID	__constant_cpu_to_be64(0x0000000001000000ULL)
-#define IB_CMA_SERVICE_ID_MASK	__constant_cpu_to_be64(0xFFFFFFFFFF000000ULL)
-#define IB_SDP_SERVICE_ID	__constant_cpu_to_be64(0x0000000000010000ULL)
-#define IB_SDP_SERVICE_ID_MASK	__constant_cpu_to_be64(0xFFFFFFFFFFFF0000ULL)
-
-struct ib_cm_compare_data {
-	u8  data[IB_CM_COMPARE_SIZE];
-	u8  mask[IB_CM_COMPARE_SIZE];
-};
+#define IB_SERVICE_ID_AGN_MASK	cpu_to_be64(0xFF00000000000000ULL)
+#define IB_CM_ASSIGN_SERVICE_ID	cpu_to_be64(0x0200000000000000ULL)
+#define IB_CMA_SERVICE_ID	cpu_to_be64(0x0000000001000000ULL)
+#define IB_CMA_SERVICE_ID_MASK	cpu_to_be64(0xFFFFFFFFFF000000ULL)
+#define IB_SDP_SERVICE_ID	cpu_to_be64(0x0000000000010000ULL)
+#define IB_SDP_SERVICE_ID_MASK	cpu_to_be64(0xFFFFFFFFFFFF0000ULL)
 
 /**
  * ib_cm_listen - Initiates listening on the specified service ID for
@@ -338,23 +344,24 @@ struct ib_cm_compare_data {
  *   range of service IDs.  If set to 0, the service ID is matched
  *   exactly.  This parameter is ignored if %service_id is set to
  *   IB_CM_ASSIGN_SERVICE_ID.
- * @compare_data: This parameter is optional.  It specifies data that must
- *   appear in the private data of a connection request for the specified
- *   listen request.
  */
-int ib_cm_listen(struct ib_cm_id *cm_id, __be64 service_id, __be64 service_mask,
-		 struct ib_cm_compare_data *compare_data);
+int ib_cm_listen(struct ib_cm_id *cm_id, __be64 service_id,
+		 __be64 service_mask);
+
+struct ib_cm_id *ib_cm_insert_listen(struct ib_device *device,
+				     ib_cm_handler cm_handler,
+				     __be64 service_id);
 
 struct ib_cm_req_param {
-	struct ib_sa_path_rec	*primary_path;
-	struct ib_sa_path_rec	*alternate_path;
+	struct sa_path_rec	*primary_path;
+	struct sa_path_rec	*alternate_path;
+	const struct ib_gid_attr *ppath_sgid_attr;
 	__be64			service_id;
 	u32			qp_num;
 	enum ib_qp_type		qp_type;
 	u32			starting_psn;
 	const void		*private_data;
 	u8			private_data_len;
-	u8			peer_to_peer;
 	u8			responder_resources;
 	u8			initiator_depth;
 	u8			remote_cm_response_timeout;
@@ -364,6 +371,7 @@ struct ib_cm_req_param {
 	u8			rnr_retry_count;
 	u8			max_cm_retries;
 	u8			srq;
+	struct rdma_ucm_ece	ece;
 };
 
 /**
@@ -387,6 +395,7 @@ struct ib_cm_rep_param {
 	u8		flow_control;
 	u8		rnr_retry_count;
 	u8		srq;
+	struct rdma_ucm_ece ece;
 };
 
 /**
@@ -482,7 +491,7 @@ int ib_send_cm_rej(struct ib_cm_id *cm_id,
  *   message.
  * @cm_id: Connection identifier associated with the connection message.
  * @service_timeout: The lower 5-bits specify the maximum time required for
- *   the sender to reply to to the connection message.  The upper 3-bits
+ *   the sender to reply to the connection message.  The upper 3-bits
  *   specify additional control flags.
  * @private_data: Optional user-defined private data sent with the
  *   message receipt acknowledgement.
@@ -490,21 +499,6 @@ int ib_send_cm_rej(struct ib_cm_id *cm_id,
  */
 int ib_send_cm_mra(struct ib_cm_id *cm_id,
 		   u8 service_timeout,
-		   const void *private_data,
-		   u8 private_data_len);
-
-/**
- * ib_send_cm_lap - Sends a load alternate path request.
- * @cm_id: Connection identifier associated with the load alternate path
- *   message.
- * @alternate_path: A path record that identifies the alternate path to
- *   load.
- * @private_data: Optional user-defined private data sent with the
- *   load alternate path message.
- * @private_data_len: Size of the private data buffer, in bytes.
- */
-int ib_send_cm_lap(struct ib_cm_id *cm_id,
-		   struct ib_sa_path_rec *alternate_path,
 		   const void *private_data,
 		   u8 private_data_len);
 
@@ -528,29 +522,11 @@ int ib_cm_init_qp_attr(struct ib_cm_id *cm_id,
 		       struct ib_qp_attr *qp_attr,
 		       int *qp_attr_mask);
 
-/**
- * ib_send_cm_apr - Sends an alternate path response message in response to
- *   a load alternate path request.
- * @cm_id: Connection identifier associated with the alternate path response.
- * @status: Reply status sent with the alternate path response.
- * @info: Optional additional information sent with the alternate path
- *   response.
- * @info_length: Size of the additional information, in bytes.
- * @private_data: Optional user-defined private data sent with the
- *   alternate path response message.
- * @private_data_len: Size of the private data buffer, in bytes.
- */
-int ib_send_cm_apr(struct ib_cm_id *cm_id,
-		   enum ib_cm_apr_status status,
-		   void *info,
-		   u8 info_length,
-		   const void *private_data,
-		   u8 private_data_len);
-
 struct ib_cm_sidr_req_param {
-	struct ib_sa_path_rec	*path;
+	struct sa_path_rec	*path;
+	const struct ib_gid_attr *sgid_attr;
 	__be64			service_id;
-	int			timeout_ms;
+	unsigned long		timeout_ms;
 	const void		*private_data;
 	u8			private_data_len;
 	u8			max_cm_retries;
@@ -574,6 +550,7 @@ struct ib_cm_sidr_rep_param {
 	u8			info_length;
 	const void		*private_data;
 	u8			private_data_len;
+	struct rdma_ucm_ece	ece;
 };
 
 /**
@@ -585,5 +562,11 @@ struct ib_cm_sidr_rep_param {
  */
 int ib_send_cm_sidr_rep(struct ib_cm_id *cm_id,
 			struct ib_cm_sidr_rep_param *param);
+
+/**
+ * ibcm_reject_msg - return a pointer to a reject message string.
+ * @reason: Value returned in the REJECT event status field.
+ */
+const char *__attribute_const__ ibcm_reject_msg(int reason);
 
 #endif /* IB_CM_H */

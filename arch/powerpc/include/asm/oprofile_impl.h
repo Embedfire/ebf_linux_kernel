@@ -1,12 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (C) 2004 Anton Blanchard <anton@au.ibm.com>, IBM
  *
  * Based on alpha version.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #ifndef _ASM_POWERPC_OPROFILE_IMPL_H
@@ -32,6 +28,12 @@ struct op_system_config {
 	unsigned long mmcr0;
 	unsigned long mmcr1;
 	unsigned long mmcra;
+#ifdef CONFIG_OPROFILE_CELL
+	/* Register for oprofile user tool to check cell kernel profiling
+	 * support.
+	 */
+	unsigned long cell_support;
+#endif
 #endif
 	unsigned long enable_kernel;
 	unsigned long enable_user;
@@ -55,7 +57,6 @@ struct op_powerpc_model {
 };
 
 extern struct op_powerpc_model op_model_fsl_emb;
-extern struct op_powerpc_model op_model_rs64;
 extern struct op_powerpc_model op_model_power4;
 extern struct op_powerpc_model op_model_7450;
 extern struct op_powerpc_model op_model_cell;

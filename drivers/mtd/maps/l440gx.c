@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * BIOS Flash chip on Intel 440GX board.
  *
@@ -27,17 +28,21 @@ static struct mtd_info *mymtd;
 
 
 /* Is this really the vpp port? */
+static DEFINE_SPINLOCK(l440gx_vpp_lock);
+static int l440gx_vpp_refcnt;
 static void l440gx_set_vpp(struct map_info *map, int vpp)
 {
-	unsigned long l;
+	unsigned long flags;
 
-	l = inl(VPP_PORT);
+	spin_lock_irqsave(&l440gx_vpp_lock, flags);
 	if (vpp) {
-		l |= 1;
+		if (++l440gx_vpp_refcnt == 1)   /* first nested 'on' */
+			outl(inl(VPP_PORT) | 1, VPP_PORT);
 	} else {
-		l &= ~1;
+		if (--l440gx_vpp_refcnt == 0)   /* last nested 'off' */
+			outl(inl(VPP_PORT) & ~1, VPP_PORT);
 	}
-	outl(l, VPP_PORT);
+	spin_unlock_irqrestore(&l440gx_vpp_lock, flags);
 }
 
 static struct map_info l440gx_map = {
@@ -73,7 +78,7 @@ static int __init init_l440gx(void)
 		return -ENODEV;
 	}
 
-	l440gx_map.virt = ioremap_nocache(WINDOW_ADDR, WINDOW_SIZE);
+	l440gx_map.virt = ioremap(WINDOW_ADDR, WINDOW_SIZE);
 
 	if (!l440gx_map.virt) {
 		printk(KERN_WARNING "Failed to ioremap L440GX flash region\n");
@@ -81,7 +86,7 @@ static int __init init_l440gx(void)
 		return -ENOMEM;
 	}
 	simple_map_init(&l440gx_map);
-	printk(KERN_NOTICE "window_addr = 0x%08lx\n", (unsigned long)l440gx_map.virt);
+	pr_debug("window_addr = %p\n", l440gx_map.virt);
 
 	/* Setup the pm iobase resource
 	 * This code should move into some kind of generic bridge
@@ -138,7 +143,7 @@ static int __init init_l440gx(void)
 	if (mymtd) {
 		mymtd->owner = THIS_MODULE;
 
-		add_mtd_device(mymtd);
+		mtd_device_register(mymtd, NULL, 0);
 		return 0;
 	}
 
@@ -148,7 +153,7 @@ static int __init init_l440gx(void)
 
 static void __exit cleanup_l440gx(void)
 {
-	del_mtd_device(mymtd);
+	mtd_device_unregister(mymtd);
 	map_destroy(mymtd);
 
 	iounmap(l440gx_map.virt);

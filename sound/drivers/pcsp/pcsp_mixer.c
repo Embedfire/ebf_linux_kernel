@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * PC-Speaker driver for Linux
  *
@@ -50,8 +51,8 @@ static int pcsp_treble_info(struct snd_kcontrol *kcontrol,
 	uinfo->value.enumerated.items = chip->max_treble + 1;
 	if (uinfo->value.enumerated.item > chip->max_treble)
 		uinfo->value.enumerated.item = chip->max_treble;
-	sprintf(uinfo->value.enumerated.name, "%d",
-			PCSP_CALC_RATE(uinfo->value.enumerated.item));
+	sprintf(uinfo->value.enumerated.name, "%lu",
+		(unsigned long)PCSP_CALC_RATE(uinfo->value.enumerated.item));
 	return 0;
 }
 
@@ -72,7 +73,7 @@ static int pcsp_treble_put(struct snd_kcontrol *kcontrol,
 	if (treble != chip->treble) {
 		chip->treble = treble;
 #if PCSP_DEBUG
-		printk(KERN_INFO "PCSP: rate set to %i\n", PCSP_RATE());
+		printk(KERN_INFO "PCSP: rate set to %li\n", PCSP_RATE());
 #endif
 		changed = 1;
 	}
@@ -119,24 +120,43 @@ static int pcsp_pcspkr_put(struct snd_kcontrol *kcontrol,
 	.put =		pcsp_##ctl_type##_put, \
 }
 
-static struct snd_kcontrol_new __devinitdata snd_pcsp_controls[] = {
+static const struct snd_kcontrol_new snd_pcsp_controls_pcm[] = {
 	PCSP_MIXER_CONTROL(enable, "Master Playback Switch"),
 	PCSP_MIXER_CONTROL(treble, "BaseFRQ Playback Volume"),
-	PCSP_MIXER_CONTROL(pcspkr, "PC Speaker Playback Switch"),
 };
 
-int __devinit snd_pcsp_new_mixer(struct snd_pcsp *chip)
-{
-	struct snd_card *card = chip->card;
-	int i, err;
+static const struct snd_kcontrol_new snd_pcsp_controls_spkr[] = {
+	PCSP_MIXER_CONTROL(pcspkr, "Beep Playback Switch"),
+};
 
-	for (i = 0; i < ARRAY_SIZE(snd_pcsp_controls); i++) {
-		err = snd_ctl_add(card,
-				 snd_ctl_new1(snd_pcsp_controls + i,
-					      chip));
+static int snd_pcsp_ctls_add(struct snd_pcsp *chip,
+			     const struct snd_kcontrol_new *ctls, int num)
+{
+	int i, err;
+	struct snd_card *card = chip->card;
+	for (i = 0; i < num; i++) {
+		err = snd_ctl_add(card, snd_ctl_new1(ctls + i, chip));
 		if (err < 0)
 			return err;
 	}
+	return 0;
+}
+
+int snd_pcsp_new_mixer(struct snd_pcsp *chip, int nopcm)
+{
+	int err;
+	struct snd_card *card = chip->card;
+
+	if (!nopcm) {
+		err = snd_pcsp_ctls_add(chip, snd_pcsp_controls_pcm,
+			ARRAY_SIZE(snd_pcsp_controls_pcm));
+		if (err < 0)
+			return err;
+	}
+	err = snd_pcsp_ctls_add(chip, snd_pcsp_controls_spkr,
+		ARRAY_SIZE(snd_pcsp_controls_spkr));
+	if (err < 0)
+		return err;
 
 	strcpy(card->mixername, "PC-Speaker");
 

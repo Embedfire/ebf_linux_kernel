@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mm/proc-syms.c
  *
  *  Copyright (C) 2000-2002 Russell King
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/module.h>
 #include <linux/mm.h>
@@ -17,7 +14,9 @@
 
 #ifndef MULTI_CPU
 EXPORT_SYMBOL(cpu_dcache_clean_area);
+#ifdef CONFIG_MMU
 EXPORT_SYMBOL(cpu_set_pte_ext);
+#endif
 #else
 EXPORT_SYMBOL(processor);
 #endif
@@ -27,14 +26,15 @@ EXPORT_SYMBOL(__cpuc_flush_kern_all);
 EXPORT_SYMBOL(__cpuc_flush_user_all);
 EXPORT_SYMBOL(__cpuc_flush_user_range);
 EXPORT_SYMBOL(__cpuc_coherent_kern_range);
+EXPORT_SYMBOL(__cpuc_flush_dcache_area);
 #else
 EXPORT_SYMBOL(cpu_cache);
 #endif
 
 #ifdef CONFIG_MMU
 #ifndef MULTI_USER
-EXPORT_SYMBOL(__cpu_clear_user_page);
-EXPORT_SYMBOL(__cpu_copy_user_page);
+EXPORT_SYMBOL(__cpu_clear_user_highpage);
+EXPORT_SYMBOL(__cpu_copy_user_highpage);
 #else
 EXPORT_SYMBOL(cpu_user);
 #endif

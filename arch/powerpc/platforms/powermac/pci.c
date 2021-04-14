@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Support for PCI bridges found on Power Macintoshes.
  *
  * Copyright (C) 2003-2005 Benjamin Herrenschmuidt (benh@kernel.crashing.org)
  * Copyright (C) 1997 Paul Mackerras (paulus@samba.org)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/kernel.h>
@@ -15,8 +11,8 @@
 #include <linux/delay.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <linux/bootmem.h>
 #include <linux/irq.h>
+#include <linux/of_pci.h>
 
 #include <asm/sections.h>
 #include <asm/io.h>
@@ -26,6 +22,8 @@
 #include <asm/pmac_feature.h>
 #include <asm/grackle.h>
 #include <asm/ppc-pci.h>
+
+#include "pmac.h"
 
 #undef DEBUG
 
@@ -60,7 +58,7 @@ struct device_node *k2_skiplist[2];
 
 static int __init fixup_one_level_bus_range(struct device_node *node, int higher)
 {
-	for (; node != 0;node = node->sibling) {
+	for (; node; node = node->sibling) {
 		const int * bus_range;
 		const unsigned int *class_code;
 		int len;
@@ -133,17 +131,23 @@ static void __init fixup_bus_range(struct device_node *bridge)
 	|(((unsigned int)(off)) & 0xFCUL) \
 	|1UL)
 
-static volatile void __iomem *macrisc_cfg_access(struct pci_controller* hose,
-					       u8 bus, u8 dev_fn, u8 offset)
+static void __iomem *macrisc_cfg_map_bus(struct pci_bus *bus,
+					 unsigned int dev_fn,
+					 int offset)
 {
 	unsigned int caddr;
+	struct pci_controller *hose;
 
-	if (bus == hose->first_busno) {
+	hose = pci_bus_to_host(bus);
+	if (hose == NULL)
+		return NULL;
+
+	if (bus->number == hose->first_busno) {
 		if (dev_fn < (11 << 3))
 			return NULL;
 		caddr = MACRISC_CFA0(dev_fn, offset);
 	} else
-		caddr = MACRISC_CFA1(bus, dev_fn, offset);
+		caddr = MACRISC_CFA1(bus->number, dev_fn, offset);
 
 	/* Uninorth will return garbage if we don't read back the value ! */
 	do {
@@ -154,129 +158,46 @@ static volatile void __iomem *macrisc_cfg_access(struct pci_controller* hose,
 	return hose->cfg_data + offset;
 }
 
-static int macrisc_read_config(struct pci_bus *bus, unsigned int devfn,
-				      int offset, int len, u32 *val)
-{
-	struct pci_controller *hose;
-	volatile void __iomem *addr;
-
-	hose = pci_bus_to_host(bus);
-	if (hose == NULL)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-	if (offset >= 0x100)
-		return  PCIBIOS_BAD_REGISTER_NUMBER;
-	addr = macrisc_cfg_access(hose, bus->number, devfn, offset);
-	if (!addr)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-	/*
-	 * Note: the caller has already checked that offset is
-	 * suitably aligned and that len is 1, 2 or 4.
-	 */
-	switch (len) {
-	case 1:
-		*val = in_8(addr);
-		break;
-	case 2:
-		*val = in_le16(addr);
-		break;
-	default:
-		*val = in_le32(addr);
-		break;
-	}
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int macrisc_write_config(struct pci_bus *bus, unsigned int devfn,
-				       int offset, int len, u32 val)
-{
-	struct pci_controller *hose;
-	volatile void __iomem *addr;
-
-	hose = pci_bus_to_host(bus);
-	if (hose == NULL)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-	if (offset >= 0x100)
-		return  PCIBIOS_BAD_REGISTER_NUMBER;
-	addr = macrisc_cfg_access(hose, bus->number, devfn, offset);
-	if (!addr)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-	/*
-	 * Note: the caller has already checked that offset is
-	 * suitably aligned and that len is 1, 2 or 4.
-	 */
-	switch (len) {
-	case 1:
-		out_8(addr, val);
-		break;
-	case 2:
-		out_le16(addr, val);
-		break;
-	default:
-		out_le32(addr, val);
-		break;
-	}
-	return PCIBIOS_SUCCESSFUL;
-}
-
 static struct pci_ops macrisc_pci_ops =
 {
-	.read = macrisc_read_config,
-	.write = macrisc_write_config,
+	.map_bus = macrisc_cfg_map_bus,
+	.read = pci_generic_config_read,
+	.write = pci_generic_config_write,
 };
 
 #ifdef CONFIG_PPC32
 /*
  * Verify that a specific (bus, dev_fn) exists on chaos
  */
-static int chaos_validate_dev(struct pci_bus *bus, int devfn, int offset)
+static void __iomem *chaos_map_bus(struct pci_bus *bus, unsigned int devfn,
+				   int offset)
 {
 	struct device_node *np;
 	const u32 *vendor, *device;
 
 	if (offset >= 0x100)
-		return  PCIBIOS_BAD_REGISTER_NUMBER;
-	np = pci_busdev_to_OF_node(bus, devfn);
+		return NULL;
+	np = of_pci_find_child_device(bus->dev.of_node, devfn);
 	if (np == NULL)
-		return PCIBIOS_DEVICE_NOT_FOUND;
+		return NULL;
 
 	vendor = of_get_property(np, "vendor-id", NULL);
 	device = of_get_property(np, "device-id", NULL);
 	if (vendor == NULL || device == NULL)
-		return PCIBIOS_DEVICE_NOT_FOUND;
+		return NULL;
 
 	if ((*vendor == 0x106b) && (*device == 3) && (offset >= 0x10)
 	    && (offset != 0x14) && (offset != 0x18) && (offset <= 0x24))
-		return PCIBIOS_BAD_REGISTER_NUMBER;
+		return NULL;
 
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int
-chaos_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
-		  int len, u32 *val)
-{
-	int result = chaos_validate_dev(bus, devfn, offset);
-	if (result == PCIBIOS_BAD_REGISTER_NUMBER)
-		*val = ~0U;
-	if (result != PCIBIOS_SUCCESSFUL)
-		return result;
-	return macrisc_read_config(bus, devfn, offset, len, val);
-}
-
-static int
-chaos_write_config(struct pci_bus *bus, unsigned int devfn, int offset,
-		   int len, u32 val)
-{
-	int result = chaos_validate_dev(bus, devfn, offset);
-	if (result != PCIBIOS_SUCCESSFUL)
-		return result;
-	return macrisc_write_config(bus, devfn, offset, len, val);
+	return macrisc_cfg_map_bus(bus, devfn, offset);
 }
 
 static struct pci_ops chaos_pci_ops =
 {
-	.read = chaos_read_config,
-	.write = chaos_write_config,
+	.map_bus = chaos_map_bus,
+	.read = pci_generic_config_read,
+	.write = pci_generic_config_write,
 };
 
 static void __init setup_chaos(struct pci_controller *hose,
@@ -299,10 +220,10 @@ static void __init setup_chaos(struct pci_controller *hose,
  * This function deals with some "special cases" devices.
  *
  *  0 -> No special case
- *  1 -> Skip the device but act as if the access was successfull
+ *  1 -> Skip the device but act as if the access was successful
  *       (return 0xff's on reads, eventually, cache config space
  *       accesses in a later version)
- * -1 -> Hide the device (unsuccessful acess)
+ * -1 -> Hide the device (unsuccessful access)
  */
 static int u3_ht_skip_device(struct pci_controller *hose,
 			     struct pci_bus *bus, unsigned int devfn)
@@ -471,15 +392,24 @@ static struct pci_ops u3_ht_pci_ops =
 	 |(((unsigned int)(off)) & 0xfcU)	\
 	 |1UL)
 
-static volatile void __iomem *u4_pcie_cfg_access(struct pci_controller* hose,
-					u8 bus, u8 dev_fn, int offset)
+static void __iomem *u4_pcie_cfg_map_bus(struct pci_bus *bus,
+					 unsigned int dev_fn,
+					 int offset)
 {
+	struct pci_controller *hose;
 	unsigned int caddr;
 
-	if (bus == hose->first_busno) {
+	if (offset >= 0x1000)
+		return NULL;
+
+	hose = pci_bus_to_host(bus);
+	if (!hose)
+		return NULL;
+
+	if (bus->number == hose->first_busno) {
 		caddr = U4_PCIE_CFA0(dev_fn, offset);
 	} else
-		caddr = U4_PCIE_CFA1(bus, dev_fn, offset);
+		caddr = U4_PCIE_CFA1(bus->number, dev_fn, offset);
 
 	/* Uninorth will return garbage if we don't read back the value ! */
 	do {
@@ -490,75 +420,26 @@ static volatile void __iomem *u4_pcie_cfg_access(struct pci_controller* hose,
 	return hose->cfg_data + offset;
 }
 
-static int u4_pcie_read_config(struct pci_bus *bus, unsigned int devfn,
-			       int offset, int len, u32 *val)
-{
-	struct pci_controller *hose;
-	volatile void __iomem *addr;
-
-	hose = pci_bus_to_host(bus);
-	if (hose == NULL)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-	if (offset >= 0x1000)
-		return  PCIBIOS_BAD_REGISTER_NUMBER;
-	addr = u4_pcie_cfg_access(hose, bus->number, devfn, offset);
-	if (!addr)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-	/*
-	 * Note: the caller has already checked that offset is
-	 * suitably aligned and that len is 1, 2 or 4.
-	 */
-	switch (len) {
-	case 1:
-		*val = in_8(addr);
-		break;
-	case 2:
-		*val = in_le16(addr);
-		break;
-	default:
-		*val = in_le32(addr);
-		break;
-	}
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int u4_pcie_write_config(struct pci_bus *bus, unsigned int devfn,
-				int offset, int len, u32 val)
-{
-	struct pci_controller *hose;
-	volatile void __iomem *addr;
-
-	hose = pci_bus_to_host(bus);
-	if (hose == NULL)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-	if (offset >= 0x1000)
-		return  PCIBIOS_BAD_REGISTER_NUMBER;
-	addr = u4_pcie_cfg_access(hose, bus->number, devfn, offset);
-	if (!addr)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-	/*
-	 * Note: the caller has already checked that offset is
-	 * suitably aligned and that len is 1, 2 or 4.
-	 */
-	switch (len) {
-	case 1:
-		out_8(addr, val);
-		break;
-	case 2:
-		out_le16(addr, val);
-		break;
-	default:
-		out_le32(addr, val);
-		break;
-	}
-	return PCIBIOS_SUCCESSFUL;
-}
-
 static struct pci_ops u4_pcie_pci_ops =
 {
-	.read = u4_pcie_read_config,
-	.write = u4_pcie_write_config,
+	.map_bus = u4_pcie_cfg_map_bus,
+	.read = pci_generic_config_read,
+	.write = pci_generic_config_write,
 };
+
+static void pmac_pci_fixup_u4_of_node(struct pci_dev *dev)
+{
+	/* Apple's device-tree "hides" the root complex virtual P2P bridge
+	 * on U4. However, Linux sees it, causing the PCI <-> OF matching
+	 * code to fail to properly match devices below it. This works around
+	 * it by setting the node of the bridge to point to the PHB node,
+	 * which is not entirely correct but fixes the matching code and
+	 * doesn't break anything else. It's also the simplest possible fix.
+	 */
+	if (dev->dev.of_node == NULL)
+		dev->dev.of_node = pcibios_get_phb_of_node(dev->bus);
+}
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_APPLE, 0x5b, pmac_pci_fixup_u4_of_node);
 
 #endif /* CONFIG_PPC64 */
 
@@ -616,9 +497,7 @@ static void __init init_p2pbridge(void)
 	/* XXX it would be better here to identify the specific
 	   PCI-PCI bridge chip we have. */
 	p2pbridge = of_find_node_by_name(NULL, "pci-bridge");
-	if (p2pbridge == NULL
-	    || p2pbridge->parent == NULL
-	    || strcmp(p2pbridge->parent->name, "pci") != 0)
+	if (p2pbridge == NULL || !of_node_name_eq(p2pbridge->parent, "pci"))
 		goto done;
 	if (pci_device_from_OF_node(p2pbridge, &bus, &devfn) < 0) {
 		DBG("Can't find PCI infos for PCI<->PCI bridge\n");
@@ -661,6 +540,7 @@ static void __init init_second_ohare(void)
 			pci_find_hose_for_OF_device(np);
 		if (!hose) {
 			printk(KERN_ERR "Can't find PCI hose for OHare2 !\n");
+			of_node_put(np);
 			return;
 		}
 		early_read_config_word(hose, bus, devfn, PCI_COMMAND, &cmd);
@@ -669,6 +549,7 @@ static void __init init_second_ohare(void)
 		early_write_config_word(hose, bus, devfn, PCI_COMMAND, cmd);
 	}
 	has_second_ohare = 1;
+	of_node_put(np);
 }
 
 /*
@@ -681,7 +562,7 @@ static void __init fixup_nec_usb2(void)
 {
 	struct device_node *nec;
 
-	for (nec = NULL; (nec = of_find_node_by_name(nec, "usb")) != NULL;) {
+	for_each_node_by_name(nec, "usb") {
 		struct pci_controller *hose;
 		u32 data;
 		const u32 *prop;
@@ -729,7 +610,7 @@ static void __init setup_bandit(struct pci_controller *hose,
 static int __init setup_uninorth(struct pci_controller *hose,
 				 struct resource *addr)
 {
-	ppc_pci_flags |= PPC_PCI_REASSIGN_ALL_BUS;
+	pci_add_flags(PCI_REASSIGN_ALL_BUS);
 	has_uninorth = 1;
 	hose->ops = &macrisc_pci_ops;
 	hose->cfg_addr = ioremap(addr->start + 0x800000, 0x1000);
@@ -807,6 +688,7 @@ static void __init parse_region_decode(struct pci_controller *hose,
 			hose->mem_resources[cur].name = hose->dn->full_name;
 			hose->mem_resources[cur].start = base;
 			hose->mem_resources[cur].end = end;
+			hose->mem_offset[cur] = 0;
 			DBG("  %d: 0x%08lx-0x%08lx\n", cur, base, end);
 		} else {
 			DBG("   :           -0x%08lx\n", end);
@@ -836,8 +718,7 @@ static void __init setup_u3_ht(struct pci_controller* hose)
 	 * into cfg_addr
 	 */
 	hose->cfg_data = ioremap(cfg_res.start, 0x02000000);
-	hose->cfg_addr = ioremap(self_res.start,
-				 self_res.end - self_res.start + 1);
+	hose->cfg_addr = ioremap(self_res.start, resource_size(&self_res));
 
 	/*
 	 * /ht node doesn't expose a "ranges" property, we read the register
@@ -850,7 +731,6 @@ static void __init setup_u3_ht(struct pci_controller* hose)
 	hose->io_resource.start = 0;
 	hose->io_resource.end = 0x003fffff;
 	hose->io_resource.flags = IORESOURCE_IO;
-	hose->pci_mem_offset = 0;
 	hose->first_busno = 0;
 	hose->last_busno = 0xef;
 
@@ -895,18 +775,18 @@ static int __init pmac_add_bridge(struct device_node *dev)
 	struct resource rsrc;
 	char *disp_name;
 	const int *bus_range;
-	int primary = 1, has_address = 0;
+	int primary = 1;
 
-	DBG("Adding PCI host bridge %s\n", dev->full_name);
+	DBG("Adding PCI host bridge %pOF\n", dev);
 
 	/* Fetch host bridge registers address */
-	has_address = (of_address_to_resource(dev, 0, &rsrc) == 0);
+	of_address_to_resource(dev, 0, &rsrc);
 
 	/* Get bus range if any */
 	bus_range = of_get_property(dev, "bus-range", &len);
 	if (bus_range == NULL || len < 2 * sizeof(int)) {
-		printk(KERN_WARNING "Can't get bus-range for %s, assume"
-		       " bus 0\n", dev->full_name);
+		printk(KERN_WARNING "Can't get bus-range for %pOF, assume"
+		       " bus 0\n", dev);
 	}
 
 	hose = pcibios_alloc_controller(dev);
@@ -914,6 +794,7 @@ static int __init pmac_add_bridge(struct device_node *dev)
 		return -ENOMEM;
 	hose->first_busno = bus_range ? bus_range[0] : 0;
 	hose->last_busno = bus_range ? bus_range[1] : 0xff;
+	hose->controller_ops = pmac_pci_controller_ops;
 
 	disp_name = NULL;
 
@@ -941,14 +822,14 @@ static int __init pmac_add_bridge(struct device_node *dev)
 	if (of_device_is_compatible(dev, "uni-north")) {
 		primary = setup_uninorth(hose, &rsrc);
 		disp_name = "UniNorth";
-	} else if (strcmp(dev->name, "pci") == 0) {
+	} else if (of_node_name_eq(dev, "pci")) {
 		/* XXX assume this is a mpc106 (grackle) */
 		setup_grackle(hose);
 		disp_name = "Grackle (MPC106)";
-	} else if (strcmp(dev->name, "bandit") == 0) {
+	} else if (of_node_name_eq(dev, "bandit")) {
 		setup_bandit(hose, &rsrc);
 		disp_name = "Bandit";
-	} else if (strcmp(dev->name, "chaos") == 0) {
+	} else if (of_node_name_eq(dev, "chaos")) {
 		setup_chaos(hose, &rsrc);
 		disp_name = "Chaos";
 		primary = 0;
@@ -972,7 +853,7 @@ static int __init pmac_add_bridge(struct device_node *dev)
 	return 0;
 }
 
-void __devinit pmac_pci_irq_fixup(struct pci_dev *dev)
+void pmac_pci_irq_fixup(struct pci_dev *dev)
 {
 #ifdef CONFIG_PPC32
 	/* Fixup interrupt for the modem/ethernet combo controller.
@@ -986,17 +867,40 @@ void __devinit pmac_pci_irq_fixup(struct pci_dev *dev)
 	    dev->vendor == PCI_VENDOR_ID_DEC &&
 	    dev->device == PCI_DEVICE_ID_DEC_TULIP_PLUS) {
 		dev->irq = irq_create_mapping(NULL, 60);
-		set_irq_type(dev->irq, IRQ_TYPE_LEVEL_LOW);
+		irq_set_irq_type(dev->irq, IRQ_TYPE_LEVEL_LOW);
 	}
 #endif /* CONFIG_PPC32 */
 }
 
+#ifdef CONFIG_PPC64
+static int pmac_pci_root_bridge_prepare(struct pci_host_bridge *bridge)
+{
+	struct pci_controller *hose = pci_bus_to_host(bridge->bus);
+	struct device_node *np, *child;
+
+	if (hose != u3_agp)
+		return 0;
+
+	/* Fixup the PCI<->OF mapping for U3 AGP due to bus renumbering. We
+	 * assume there is no P2P bridge on the AGP bus, which should be a
+	 * safe assumptions for now. We should do something better in the
+	 * future though
+	 */
+	np = hose->dn;
+	PCI_DN(np)->busno = 0xf0;
+	for_each_child_of_node(np, child)
+		PCI_DN(child)->busno = 0xf0;
+
+	return 0;
+}
+#endif /* CONFIG_PPC64 */
+
 void __init pmac_pci_init(void)
 {
 	struct device_node *np, *root;
-	struct device_node *ht = NULL;
+	struct device_node *ht __maybe_unused = NULL;
 
-	ppc_pci_flags = PPC_PCI_CAN_SKIP_ISA_ALIGN;
+	pci_set_flags(PCI_CAN_SKIP_ISA_ALIGN);
 
 	root = of_find_node_by_path("/");
 	if (root == NULL) {
@@ -1004,16 +908,14 @@ void __init pmac_pci_init(void)
 		       "of device tree\n");
 		return;
 	}
-	for (np = NULL; (np = of_get_next_child(root, np)) != NULL;) {
-		if (np->name == NULL)
-			continue;
-		if (strcmp(np->name, "bandit") == 0
-		    || strcmp(np->name, "chaos") == 0
-		    || strcmp(np->name, "pci") == 0) {
+	for_each_child_of_node(root, np) {
+		if (of_node_name_eq(np, "bandit")
+		    || of_node_name_eq(np, "chaos")
+		    || of_node_name_eq(np, "pci")) {
 			if (pmac_add_bridge(np) == 0)
 				of_node_get(np);
 		}
-		if (strcmp(np->name, "ht") == 0) {
+		if (of_node_name_eq(np, "ht")) {
 			of_node_get(np);
 			ht = np;
 		}
@@ -1027,24 +929,8 @@ void __init pmac_pci_init(void)
 	if (ht && pmac_add_bridge(ht) != 0)
 		of_node_put(ht);
 
-	/* Setup the linkage between OF nodes and PHBs */
-	pci_devs_phb_init();
-
-	/* Fixup the PCI<->OF mapping for U3 AGP due to bus renumbering. We
-	 * assume there is no P2P bridge on the AGP bus, which should be a
-	 * safe assumptions for now. We should do something better in the
-	 * future though
-	 */
-	if (u3_agp) {
-		struct device_node *np = u3_agp->dn;
-		PCI_DN(np)->busno = 0xf0;
-		for (np = np->child; np; np = np->sibling)
-			PCI_DN(np)->busno = 0xf0;
-	}
+	ppc_md.pcibios_root_bridge_prepare = pmac_pci_root_bridge_prepare;
 	/* pmac_check_ht_link(); */
-
-	/* We can allocate missing resources if any */
-	pci_probe_only = 0;
 
 #else /* CONFIG_PPC64 */
 	init_p2pbridge();
@@ -1055,13 +941,13 @@ void __init pmac_pci_init(void)
 	 * some offset between bus number and domains for now when we
 	 * assign all busses should help for now
 	 */
-	if (ppc_pci_flags & PPC_PCI_REASSIGN_ALL_BUS)
+	if (pci_has_flag(PCI_REASSIGN_ALL_BUS))
 		pcibios_assign_bus_offset = 0x10;
 #endif
 }
 
 #ifdef CONFIG_PPC32
-int pmac_pci_enable_device_hook(struct pci_dev *dev)
+static bool pmac_pci_enable_device_hook(struct pci_dev *dev)
 {
 	struct device_node* node;
 	int updatecfg = 0;
@@ -1077,11 +963,11 @@ int pmac_pci_enable_device_hook(struct pci_dev *dev)
 	    && !node) {
 		printk(KERN_INFO "Apple USB OHCI %s disabled by firmware\n",
 		       pci_name(dev));
-		return -EINVAL;
+		return false;
 	}
 
 	if (!node)
-		return 0;
+		return true;
 
 	uninorth_child = node->parent &&
 		of_device_is_compatible(node->parent, "uni-north");
@@ -1089,7 +975,7 @@ int pmac_pci_enable_device_hook(struct pci_dev *dev)
 	/* Firewire & GMAC were disabled after PCI probe, the driver is
 	 * claiming them, we must re-enable them now.
 	 */
-	if (uninorth_child && !strcmp(node->name, "firewire") &&
+	if (uninorth_child && of_node_name_eq(node, "firewire") &&
 	    (of_device_is_compatible(node, "pci106b,18") ||
 	     of_device_is_compatible(node, "pci106b,30") ||
 	     of_device_is_compatible(node, "pci11c1,5811"))) {
@@ -1097,7 +983,7 @@ int pmac_pci_enable_device_hook(struct pci_dev *dev)
 		pmac_call_feature(PMAC_FTR_1394_ENABLE, node, 0, 1);
 		updatecfg = 1;
 	}
-	if (uninorth_child && !strcmp(node->name, "ethernet") &&
+	if (uninorth_child && of_node_name_eq(node, "ethernet") &&
 	    of_device_is_compatible(node, "gmac")) {
 		pmac_call_feature(PMAC_FTR_GMAC_ENABLE, node, 0, 1);
 		updatecfg = 1;
@@ -1122,10 +1008,10 @@ int pmac_pci_enable_device_hook(struct pci_dev *dev)
 				      L1_CACHE_BYTES >> 2);
 	}
 
-	return 0;
+	return true;
 }
 
-void __devinit pmac_pci_fixup_ohci(struct pci_dev *dev)
+static void pmac_pci_fixup_ohci(struct pci_dev *dev)
 {
 	struct device_node *node = pci_device_to_OF_node(dev);
 
@@ -1153,16 +1039,14 @@ void __init pmac_pcibios_after_init(void)
 			pmac_call_feature(PMAC_FTR_1394_CABLE_POWER, nd, 0, 0);
 		}
 	}
-	of_node_put(nd);
 	for_each_node_by_name(nd, "ethernet") {
 		if (nd->parent && of_device_is_compatible(nd, "gmac")
 		    && of_device_is_compatible(nd->parent, "uni-north"))
 			pmac_call_feature(PMAC_FTR_GMAC_ENABLE, nd, 0, 0);
 	}
-	of_node_put(nd);
 }
 
-void pmac_pci_fixup_cardbus(struct pci_dev* dev)
+static void pmac_pci_fixup_cardbus(struct pci_dev *dev)
 {
 	if (!machine_is(powermac))
 		return;
@@ -1199,7 +1083,7 @@ void pmac_pci_fixup_cardbus(struct pci_dev* dev)
 
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_TI, PCI_ANY_ID, pmac_pci_fixup_cardbus);
 
-void pmac_pci_fixup_pciata(struct pci_dev* dev)
+static void pmac_pci_fixup_pciata(struct pci_dev *dev)
 {
        u8 progif = 0;
 
@@ -1284,3 +1168,89 @@ static void fixup_k2_sata(struct pci_dev* dev)
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SERVERWORKS, 0x0240, fixup_k2_sata);
 
+/*
+ * On U4 (aka CPC945) the PCIe root complex "P2P" bridge resource ranges aren't
+ * configured by the firmware. The bridge itself seems to ignore them but it
+ * causes problems with Linux which then re-assigns devices below the bridge,
+ * thus changing addresses of those devices from what was in the device-tree,
+ * which sucks when those are video cards using offb
+ *
+ * We could just mark it transparent but I prefer fixing up the resources to
+ * properly show what's going on here, as I have some doubts about having them
+ * badly configured potentially being an issue for DMA.
+ *
+ * We leave PIO alone, it seems to be fine
+ *
+ * Oh and there's another funny bug. The OF properties advertize the region
+ * 0xf1000000..0xf1ffffff as being forwarded as memory space. But that's
+ * actually not true, this region is the memory mapped config space. So we
+ * also need to filter it out or we'll map things in the wrong place.
+ */
+static void fixup_u4_pcie(struct pci_dev* dev)
+{
+	struct pci_controller *host = pci_bus_to_host(dev->bus);
+	struct resource *region = NULL;
+	u32 reg;
+	int i;
+
+	/* Only do that on PowerMac */
+	if (!machine_is(powermac))
+		return;
+
+	/* Find the largest MMIO region */
+	for (i = 0; i < 3; i++) {
+		struct resource *r = &host->mem_resources[i];
+		if (!(r->flags & IORESOURCE_MEM))
+			continue;
+		/* Skip the 0xf0xxxxxx..f2xxxxxx regions, we know they
+		 * are reserved by HW for other things
+		 */
+		if (r->start >= 0xf0000000 && r->start < 0xf3000000)
+			continue;
+		if (!region || resource_size(r) > resource_size(region))
+			region = r;
+	}
+	/* Nothing found, bail */
+	if (!region)
+		return;
+
+	/* Print things out */
+	printk(KERN_INFO "PCI: Fixup U4 PCIe bridge range: %pR\n", region);
+
+	/* Fixup bridge config space. We know it's a Mac, resource aren't
+	 * offset so let's just blast them as-is. We also know that they
+	 * fit in 32 bits
+	 */
+	reg = ((region->start >> 16) & 0xfff0) | (region->end & 0xfff00000);
+	pci_write_config_dword(dev, PCI_MEMORY_BASE, reg);
+	pci_write_config_dword(dev, PCI_PREF_BASE_UPPER32, 0);
+	pci_write_config_dword(dev, PCI_PREF_LIMIT_UPPER32, 0);
+	pci_write_config_dword(dev, PCI_PREF_MEMORY_BASE, 0);
+}
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_APPLE, PCI_DEVICE_ID_APPLE_U4_PCIE, fixup_u4_pcie);
+
+#ifdef CONFIG_PPC64
+static int pmac_pci_probe_mode(struct pci_bus *bus)
+{
+	struct device_node *node = pci_bus_to_OF_node(bus);
+
+	/* We need to use normal PCI probing for the AGP bus,
+	 * since the device for the AGP bridge isn't in the tree.
+	 * Same for the PCIe host on U4 and the HT host bridge.
+	 */
+	if (bus->self == NULL && (of_device_is_compatible(node, "u3-agp") ||
+				  of_device_is_compatible(node, "u4-pcie") ||
+				  of_device_is_compatible(node, "u3-ht")))
+		return PCI_PROBE_NORMAL;
+	return PCI_PROBE_DEVTREE;
+}
+#endif /* CONFIG_PPC64 */
+
+struct pci_controller_ops pmac_pci_controller_ops = {
+#ifdef CONFIG_PPC64
+	.probe_mode		= pmac_pci_probe_mode,
+#endif
+#ifdef CONFIG_PPC32
+	.enable_device_hook	= pmac_pci_enable_device_hook,
+#endif
+};

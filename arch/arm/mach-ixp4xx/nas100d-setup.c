@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/arm/mach-ixp4xx/nas100d-setup.c
  *
@@ -17,7 +18,7 @@
  * Maintainers: http://www.nslu2-linux.org/
  *
  */
-
+#include <linux/gpio.h>
 #include <linux/if_ether.h>
 #include <linux/irq.h>
 #include <linux/jiffies.h>
@@ -27,13 +28,28 @@
 #include <linux/leds.h>
 #include <linux/reboot.h>
 #include <linux/i2c.h>
-#include <linux/i2c-gpio.h>
-
+#include <linux/gpio/machine.h>
+#include <linux/io.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
-#include <asm/io.h>
-#include <asm/gpio.h>
+
+#include "irqs.h"
+
+#define NAS100D_SDA_PIN		5
+#define NAS100D_SCL_PIN		6
+
+/* Buttons */
+#define NAS100D_PB_GPIO         14   /* power button */
+#define NAS100D_RB_GPIO         4    /* reset button */
+
+/* Power control */
+#define NAS100D_PO_GPIO         12   /* power off */
+
+/* LEDs */
+#define NAS100D_LED_WLAN_GPIO	0
+#define NAS100D_LED_DISK_GPIO	3
+#define NAS100D_LED_PWR_GPIO	15
 
 static struct flash_platform_data nas100d_flash_data = {
 	.map_name		= "cfi_probe",
@@ -87,16 +103,21 @@ static struct platform_device nas100d_leds = {
 	.dev.platform_data	= &nas100d_led_data,
 };
 
-static struct i2c_gpio_platform_data nas100d_i2c_gpio_data = {
-	.sda_pin		= NAS100D_SDA_PIN,
-	.scl_pin		= NAS100D_SCL_PIN,
+static struct gpiod_lookup_table nas100d_i2c_gpiod_table = {
+	.dev_id		= "i2c-gpio.0",
+	.table		= {
+		GPIO_LOOKUP_IDX("IXP4XX_GPIO_CHIP", NAS100D_SDA_PIN,
+				NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+		GPIO_LOOKUP_IDX("IXP4XX_GPIO_CHIP", NAS100D_SCL_PIN,
+				NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+	},
 };
 
 static struct platform_device nas100d_i2c_gpio = {
 	.name			= "i2c-gpio",
 	.id			= 0,
 	.dev	 = {
-		.platform_data	= &nas100d_i2c_gpio_data,
+		.platform_data	= NULL,
 	},
 };
 
@@ -144,6 +165,14 @@ static struct platform_device nas100d_uart = {
 };
 
 /* Built-in 10/100 Ethernet MAC interfaces */
+static struct resource nas100d_eth_resources[] = {
+	{
+		.start		= IXP4XX_EthB_BASE_PHYS,
+		.end		= IXP4XX_EthB_BASE_PHYS + 0x0fff,
+		.flags		= IORESOURCE_MEM,
+	},
+};
+
 static struct eth_plat_info nas100d_plat_eth[] = {
 	{
 		.phy		= 0,
@@ -157,6 +186,8 @@ static struct platform_device nas100d_eth[] = {
 		.name			= "ixp4xx_eth",
 		.id			= IXP4XX_ETH_NPEB,
 		.dev.platform_data	= nas100d_plat_eth,
+		.num_resources		= ARRAY_SIZE(nas100d_eth_resources),
+		.resource		= nas100d_eth_resources,
 	}
 };
 
@@ -171,11 +202,8 @@ static void nas100d_power_off(void)
 {
 	/* This causes the box to drop the power and go dead. */
 
-	/* enable the pwr cntl gpio */
-	gpio_line_config(NAS100D_PO_GPIO, IXP4XX_GPIO_OUT);
-
-	/* do the deed */
-	gpio_line_set(NAS100D_PO_GPIO, IXP4XX_GPIO_HIGH);
+	/* enable the pwr cntl gpio and assert power off */
+	gpio_direction_output(NAS100D_PO_GPIO, 1);
 }
 
 /* This is used to make sure the power-button pusher is serious.  The button
@@ -186,10 +214,10 @@ static int power_button_countdown;
 /* Must hold the button down for at least this many counts to be processed */
 #define PBUTTON_HOLDDOWN_COUNT 4 /* 2 secs */
 
-static void nas100d_power_handler(unsigned long data);
-static DEFINE_TIMER(nas100d_power_timer, nas100d_power_handler, 0, 0);
+static void nas100d_power_handler(struct timer_list *unused);
+static DEFINE_TIMER(nas100d_power_timer, nas100d_power_handler);
 
-static void nas100d_power_handler(unsigned long data)
+static void nas100d_power_handler(struct timer_list *unused)
 {
 	/* This routine is called twice per second to check the
 	 * state of the power button.
@@ -212,7 +240,7 @@ static void nas100d_power_handler(unsigned long data)
 			ctrl_alt_del();
 
 			/* Change the state of the power LED to "blink" */
-			gpio_line_set(NAS100D_LED_PWR_GPIO, IXP4XX_GPIO_LOW);
+			gpio_set_value(NAS100D_LED_PWR_GPIO, 0);
 		} else {
 			power_button_countdown = PBUTTON_HOLDDOWN_COUNT;
 		}
@@ -229,21 +257,45 @@ static irqreturn_t nas100d_reset_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static int __init nas100d_gpio_init(void)
+{
+	if (!machine_is_nas100d())
+		return 0;
+
+	/*
+	 * The power button on the Iomega NAS100d is on GPIO 14, but
+	 * it cannot handle interrupts on that GPIO line.  So we'll
+	 * have to poll it with a kernel timer.
+	 */
+
+	/* Request the power off GPIO */
+	gpio_request(NAS100D_PO_GPIO, "power off");
+
+	/* Make sure that the power button GPIO is set up as an input */
+	gpio_request(NAS100D_PB_GPIO, "power button");
+	gpio_direction_input(NAS100D_PB_GPIO);
+
+	/* Set the initial value for the power button IRQ handler */
+	power_button_countdown = PBUTTON_HOLDDOWN_COUNT;
+
+	mod_timer(&nas100d_power_timer, jiffies + msecs_to_jiffies(500));
+
+	return 0;
+}
+device_initcall(nas100d_gpio_init);
+
 static void __init nas100d_init(void)
 {
-	DECLARE_MAC_BUF(mac_buf);
 	uint8_t __iomem *f;
 	int i;
 
 	ixp4xx_sys_init();
 
-	/* gpio 14 and 15 are _not_ clocks */
-	*IXP4XX_GPIO_GPCLKR = 0;
-
 	nas100d_flash_resource.start = IXP4XX_EXP_BUS_BASE(0);
 	nas100d_flash_resource.end =
 		IXP4XX_EXP_BUS_BASE(0) + ixp4xx_exp_bus_size - 1;
 
+	gpiod_add_lookup_table(&nas100d_i2c_gpiod_table);
 	i2c_register_board_info(0, nas100d_i2c_board_info,
 				ARRAY_SIZE(nas100d_i2c_board_info));
 
@@ -259,25 +311,11 @@ static void __init nas100d_init(void)
 	pm_power_off = nas100d_power_off;
 
 	if (request_irq(gpio_to_irq(NAS100D_RB_GPIO), &nas100d_reset_handler,
-		IRQF_DISABLED | IRQF_TRIGGER_LOW,
-		"NAS100D reset button", NULL) < 0) {
+		IRQF_TRIGGER_LOW, "NAS100D reset button", NULL) < 0) {
 
 		printk(KERN_DEBUG "Reset Button IRQ %d not available\n",
 			gpio_to_irq(NAS100D_RB_GPIO));
 	}
-
-	/* The power button on the Iomega NAS100d is on GPIO 14, but
-	 * it cannot handle interrupts on that GPIO line.  So we'll
-	 * have to poll it with a kernel timer.
-	 */
-
-	/* Make sure that the power button GPIO is set up as an input */
-	gpio_line_config(NAS100D_PB_GPIO, IXP4XX_GPIO_IN);
-
-	/* Set the initial value for the power button IRQ handler */
-	power_button_countdown = PBUTTON_HOLDDOWN_COUNT;
-
-	mod_timer(&nas100d_power_timer, jiffies + msecs_to_jiffies(500));
 
 	/*
 	 * Map in a portion of the flash and read the MAC address.
@@ -294,18 +332,21 @@ static void __init nas100d_init(void)
 #endif
 		iounmap(f);
 	}
-	printk(KERN_INFO "NAS100D: Using MAC address %s for port 0\n",
-	       print_mac(mac_buf, nas100d_plat_eth[0].hwaddr));
+	printk(KERN_INFO "NAS100D: Using MAC address %pM for port 0\n",
+	       nas100d_plat_eth[0].hwaddr);
 
 }
 
 MACHINE_START(NAS100D, "Iomega NAS 100d")
 	/* Maintainer: www.nslu2-linux.org */
-	.phys_io	= IXP4XX_PERIPHERAL_BASE_PHYS,
-	.io_pg_offst	= ((IXP4XX_PERIPHERAL_BASE_VIRT) >> 18) & 0xFFFC,
-	.boot_params	= 0x00000100,
+	.atag_offset	= 0x100,
 	.map_io		= ixp4xx_map_io,
+	.init_early	= ixp4xx_init_early,
 	.init_irq	= ixp4xx_init_irq,
-	.timer          = &ixp4xx_timer,
+	.init_time	= ixp4xx_timer_init,
 	.init_machine	= nas100d_init,
+#if defined(CONFIG_PCI)
+	.dma_zone_size	= SZ_64M,
+#endif
+	.restart	= ixp4xx_restart,
 MACHINE_END

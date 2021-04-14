@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * IPWireless 3G UMTS TDD Modem driver (USB connected)
  *
  *   Copyright (C) 2004 Roelf Diedericks <roelfd@inet.co.za>
  *   Copyright (C) 2004 Greg Kroah-Hartman <greg@kroah.com>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
  *
  * All information about the device was acquired using SnoopyPro
  * on MSFT's O/S, and examing the MSFT drivers' debug output
@@ -34,12 +30,10 @@
  * DCD, DTR, RTS, CTS which are currently faked.
  * It's good enough for PPP at this point. It's based off all kinds of
  * code found in usb/serial and usb/class
- *
  */
 
 #include <linux/kernel.h>
 #include <linux/errno.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
@@ -48,11 +42,8 @@
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 #include <linux/uaccess.h>
+#include "usb-wwan.h"
 
-/*
- * Version Information
- */
-#define DRIVER_VERSION	"v0.3"
 #define DRIVER_AUTHOR	"Roelf Diedericks"
 #define DRIVER_DESC	"IPWireless tty driver"
 
@@ -65,8 +56,6 @@
 /* Message sizes */
 #define EVENT_BUFFER_SIZE	0xFF
 #define CHAR2INT16(c1, c0)	(((u32)((c1) & 0xff) << 8) + (u32)((c0) & 0xff))
-#define NUM_BULK_URBS		24
-#define NUM_CONTROL_URBS	16
 
 /* vendor/product pairs that are known work with this driver*/
 #define IPW_VID		0x0bc3
@@ -134,86 +123,29 @@ enum {
 
 #define IPW_WANTS_TO_SEND	0x30
 
-static struct usb_device_id usb_ipw_ids[] = {
+static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(IPW_VID, IPW_PID) },
 	{ },
 };
+MODULE_DEVICE_TABLE(usb, id_table);
 
-MODULE_DEVICE_TABLE(usb, usb_ipw_ids);
-
-static struct usb_driver usb_ipw_driver = {
-	.name =		"ipwtty",
-	.probe =	usb_serial_probe,
-	.disconnect =	usb_serial_disconnect,
-	.id_table =	usb_ipw_ids,
-	.no_dynamic_id = 	1,
-};
-
-static int debug;
-
-static void ipw_read_bulk_callback(struct urb *urb)
+static int ipw_open(struct tty_struct *tty, struct usb_serial_port *port)
 {
-	struct usb_serial_port *port = urb->context;
-	unsigned char *data = urb->transfer_buffer;
-	struct tty_struct *tty;
-	int result;
-	int status = urb->status;
-
-	dbg("%s - port %d", __func__, port->number);
-
-	if (status) {
-		dbg("%s - nonzero read bulk status received: %d",
-		    __func__, status);
-		return;
-	}
-
-	usb_serial_debug_data(debug, &port->dev, __func__,
-					urb->actual_length, data);
-
-	tty = port->port.tty;
-	if (tty && urb->actual_length) {
-		tty_buffer_request_room(tty, urb->actual_length);
-		tty_insert_flip_string(tty, data, urb->actual_length);
-		tty_flip_buffer_push(tty);
-	}
-
-	/* Continue trying to always read  */
-	usb_fill_bulk_urb(port->read_urb, port->serial->dev,
-			  usb_rcvbulkpipe(port->serial->dev,
-					   port->bulk_in_endpointAddress),
-			  port->read_urb->transfer_buffer,
-			  port->read_urb->transfer_buffer_length,
-			  ipw_read_bulk_callback, port);
-	result = usb_submit_urb(port->read_urb, GFP_ATOMIC);
-	if (result)
-		dev_err(&port->dev,
-			"%s - failed resubmitting read urb, error %d\n",
-							__func__, result);
-	return;
-}
-
-static int ipw_open(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp)
-{
-	struct usb_device *dev = port->serial->dev;
+	struct usb_device *udev = port->serial->dev;
+	struct device *dev = &port->dev;
 	u8 buf_flow_static[16] = IPW_BYTES_FLOWINIT;
 	u8 *buf_flow_init;
 	int result;
-
-	dbg("%s", __func__);
 
 	buf_flow_init = kmemdup(buf_flow_static, 16, GFP_KERNEL);
 	if (!buf_flow_init)
 		return -ENOMEM;
 
-	if (tty)
-		tty->low_latency = 1;
-
 	/* --1: Tell the modem to initialize (we think) From sniffs this is
 	 *	always the first thing that gets sent to the modem during
 	 *	opening of the device */
-	dbg("%s: Sending SIO_INIT (we guess)", __func__);
-	result = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
+	dev_dbg(dev, "%s: Sending SIO_INIT (we guess)\n", __func__);
+	result = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
 			 IPW_SIO_INIT,
 			 USB_TYPE_VENDOR | USB_RECIP_INTERFACE | USB_DIR_OUT,
 			 0,
@@ -222,30 +154,19 @@ static int ipw_open(struct tty_struct *tty,
 			 0,
 			 100000);
 	if (result < 0)
-		dev_err(&port->dev,
-			"Init of modem failed (error = %d)\n", result);
+		dev_err(dev, "Init of modem failed (error = %d)\n", result);
 
 	/* reset the bulk pipes */
-	usb_clear_halt(dev,
-			usb_rcvbulkpipe(dev, port->bulk_in_endpointAddress));
-	usb_clear_halt(dev,
-			usb_sndbulkpipe(dev, port->bulk_out_endpointAddress));
+	usb_clear_halt(udev, usb_rcvbulkpipe(udev, port->bulk_in_endpointAddress));
+	usb_clear_halt(udev, usb_sndbulkpipe(udev, port->bulk_out_endpointAddress));
 
 	/*--2: Start reading from the device */
-	dbg("%s: setting up bulk read callback", __func__);
-	usb_fill_bulk_urb(port->read_urb, dev,
-			  usb_rcvbulkpipe(dev, port->bulk_in_endpointAddress),
-			  port->bulk_in_buffer,
-			  port->bulk_in_size,
-			  ipw_read_bulk_callback, port);
-	result = usb_submit_urb(port->read_urb, GFP_KERNEL);
-	if (result < 0)
-		dbg("%s - usb_submit_urb(read bulk) failed with status %d",
-							__func__, result);
+	dev_dbg(dev, "%s: setting up bulk read callback\n", __func__);
+	usb_wwan_open(tty, port);
 
 	/*--3: Tell the modem to open the floodgates on the rx bulk channel */
-	dbg("%s:asking modem for RxRead (RXBULK_ON)", __func__);
-	result = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
+	dev_dbg(dev, "%s:asking modem for RxRead (RXBULK_ON)\n", __func__);
+	result = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
 			 IPW_SIO_RXCTL,
 			 USB_TYPE_VENDOR | USB_RECIP_INTERFACE | USB_DIR_OUT,
 			 IPW_RXBULK_ON,
@@ -254,12 +175,11 @@ static int ipw_open(struct tty_struct *tty,
 			 0,
 			 100000);
 	if (result < 0)
-		dev_err(&port->dev,
-			"Enabling bulk RxRead failed (error = %d)\n", result);
+		dev_err(dev, "Enabling bulk RxRead failed (error = %d)\n", result);
 
 	/*--4: setup the initial flowcontrol */
-	dbg("%s:setting init flowcontrol (%s)", __func__, buf_flow_init);
-	result = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
+	dev_dbg(dev, "%s:setting init flowcontrol (%s)\n", __func__, buf_flow_init);
+	result = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
 			 IPW_SIO_HANDFLOW,
 			 USB_TYPE_VENDOR | USB_RECIP_INTERFACE | USB_DIR_OUT,
 			 0,
@@ -268,85 +188,73 @@ static int ipw_open(struct tty_struct *tty,
 			 0x10,
 			 200000);
 	if (result < 0)
-		dev_err(&port->dev,
-			"initial flowcontrol failed (error = %d)\n", result);
-
-
-	/*--5: raise the dtr */
-	dbg("%s:raising dtr", __func__);
-	result = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
-			 IPW_SIO_SET_PIN,
-			 USB_TYPE_VENDOR | USB_RECIP_INTERFACE | USB_DIR_OUT,
-			 IPW_PIN_SETDTR,
-			 0,
-			 NULL,
-			 0,
-			 200000);
-	if (result < 0)
-		dev_err(&port->dev,
-				"setting dtr failed (error = %d)\n", result);
-
-	/*--6: raise the rts */
-	dbg("%s:raising rts", __func__);
-	result = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
-			 IPW_SIO_SET_PIN,
-			 USB_TYPE_VENDOR | USB_RECIP_INTERFACE | USB_DIR_OUT,
-			 IPW_PIN_SETRTS,
-			 0,
-			 NULL,
-			 0,
-			 200000);
-	if (result < 0)
-		dev_err(&port->dev,
-				"setting dtr failed (error = %d)\n", result);
+		dev_err(dev, "initial flowcontrol failed (error = %d)\n", result);
 
 	kfree(buf_flow_init);
 	return 0;
 }
 
-static void ipw_close(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp)
+static int ipw_attach(struct usb_serial *serial)
 {
-	struct usb_device *dev = port->serial->dev;
+	struct usb_wwan_intf_private *data;
+
+	data = kzalloc(sizeof(struct usb_wwan_intf_private), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	spin_lock_init(&data->susp_lock);
+	usb_set_serial_data(serial, data);
+	return 0;
+}
+
+static void ipw_release(struct usb_serial *serial)
+{
+	struct usb_wwan_intf_private *data = usb_get_serial_data(serial);
+
+	usb_set_serial_data(serial, NULL);
+	kfree(data);
+}
+
+static void ipw_dtr_rts(struct usb_serial_port *port, int on)
+{
+	struct usb_device *udev = port->serial->dev;
+	struct device *dev = &port->dev;
 	int result;
 
-	if (tty_hung_up_p(filp)) {
-		dbg("%s: tty_hung_up_p ...", __func__);
-		return;
-	}
+	dev_dbg(dev, "%s: on = %d\n", __func__, on);
 
-	/*--1: drop the dtr */
-	dbg("%s:dropping dtr", __func__);
-	result = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
+	result = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
 			 IPW_SIO_SET_PIN,
 			 USB_TYPE_VENDOR | USB_RECIP_INTERFACE | USB_DIR_OUT,
-			 IPW_PIN_CLRDTR,
+			 on ? IPW_PIN_SETDTR : IPW_PIN_CLRDTR,
 			 0,
 			 NULL,
 			 0,
 			 200000);
 	if (result < 0)
-		dev_err(&port->dev, "dropping dtr failed (error = %d)\n",
-								result);
+		dev_err(dev, "setting dtr failed (error = %d)\n", result);
 
-	/*--2: drop the rts */
-	dbg("%s:dropping rts", __func__);
-	result = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
+	result = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
 			 IPW_SIO_SET_PIN, USB_TYPE_VENDOR |
-			 		USB_RECIP_INTERFACE | USB_DIR_OUT,
-			 IPW_PIN_CLRRTS,
+					USB_RECIP_INTERFACE | USB_DIR_OUT,
+			 on ? IPW_PIN_SETRTS : IPW_PIN_CLRRTS,
 			 0,
 			 NULL,
 			 0,
 			 200000);
 	if (result < 0)
-		dev_err(&port->dev,
-				"dropping rts failed (error = %d)\n", result);
+		dev_err(dev, "setting rts failed (error = %d)\n", result);
+}
 
+static void ipw_close(struct usb_serial_port *port)
+{
+	struct usb_device *udev = port->serial->dev;
+	struct device *dev = &port->dev;
+	int result;
 
 	/*--3: purge */
-	dbg("%s:sending purge", __func__);
-	result = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
+	dev_dbg(dev, "%s:sending purge\n", __func__);
+	result = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
 			 IPW_SIO_PURGE, USB_TYPE_VENDOR |
 			 		USB_RECIP_INTERFACE | USB_DIR_OUT,
 			 0x03,
@@ -355,12 +263,12 @@ static void ipw_close(struct tty_struct *tty,
 			 0,
 			 200000);
 	if (result < 0)
-		dev_err(&port->dev, "purge failed (error = %d)\n", result);
+		dev_err(dev, "purge failed (error = %d)\n", result);
 
 
 	/* send RXBULK_off (tell modem to stop transmitting bulk data on
 	   rx chan) */
-	result = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
+	result = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
 			 IPW_SIO_RXCTL,
 			 USB_TYPE_VENDOR | USB_RECIP_INTERFACE | USB_DIR_OUT,
 			 IPW_RXBULK_OFF,
@@ -370,86 +278,9 @@ static void ipw_close(struct tty_struct *tty,
 			 100000);
 
 	if (result < 0)
-		dev_err(&port->dev,
-			"Disabling bulk RxRead failed (error = %d)\n", result);
+		dev_err(dev, "Disabling bulk RxRead failed (error = %d)\n", result);
 
-	/* shutdown any in-flight urbs that we know about */
-	usb_kill_urb(port->read_urb);
-	usb_kill_urb(port->write_urb);
-}
-
-static void ipw_write_bulk_callback(struct urb *urb)
-{
-	struct usb_serial_port *port = urb->context;
-	int status = urb->status;
-
-	dbg("%s", __func__);
-
-	port->write_urb_busy = 0;
-
-	if (status)
-		dbg("%s - nonzero write bulk status received: %d",
-		    __func__, status);
-
-	usb_serial_port_softint(port);
-}
-
-static int ipw_write(struct tty_struct *tty, struct usb_serial_port *port,
-					const unsigned char *buf, int count)
-{
-	struct usb_device *dev = port->serial->dev;
-	int ret;
-
-	dbg("%s: TOP: count=%d, in_interrupt=%ld", __func__,
-		count, in_interrupt());
-
-	if (count == 0) {
-		dbg("%s - write request of 0 bytes", __func__);
-		return 0;
-	}
-
-	spin_lock_bh(&port->lock);
-	if (port->write_urb_busy) {
-		spin_unlock_bh(&port->lock);
-		dbg("%s - already writing", __func__);
-		return 0;
-	}
-	port->write_urb_busy = 1;
-	spin_unlock_bh(&port->lock);
-
-	count = min(count, port->bulk_out_size);
-	memcpy(port->bulk_out_buffer, buf, count);
-
-	dbg("%s count now:%d", __func__, count);
-
-	usb_fill_bulk_urb(port->write_urb, dev,
-			  usb_sndbulkpipe(dev, port->bulk_out_endpointAddress),
-			  port->write_urb->transfer_buffer,
-			  count,
-			  ipw_write_bulk_callback,
-			  port);
-
-	ret = usb_submit_urb(port->write_urb, GFP_ATOMIC);
-	if (ret != 0) {
-		port->write_urb_busy = 0;
-		dbg("%s - usb_submit_urb(write bulk) failed with error = %d",
-								__func__, ret);
-		return ret;
-	}
-
-	dbg("%s returning %d", __func__, count);
-	return count;
-}
-
-static int ipw_probe(struct usb_serial_port *port)
-{
-	return 0;
-}
-
-static int ipw_disconnect(struct usb_serial_port *port)
-{
-	usb_set_serial_port_data(port, NULL);
-	return 0;
+	usb_wwan_close(port);
 }
 
 static struct usb_serial_driver ipw_device = {
@@ -458,49 +289,25 @@ static struct usb_serial_driver ipw_device = {
 		.name =		"ipw",
 	},
 	.description =		"IPWireless converter",
-	.usb_driver = 		&usb_ipw_driver,
-	.id_table =		usb_ipw_ids,
+	.id_table =		id_table,
 	.num_ports =		1,
 	.open =			ipw_open,
 	.close =		ipw_close,
-	.port_probe = 		ipw_probe,
-	.port_remove =		ipw_disconnect,
-	.write =		ipw_write,
-	.write_bulk_callback =	ipw_write_bulk_callback,
-	.read_bulk_callback =	ipw_read_bulk_callback,
+	.attach =		ipw_attach,
+	.release =		ipw_release,
+	.port_probe =		usb_wwan_port_probe,
+	.port_remove =		usb_wwan_port_remove,
+	.dtr_rts =		ipw_dtr_rts,
+	.write =		usb_wwan_write,
 };
 
+static struct usb_serial_driver * const serial_drivers[] = {
+	&ipw_device, NULL
+};
 
-
-static int usb_ipw_init(void)
-{
-	int retval;
-
-	retval = usb_serial_register(&ipw_device);
-	if (retval)
-		return retval;
-	retval = usb_register(&usb_ipw_driver);
-	if (retval) {
-		usb_serial_deregister(&ipw_device);
-		return retval;
-	}
-	info(DRIVER_DESC " " DRIVER_VERSION);
-	return 0;
-}
-
-static void usb_ipw_exit(void)
-{
-	usb_deregister(&usb_ipw_driver);
-	usb_serial_deregister(&ipw_device);
-}
-
-module_init(usb_ipw_init);
-module_exit(usb_ipw_exit);
+module_usb_serial_driver(serial_drivers, id_table);
 
 /* Module information */
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
-
-module_param(debug, bool, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(debug, "Debug enabled or not");

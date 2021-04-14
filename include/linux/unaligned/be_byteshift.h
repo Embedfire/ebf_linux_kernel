@@ -1,7 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_UNALIGNED_BE_BYTESHIFT_H
 #define _LINUX_UNALIGNED_BE_BYTESHIFT_H
 
-#include <linux/kernel.h>
+#include <linux/types.h>
 
 static inline u16 __get_unaligned_be16(const u8 *p)
 {
@@ -39,17 +40,17 @@ static inline void __put_unaligned_be64(u64 val, u8 *p)
 
 static inline u16 get_unaligned_be16(const void *p)
 {
-	return __get_unaligned_be16((const u8 *)p);
+	return __get_unaligned_be16(p);
 }
 
 static inline u32 get_unaligned_be32(const void *p)
 {
-	return __get_unaligned_be32((const u8 *)p);
+	return __get_unaligned_be32(p);
 }
 
 static inline u64 get_unaligned_be64(const void *p)
 {
-	return __get_unaligned_be64((const u8 *)p);
+	return __get_unaligned_be64(p);
 }
 
 static inline void put_unaligned_be16(u16 val, void *p)

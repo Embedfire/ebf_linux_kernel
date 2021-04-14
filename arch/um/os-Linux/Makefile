@@ -1,23 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0
 # 
 # Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
-# Licensed under the GPL
 #
 
-obj-y = aio.o elf_aux.o execvp.o file.o helper.o irq.o main.o mem.o process.o \
-	registers.o sigio.o signal.o start_up.o time.o tty.o uaccess.o \
-	umid.o tls.o user_syms.o util.o drivers/ sys-$(SUBARCH)/ skas/
+# Don't instrument UML-specific code
+KCOV_INSTRUMENT                := n
 
-obj-$(CONFIG_TTY_LOG) += tty_log.o
-user-objs-$(CONFIG_TTY_LOG) += tty_log.o
+obj-y = execvp.o file.o helper.o irq.o main.o mem.o process.o \
+	registers.o sigio.o signal.o start_up.o time.o tty.o \
+	umid.o user_syms.o util.o drivers/ skas/
 
-USER_OBJS := $(user-objs-y) aio.o elf_aux.o execvp.o file.o helper.o irq.o \
+obj-$(CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA) += elf_aux.o
+
+USER_OBJS := $(user-objs-y) elf_aux.o execvp.o file.o helper.o irq.o \
 	main.o mem.o process.o registers.o sigio.o signal.o start_up.o time.o \
-	tty.o tls.o uaccess.o umid.o util.o
-
-CFLAGS_user_syms.o += -DSUBARCH_$(SUBARCH)
-
-HAVE_AIO_ABI := $(shell [ -r /usr/include/linux/aio_abi.h ] && \
-	echo -DHAVE_AIO_ABI )
-CFLAGS_aio.o += $(HAVE_AIO_ABI)
+	tty.o umid.o util.o
 
 include arch/um/scripts/Makefile.rules

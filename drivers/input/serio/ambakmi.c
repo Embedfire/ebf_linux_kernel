@@ -1,16 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  linux/drivers/input/serio/ambakmi.c
  *
  *  Copyright (C) 2000-2003 Deep Blue Solutions Ltd.
  *  Copyright (C) 2002 Russell King.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/serio.h>
 #include <linux/errno.h>
 #include <linux/interrupt.h>
@@ -57,7 +52,7 @@ static int amba_kmi_write(struct serio *io, unsigned char val)
 	struct amba_kmi_port *kmi = io->port_data;
 	unsigned int timeleft = 10000; /* timeout in 100ms */
 
-	while ((readb(KMISTAT) & KMISTAT_TXEMPTY) == 0 && timeleft--)
+	while ((readb(KMISTAT) & KMISTAT_TXEMPTY) == 0 && --timeleft)
 		udelay(10);
 
 	if (timeleft)
@@ -72,7 +67,7 @@ static int amba_kmi_open(struct serio *io)
 	unsigned int divisor;
 	int ret;
 
-	ret = clk_enable(kmi->clk);
+	ret = clk_prepare_enable(kmi->clk);
 	if (ret)
 		goto out;
 
@@ -80,7 +75,8 @@ static int amba_kmi_open(struct serio *io)
 	writeb(divisor, KMICLKDIV);
 	writeb(KMICR_EN, KMICR);
 
-	ret = request_irq(kmi->irq, amba_kmi_int, 0, "kmi-pl050", kmi);
+	ret = request_irq(kmi->irq, amba_kmi_int, IRQF_SHARED, "kmi-pl050",
+			  kmi);
 	if (ret) {
 		printk(KERN_ERR "kmi: failed to claim IRQ%d\n", kmi->irq);
 		writeb(0, KMICR);
@@ -92,7 +88,7 @@ static int amba_kmi_open(struct serio *io)
 	return 0;
 
  clk_disable:
-	clk_disable(kmi->clk);
+	clk_disable_unprepare(kmi->clk);
  out:
 	return ret;
 }
@@ -104,10 +100,11 @@ static void amba_kmi_close(struct serio *io)
 	writeb(0, KMICR);
 
 	free_irq(kmi->irq, kmi);
-	clk_disable(kmi->clk);
+	clk_disable_unprepare(kmi->clk);
 }
 
-static int amba_kmi_probe(struct amba_device *dev, void *id)
+static int amba_kmi_probe(struct amba_device *dev,
+	const struct amba_id *id)
 {
 	struct amba_kmi_port *kmi;
 	struct serio *io;
@@ -129,13 +126,13 @@ static int amba_kmi_probe(struct amba_device *dev, void *id)
 	io->write	= amba_kmi_write;
 	io->open	= amba_kmi_open;
 	io->close	= amba_kmi_close;
-	strlcpy(io->name, dev->dev.bus_id, sizeof(io->name));
-	strlcpy(io->phys, dev->dev.bus_id, sizeof(io->phys));
+	strlcpy(io->name, dev_name(&dev->dev), sizeof(io->name));
+	strlcpy(io->phys, dev_name(&dev->dev), sizeof(io->phys));
 	io->port_data	= kmi;
 	io->dev.parent	= &dev->dev;
 
-	kmi->io 	= io;
-	kmi->base	= ioremap(dev->res.start, KMI_SIZE);
+	kmi->io		= io;
+	kmi->base	= ioremap(dev->res.start, resource_size(&dev->res));
 	if (!kmi->base) {
 		ret = -ENOMEM;
 		goto out;
@@ -166,8 +163,6 @@ static int amba_kmi_remove(struct amba_device *dev)
 {
 	struct amba_kmi_port *kmi = amba_get_drvdata(dev);
 
-	amba_set_drvdata(dev, NULL);
-
 	serio_unregister_port(kmi->io);
 	clk_put(kmi->clk);
 	iounmap(kmi->base);
@@ -176,9 +171,9 @@ static int amba_kmi_remove(struct amba_device *dev)
 	return 0;
 }
 
-static int amba_kmi_resume(struct amba_device *dev)
+static int __maybe_unused amba_kmi_resume(struct device *dev)
 {
-	struct amba_kmi_port *kmi = amba_get_drvdata(dev);
+	struct amba_kmi_port *kmi = dev_get_drvdata(dev);
 
 	/* kick the serio layer to rescan this port */
 	serio_reconnect(kmi->io);
@@ -186,7 +181,9 @@ static int amba_kmi_resume(struct amba_device *dev)
 	return 0;
 }
 
-static struct amba_id amba_kmi_idtable[] = {
+static SIMPLE_DEV_PM_OPS(amba_kmi_dev_pm_ops, NULL, amba_kmi_resume);
+
+static const struct amba_id amba_kmi_idtable[] = {
 	{
 		.id	= 0x00041050,
 		.mask	= 0x000fffff,
@@ -194,28 +191,20 @@ static struct amba_id amba_kmi_idtable[] = {
 	{ 0, 0 }
 };
 
+MODULE_DEVICE_TABLE(amba, amba_kmi_idtable);
+
 static struct amba_driver ambakmi_driver = {
 	.drv		= {
 		.name	= "kmi-pl050",
+		.owner	= THIS_MODULE,
+		.pm	= &amba_kmi_dev_pm_ops,
 	},
 	.id_table	= amba_kmi_idtable,
 	.probe		= amba_kmi_probe,
 	.remove		= amba_kmi_remove,
-	.resume		= amba_kmi_resume,
 };
 
-static int __init amba_kmi_init(void)
-{
-	return amba_driver_register(&ambakmi_driver);
-}
-
-static void __exit amba_kmi_exit(void)
-{
-	amba_driver_unregister(&ambakmi_driver);
-}
-
-module_init(amba_kmi_init);
-module_exit(amba_kmi_exit);
+module_amba_driver(ambakmi_driver);
 
 MODULE_AUTHOR("Russell King <rmk@arm.linux.org.uk>");
 MODULE_DESCRIPTION("AMBA KMI controller driver");

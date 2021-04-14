@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*      National Semiconductor NS87560UBD Super I/O controller used in
  *      HP [BCJ]x000 workstations.
  *
@@ -13,11 +14,6 @@
  *      (C) Copyright 2003 Grant Grundler <grundler parisc-linux org>
  *	(C) Copyright 2005 Kyle McMartin <kyle@parisc-linux.org>
  *	(C) Copyright 2006 Helge Deller <deller@gmx.de>
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License as
- *	published by the Free Software Foundation; either version 2 of
- *	the License, or (at your option) any later version.  
  *
  *	The initial version of this is by Martin Peterson.  Alex deVries
  *	has spent a bit of time trying to coax it into working.
@@ -139,7 +135,7 @@ superio_interrupt(int parent_irq, void *devp)
 	}
 
 	/* Call the appropriate device's interrupt */
-	__do_IRQ(local_irq);
+	generic_handle_irq(local_irq);
 
 	/* set EOI - forces a new interrupt if a lower priority device
 	 * still needs service.
@@ -169,7 +165,7 @@ superio_init(struct pci_dev *pcidev)
 	/* ...then properly fixup the USB to point at suckyio PIC */
 	sio->usb_pdev->irq = superio_fixup_irq(sio->usb_pdev);
 
-	printk(KERN_INFO PFX "Found NS87560 Legacy I/O device at %s (IRQ %i) \n",
+	printk(KERN_INFO PFX "Found NS87560 Legacy I/O device at %s (IRQ %i)\n",
 	       pci_name(pdev), pdev->irq);
 
 	pci_read_config_dword (pdev, SIO_SP1BAR, &sio->sp1_base);
@@ -274,7 +270,7 @@ superio_init(struct pci_dev *pcidev)
 	else
 		printk(KERN_ERR PFX "USB regulator not initialized!\n");
 
-	if (request_irq(pdev->irq, superio_interrupt, IRQF_DISABLED,
+	if (request_irq(pdev->irq, superio_interrupt, 0,
 			SUPERIO, (void *)sio)) {
 
 		printk(KERN_ERR PFX "could not get irq\n");
@@ -286,8 +282,9 @@ superio_init(struct pci_dev *pcidev)
 }
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NS, PCI_DEVICE_ID_NS_87560_LIO, superio_init);
 
-static void superio_disable_irq(unsigned int irq)
+static void superio_mask_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
 	u8 r8;
 
 	if ((irq < 1) || (irq == 2) || (irq > 7)) {
@@ -303,8 +300,9 @@ static void superio_disable_irq(unsigned int irq)
 	outb (r8,IC_PIC1+1);
 }
 
-static void superio_enable_irq(unsigned int irq)
+static void superio_unmask_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
 	u8 r8;
 
 	if ((irq < 1) || (irq == 2) || (irq > 7)) {
@@ -319,20 +317,10 @@ static void superio_enable_irq(unsigned int irq)
 	outb (r8,IC_PIC1+1);
 }
 
-static unsigned int superio_startup_irq(unsigned int irq)
-{
-	superio_enable_irq(irq);
-	return 0;
-}
-
-static struct hw_interrupt_type superio_interrupt_type = {
-	.typename =	SUPERIO,
-	.startup =	superio_startup_irq,
-	.shutdown =	superio_disable_irq,
-	.enable =	superio_enable_irq,
-	.disable =	superio_disable_irq,
-	.ack =		no_ack_irq,
-	.end =		no_end_irq,
+static struct irq_chip superio_interrupt_type = {
+	.name		=	SUPERIO,
+	.irq_unmask	=	superio_unmask_irq,
+	.irq_mask	=	superio_mask_irq,
 };
 
 #ifdef DEBUG_SUPERIO_INIT
@@ -356,14 +344,15 @@ int superio_fixup_irq(struct pci_dev *pcidev)
 		BUG();
 		return -1;
 	}
-	printk("superio_fixup_irq(%s) ven 0x%x dev 0x%x from %p\n",
+	printk(KERN_DEBUG "superio_fixup_irq(%s) ven 0x%x dev 0x%x from %ps\n",
 		pci_name(pcidev),
 		pcidev->vendor, pcidev->device,
 		__builtin_return_address(0));
 #endif
 
 	for (i = 0; i < 16; i++) {
-		irq_desc[i].chip = &superio_interrupt_type;
+		irq_set_chip_and_handler(i, &superio_interrupt_type,
+					 handle_simple_irq);
 	}
 
 	/*
@@ -402,8 +391,8 @@ static void __init superio_serial_init(void)
 	serial_port.iotype	= UPIO_PORT;
 	serial_port.type	= PORT_16550A;
 	serial_port.uartclk	= 115200*16;
-	serial_port.fifosize	= 16;
-	spin_lock_init(&serial_port.lock);
+	serial_port.flags	= UPF_FIXED_PORT | UPF_FIXED_TYPE |
+				  UPF_BOOT_AUTOCONF;
 
 	/* serial port #1 */
 	serial_port.iobase	= sio_dev.sp1_base;
@@ -433,7 +422,8 @@ static void __init superio_parport_init(void)
 			0 /*base_hi*/,
 			PAR_IRQ, 
 			PARPORT_DMA_NONE /* dma */,
-			NULL /*struct pci_dev* */) )
+			NULL /*struct pci_dev* */,
+			0 /* shared irq flags */))
 
 		printk(KERN_WARNING PFX "Probing parallel port failed.\n");
 #endif	/* CONFIG_PARPORT_PC */
@@ -488,28 +478,17 @@ superio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	return -ENODEV;
 }
 
-static const struct pci_device_id superio_tbl[] = {
+static const struct pci_device_id superio_tbl[] __initconst = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_NS, PCI_DEVICE_ID_NS_87560_LIO) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_NS, PCI_DEVICE_ID_NS_87560_USB) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_NS, PCI_DEVICE_ID_NS_87415) },
 	{ 0, }
 };
 
-static struct pci_driver superio_driver = {
+static struct pci_driver superio_driver __refdata = {
 	.name =         SUPERIO,
 	.id_table =     superio_tbl,
 	.probe =        superio_probe,
 };
 
-static int __init superio_modinit(void)
-{
-	return pci_register_driver(&superio_driver);
-}
-
-static void __exit superio_exit(void)
-{
-	pci_unregister_driver(&superio_driver);
-}
-
-module_init(superio_modinit);
-module_exit(superio_exit);
+module_pci_driver(superio_driver);

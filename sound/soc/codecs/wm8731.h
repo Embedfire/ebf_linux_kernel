@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * wm8731.h  --  WM8731 Soc Audio driver
  *
@@ -6,10 +7,6 @@
  * Author: Richard Purdie <richard@openedhand.com>
  *
  * Based on wm8753.h
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef _WM8731_H
@@ -31,14 +28,9 @@
 
 #define WM8731_CACHEREGNUM 	10
 
-#define WM8731_SYSCLK	0
+#define WM8731_SYSCLK_MCLK 0
+#define WM8731_SYSCLK_XTAL 1
+
 #define WM8731_DAI		0
-
-struct wm8731_setup_data {
-	unsigned short i2c_address;
-};
-
-extern struct snd_soc_dai wm8731_dai;
-extern struct snd_soc_codec_device soc_codec_dev_wm8731;
 
 #endif

@@ -1,10 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * sata_inic162x.c - Driver for Initio 162x SATA controllers
  *
  * Copyright 2006  SUSE Linux Products GmbH
  * Copyright 2006  Tejun Heo <teheo@novell.com>
  *
- * This file is released under GPL v2.
+ * **** WARNING ****
+ *
+ * This driver never worked properly and unfortunately data corruption is
+ * relatively common.  There isn't anyone working on the driver and there's
+ * no support from the vendor.  Do not use this driver in any production
+ * environment.
+ *
+ * http://thread.gmane.org/gmane.linux.debian.devel.bugs.rc/378525/focus=54491
+ * https://bugzilla.kernel.org/show_bug.cgi?id=60565
+ *
+ * *****************
  *
  * This controller is eccentric and easily locks up if something isn't
  * right.  Documentation is available at initio's website but it only
@@ -39,6 +50,7 @@
  * happy to assist.
  */
 
+#include <linux/gfp.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -133,7 +145,7 @@ enum {
 
 	/* PORT_IDMA_CTL bits */
 	IDMA_CTL_RST_ATA	= (1 << 2),  /* hardreset ATA bus */
-	IDMA_CTL_RST_IDMA	= (1 << 5),  /* reset IDMA machinary */
+	IDMA_CTL_RST_IDMA	= (1 << 5),  /* reset IDMA machinery */
 	IDMA_CTL_GO		= (1 << 7),  /* IDMA mode go */
 	IDMA_CTL_ATA_NIEN	= (1 << 8),  /* ATA IRQ disable */
 
@@ -232,8 +244,15 @@ struct inic_port_priv {
 
 static struct scsi_host_template inic_sht = {
 	ATA_BASE_SHT(DRV_NAME),
-	.sg_tablesize	= LIBATA_MAX_PRD,	/* maybe it can be larger? */
-	.dma_boundary	= INIC_DMA_BOUNDARY,
+	.sg_tablesize		= LIBATA_MAX_PRD, /* maybe it can be larger? */
+
+	/*
+	 * This controller is braindamaged.  dma_boundary is 0xffff like others
+	 * but it will lock up the whole machine HARD if 65536 byte PRD entry
+	 * is fed.  Reduce maximum segment size.
+	 */
+	.dma_boundary		= INIC_DMA_BOUNDARY,
+	.max_segment_size	= 65536 - 512,
 };
 
 static const int scr_map[] = {
@@ -269,15 +288,13 @@ static void inic_reset_port(void __iomem *port_base)
 	writeb(0xff, port_base + PORT_IRQ_STAT);
 }
 
-static int inic_scr_read(struct ata_port *ap, unsigned sc_reg, u32 *val)
+static int inic_scr_read(struct ata_link *link, unsigned sc_reg, u32 *val)
 {
-	void __iomem *scr_addr = inic_port_base(ap) + PORT_SCR;
-	void __iomem *addr;
+	void __iomem *scr_addr = inic_port_base(link->ap) + PORT_SCR;
 
 	if (unlikely(sc_reg >= ARRAY_SIZE(scr_map)))
 		return -EINVAL;
 
-	addr = scr_addr + scr_map[sc_reg] * 4;
 	*val = readl(scr_addr + scr_map[sc_reg] * 4);
 
 	/* this controller has stuck DIAG.N, ignore it */
@@ -286,9 +303,9 @@ static int inic_scr_read(struct ata_port *ap, unsigned sc_reg, u32 *val)
 	return 0;
 }
 
-static int inic_scr_write(struct ata_port *ap, unsigned sc_reg, u32 val)
+static int inic_scr_write(struct ata_link *link, unsigned sc_reg, u32 val)
 {
-	void __iomem *scr_addr = inic_port_base(ap) + PORT_SCR;
+	void __iomem *scr_addr = inic_port_base(link->ap) + PORT_SCR;
 
 	if (unlikely(sc_reg >= ARRAY_SIZE(scr_map)))
 		return -EINVAL;
@@ -395,9 +412,8 @@ static void inic_host_intr(struct ata_port *ap)
 	}
 
  spurious:
-	ata_port_printk(ap, KERN_WARNING, "unhandled interrupt: "
-			"cmd=0x%x irq_stat=0x%x idma_stat=0x%x\n",
-			qc ? qc->tf.command : 0xff, irq_stat, idma_stat);
+	ata_port_warn(ap, "unhandled interrupt: cmd=0x%x irq_stat=0x%x idma_stat=0x%x\n",
+		      qc ? qc->tf.command : 0xff, irq_stat, idma_stat);
 }
 
 static irqreturn_t inic_interrupt(int irq, void *dev_instance)
@@ -405,7 +421,7 @@ static irqreturn_t inic_interrupt(int irq, void *dev_instance)
 	struct ata_host *host = dev_instance;
 	struct inic_host_priv *hpriv = host->private_data;
 	u16 host_irq_stat;
-	int i, handled = 0;;
+	int i, handled = 0;
 
 	host_irq_stat = readw(hpriv->mmio_base + HOST_IRQ_STAT);
 
@@ -414,22 +430,11 @@ static irqreturn_t inic_interrupt(int irq, void *dev_instance)
 
 	spin_lock(&host->lock);
 
-	for (i = 0; i < NR_PORTS; i++) {
-		struct ata_port *ap = host->ports[i];
-
-		if (!(host_irq_stat & (HIRQ_PORT0 << i)))
-			continue;
-
-		if (likely(ap && !(ap->flags & ATA_FLAG_DISABLED))) {
-			inic_host_intr(ap);
+	for (i = 0; i < NR_PORTS; i++)
+		if (host_irq_stat & (HIRQ_PORT0 << i)) {
+			inic_host_intr(host->ports[i]);
 			handled++;
-		} else {
-			if (ata_ratelimit())
-				dev_printk(KERN_ERR, host->dev, "interrupt "
-					   "from disabled port %d (0x%x)\n",
-					   i, host_irq_stat);
 		}
-	}
 
 	spin_unlock(&host->lock);
 
@@ -473,7 +478,7 @@ static void inic_fill_sg(struct inic_prd *prd, struct ata_queued_cmd *qc)
 	prd[-1].flags |= PRD_END;
 }
 
-static void inic_qc_prep(struct ata_queued_cmd *qc)
+static enum ata_completion_errors inic_qc_prep(struct ata_queued_cmd *qc)
 {
 	struct inic_port_priv *pp = qc->ap->private_data;
 	struct inic_pkt *pkt = pp->pkt;
@@ -533,6 +538,8 @@ static void inic_qc_prep(struct ata_queued_cmd *qc)
 		inic_fill_sg(prd, qc);
 
 	pp->cpb_tbl[0] = pp->pkt_dma;
+
+	return AC_ERR_OK;
 }
 
 static unsigned int inic_qc_issue(struct ata_queued_cmd *qc)
@@ -624,13 +631,14 @@ static int inic_hardreset(struct ata_link *link, unsigned int *class,
 
 	writew(IDMA_CTL_RST_ATA, idma_ctl);
 	readw(idma_ctl);	/* flush */
-	msleep(1);
+	ata_msleep(ap, 1);
 	writew(0, idma_ctl);
 
 	rc = sata_link_resume(link, timing, deadline);
 	if (rc) {
-		ata_link_printk(link, KERN_WARNING, "failed to resume "
-				"link after reset (errno=%d)\n", rc);
+		ata_link_warn(link,
+			      "failed to resume link after reset (errno=%d)\n",
+			      rc);
 		return rc;
 	}
 
@@ -642,8 +650,9 @@ static int inic_hardreset(struct ata_link *link, unsigned int *class,
 		rc = ata_wait_after_reset(link, deadline, inic_check_ready);
 		/* link occupied, -ENODEV too is an error */
 		if (rc) {
-			ata_link_printk(link, KERN_WARNING, "device not ready "
-					"after hardreset (errno=%d)\n", rc);
+			ata_link_warn(link,
+				      "device not ready after hardreset (errno=%d)\n",
+				      rc);
 			return rc;
 		}
 
@@ -678,8 +687,7 @@ static void init_port(struct ata_port *ap)
 	memset(pp->pkt, 0, sizeof(struct inic_pkt));
 	memset(pp->cpb_tbl, 0, IDMA_CPB_TBL_SIZE);
 
-	/* setup PRD and CPB lookup table addresses */
-	writel(ap->prd_dma, port_base + PORT_PRD_ADDR);
+	/* setup CPB lookup table addresses */
 	writel(pp->cpb_tbl_dma, port_base + PORT_CPB_CPBLAR);
 }
 
@@ -693,7 +701,6 @@ static int inic_port_start(struct ata_port *ap)
 {
 	struct device *dev = ap->host->dev;
 	struct inic_port_priv *pp;
-	int rc;
 
 	/* alloc and initialize private data */
 	pp = devm_kzalloc(dev, sizeof(*pp), GFP_KERNEL);
@@ -702,10 +709,6 @@ static int inic_port_start(struct ata_port *ap)
 	ap->private_data = pp;
 
 	/* Alloc resources */
-	rc = ata_port_start(ap);
-	if (rc)
-		return rc;
-
 	pp->pkt = dmam_alloc_coherent(dev, sizeof(struct inic_pkt),
 				      &pp->pkt_dma, GFP_KERNEL);
 	if (!pp->pkt)
@@ -742,10 +745,10 @@ static struct ata_port_operations inic_port_ops = {
 	.port_start		= inic_port_start,
 };
 
-static struct ata_port_info inic_port_info = {
+static const struct ata_port_info inic_port_info = {
 	.flags			= ATA_FLAG_SATA | ATA_FLAG_PIO_DMA,
-	.pio_mask		= 0x1f,	/* pio0-4 */
-	.mwdma_mask		= 0x07, /* mwdma0-2 */
+	.pio_mask		= ATA_PIO4,
+	.mwdma_mask		= ATA_MWDMA2,
 	.udma_mask		= ATA_UDMA6,
 	.port_ops		= &inic_port_ops
 };
@@ -790,10 +793,10 @@ static int init_controller(void __iomem *mmio_base, u16 hctl)
 	return 0;
 }
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 static int inic_pci_device_resume(struct pci_dev *pdev)
 {
-	struct ata_host *host = dev_get_drvdata(&pdev->dev);
+	struct ata_host *host = pci_get_drvdata(pdev);
 	struct inic_host_priv *hpriv = host->private_data;
 	int rc;
 
@@ -815,7 +818,6 @@ static int inic_pci_device_resume(struct pci_dev *pdev)
 
 static int inic_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
-	static int printed_version;
 	const struct ata_port_info *ppi[] = { &inic_port_info, NULL };
 	struct ata_host *host;
 	struct inic_host_priv *hpriv;
@@ -823,8 +825,9 @@ static int inic_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	int mmio_bar;
 	int i, rc;
 
-	if (!printed_version++)
-		dev_printk(KERN_DEBUG, &pdev->dev, "version " DRV_VERSION "\n");
+	ata_print_version_once(&pdev->dev, DRV_VERSION);
+
+	dev_alert(&pdev->dev, "inic162x support is broken with common data corruption issues and will be disabled by default, contact linux-ide@vger.kernel.org if in production use\n");
 
 	/* alloc host */
 	host = ata_host_alloc_pinfo(&pdev->dev, ppi, NR_PORTS);
@@ -861,36 +864,15 @@ static int inic_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	/* Set dma_mask.  This devices doesn't support 64bit addressing. */
-	rc = pci_set_dma_mask(pdev, DMA_32BIT_MASK);
+	rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (rc) {
-		dev_printk(KERN_ERR, &pdev->dev,
-			   "32-bit DMA enable failed\n");
-		return rc;
-	}
-
-	rc = pci_set_consistent_dma_mask(pdev, DMA_32BIT_MASK);
-	if (rc) {
-		dev_printk(KERN_ERR, &pdev->dev,
-			   "32-bit consistent DMA enable failed\n");
-		return rc;
-	}
-
-	/*
-	 * This controller is braindamaged.  dma_boundary is 0xffff
-	 * like others but it will lock up the whole machine HARD if
-	 * 65536 byte PRD entry is fed. Reduce maximum segment size.
-	 */
-	rc = pci_set_dma_max_seg_size(pdev, 65536 - 512);
-	if (rc) {
-		dev_printk(KERN_ERR, &pdev->dev,
-			   "failed to set the maximum segment size.\n");
+		dev_err(&pdev->dev, "32-bit DMA enable failed\n");
 		return rc;
 	}
 
 	rc = init_controller(hpriv->mmio_base, hpriv->cached_hctl);
 	if (rc) {
-		dev_printk(KERN_ERR, &pdev->dev,
-			   "failed to initialize controller\n");
+		dev_err(&pdev->dev, "failed to initialize controller\n");
 		return rc;
 	}
 
@@ -907,7 +889,7 @@ static const struct pci_device_id inic_pci_tbl[] = {
 static struct pci_driver inic_pci_driver = {
 	.name 		= DRV_NAME,
 	.id_table	= inic_pci_tbl,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	.suspend	= ata_pci_device_suspend,
 	.resume		= inic_pci_device_resume,
 #endif
@@ -915,21 +897,10 @@ static struct pci_driver inic_pci_driver = {
 	.remove		= ata_pci_remove_one,
 };
 
-static int __init inic_init(void)
-{
-	return pci_register_driver(&inic_pci_driver);
-}
-
-static void __exit inic_exit(void)
-{
-	pci_unregister_driver(&inic_pci_driver);
-}
+module_pci_driver(inic_pci_driver);
 
 MODULE_AUTHOR("Tejun Heo");
 MODULE_DESCRIPTION("low-level driver for Initio 162x SATA");
 MODULE_LICENSE("GPL v2");
 MODULE_DEVICE_TABLE(pci, inic_pci_tbl);
 MODULE_VERSION(DRV_VERSION);
-
-module_init(inic_init);
-module_exit(inic_exit);

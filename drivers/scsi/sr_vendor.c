@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* -*-linux-c-*-
 
  * vendor-specific code for SCSI CD-ROM's goes here.
@@ -39,6 +40,7 @@
 #include <linux/string.h>
 #include <linux/bcd.h>
 #include <linux/blkdev.h>
+#include <linux/slab.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -59,14 +61,12 @@
 #define VENDOR_NEC             2
 #define VENDOR_TOSHIBA         3
 #define VENDOR_WRITER          4	/* pre-scsi3 writers */
+#define VENDOR_CYGNAL_85ED     5	/* CD-on-a-chip */
 
 #define VENDOR_TIMEOUT	30*HZ
 
 void sr_vendor_init(Scsi_CD *cd)
 {
-#ifndef CONFIG_BLK_DEV_SR_VENDOR
-	cd->vendor = VENDOR_SCSI3;
-#else
 	const char *vendor = cd->device->vendor;
 	const char *model = cd->device->model;
 	
@@ -97,8 +97,24 @@ void sr_vendor_init(Scsi_CD *cd)
 	} else if (!strncmp(vendor, "TOSHIBA", 7)) {
 		cd->vendor = VENDOR_TOSHIBA;
 
+	} else if (!strncmp(vendor, "Beurer", 6) &&
+		   !strncmp(model, "Gluco Memory", 12)) {
+		/* The Beurer GL50 evo uses a Cygnal-manufactured CD-on-a-chip
+		   that only accepts a subset of SCSI commands.  Most of the
+		   not-implemented commands are fine to fail, but a few,
+		   particularly around the MMC or Audio commands, will put the
+		   device into an unrecoverable state, so they need to be
+		   avoided at all costs.
+		*/
+		cd->vendor = VENDOR_CYGNAL_85ED;
+		cd->cdi.mask |= (
+			CDC_MULTI_SESSION |
+			CDC_CLOSE_TRAY | CDC_OPEN_TRAY |
+			CDC_LOCK |
+			CDC_GENERIC_PACKET |
+			CDC_PLAY_AUDIO
+			);
 	}
-#endif
 }
 
 
@@ -112,17 +128,15 @@ int sr_set_blocklength(Scsi_CD *cd, int blocklength)
 	struct ccs_modesel_head *modesel;
 	int rc, density = 0;
 
-#ifdef CONFIG_BLK_DEV_SR_VENDOR
 	if (cd->vendor == VENDOR_TOSHIBA)
 		density = (blocklength > 2048) ? 0x81 : 0x83;
-#endif
 
 	buffer = kmalloc(512, GFP_KERNEL | GFP_DMA);
 	if (!buffer)
 		return -ENOMEM;
 
 #ifdef DEBUG
-	printk("%s: MODE SELECT 0x%x/%d\n", cd->cdi.name, density, blocklength);
+	sr_printk(KERN_INFO, cd, "MODE SELECT 0x%x/%d\n", density, blocklength);
 #endif
 	memset(&cgc, 0, sizeof(struct packet_command));
 	cgc.cmd[0] = MODE_SELECT;
@@ -143,8 +157,9 @@ int sr_set_blocklength(Scsi_CD *cd, int blocklength)
 	}
 #ifdef DEBUG
 	else
-		printk("%s: switching blocklength to %d bytes failed\n",
-		       cd->cdi.name, blocklength);
+		sr_printk(KERN_INFO, cd,
+			  "switching blocklength to %d bytes failed\n",
+			  blocklength);
 #endif
 	kfree(buffer);
 	return rc;
@@ -189,8 +204,8 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 		if (rc != 0)
 			break;
 		if ((buffer[0] << 8) + buffer[1] < 0x0a) {
-			printk(KERN_INFO "%s: Hmm, seems the drive "
-			   "doesn't support multisession CD's\n", cd->cdi.name);
+			sr_printk(KERN_INFO, cd, "Hmm, seems the drive "
+			   "doesn't support multisession CD's\n");
 			no_multi = 1;
 			break;
 		}
@@ -202,7 +217,6 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 		}
 		break;
 
-#ifdef CONFIG_BLK_DEV_SR_VENDOR
 	case VENDOR_NEC:{
 			unsigned long min, sec, frame;
 			cgc.cmd[0] = 0xde;
@@ -217,15 +231,15 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 			if (rc != 0)
 				break;
 			if (buffer[14] != 0 && buffer[14] != 0xb0) {
-				printk(KERN_INFO "%s: Hmm, seems the cdrom "
-				       "doesn't support multisession CD's\n",
-				       cd->cdi.name);
+				sr_printk(KERN_INFO, cd, "Hmm, seems the cdrom "
+					  "doesn't support multisession CD's\n");
+
 				no_multi = 1;
 				break;
 			}
-			min = BCD2BIN(buffer[15]);
-			sec = BCD2BIN(buffer[16]);
-			frame = BCD2BIN(buffer[17]);
+			min = bcd2bin(buffer[15]);
+			sec = bcd2bin(buffer[16]);
+			frame = bcd2bin(buffer[17]);
 			sector = min * CD_SECS * CD_FRAMES + sec * CD_FRAMES + frame;
 			break;
 		}
@@ -244,17 +258,16 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 			cgc.timeout = VENDOR_TIMEOUT;
 			rc = sr_do_ioctl(cd, &cgc);
 			if (rc == -EINVAL) {
-				printk(KERN_INFO "%s: Hmm, seems the drive "
-				       "doesn't support multisession CD's\n",
-				       cd->cdi.name);
+				sr_printk(KERN_INFO, cd, "Hmm, seems the drive "
+					  "doesn't support multisession CD's\n");
 				no_multi = 1;
 				break;
 			}
 			if (rc != 0)
 				break;
-			min = BCD2BIN(buffer[1]);
-			sec = BCD2BIN(buffer[2]);
-			frame = BCD2BIN(buffer[3]);
+			min = bcd2bin(buffer[1]);
+			sec = bcd2bin(buffer[2]);
+			frame = bcd2bin(buffer[3]);
 			sector = min * CD_SECS * CD_FRAMES + sec * CD_FRAMES + frame;
 			if (sector)
 				sector -= CD_MSF_OFFSET;
@@ -276,8 +289,8 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 			break;
 		}
 		if ((rc = buffer[2]) == 0) {
-			printk(KERN_WARNING
-			       "%s: No finished session\n", cd->cdi.name);
+			sr_printk(KERN_WARNING, cd,
+				  "No finished session\n");
 			break;
 		}
 		cgc.cmd[0] = READ_TOC;	/* Read TOC */
@@ -296,13 +309,12 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 		sector = buffer[11] + (buffer[10] << 8) +
 		    (buffer[9] << 16) + (buffer[8] << 24);
 		break;
-#endif				/* CONFIG_BLK_DEV_SR_VENDOR */
 
 	default:
 		/* should not happen */
-		printk(KERN_WARNING
-		   "%s: unknown vendor code (%i), not initialized ?\n",
-		       cd->cdi.name, cd->vendor);
+		sr_printk(KERN_WARNING, cd,
+			  "unknown vendor code (%i), not initialized ?\n",
+			  cd->vendor);
 		sector = 0;
 		no_multi = 1;
 		break;
@@ -320,8 +332,8 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 
 #ifdef DEBUG
 	if (sector)
-		printk(KERN_DEBUG "%s: multisession offset=%lu\n",
-		       cd->cdi.name, sector);
+		sr_printk(KERN_DEBUG, cd, "multisession offset=%lu\n",
+			  sector);
 #endif
 	kfree(buffer);
 	return rc;

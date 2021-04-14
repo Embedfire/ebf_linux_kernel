@@ -1,15 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  TI FlashMedia driver
  *
  *  Copyright (C) 2007 Alex Dubov <oakad@yahoo.com>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  * Special thanks to Carlos Corbacho for providing various MemoryStick cards
  * that made this driver possible.
- *
  */
 
 #include <linux/tifm.h>
@@ -17,11 +13,12 @@
 #include <linux/highmem.h>
 #include <linux/scatterlist.h>
 #include <linux/log2.h>
+#include <linux/module.h>
 #include <asm/io.h>
 
 #define DRIVER_NAME "tifm_ms"
 
-static int no_dma;
+static bool no_dma;
 module_param(no_dma, bool, 0644);
 
 /*
@@ -165,9 +162,11 @@ static unsigned int tifm_ms_write_data(struct tifm_ms *host,
 	case 3:
 		host->io_word |= buf[off + 2] << 16;
 		host->io_pos++;
+		fallthrough;
 	case 2:
 		host->io_word |= buf[off + 1] << 8;
 		host->io_pos++;
+		fallthrough;
 	case 1:
 		host->io_word |= buf[off];
 		host->io_pos++;
@@ -199,7 +198,7 @@ static unsigned int tifm_ms_transfer_data(struct tifm_ms *host)
 		host->block_pos);
 
 	while (length) {
-		unsigned int uninitialized_var(p_off);
+		unsigned int p_off;
 
 		if (host->req->long_data) {
 			pg = nth_page(sg_page(&host->req->sg),
@@ -209,7 +208,7 @@ static unsigned int tifm_ms_transfer_data(struct tifm_ms *host)
 			p_cnt = min(p_cnt, length);
 
 			local_irq_save(flags);
-			buf = kmap_atomic(pg, KM_BIO_SRC_IRQ) + p_off;
+			buf = kmap_atomic(pg) + p_off;
 		} else {
 			buf = host->req->data + host->block_pos;
 			p_cnt = host->req->data_len - host->block_pos;
@@ -220,7 +219,7 @@ static unsigned int tifm_ms_transfer_data(struct tifm_ms *host)
 			 : tifm_ms_read_data(host, buf, p_cnt);
 
 		if (host->req->long_data) {
-			kunmap_atomic(buf - p_off, KM_BIO_SRC_IRQ);
+			kunmap_atomic(buf - p_off);
 			local_irq_restore(flags);
 		}
 
@@ -253,7 +252,6 @@ static unsigned int tifm_ms_transfer_data(struct tifm_ms *host)
 static int tifm_ms_issue_cmd(struct tifm_ms *host)
 {
 	struct tifm_dev *sock = host->dev;
-	unsigned char *data;
 	unsigned int data_len, cmd, sys_param;
 
 	host->cmd_flags = 0;
@@ -261,8 +259,6 @@ static int tifm_ms_issue_cmd(struct tifm_ms *host)
 	host->io_pos = 0;
 	host->io_word = 0;
 	host->cmd_flags = 0;
-
-	data = host->req->data;
 
 	host->use_dma = !no_dma;
 
@@ -537,16 +533,16 @@ static int tifm_ms_set_param(struct memstick_host *msh,
 	return 0;
 }
 
-static void tifm_ms_abort(unsigned long data)
+static void tifm_ms_abort(struct timer_list *t)
 {
-	struct tifm_ms *host = (struct tifm_ms *)data;
+	struct tifm_ms *host = from_timer(host, t, timer);
 
 	dev_dbg(&host->dev->dev, "status %x\n",
 		readl(host->dev->addr + SOCK_MS_STATUS));
 	printk(KERN_ERR
 	       "%s : card failed to respond for a long period of time "
 	       "(%x, %x)\n",
-	       host->dev->dev.bus_id, host->req ? host->req->tpc : 0,
+	       dev_name(&host->dev->dev), host->req ? host->req->tpc : 0,
 	       host->cmd_flags);
 
 	tifm_eject(host->dev);
@@ -561,7 +557,7 @@ static int tifm_ms_probe(struct tifm_dev *sock)
 	if (!(TIFM_SOCK_STATE_OCCUPIED
 	      & readl(sock->addr + SOCK_PRESENT_STATE))) {
 		printk(KERN_WARNING "%s : card gone, unexpectedly\n",
-		       sock->dev.bus_id);
+		       dev_name(&sock->dev));
 		return rc;
 	}
 
@@ -574,7 +570,7 @@ static int tifm_ms_probe(struct tifm_dev *sock)
 	host->dev = sock;
 	host->timeout_jiffies = msecs_to_jiffies(1000);
 
-	setup_timer(&host->timer, tifm_ms_abort, (unsigned long)host);
+	timer_setup(&host->timer, tifm_ms_abort, 0);
 	tasklet_init(&host->notify, tifm_ms_req_tasklet, (unsigned long)msh);
 
 	msh->request = tifm_ms_submit_req;

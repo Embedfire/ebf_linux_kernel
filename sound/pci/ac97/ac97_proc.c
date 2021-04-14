@@ -1,28 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Universal interface for Audio Codec '97
  *
  *  For more details look to AC '97 component specification revision 2.2
  *  by Intel Corporation (http://developer.intel.com).
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
-#include <linux/slab.h>
 #include <linux/mutex.h>
 
 #include <sound/core.h>
@@ -124,6 +108,8 @@ static void snd_ac97_proc_read_main(struct snd_ac97 *ac97, struct snd_info_buffe
 	            ac97->subsystem_vendor);
         snd_iprintf(buffer, "PCI Subsys Device: 0x%04x\n\n",
                     ac97->subsystem_device);
+
+	snd_iprintf(buffer, "Flags: %x\n", ac97->flags);
 
 	if ((ac97->ext_id & AC97_EI_REV_MASK) >= AC97_EI_REV_23) {
 		val = snd_ac97_read(ac97, AC97_INT_PAGING);
@@ -435,25 +421,20 @@ void snd_ac97_proc_init(struct snd_ac97 * ac97)
 		return;
 	prefix = ac97_is_audio(ac97) ? "ac97" : "mc97";
 	sprintf(name, "%s#%d-%d", prefix, ac97->addr, ac97->num);
-	if ((entry = snd_info_create_card_entry(ac97->bus->card, name, ac97->bus->proc)) != NULL) {
+	entry = snd_info_create_card_entry(ac97->bus->card, name,
+					   ac97->bus->proc);
+	if (entry)
 		snd_info_set_text_ops(entry, ac97, snd_ac97_proc_read);
-		if (snd_info_register(entry) < 0) {
-			snd_info_free_entry(entry);
-			entry = NULL;
-		}
-	}
 	ac97->proc = entry;
 	sprintf(name, "%s#%d-%d+regs", prefix, ac97->addr, ac97->num);
-	if ((entry = snd_info_create_card_entry(ac97->bus->card, name, ac97->bus->proc)) != NULL) {
+	entry = snd_info_create_card_entry(ac97->bus->card, name,
+					   ac97->bus->proc);
+	if (entry) {
 		snd_info_set_text_ops(entry, ac97, snd_ac97_proc_regs_read);
 #ifdef CONFIG_SND_DEBUG
-		entry->mode |= S_IWUSR;
+		entry->mode |= 0200;
 		entry->c.text.write = snd_ac97_proc_regs_write;
 #endif
-		if (snd_info_register(entry) < 0) {
-			snd_info_free_entry(entry);
-			entry = NULL;
-		}
 	}
 	ac97->proc_regs = entry;
 }
@@ -472,13 +453,10 @@ void snd_ac97_bus_proc_init(struct snd_ac97_bus * bus)
 	char name[32];
 
 	sprintf(name, "codec97#%d", bus->num);
-	if ((entry = snd_info_create_card_entry(bus->card, name, bus->card->proc_root)) != NULL) {
-		entry->mode = S_IFDIR | S_IRUGO | S_IXUGO;
-		if (snd_info_register(entry) < 0) {
-			snd_info_free_entry(entry);
-			entry = NULL;
-		}
-	}
+	entry = snd_info_create_card_entry(bus->card, name,
+					   bus->card->proc_root);
+	if (entry)
+		entry->mode = S_IFDIR | 0555;
 	bus->proc = entry;
 }
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef __SOUND_AK4XXX_ADDA_H
 #define __SOUND_AK4XXX_ADDA_H
 
@@ -6,21 +7,6 @@
  *   AD and DA converters
  *
  *	Copyright (c) 2000 Jaroslav Kysela <perex@perex.cz>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */      
 
 #ifndef AK4XXX_MAX_CHIPS
@@ -68,7 +54,7 @@ struct snd_akm4xxx {
 	enum {
 		SND_AK4524, SND_AK4528, SND_AK4529,
 		SND_AK4355, SND_AK4358, SND_AK4381,
-		SND_AK5365
+		SND_AK5365, SND_AK4620,
 	} type;
 
 	/* (array) information of combined codecs */
@@ -76,6 +62,9 @@ struct snd_akm4xxx {
 	const struct snd_akm4xxx_adc_channel *adc_info;
 
 	struct snd_ak4xxx_ops ops;
+	unsigned int num_chips;
+	unsigned int total_regs;
+	const char *name;
 };
 
 void snd_akm4xxx_write(struct snd_akm4xxx *ak, int chip, unsigned char reg,

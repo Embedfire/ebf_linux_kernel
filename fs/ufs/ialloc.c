@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/ufs/ialloc.c
  *
@@ -27,7 +28,6 @@
 #include <linux/time.h>
 #include <linux/stat.h>
 #include <linux/string.h>
-#include <linux/quotaops.h>
 #include <linux/buffer_head.h>
 #include <linux/sched.h>
 #include <linux/bitops.h>
@@ -58,7 +58,6 @@ void ufs_free_inode (struct inode * inode)
 {
 	struct super_block * sb;
 	struct ufs_sb_private_info * uspi;
-	struct ufs_super_block_first * usb1;
 	struct ufs_cg_private_info * ucpi;
 	struct ufs_cylinder_group * ucg;
 	int is_directory;
@@ -68,15 +67,14 @@ void ufs_free_inode (struct inode * inode)
 
 	sb = inode->i_sb;
 	uspi = UFS_SB(sb)->s_uspi;
-	usb1 = ubh_get_usb_first(uspi);
 	
 	ino = inode->i_ino;
 
-	lock_super (sb);
+	mutex_lock(&UFS_SB(sb)->s_lock);
 
 	if (!((ino > 1) && (ino < (uspi->s_ncg * uspi->s_ipg )))) {
 		ufs_warning(sb, "ufs_free_inode", "reserved inode or nonexistent inode %u\n", ino);
-		unlock_super (sb);
+		mutex_unlock(&UFS_SB(sb)->s_lock);
 		return;
 	}
 	
@@ -84,21 +82,16 @@ void ufs_free_inode (struct inode * inode)
 	bit = ufs_inotocgoff (ino);
 	ucpi = ufs_load_cylinder (sb, cg);
 	if (!ucpi) {
-		unlock_super (sb);
+		mutex_unlock(&UFS_SB(sb)->s_lock);
 		return;
 	}
 	ucg = ubh_get_ucg(UCPI_UBH(ucpi));
 	if (!ufs_cg_chkmagic(sb, ucg))
 		ufs_panic (sb, "ufs_free_fragments", "internal error, bad cg magic number");
 
-	ucg->cg_time = cpu_to_fs32(sb, get_seconds());
+	ucg->cg_time = ufs_get_seconds(sb);
 
 	is_directory = S_ISDIR(inode->i_mode);
-
-	DQUOT_FREE_INODE(inode);
-	DQUOT_DROP(inode);
-
-	clear_inode (inode);
 
 	if (ubh_isclr (UCPI_UBH(ucpi), ucpi->c_iusedoff, bit))
 		ufs_error(sb, "ufs_free_inode", "bit already cleared for inode %u", ino);
@@ -119,13 +112,11 @@ void ufs_free_inode (struct inode * inode)
 
 	ubh_mark_buffer_dirty (USPI_UBH(uspi));
 	ubh_mark_buffer_dirty (UCPI_UBH(ucpi));
-	if (sb->s_flags & MS_SYNCHRONOUS) {
-		ubh_ll_rw_block(SWRITE, UCPI_UBH(ucpi));
-		ubh_wait_on_buffer (UCPI_UBH(ucpi));
-	}
+	if (sb->s_flags & SB_SYNCHRONOUS)
+		ubh_sync_block(UCPI_UBH(ucpi));
 	
-	sb->s_dirt = 1;
-	unlock_super (sb);
+	ufs_mark_sb_dirty(sb);
+	mutex_unlock(&UFS_SB(sb)->s_lock);
 	UFSD("EXIT\n");
 }
 
@@ -155,17 +146,15 @@ static void ufs2_init_inodes_chunk(struct super_block *sb,
 		set_buffer_uptodate(bh);
 		mark_buffer_dirty(bh);
 		unlock_buffer(bh);
-		if (sb->s_flags & MS_SYNCHRONOUS)
+		if (sb->s_flags & SB_SYNCHRONOUS)
 			sync_dirty_buffer(bh);
 		brelse(bh);
 	}
 
 	fs32_add(sb, &ucg->cg_u.cg_u2.cg_initediblk, uspi->s_inopb);
 	ubh_mark_buffer_dirty(UCPI_UBH(ucpi));
-	if (sb->s_flags & MS_SYNCHRONOUS) {
-		ubh_ll_rw_block(SWRITE, UCPI_UBH(ucpi));
-		ubh_wait_on_buffer(UCPI_UBH(ucpi));
-	}
+	if (sb->s_flags & SB_SYNCHRONOUS)
+		ubh_sync_block(UCPI_UBH(ucpi));
 
 	UFSD("EXIT\n");
 }
@@ -180,15 +169,15 @@ static void ufs2_init_inodes_chunk(struct super_block *sb,
  * For other inodes, search forward from the parent directory's block
  * group to find a free inode.
  */
-struct inode * ufs_new_inode(struct inode * dir, int mode)
+struct inode *ufs_new_inode(struct inode *dir, umode_t mode)
 {
 	struct super_block * sb;
 	struct ufs_sb_info * sbi;
 	struct ufs_sb_private_info * uspi;
-	struct ufs_super_block_first * usb1;
 	struct ufs_cg_private_info * ucpi;
 	struct ufs_cylinder_group * ucg;
 	struct inode * inode;
+	struct timespec64 ts;
 	unsigned cg, bit, i, j, start;
 	struct ufs_inode_info *ufsi;
 	int err = -ENOSPC;
@@ -205,9 +194,8 @@ struct inode * ufs_new_inode(struct inode * dir, int mode)
 	ufsi = UFS_I(inode);
 	sbi = UFS_SB(sb);
 	uspi = sbi->s_uspi;
-	usb1 = ubh_get_usb_first(uspi);
 
-	lock_super (sb);
+	mutex_lock(&sbi->s_lock);
 
 	/*
 	 * Try to place the inode in its parent directory
@@ -296,25 +284,15 @@ cg_found:
 	}
 	ubh_mark_buffer_dirty (USPI_UBH(uspi));
 	ubh_mark_buffer_dirty (UCPI_UBH(ucpi));
-	if (sb->s_flags & MS_SYNCHRONOUS) {
-		ubh_ll_rw_block(SWRITE, UCPI_UBH(ucpi));
-		ubh_wait_on_buffer (UCPI_UBH(ucpi));
-	}
-	sb->s_dirt = 1;
+	if (sb->s_flags & SB_SYNCHRONOUS)
+		ubh_sync_block(UCPI_UBH(ucpi));
+	ufs_mark_sb_dirty(sb);
 
 	inode->i_ino = cg * uspi->s_ipg + bit;
-	inode->i_mode = mode;
-	inode->i_uid = current->fsuid;
-	if (dir->i_mode & S_ISGID) {
-		inode->i_gid = dir->i_gid;
-		if (S_ISDIR(mode))
-			inode->i_mode |= S_ISGID;
-	} else
-		inode->i_gid = current->fsgid;
-
+	inode_init_owner(inode, dir, mode);
 	inode->i_blocks = 0;
 	inode->i_generation = 0;
-	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME_SEC;
+	inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
 	ufsi->i_flags = UFS_I(dir)->i_flags;
 	ufsi->i_lastfrag = 0;
 	ufsi->i_shadow = 0;
@@ -322,7 +300,10 @@ cg_found:
 	ufsi->i_oeftflag = 0;
 	ufsi->i_dir_start_lookup = 0;
 	memset(&ufsi->i_u1, 0, sizeof(ufsi->i_u1));
-	insert_inode_hash(inode);
+	if (insert_inode_locked(inode) < 0) {
+		err = -EIO;
+		goto failed;
+	}
 	mark_inode_dirty(inode);
 
 	if (uspi->fs_magic == UFS2_MAGIC) {
@@ -344,37 +325,29 @@ cg_found:
 		lock_buffer(bh);
 		ufs2_inode = (struct ufs2_inode *)bh->b_data;
 		ufs2_inode += ufs_inotofsbo(inode->i_ino);
-		ufs2_inode->ui_birthtime = cpu_to_fs64(sb, CURRENT_TIME.tv_sec);
-		ufs2_inode->ui_birthnsec = cpu_to_fs32(sb, CURRENT_TIME.tv_nsec);
+		ktime_get_real_ts64(&ts);
+		ufs2_inode->ui_birthtime = cpu_to_fs64(sb, ts.tv_sec);
+		ufs2_inode->ui_birthnsec = cpu_to_fs32(sb, ts.tv_nsec);
 		mark_buffer_dirty(bh);
 		unlock_buffer(bh);
-		if (sb->s_flags & MS_SYNCHRONOUS)
+		if (sb->s_flags & SB_SYNCHRONOUS)
 			sync_dirty_buffer(bh);
 		brelse(bh);
 	}
-
-	unlock_super (sb);
-
-	if (DQUOT_ALLOC_INODE(inode)) {
-		DQUOT_DROP(inode);
-		err = -EDQUOT;
-		goto fail_without_unlock;
-	}
+	mutex_unlock(&sbi->s_lock);
 
 	UFSD("allocating inode %lu\n", inode->i_ino);
 	UFSD("EXIT\n");
 	return inode;
 
 fail_remove_inode:
-	unlock_super(sb);
-fail_without_unlock:
-	inode->i_flags |= S_NOQUOTA;
-	inode->i_nlink = 0;
-	iput(inode);
+	mutex_unlock(&sbi->s_lock);
+	clear_nlink(inode);
+	discard_new_inode(inode);
 	UFSD("EXIT (FAILED): err %d\n", err);
 	return ERR_PTR(err);
 failed:
-	unlock_super (sb);
+	mutex_unlock(&sbi->s_lock);
 	make_bad_inode(inode);
 	iput (inode);
 	UFSD("EXIT (FAILED): err %d\n", err);

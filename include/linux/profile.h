@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_PROFILE_H
 #define _LINUX_PROFILE_H
 
@@ -18,10 +19,16 @@ struct pt_regs;
 struct notifier_block;
 
 #if defined(CONFIG_PROFILING) && defined(CONFIG_PROC_FS)
-void create_prof_cpu_mask(struct proc_dir_entry *de);
+void create_prof_cpu_mask(void);
+int create_proc_profile(void);
 #else
-static inline void create_prof_cpu_mask(struct proc_dir_entry *de)
+static inline void create_prof_cpu_mask(void)
 {
+}
+
+static inline int create_proc_profile(void)
+{
+	return 0;
 }
 #endif
 
@@ -35,8 +42,10 @@ enum profile_type {
 extern int prof_on __read_mostly;
 
 /* init basic kernel profiler */
-void __init profile_init(void);
+int profile_init(void);
+int profile_setup(char *str);
 void profile_tick(int type);
+int setup_profiling_timer(unsigned int multiplier);
 
 /*
  * Add multiple profiler hits to a given address:
@@ -75,18 +84,15 @@ int task_handoff_unregister(struct notifier_block * n);
 int profile_event_register(enum profile_type, struct notifier_block * n);
 int profile_event_unregister(enum profile_type, struct notifier_block * n);
 
-int register_timer_hook(int (*hook)(struct pt_regs *));
-void unregister_timer_hook(int (*hook)(struct pt_regs *));
-
 struct pt_regs;
 
 #else
 
 #define prof_on 0
 
-static inline void profile_init(void)
+static inline int profile_init(void)
 {
-	return;
+	return 0;
 }
 
 static inline void profile_tick(int type)
@@ -127,16 +133,6 @@ static inline int profile_event_unregister(enum profile_type t, struct notifier_
 #define profile_task_exit(a) do { } while (0)
 #define profile_handoff_task(a) (0)
 #define profile_munmap(a) do { } while (0)
-
-static inline int register_timer_hook(int (*hook)(struct pt_regs *))
-{
-	return -ENOSYS;
-}
-
-static inline void unregister_timer_hook(int (*hook)(struct pt_regs *))
-{
-	return;
-}
 
 #endif /* CONFIG_PROFILING */
 

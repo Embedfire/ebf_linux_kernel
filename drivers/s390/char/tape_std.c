@@ -1,15 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *  drivers/s390/char/tape_std.c
  *    standard tape device functions for ibm tapes.
  *
  *  S390 and zSeries version
- *    Copyright (C) 2001,2002 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 2001, 2002
  *    Author(s): Carsten Otte <cotte@de.ibm.com>
  *		 Michael Holzheu <holzheu@de.ibm.com>
  *		 Tuan Ngo-Anh <ngoanh@de.ibm.com>
  *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
  *		 Stefan Bader <shbader@de.ibm.com>
  */
+
+#define KMSG_COMPONENT "tape"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
 #include <linux/stddef.h>
 #include <linux/kernel.h>
@@ -26,29 +29,24 @@
 #include "tape.h"
 #include "tape_std.h"
 
-#define PRINTK_HEADER "TAPE_STD: "
-
 /*
  * tape_std_assign
  */
 static void
-tape_std_assign_timeout(unsigned long data)
+tape_std_assign_timeout(struct timer_list *t)
 {
-	struct tape_request *	request;
-	struct tape_device *	device;
+	struct tape_request *	request = from_timer(request, t, timer);
+	struct tape_device *	device = request->device;
 	int rc;
 
-	request = (struct tape_request *) data;
-	if ((device = request->device) == NULL)
-		BUG();
+	BUG_ON(!device);
 
 	DBF_EVENT(3, "%08x: Assignment timeout. Device busy.\n",
 			device->cdev_id);
 	rc = tape_cancel_io(device, request);
 	if(rc)
-		PRINT_ERR("(%s): Assign timeout: Cancel failed with rc = %i\n",
-			device->cdev->dev.bus_id, rc);
-
+		DBF_EVENT(3, "(%08x): Assign timeout: Cancel failed with rc = "
+			  "%i\n", device->cdev_id, rc);
 }
 
 int
@@ -71,19 +69,14 @@ tape_std_assign(struct tape_device *device)
 	 * to another host (actually this shouldn't happen but it does).
 	 * So we set up a timeout for this call.
 	 */
-	init_timer(&timeout);
-	timeout.function = tape_std_assign_timeout;
-	timeout.data     = (unsigned long) request;
-	timeout.expires  = jiffies + 2 * HZ;
-	add_timer(&timeout);
+	timer_setup(&request->timer, tape_std_assign_timeout, 0);
+	mod_timer(&timeout, jiffies + 2 * HZ);
 
 	rc = tape_do_io_interruptible(device, request);
 
-	del_timer(&timeout);
+	del_timer_sync(&request->timer);
 
 	if (rc != 0) {
-		PRINT_WARN("%s: assign failed - device might be busy\n",
-			device->cdev->dev.bus_id);
 		DBF_EVENT(3, "%08x: assign failed - device might be busy\n",
 			device->cdev_id);
 	} else {
@@ -105,8 +98,6 @@ tape_std_unassign (struct tape_device *device)
 	if (device->tape_state == TS_NOT_OPER) {
 		DBF_EVENT(3, "(%08x): Can't unassign device\n",
 			device->cdev_id);
-		PRINT_WARN("(%s): Can't unassign device - device gone\n",
-			device->cdev->dev.bus_id);
 		return -EIO;
 	}
 
@@ -120,7 +111,6 @@ tape_std_unassign (struct tape_device *device)
 
 	if ((rc = tape_do_io(device, request)) != 0) {
 		DBF_EVENT(3, "%08x: Unassign failed\n", device->cdev_id);
-		PRINT_WARN("%s: Unassign failed\n", device->cdev->dev.bus_id);
 	} else {
 		DBF_EVENT(3, "%08x: Tape unassigned\n", device->cdev_id);
 	}
@@ -240,8 +230,6 @@ tape_std_mtsetblk(struct tape_device *device, int count)
 
 	if (count > MAX_BLOCKSIZE) {
 		DBF_EVENT(3, "Invalid block size (%d > %d) given.\n",
-			count, MAX_BLOCKSIZE);
-		PRINT_ERR("Invalid block size (%d > %d) given.\n",
 			count, MAX_BLOCKSIZE);
 		return -EINVAL;
 	}
@@ -571,7 +559,6 @@ int
 tape_std_mtreten(struct tape_device *device, int mt_count)
 {
 	struct tape_request *request;
-	int rc;
 
 	request = tape_alloc_request(4, 0);
 	if (IS_ERR(request))
@@ -583,7 +570,7 @@ tape_std_mtreten(struct tape_device *device, int mt_count)
 	tape_ccw_cc(request->cpaddr + 2, NOP, 0, NULL);
 	tape_ccw_end(request->cpaddr + 3, CCW_CMD_TIC, 0, request->cpaddr);
 	/* execute it, MTRETEN rc gets ignored */
-	rc = tape_do_io_interruptible(device, request);
+	tape_do_io_interruptible(device, request);
 	tape_free_request(request);
 	return tape_mtop(device, MTREW, 1);
 }
@@ -632,14 +619,6 @@ tape_std_mtcompression(struct tape_device *device, int mt_count)
 
 	if (mt_count < 0 || mt_count > 1) {
 		DBF_EXCEPTION(6, "xcom parm\n");
-		if (*device->modeset_byte & 0x08)
-			PRINT_INFO("(%s) Compression is currently on\n",
-				   device->cdev->dev.bus_id);
-		else
-			PRINT_INFO("(%s) Compression is currently off\n",
-				   device->cdev->dev.bus_id);
-		PRINT_INFO("Use 1 to switch compression on, 0 to "
-			   "switch it off\n");
 		return -EINVAL;
 	}
 	request = tape_alloc_request(2, 0);

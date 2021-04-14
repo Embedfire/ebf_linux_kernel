@@ -6,18 +6,22 @@
  * Copyright (c) 2005 Stefano Brivio <st3@riseup.net>
  * Copyright (c) 2005 Danny van Dyk <kugelfang@gentoo.org>
  * Copyright (c) 2005 Andreas Jaggi <andreas.jaggi@waterwave.ch>
- * Copyright (c) 2005-2007 Michael Buesch <mbuesch@freenet.de>
+ * Copyright (c) 2005-2007 Michael Buesch <m@bues.ch>
  *
  * Licensed under the GNU/GPL. See COPYING for details.
  */
 
+#include <linux/pm.h>
 #include <linux/pci.h>
+#include <linux/export.h>
+#include <linux/slab.h>
 #include <linux/ssb/ssb.h>
 
 
-#ifdef CONFIG_PM
-static int ssb_pcihost_suspend(struct pci_dev *dev, pm_message_t state)
+#ifdef CONFIG_PM_SLEEP
+static int ssb_pcihost_suspend(struct device *d)
 {
+	struct pci_dev *dev = to_pci_dev(d);
 	struct ssb_bus *ssb = pci_get_drvdata(dev);
 	int err;
 
@@ -26,17 +30,23 @@ static int ssb_pcihost_suspend(struct pci_dev *dev, pm_message_t state)
 		return err;
 	pci_save_state(dev);
 	pci_disable_device(dev);
-	pci_set_power_state(dev, pci_choose_state(dev, state));
+
+	/* if there is a wakeup enabled child device on ssb bus,
+	   enable pci wakeup posibility. */
+	device_set_wakeup_enable(d, d->power.wakeup_path);
+
+	pci_prepare_to_sleep(dev);
 
 	return 0;
 }
 
-static int ssb_pcihost_resume(struct pci_dev *dev)
+static int ssb_pcihost_resume(struct device *d)
 {
+	struct pci_dev *dev = to_pci_dev(d);
 	struct ssb_bus *ssb = pci_get_drvdata(dev);
 	int err;
 
-	pci_set_power_state(dev, 0);
+	pci_back_from_sleep(dev);
 	err = pci_enable_device(dev);
 	if (err)
 		return err;
@@ -47,10 +57,12 @@ static int ssb_pcihost_resume(struct pci_dev *dev)
 
 	return 0;
 }
-#else /* CONFIG_PM */
-# define ssb_pcihost_suspend	NULL
-# define ssb_pcihost_resume	NULL
-#endif /* CONFIG_PM */
+
+static const struct dev_pm_ops ssb_pcihost_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(ssb_pcihost_suspend, ssb_pcihost_resume)
+};
+
+#endif /* CONFIG_PM_SLEEP */
 
 static int ssb_pcihost_probe(struct pci_dev *dev,
 			     const struct pci_device_id *id)
@@ -58,6 +70,7 @@ static int ssb_pcihost_probe(struct pci_dev *dev,
 	struct ssb_bus *ssb;
 	int err = -ENOMEM;
 	const char *name;
+	u32 val;
 
 	ssb = kzalloc(sizeof(*ssb), GFP_KERNEL);
 	if (!ssb)
@@ -65,13 +78,19 @@ static int ssb_pcihost_probe(struct pci_dev *dev,
 	err = pci_enable_device(dev);
 	if (err)
 		goto err_kfree_ssb;
-	name = dev->dev.bus_id;
+	name = dev_name(&dev->dev);
 	if (dev->driver && dev->driver->name)
 		name = dev->driver->name;
 	err = pci_request_regions(dev, name);
 	if (err)
 		goto err_pci_disable;
 	pci_set_master(dev);
+
+	/* Disable the RETRY_TIMEOUT register (0x41) to keep
+	 * PCI Tx retries from interfering with C3 CPU state */
+	pci_read_config_dword(dev, 0x40, &val);
+	if ((val & 0x0000ff00) != 0)
+		pci_write_config_dword(dev, 0x40, val & 0xffff00ff);
 
 	err = ssb_bus_pcibus_register(ssb, dev);
 	if (err)
@@ -106,8 +125,9 @@ int ssb_pcihost_register(struct pci_driver *driver)
 {
 	driver->probe = ssb_pcihost_probe;
 	driver->remove = ssb_pcihost_remove;
-	driver->suspend = ssb_pcihost_suspend;
-	driver->resume = ssb_pcihost_resume;
+#ifdef CONFIG_PM_SLEEP
+	driver->driver.pm = &ssb_pcihost_pm_ops;
+#endif
 
 	return pci_register_driver(driver);
 }

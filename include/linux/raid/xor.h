@@ -1,7 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _XOR_H
 #define _XOR_H
-
-#include <linux/raid/md.h>
 
 #define MAX_XOR_BLOCKS 4
 

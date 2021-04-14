@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * vrc4171_card.c, NEC VRC4171 Card Controller driver for Socket Services.
  *
- * Copyright (C) 2003-2005  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * Copyright (C) 2003-2005  Yoichi Yuasa <yuasa@linux-mips.org>
  */
 #include <linux/init.h>
 #include <linux/ioport.h>
@@ -32,7 +19,7 @@
 #include "i82365.h"
 
 MODULE_DESCRIPTION("NEC VRC4171 Card Controllers driver for Socket Services");
-MODULE_AUTHOR("Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>");
+MODULE_AUTHOR("Yoichi Yuasa <yuasa@linux-mips.org>");
 MODULE_LICENSE("GPL");
 
 #define CARD_MAX_SLOTS		2
@@ -84,31 +71,32 @@ MODULE_LICENSE("GPL");
 #define IO_MAX_MAPS	2
 #define MEM_MAX_MAPS	5
 
-typedef enum {
+enum vrc4171_slot {
 	SLOT_PROBE = 0,
 	SLOT_NOPROBE_IO,
 	SLOT_NOPROBE_MEM,
 	SLOT_NOPROBE_ALL,
 	SLOT_INITIALIZED,
-} vrc4171_slot_t;
+};
 
-typedef enum {
+enum vrc4171_slotb {
 	SLOTB_IS_NONE,
 	SLOTB_IS_PCCARD,
 	SLOTB_IS_CF,
 	SLOTB_IS_FLASHROM,
-} vrc4171_slotb_t;
+};
 
-typedef struct vrc4171_socket {
-	vrc4171_slot_t slot;
+struct vrc4171_socket {
+	enum vrc4171_slot slot;
 	struct pcmcia_socket pcmcia_socket;
 	char name[24];
 	int csc_irq;
 	int io_irq;
-} vrc4171_socket_t;
+	spinlock_t lock;
+};
 
-static vrc4171_socket_t vrc4171_sockets[CARD_MAX_SLOTS];
-static vrc4171_slotb_t vrc4171_slotb = SLOTB_IS_NONE;
+static struct vrc4171_socket vrc4171_sockets[CARD_MAX_SLOTS];
+static enum vrc4171_slotb vrc4171_slotb = SLOTB_IS_NONE;
 static char vrc4171_card_name[] = "NEC VRC4171 Card Controller";
 static unsigned int vrc4171_irq;
 static uint16_t vrc4171_irq_mask = 0xdeb8;
@@ -140,7 +128,7 @@ static inline uint16_t vrc4171_get_irq_status(void)
 	return inw(INTERRUPT_STATUS);
 }
 
-static inline void vrc4171_set_multifunction_pin(vrc4171_slotb_t config)
+static inline void vrc4171_set_multifunction_pin(enum vrc4171_slotb config)
 {
 	uint16_t config1;
 
@@ -233,7 +221,7 @@ static inline int search_nonuse_irq(void)
 
 static int pccard_init(struct pcmcia_socket *sock)
 {
-	vrc4171_socket_t *socket;
+	struct vrc4171_socket *socket;
 	unsigned int slot;
 
 	sock->features |= SS_CAP_PCCARD | SS_CAP_PAGE_REGS;
@@ -245,6 +233,7 @@ static int pccard_init(struct pcmcia_socket *sock)
 	socket = &vrc4171_sockets[slot];
 	socket->csc_irq = search_nonuse_irq();
 	socket->io_irq = search_nonuse_irq();
+	spin_lock_init(&socket->lock);
 
 	return 0;
 }
@@ -315,7 +304,7 @@ static inline uint8_t set_Vcc_value(u_char Vcc)
 
 static int pccard_set_socket(struct pcmcia_socket *sock, socket_state_t *state)
 {
-	vrc4171_socket_t *socket;
+	struct vrc4171_socket *socket;
 	unsigned int slot;
 	uint8_t voltage, power, control, cscint;
 
@@ -327,7 +316,7 @@ static int pccard_set_socket(struct pcmcia_socket *sock, socket_state_t *state)
 	slot = sock->sock;
 	socket = &vrc4171_sockets[slot];
 
-	spin_lock_irq(&sock->lock);
+	spin_lock_irq(&socket->lock);
 
 	voltage = set_Vcc_value(state->Vcc);
 	exca_write_byte(slot, CARD_VOLTAGE_SELECT, voltage);
@@ -370,7 +359,7 @@ static int pccard_set_socket(struct pcmcia_socket *sock, socket_state_t *state)
 		cscint |= I365_CSC_DETECT;
         exca_write_byte(slot, I365_CSCINT, cscint);
 
-	spin_unlock_irq(&sock->lock);
+	spin_unlock_irq(&socket->lock);
 
 	return 0;
 }
@@ -515,7 +504,7 @@ static inline unsigned int get_events(int slot)
 
 static irqreturn_t pccard_interrupt(int irq, void *dev_id)
 {
-	vrc4171_socket_t *socket;
+	struct vrc4171_socket *socket;
 	unsigned int events;
 	irqreturn_t retval = IRQ_NONE;
 	uint16_t status;
@@ -563,9 +552,9 @@ static inline void reserve_using_irq(int slot)
 	vrc4171_irq_mask &= ~(1 << irq);
 }
 
-static int __devinit vrc4171_add_sockets(void)
+static int vrc4171_add_sockets(void)
 {
-	vrc4171_socket_t *socket;
+	struct vrc4171_socket *socket;
 	int slot, retval;
 
 	for (slot = 0; slot < CARD_MAX_SLOTS; slot++) {
@@ -615,7 +604,7 @@ static int __devinit vrc4171_add_sockets(void)
 
 static void vrc4171_remove_sockets(void)
 {
-	vrc4171_socket_t *socket;
+	struct vrc4171_socket *socket;
 	int slot;
 
 	for (slot = 0; slot < CARD_MAX_SLOTS; slot++) {
@@ -630,7 +619,7 @@ static void vrc4171_remove_sockets(void)
 	}
 }
 
-static int __devinit vrc4171_card_setup(char *options)
+static int vrc4171_card_setup(char *options)
 {
 	if (options == NULL || *options == '\0')
 		return 1;
@@ -639,7 +628,7 @@ static int __devinit vrc4171_card_setup(char *options)
 		int irq;
 		options += 4;
 		irq = simple_strtoul(options, &options, 0);
-		if (irq >= 0 && irq < NR_IRQS)
+		if (irq >= 0 && irq < nr_irqs)
 			vrc4171_irq = irq;
 
 		if (*options != ',')
@@ -704,24 +693,23 @@ static int __devinit vrc4171_card_setup(char *options)
 
 __setup("vrc4171_card=", vrc4171_card_setup);
 
-static struct device_driver vrc4171_card_driver = {
-	.name		= vrc4171_card_name,
-	.bus		= &platform_bus_type,
-	.suspend	= pcmcia_socket_dev_suspend,
-	.resume		= pcmcia_socket_dev_resume,
+static struct platform_driver vrc4171_card_driver = {
+	.driver = {
+		.name		= vrc4171_card_name,
+	},
 };
 
-static int __devinit vrc4171_card_init(void)
+static int vrc4171_card_init(void)
 {
 	int retval;
 
-	retval = driver_register(&vrc4171_card_driver);
+	retval = platform_driver_register(&vrc4171_card_driver);
 	if (retval < 0)
 		return retval;
 
 	retval = platform_device_register(&vrc4171_card_device);
 	if (retval < 0) {
-		driver_unregister(&vrc4171_card_driver);
+		platform_driver_unregister(&vrc4171_card_driver);
 		return retval;
 	}
 
@@ -735,21 +723,22 @@ static int __devinit vrc4171_card_init(void)
 	if (retval < 0) {
 		vrc4171_remove_sockets();
 		platform_device_unregister(&vrc4171_card_device);
-		driver_unregister(&vrc4171_card_driver);
+		platform_driver_unregister(&vrc4171_card_driver);
 		return retval;
 	}
 
-	printk(KERN_INFO "%s, connected to IRQ %d\n", vrc4171_card_driver.name, vrc4171_irq);
+	printk(KERN_INFO "%s, connected to IRQ %d\n",
+		vrc4171_card_driver.driver.name, vrc4171_irq);
 
 	return 0;
 }
 
-static void __devexit vrc4171_card_exit(void)
+static void vrc4171_card_exit(void)
 {
 	free_irq(vrc4171_irq, vrc4171_sockets);
 	vrc4171_remove_sockets();
 	platform_device_unregister(&vrc4171_card_device);
-	driver_unregister(&vrc4171_card_driver);
+	platform_driver_unregister(&vrc4171_card_driver);
 }
 
 module_init(vrc4171_card_init);

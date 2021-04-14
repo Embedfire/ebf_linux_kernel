@@ -1,11 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *  drivers/s390/char/sclp_cpi_sys.c
  *    SCLP control program identification sysfs interface
  *
  *    Copyright IBM Corp. 2001, 2007
  *    Author(s): Martin Peschke <mpeschke@de.ibm.com>
  *		 Michael Ernst <mernst@de.ibm.com>
  */
+
+#define KMSG_COMPONENT "sclp_cpi"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -18,8 +21,10 @@
 #include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/completion.h>
+#include <linux/export.h>
 #include <asm/ebcdic.h>
 #include <asm/sclp.h>
+
 #include "sclp.h"
 #include "sclp_rw.h"
 #include "sclp_cpi_sys.h"
@@ -89,7 +94,7 @@ static struct sclp_req *cpi_prepare_req(void)
 	/* setup SCCB for Control-Program Identification */
 	sccb->header.length = sizeof(struct cpi_sccb);
 	sccb->cpi_evbuf.header.length = sizeof(struct cpi_evbuf);
-	sccb->cpi_evbuf.header.type = 0x0b;
+	sccb->cpi_evbuf.header.type = EVTYP_CTLPROGIDENT;
 	evb = &sccb->cpi_evbuf;
 
 	/* set system type */
@@ -98,7 +103,7 @@ static struct sclp_req *cpi_prepare_req(void)
 	/* set system name */
 	set_data(evb->system_name, system_name);
 
-	/* set sytem level */
+	/* set system level */
 	evb->system_level = system_level;
 
 	/* set sysplex name */
@@ -150,16 +155,14 @@ static int cpi_req(void)
 	wait_for_completion(&completion);
 
 	if (req->status != SCLP_REQ_DONE) {
-		printk(KERN_WARNING "cpi: request failed (status=0x%02x)\n",
-			req->status);
+		pr_warn("request failed (status=0x%02x)\n", req->status);
 		rc = -EIO;
 		goto out_free_req;
 	}
 
 	response = ((struct cpi_sccb *) req->sccb)->header.response_code;
 	if (response != 0x0020) {
-		printk(KERN_WARNING "cpi: failed with "
-			"response code 0x%x\n", response);
+		pr_warn("request failed with response code 0x%x\n", response);
 		rc = -EIO;
 	}
 

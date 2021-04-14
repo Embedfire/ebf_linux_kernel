@@ -1,28 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * spu hypervisor abstraction for direct hardware access.
  *
  *  (C) Copyright IBM Deutschland Entwicklung GmbH 2005
  *  Copyright 2006 Sony Corp.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/interrupt.h>
 #include <linux/list.h>
-#include <linux/module.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/wait.h>
 #include <linux/mm.h>
 #include <linux/io.h>
@@ -80,10 +66,10 @@ static void cpu_affinity_set(struct spu *spu, int cpu)
 	u64 route;
 
 	if (nr_cpus_node(spu->node)) {
-		cpumask_t spumask = node_to_cpumask(spu->node);
-		cpumask_t cpumask = node_to_cpumask(cpu_to_node(cpu));
+		const struct cpumask *spumask = cpumask_of_node(spu->node),
+			*cpumask = cpumask_of_node(cpu_to_node(cpu));
 
-		if (!cpus_intersects(spumask, cpumask))
+		if (!cpumask_intersects(spumask, cpumask))
 			return;
 	}
 

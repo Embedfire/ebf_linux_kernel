@@ -1,3 +1,9 @@
-include include/asm-generic/Kbuild.asm
+# SPDX-License-Identifier: GPL-2.0
+generic-y += early_ioremap.h
+generic-y += extable.h
+generic-y += flat.h
+generic-y += parport.h
+generic-y += seccomp.h
 
-unifdef-y += hwcap.h
+generated-y += mach-types.h
+generated-y += unistd-nr.h

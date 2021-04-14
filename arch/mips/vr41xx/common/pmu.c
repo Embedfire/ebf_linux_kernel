@@ -1,22 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  pmu.c, Power Management Unit routines for NEC VR4100 series.
  *
- *  Copyright (C) 2003-2007  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *  Copyright (C) 2003-2007  Yoichi Yuasa <yuasa@linux-mips.org>
  */
+#include <linux/cpu.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
@@ -27,10 +15,10 @@
 
 #include <asm/cacheflush.h>
 #include <asm/cpu.h>
+#include <asm/idle.h>
 #include <asm/io.h>
 #include <asm/processor.h>
 #include <asm/reboot.h>
-#include <asm/system.h>
 
 #define PMU_TYPE1_BASE	0x0b0000a0UL
 #define PMU_TYPE1_SIZE	0x0eUL
@@ -46,7 +34,7 @@ static void __iomem *pmu_base;
 #define pmu_read(offset)		readw(pmu_base + (offset))
 #define pmu_write(offset, value)	writew((value), pmu_base + (offset))
 
-static void vr41xx_cpu_wait(void)
+static void __cpuidle vr41xx_cpu_wait(void)
 {
 	local_irq_disable();
 	if (!need_resched())
@@ -73,9 +61,9 @@ static inline void software_reset(void)
 	default:
 		set_c0_status(ST0_BEV | ST0_ERL);
 		change_c0_config(CONF_CM_CMASK, CONF_CM_UNCACHED);
-		flush_cache_all();
+		__flush_cache_all();
 		write_c0_wired(0);
-		__asm__("jr     %0"::"r"(0xbfc00000));
+		__asm__("jr	%0"::"r"(0xbfc00000));
 		break;
 	}
 }

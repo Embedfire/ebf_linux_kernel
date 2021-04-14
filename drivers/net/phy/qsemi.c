@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * drivers/net/phy/qsemi.c
  *
@@ -6,18 +7,11 @@
  * Author: Andy Fleming
  *
  * Copyright (c) 2004 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
- *
  */
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/unistd.h>
-#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/delay.h>
@@ -33,7 +27,7 @@
 
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 /* ------------------------------------------------------------------------- */
 /* The Quality Semiconductor QS6612 is used on the RPX CLLF                  */
@@ -112,29 +106,21 @@ static int qs6612_config_intr(struct phy_device *phydev)
 
 }
 
-static struct phy_driver qs6612_driver = {
+static struct phy_driver qs6612_driver[] = { {
 	.phy_id		= 0x00181440,
 	.name		= "QS6612",
 	.phy_id_mask	= 0xfffffff0,
-	.features	= PHY_BASIC_FEATURES,
-	.flags		= PHY_HAS_INTERRUPT,
+	/* PHY_BASIC_FEATURES */
 	.config_init	= qs6612_config_init,
-	.config_aneg	= genphy_config_aneg,
-	.read_status	= genphy_read_status,
 	.ack_interrupt	= qs6612_ack_interrupt,
 	.config_intr	= qs6612_config_intr,
-	.driver 	= { .owner = THIS_MODULE,},
+} };
+
+module_phy_driver(qs6612_driver);
+
+static struct mdio_device_id __maybe_unused qs6612_tbl[] = {
+	{ 0x00181440, 0xfffffff0 },
+	{ }
 };
 
-static int __init qs6612_init(void)
-{
-	return phy_driver_register(&qs6612_driver);
-}
-
-static void __exit qs6612_exit(void)
-{
-	phy_driver_unregister(&qs6612_driver);
-}
-
-module_init(qs6612_init);
-module_exit(qs6612_exit);
+MODULE_DEVICE_TABLE(mdio, qs6612_tbl);

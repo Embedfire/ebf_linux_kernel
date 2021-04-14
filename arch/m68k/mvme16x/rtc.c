@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	Real Time Clock interface for Linux on the MVME16x
  *
@@ -9,20 +10,17 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
-#include <linux/slab.h>
-#include <linux/smp_lock.h>
 #include <linux/ioport.h>
 #include <linux/capability.h>
 #include <linux/fcntl.h>
 #include <linux/init.h>
 #include <linux/poll.h>
-#include <linux/mc146818rtc.h>	/* For struct rtc_time and ioctls, etc */
+#include <linux/rtc.h>	/* For struct rtc_time and ioctls, etc */
 #include <linux/bcd.h>
 #include <asm/mvme16xhw.h>
 
 #include <asm/io.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
+#include <linux/uaccess.h>
 #include <asm/setup.h>
 
 /*
@@ -37,8 +35,7 @@ static const unsigned char days_in_mo[] =
 
 static atomic_t rtc_ready = ATOMIC_INIT(1);
 
-static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
-		     unsigned long arg)
+static long rtc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	volatile MK48T08ptr_t rtc = (MK48T08ptr_t)MVME_RTC_BASE;
 	unsigned long flags;
@@ -52,15 +49,15 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		/* Ensure clock and real-time-mode-register are accessible */
 		rtc->ctrl = RTC_READ;
 		memset(&wtime, 0, sizeof(struct rtc_time));
-		wtime.tm_sec =  BCD2BIN(rtc->bcd_sec);
-		wtime.tm_min =  BCD2BIN(rtc->bcd_min);
-		wtime.tm_hour = BCD2BIN(rtc->bcd_hr);
-		wtime.tm_mday =  BCD2BIN(rtc->bcd_dom);
-		wtime.tm_mon =  BCD2BIN(rtc->bcd_mth)-1;
-		wtime.tm_year = BCD2BIN(rtc->bcd_year);
+		wtime.tm_sec =  bcd2bin(rtc->bcd_sec);
+		wtime.tm_min =  bcd2bin(rtc->bcd_min);
+		wtime.tm_hour = bcd2bin(rtc->bcd_hr);
+		wtime.tm_mday =  bcd2bin(rtc->bcd_dom);
+		wtime.tm_mon =  bcd2bin(rtc->bcd_mth)-1;
+		wtime.tm_year = bcd2bin(rtc->bcd_year);
 		if (wtime.tm_year < 70)
 			wtime.tm_year += 100;
-		wtime.tm_wday = BCD2BIN(rtc->bcd_dow)-1;
+		wtime.tm_wday = bcd2bin(rtc->bcd_dow)-1;
 		rtc->ctrl = 0;
 		local_irq_restore(flags);
 		return copy_to_user(argp, &wtime, sizeof wtime) ?
@@ -104,12 +101,12 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		local_irq_save(flags);
 		rtc->ctrl     = RTC_WRITE;
 
-		rtc->bcd_sec  = BIN2BCD(sec);
-		rtc->bcd_min  = BIN2BCD(min);
-		rtc->bcd_hr   = BIN2BCD(hrs);
-		rtc->bcd_dom  = BIN2BCD(day);
-		rtc->bcd_mth  = BIN2BCD(mon);
-		rtc->bcd_year = BIN2BCD(yrs%100);
+		rtc->bcd_sec  = bin2bcd(sec);
+		rtc->bcd_min  = bin2bcd(min);
+		rtc->bcd_hr   = bin2bcd(hrs);
+		rtc->bcd_dom  = bin2bcd(day);
+		rtc->bcd_mth  = bin2bcd(mon);
+		rtc->bcd_year = bin2bcd(yrs%100);
 
 		rtc->ctrl     = 0;
 		local_irq_restore(flags);
@@ -121,22 +118,15 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 }
 
 /*
- *	We enforce only one user at a time here with the open/close.
- *	Also clear the previous interrupt data on an open, and clean
- *	up things on a close.
+ * We enforce only one user at a time here with the open/close.
  */
-
 static int rtc_open(struct inode *inode, struct file *file)
 {
-	lock_kernel();
 	if( !atomic_dec_and_test(&rtc_ready) )
 	{
 		atomic_inc( &rtc_ready );
-		unlock_kernel();
 		return -EBUSY;
 	}
-	unlock_kernel();
-
 	return 0;
 }
 
@@ -151,9 +141,10 @@ static int rtc_release(struct inode *inode, struct file *file)
  */
 
 static const struct file_operations rtc_fops = {
-	.ioctl =	rtc_ioctl,
-	.open =		rtc_open,
-	.release =	rtc_release,
+	.unlocked_ioctl	= rtc_ioctl,
+	.open		= rtc_open,
+	.release	= rtc_release,
+	.llseek		= noop_llseek,
 };
 
 static struct miscdevice rtc_dev=
@@ -168,7 +159,7 @@ static int __init rtc_MK48T08_init(void)
 	if (!MACH_IS_MVME16x)
 		return -ENODEV;
 
-	printk(KERN_INFO "MK48T08 Real Time Clock Driver v%s\n", RTC_VERSION);
+	pr_info("MK48T08 Real Time Clock Driver v%s\n", RTC_VERSION);
 	return misc_register(&rtc_dev);
 }
-module_init(rtc_MK48T08_init);
+device_initcall(rtc_MK48T08_init);

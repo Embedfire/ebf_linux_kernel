@@ -1,23 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  Header file for AT91/AT32 LCD Controller
  *
  *  Data structure and register user interface
  *
  *  Copyright (C) 2007 Atmel Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #ifndef __ATMEL_LCDC_H__
 #define __ATMEL_LCDC_H__
@@ -33,33 +20,18 @@
 
 
  /* LCD Controller info data structure, stored in device platform_data */
-struct atmel_lcdfb_info {
-	spinlock_t		lock;
-	struct fb_info		*info;
-	void __iomem		*mmio;
-	unsigned long		irq_base;
-	struct work_struct	task;
-
+struct atmel_lcdfb_pdata {
 	unsigned int		guard_time;
-	unsigned int 		smem_len;
-	struct platform_device	*pdev;
-	struct clk		*bus_clk;
-	struct clk		*lcdc_clk;
-
-#ifdef CONFIG_BACKLIGHT_ATMEL_LCDC
-	struct backlight_device	*backlight;
-	u8			bl_power;
-#endif
 	bool			lcdcon_is_backlight;
-	u8			saved_lcdcon;
-
+	bool			lcdcon_pol_negative;
 	u8			default_bpp;
 	u8			lcd_wiring_mode;
 	unsigned int		default_lcdcon2;
 	unsigned int		default_dmacon;
-	void (*atmel_lcdfb_power_control)(int on);
+	void (*atmel_lcdfb_power_control)(struct atmel_lcdfb_pdata *pdata, int on);
 	struct fb_monspecs	*default_monspecs;
-	u32			pseudo_palette[16];
+
+	struct list_head	pwr_gpios;
 };
 
 #define ATMEL_LCDC_DMABADDR1	0x00

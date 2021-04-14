@@ -1,23 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * sma cpu5 watchdog driver
  *
  * Copyright (C) 2003 Heiko Ronsdorf <hero@ihg.uni-duisburg.de>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -25,7 +13,6 @@
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
-#include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/timer.h>
 #include <linux/completion.h>
@@ -39,7 +26,7 @@
 static int verbose;
 static int port = 0x91;
 static int ticks = 10000;
-static spinlock_t cpu5wdt_lock;
+static DEFINE_SPINLOCK(cpu5wdt_lock);
 
 #define PFX			"cpu5wdt: "
 
@@ -68,10 +55,10 @@ static struct {
 
 /* generic helper functions */
 
-static void cpu5wdt_trigger(unsigned long unused)
+static void cpu5wdt_trigger(struct timer_list *unused)
 {
 	if (verbose > 2)
-		printk(KERN_DEBUG PFX "trigger at %i ticks\n", ticks);
+		pr_debug("trigger at %i ticks\n", ticks);
 
 	if (cpu5wdt_device.running)
 		ticks--;
@@ -96,7 +83,7 @@ static void cpu5wdt_reset(void)
 	ticks = cpu5wdt_device.default_ticks;
 
 	if (verbose)
-		printk(KERN_DEBUG PFX "reset (%i ticks)\n", (int) ticks);
+		pr_debug("reset (%i ticks)\n", (int) ticks);
 
 }
 
@@ -129,7 +116,7 @@ static int cpu5wdt_stop(void)
 	ticks = cpu5wdt_device.default_ticks;
 	spin_unlock_irqrestore(&cpu5wdt_lock, flags);
 	if (verbose)
-		printk(KERN_CRIT PFX "stop not possible\n");
+		pr_crit("stop not possible\n");
 	return -EIO;
 }
 
@@ -139,7 +126,7 @@ static int cpu5wdt_open(struct inode *inode, struct file *file)
 {
 	if (test_and_set_bit(0, &cpu5wdt_device.inuse))
 		return -EBUSY;
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int cpu5wdt_release(struct inode *inode, struct file *file)
@@ -154,7 +141,7 @@ static long cpu5wdt_ioctl(struct file *file, unsigned int cmd,
 	void __user *argp = (void __user *)arg;
 	int __user *p = argp;
 	unsigned int value;
-	static struct watchdog_info ident = {
+	static const struct watchdog_info ident = {
 		.options = WDIOF_CARDRESET,
 		.identity = "CPU5 WDT",
 	};
@@ -200,6 +187,7 @@ static const struct file_operations cpu5wdt_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.unlocked_ioctl	= cpu5wdt_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= cpu5wdt_open,
 	.write		= cpu5wdt_write,
 	.release	= cpu5wdt_release,
@@ -213,23 +201,21 @@ static struct miscdevice cpu5wdt_misc = {
 
 /* init/exit function */
 
-static int __devinit cpu5wdt_init(void)
+static int cpu5wdt_init(void)
 {
 	unsigned int val;
 	int err;
 
 	if (verbose)
-		printk(KERN_DEBUG PFX
-				"port=0x%x, verbose=%i\n", port, verbose);
+		pr_debug("port=0x%x, verbose=%i\n", port, verbose);
 
 	init_completion(&cpu5wdt_device.stop);
-	spin_lock_init(&cpu5wdt_lock);
 	cpu5wdt_device.queue = 0;
-	setup_timer(&cpu5wdt_device.timer, cpu5wdt_trigger, 0);
+	timer_setup(&cpu5wdt_device.timer, cpu5wdt_trigger, 0);
 	cpu5wdt_device.default_ticks = ticks;
 
 	if (!request_region(port, CPU5WDT_EXTENT, PFX)) {
-		printk(KERN_ERR PFX "request_region failed\n");
+		pr_err("request_region failed\n");
 		err = -EBUSY;
 		goto no_port;
 	}
@@ -238,16 +224,16 @@ static int __devinit cpu5wdt_init(void)
 	val = inb(port + CPU5WDT_STATUS_REG);
 	val = (val >> 2) & 1;
 	if (!val)
-		printk(KERN_INFO PFX "sorry, was my fault\n");
+		pr_info("sorry, was my fault\n");
 
 	err = misc_register(&cpu5wdt_misc);
 	if (err < 0) {
-		printk(KERN_ERR PFX "misc_register failed\n");
+		pr_err("misc_register failed\n");
 		goto no_misc;
 	}
 
 
-	printk(KERN_INFO PFX "init success\n");
+	pr_info("init success\n");
 	return 0;
 
 no_misc:
@@ -256,16 +242,17 @@ no_port:
 	return err;
 }
 
-static int __devinit cpu5wdt_init_module(void)
+static int cpu5wdt_init_module(void)
 {
 	return cpu5wdt_init();
 }
 
-static void __devexit cpu5wdt_exit(void)
+static void cpu5wdt_exit(void)
 {
 	if (cpu5wdt_device.queue) {
 		cpu5wdt_device.queue = 0;
 		wait_for_completion(&cpu5wdt_device.stop);
+		del_timer(&cpu5wdt_device.timer);
 	}
 
 	misc_deregister(&cpu5wdt_misc);
@@ -274,7 +261,7 @@ static void __devexit cpu5wdt_exit(void)
 
 }
 
-static void __devexit cpu5wdt_exit_module(void)
+static void cpu5wdt_exit_module(void)
 {
 	cpu5wdt_exit();
 }
@@ -288,9 +275,8 @@ MODULE_AUTHOR("Heiko Ronsdorf <hero@ihg.uni-duisburg.de>");
 MODULE_DESCRIPTION("sma cpu5 watchdog driver");
 MODULE_SUPPORTED_DEVICE("sma cpu5 watchdog");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
 
-module_param(port, int, 0);
+module_param_hw(port, int, ioport, 0);
 MODULE_PARM_DESC(port, "base address of watchdog card, default is 0x91");
 
 module_param(verbose, int, 0);

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * hd64572.h	Description of the Hitachi HD64572 (SCA-II), valid for 
  * 		CPU modes 0 & 2.
@@ -5,11 +6,6 @@
  * Author:	Ivan Passos <ivan@cyclades.com>
  *
  * Copyright:   (c) 2000-2001 Cyclades Corp.
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  *
  * $Log: hd64572.h,v $
  * Revision 3.1  2001/06/15 12:41:10  regina
@@ -20,7 +16,6 @@
  *
  * Revision 1.0 2000/01/25 ivan
  * Initial version.
- *
  */
 
 #ifndef __HD64572_H
@@ -218,7 +213,7 @@ typedef struct {
 #define ST_TX_EOM     0x80	/* End of frame */
 #define ST_TX_UNDRRUN 0x08
 #define ST_TX_OWNRSHP 0x02
-#define ST_TX_EOT     0x01	/* End of transmition */
+#define ST_TX_EOT     0x01	/* End of transmission */
 
 #define ST_RX_EOM     0x80	/* End of frame */
 #define ST_RX_SHORT   0x40	/* Short frame */

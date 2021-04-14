@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Cell Broadband Engine Performance Monitor
  *
@@ -6,20 +7,6 @@
  * Author:
  *   David Erb (djerb@us.ibm.com)
  *   Kevin Corry (kevcorry@us.ibm.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #ifndef __ASM_CELL_PMU_H__
@@ -37,9 +24,11 @@
 #define CBE_PM_STOP_AT_MAX                 0x40000000
 #define CBE_PM_TRACE_MODE_GET(pm_control)  (((pm_control) >> 28) & 0x3)
 #define CBE_PM_TRACE_MODE_SET(mode)        (((mode)  & 0x3) << 28)
+#define CBE_PM_TRACE_BUF_OVFLW(bit)        (((bit) & 0x1) << 17)
 #define CBE_PM_COUNT_MODE_SET(count)       (((count) & 0x3) << 18)
 #define CBE_PM_FREEZE_ALL_CTRS             0x00100000
 #define CBE_PM_ENABLE_EXT_TRACE            0x00008000
+#define CBE_PM_SPU_ADDR_TRACE_SET(msk)     (((msk) & 0x3) << 9)
 
 /* Macros for the trace_address register. */
 #define CBE_PM_TRACE_BUF_FULL              0x00000800

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	X.25 Packet Layer release 002
  *
@@ -6,29 +7,30 @@
  *
  *	This code REQUIRES 2.1.15 or higher
  *
- *	This module:
- *		This module is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
- *
  *	History
  *	X.25 001	Jonathan Naylor	Started coding.
  *      2000-09-04	Henner Eisen	Prevent freeing a dangling skb.
  */
 
+#define pr_fmt(fmt) "X25: " fmt
+
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <linux/if_arp.h>
 #include <net/x25.h>
+#include <net/x25device.h>
 
 static int x25_receive_data(struct sk_buff *skb, struct x25_neigh *nb)
 {
 	struct sock *sk;
 	unsigned short frametype;
 	unsigned int lci;
+
+	if (!pskb_may_pull(skb, X25_STD_MIN_LEN))
+		return 0;
 
 	frametype = skb->data[2];
 	lci = ((skb->data[0] << 8) & 0xF00) + ((skb->data[1] << 0) & 0x0FF);
@@ -53,7 +55,7 @@ static int x25_receive_data(struct sk_buff *skb, struct x25_neigh *nb)
 		if (!sock_owned_by_user(sk)) {
 			queued = x25_process_rx_frame(sk, skb);
 		} else {
-			sk_add_backlog(sk, skb);
+			queued = !sk_add_backlog(sk, skb, READ_ONCE(sk->sk_rcvbuf));
 		}
 		bh_unlock_sock(sk);
 		sock_put(sk);
@@ -84,7 +86,7 @@ static int x25_receive_data(struct sk_buff *skb, struct x25_neigh *nb)
 */
 
 	if (frametype != X25_CLEAR_CONFIRMATION)
-		printk(KERN_DEBUG "x25_receive_data(): unknown frame type %2x\n",frametype);
+		pr_debug("x25_receive_data(): unknown frame type %2x\n",frametype);
 
 	return 0;
 }
@@ -109,24 +111,32 @@ int x25_lapb_receive_frame(struct sk_buff *skb, struct net_device *dev,
 	 */
 	nb = x25_get_neigh(dev);
 	if (!nb) {
-		printk(KERN_DEBUG "X.25: unknown neighbour - %s\n", dev->name);
+		pr_debug("unknown neighbour - %s\n", dev->name);
 		goto drop;
 	}
 
+	if (!pskb_may_pull(skb, 1)) {
+		x25_neigh_put(nb);
+		return 0;
+	}
+
 	switch (skb->data[0]) {
-		case 0x00:
-			skb_pull(skb, 1);
-			if (x25_receive_data(skb, nb)) {
-				x25_neigh_put(nb);
-				goto out;
-			}
-			break;
-		case 0x01:
-			x25_link_established(nb);
-			break;
-		case 0x02:
-			x25_link_terminated(nb);
-			break;
+
+	case X25_IFACE_DATA:
+		skb_pull(skb, 1);
+		if (x25_receive_data(skb, nb)) {
+			x25_neigh_put(nb);
+			goto out;
+		}
+		break;
+
+	case X25_IFACE_CONNECT:
+		x25_link_established(nb);
+		break;
+
+	case X25_IFACE_DISCONNECT:
+		x25_link_terminated(nb);
+		break;
 	}
 	x25_neigh_put(nb);
 drop:
@@ -141,21 +151,21 @@ void x25_establish_link(struct x25_neigh *nb)
 	unsigned char *ptr;
 
 	switch (nb->dev->type) {
-		case ARPHRD_X25:
-			if ((skb = alloc_skb(1, GFP_ATOMIC)) == NULL) {
-				printk(KERN_ERR "x25_dev: out of memory\n");
-				return;
-			}
-			ptr  = skb_put(skb, 1);
-			*ptr = 0x01;
-			break;
+	case ARPHRD_X25:
+		if ((skb = alloc_skb(1, GFP_ATOMIC)) == NULL) {
+			pr_err("x25_dev: out of memory\n");
+			return;
+		}
+		ptr  = skb_put(skb, 1);
+		*ptr = X25_IFACE_CONNECT;
+		break;
 
-#if defined(CONFIG_LLC) || defined(CONFIG_LLC_MODULE)
-		case ARPHRD_ETHER:
-			return;
+#if IS_ENABLED(CONFIG_LLC)
+	case ARPHRD_ETHER:
+		return;
 #endif
-		default:
-			return;
+	default:
+		return;
 	}
 
 	skb->protocol = htons(ETH_P_X25);
@@ -169,7 +179,7 @@ void x25_terminate_link(struct x25_neigh *nb)
 	struct sk_buff *skb;
 	unsigned char *ptr;
 
-#if defined(CONFIG_LLC) || defined(CONFIG_LLC_MODULE)
+#if IS_ENABLED(CONFIG_LLC)
 	if (nb->dev->type == ARPHRD_ETHER)
 		return;
 #endif
@@ -178,12 +188,12 @@ void x25_terminate_link(struct x25_neigh *nb)
 
 	skb = alloc_skb(1, GFP_ATOMIC);
 	if (!skb) {
-		printk(KERN_ERR "x25_dev: out of memory\n");
+		pr_err("x25_dev: out of memory\n");
 		return;
 	}
 
 	ptr  = skb_put(skb, 1);
-	*ptr = 0x02;
+	*ptr = X25_IFACE_DISCONNECT;
 
 	skb->protocol = htons(ETH_P_X25);
 	skb->dev      = nb->dev;
@@ -197,19 +207,19 @@ void x25_send_frame(struct sk_buff *skb, struct x25_neigh *nb)
 	skb_reset_network_header(skb);
 
 	switch (nb->dev->type) {
-		case ARPHRD_X25:
-			dptr  = skb_push(skb, 1);
-			*dptr = 0x00;
-			break;
+	case ARPHRD_X25:
+		dptr  = skb_push(skb, 1);
+		*dptr = X25_IFACE_DATA;
+		break;
 
-#if defined(CONFIG_LLC) || defined(CONFIG_LLC_MODULE)
-		case ARPHRD_ETHER:
-			kfree_skb(skb);
-			return;
+#if IS_ENABLED(CONFIG_LLC)
+	case ARPHRD_ETHER:
+		kfree_skb(skb);
+		return;
 #endif
-		default:
-			kfree_skb(skb);
-			return;
+	default:
+		kfree_skb(skb);
+		return;
 	}
 
 	skb->protocol = htons(ETH_P_X25);

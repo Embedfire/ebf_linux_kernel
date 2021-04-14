@@ -1,22 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  PS3 hvcall interface.
  *
  *  Copyright (C) 2006 Sony Computer Entertainment Inc.
  *  Copyright 2006 Sony Corp.
  *  Copyright 2003, 2004 (c) MontaVista Software, Inc.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #if !defined(_ASM_POWERPC_LV1CALL_H)
@@ -25,6 +13,7 @@
 #if !defined(__ASSEMBLY__)
 
 #include <linux/types.h>
+#include <linux/export.h>
 
 /* lv1 call declaration macros */
 
@@ -230,7 +219,7 @@ LV1_CALL(allocate_memory,                               4, 2,   0 )
 LV1_CALL(write_htab_entry,                              4, 0,   1 )
 LV1_CALL(construct_virtual_address_space,               3, 2,   2 )
 LV1_CALL(invalidate_htab_entries,                       5, 0,   3 )
-LV1_CALL(get_virtual_address_space_id_of_ppe,           1, 1,   4 )
+LV1_CALL(get_virtual_address_space_id_of_ppe,           0, 1,   4 )
 LV1_CALL(query_logical_partition_address_region_info,   1, 5,   6 )
 LV1_CALL(select_virtual_address_space,                  1, 0,   7 )
 LV1_CALL(pause,                                         1, 0,   9 )
@@ -263,9 +252,9 @@ LV1_CALL(configure_execution_time_variable,             1, 0,  77 )
 LV1_CALL(get_spe_irq_outlet,                            2, 1,  78 )
 LV1_CALL(set_spe_privilege_state_area_1_register,       3, 0,  79 )
 LV1_CALL(create_repository_node,                        6, 0,  90 )
-LV1_CALL(get_repository_node_value,                     5, 2,  91 )
-LV1_CALL(modify_repository_node_value,                  6, 0,  92 )
-LV1_CALL(remove_repository_node,                        4, 0,  93 )
+LV1_CALL(read_repository_node,                          5, 2,  91 )
+LV1_CALL(write_repository_node,                         6, 0,  92 )
+LV1_CALL(delete_repository_node,                        4, 0,  93 )
 LV1_CALL(read_htab_entries,                             2, 5,  95 )
 LV1_CALL(set_dabr,                                      2, 0,  96 )
 LV1_CALL(get_total_execution_time,                      2, 1, 103 )
@@ -275,7 +264,7 @@ LV1_CALL(construct_io_irq_outlet,                       1, 1, 120 )
 LV1_CALL(destruct_io_irq_outlet,                        1, 0, 121 )
 LV1_CALL(map_htab,                                      1, 1, 122 )
 LV1_CALL(unmap_htab,                                    1, 0, 123 )
-LV1_CALL(get_version_info,                              0, 1, 127 )
+LV1_CALL(get_version_info,                              0, 2, 127 )
 LV1_CALL(insert_htab_entry,                             6, 3, 158 )
 LV1_CALL(read_virtual_uart,                             3, 1, 162 )
 LV1_CALL(write_virtual_uart,                            3, 1, 163 )
@@ -293,9 +282,9 @@ LV1_CALL(unmap_device_dma_region,                       4, 0, 177 )
 LV1_CALL(net_add_multicast_address,                     4, 0, 185 )
 LV1_CALL(net_remove_multicast_address,                  4, 0, 186 )
 LV1_CALL(net_start_tx_dma,                              4, 0, 187 )
-LV1_CALL(net_stop_tx_dma,                               3, 0, 188 )
+LV1_CALL(net_stop_tx_dma,                               2, 0, 188 )
 LV1_CALL(net_start_rx_dma,                              4, 0, 189 )
-LV1_CALL(net_stop_rx_dma,                               3, 0, 190 )
+LV1_CALL(net_stop_rx_dma,                               2, 0, 190 )
 LV1_CALL(net_set_interrupt_status_indicator,            4, 0, 191 )
 LV1_CALL(net_set_interrupt_mask,                        4, 0, 193 )
 LV1_CALL(net_control,                                   6, 2, 194 )
@@ -315,7 +304,7 @@ LV1_CALL(gpu_context_free,                              1, 0, 218 )
 LV1_CALL(gpu_context_iomap,                             5, 0, 221 )
 LV1_CALL(gpu_context_attribute,                         6, 0, 225 )
 LV1_CALL(gpu_context_intr,                              1, 1, 227 )
-LV1_CALL(gpu_attribute,                                 5, 0, 228 )
+LV1_CALL(gpu_attribute,                                 3, 0, 228 )
 LV1_CALL(get_rtc,                                       0, 2, 232 )
 LV1_CALL(set_ppe_periodic_tracer_frequency,             1, 0, 240 )
 LV1_CALL(start_ppe_periodic_tracer,                     5, 0, 241 )

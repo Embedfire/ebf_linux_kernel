@@ -1,20 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- * File...........: linux/drivers/s390/block/dasd.c
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  *		    Horst Hummel <Horst.Hummel@de.ibm.com>
  *		    Carsten Otte <Cotte@de.ibm.com>
  *		    Martin Schwidefsky <schwidefsky@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
- * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999-2001
+ * Copyright IBM Corp. 1999, 2001
  *
  */
+
+#define KMSG_COMPONENT "dasd"
 
 #include <linux/ctype.h>
 #include <linux/init.h>
 
 #include <asm/debug.h>
 #include <asm/ebcdic.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 /* This is ugly... */
 #define PRINTK_HEADER "dasd_erp:"
@@ -91,16 +93,17 @@ dasd_default_erp_action(struct dasd_ccw_req *cqr)
 
         /* just retry - there is nothing to save ... I got no sense data.... */
         if (cqr->retries > 0) {
-		DEV_MESSAGE (KERN_DEBUG, device,
+		DBF_DEV_EVENT(DBF_DEBUG, device,
                              "default ERP called (%i retries left)",
                              cqr->retries);
-		cqr->lpm    = LPM_ANYPATH;
+		if (!test_bit(DASD_CQR_VERIFY_PATH, &cqr->flags))
+			cqr->lpm = dasd_path_get_opm(device);
 		cqr->status = DASD_CQR_FILLED;
         } else {
-                DEV_MESSAGE (KERN_WARNING, device, "%s",
-			     "default ERP called (NO retry left)");
+		pr_err("%s: default ERP has run out of retries and failed\n",
+		       dev_name(&device->cdev->dev));
 		cqr->status = DASD_CQR_FAILED;
-		cqr->stopclk = get_clock();
+		cqr->stopclk = get_tod_clock();
         }
         return cqr;
 }				/* end dasd_default_erp_action */
@@ -122,10 +125,15 @@ dasd_default_erp_action(struct dasd_ccw_req *cqr)
 struct dasd_ccw_req *dasd_default_erp_postaction(struct dasd_ccw_req *cqr)
 {
 	int success;
+	unsigned long startclk, stopclk;
+	struct dasd_device *startdev;
 
 	BUG_ON(cqr->refers == NULL || cqr->function == NULL);
 
 	success = cqr->status == DASD_CQR_DONE;
+	startclk = cqr->startclk;
+	stopclk = cqr->stopclk;
+	startdev = cqr->startdev;
 
 	/* free all ERPs - but NOT the original cqr */
 	while (cqr->refers != NULL) {
@@ -140,11 +148,14 @@ struct dasd_ccw_req *dasd_default_erp_postaction(struct dasd_ccw_req *cqr)
 	}
 
 	/* set corresponding status to original cqr */
+	cqr->startclk = startclk;
+	cqr->stopclk = stopclk;
+	cqr->startdev = startdev;
 	if (success)
 		cqr->status = DASD_CQR_DONE;
 	else {
 		cqr->status = DASD_CQR_FAILED;
-		cqr->stopclk = get_clock();
+		cqr->stopclk = get_tod_clock();
 	}
 
 	return cqr;
@@ -157,13 +168,36 @@ dasd_log_sense(struct dasd_ccw_req *cqr, struct irb *irb)
 	struct dasd_device *device;
 
 	device = cqr->startdev;
+	if (cqr->intrc == -ETIMEDOUT) {
+		dev_err(&device->cdev->dev,
+			"A timeout error occurred for cqr %p\n", cqr);
+		return;
+	}
+	if (cqr->intrc == -ENOLINK) {
+		dev_err(&device->cdev->dev,
+			"A transport error occurred for cqr %p\n", cqr);
+		return;
+	}
 	/* dump sense data */
 	if (device->discipline && device->discipline->dump_sense)
 		device->discipline->dump_sense(device, cqr, irb);
 }
+
+void
+dasd_log_sense_dbf(struct dasd_ccw_req *cqr, struct irb *irb)
+{
+	struct dasd_device *device;
+
+	device = cqr->startdev;
+	/* dump sense data to s390 debugfeature*/
+	if (device->discipline && device->discipline->dump_sense_dbf)
+		device->discipline->dump_sense_dbf(device, irb, "log");
+}
+EXPORT_SYMBOL(dasd_log_sense_dbf);
 
 EXPORT_SYMBOL(dasd_default_erp_action);
 EXPORT_SYMBOL(dasd_default_erp_postaction);
 EXPORT_SYMBOL(dasd_alloc_erp_request);
 EXPORT_SYMBOL(dasd_free_erp_request);
 EXPORT_SYMBOL(dasd_log_sense);
+

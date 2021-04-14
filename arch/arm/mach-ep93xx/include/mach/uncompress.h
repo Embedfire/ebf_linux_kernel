@@ -1,15 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * arch/arm/mach-ep93xx/include/mach/uncompress.h
  *
  * Copyright (C) 2006 Lennert Buytenhek <buytenh@wantstofly.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or (at
- * your option) any later version.
  */
 
 #include <mach/ep93xx-regs.h>
+#include <asm/mach-types.h>
 
 static unsigned char __raw_readb(unsigned int ptr)
 {
@@ -31,22 +28,21 @@ static void __raw_writel(unsigned int value, unsigned int ptr)
 	*((volatile unsigned int *)ptr) = value;
 }
 
-
-#define PHYS_UART1_DATA		0x808c0000
-#define PHYS_UART1_FLAG		0x808c0018
-#define UART1_FLAG_TXFF		0x20
+#define PHYS_UART_DATA		(CONFIG_DEBUG_UART_PHYS + 0x00)
+#define PHYS_UART_FLAG		(CONFIG_DEBUG_UART_PHYS + 0x18)
+#define UART_FLAG_TXFF		0x20
 
 static inline void putc(int c)
 {
 	int i;
 
-	for (i = 0; i < 1000; i++) {
-		/* Transmit fifo not full?  */
-		if (!(__raw_readb(PHYS_UART1_FLAG) & UART1_FLAG_TXFF))
+	for (i = 0; i < 10000; i++) {
+		/* Transmit fifo not full? */
+		if (!(__raw_readb(PHYS_UART_FLAG) & UART_FLAG_TXFF))
 			break;
 	}
 
-	__raw_writeb(c, PHYS_UART1_DATA);
+	__raw_writeb(c, PHYS_UART_DATA);
 }
 
 static inline void flush(void)
@@ -76,10 +72,19 @@ static void ethernet_reset(void)
 		;
 }
 
+#define TS72XX_WDT_CONTROL_PHYS_BASE	0x23800000
+#define TS72XX_WDT_FEED_PHYS_BASE	0x23c00000
+#define TS72XX_WDT_FEED_VAL		0x05
+
+static void __maybe_unused ts72xx_watchdog_disable(void)
+{
+	__raw_writeb(TS72XX_WDT_FEED_VAL, TS72XX_WDT_FEED_PHYS_BASE);
+	__raw_writeb(0, TS72XX_WDT_CONTROL_PHYS_BASE);
+}
 
 static void arch_decomp_setup(void)
 {
+	if (machine_is_ts72xx())
+		ts72xx_watchdog_disable();
 	ethernet_reset();
 }
-
-#define arch_decomp_wdog()

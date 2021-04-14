@@ -1,12 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* 
  * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
- * Licensed under the GPL
  */
 
 #ifndef __UM_TUNTAP_H
 #define __UM_TUNTAP_H
 
-#include "net_user.h"
+#include <net_user.h>
 
 struct tuntap_data {
 	char *dev_name;

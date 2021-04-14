@@ -1,27 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * c67x00-ll-hpi.c: Cypress C67X00 USB Low level interface using HPI
  *
  * Copyright (C) 2006-2008 Barco N.V.
  *    Derived from the Cypress cy7c67200/300 ezusb linux driver and
  *    based on multiple host controller drivers inside the linux kernel.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- * MA  02110-1301  USA.
  */
 
 #include <asm/byteorder.h>
+#include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/jiffies.h>
 #include <linux/usb/c67x00.h>
@@ -62,8 +49,8 @@ struct c67x00_lcp_int_data {
  * HPI implementation
  *
  * The c67x00 chip also support control via SPI or HSS serial
- * interfaces.  However, this driver assumes that register access can
- * be performed from IRQ context.  While this is a safe assuption with
+ * interfaces. However, this driver assumes that register access can
+ * be performed from IRQ context. While this is a safe assumption with
  * the HPI interface, it is not true for the serial interfaces.
  */
 
@@ -73,13 +60,22 @@ struct c67x00_lcp_int_data {
 #define HPI_ADDR	2
 #define HPI_STATUS	3
 
+/*
+ * According to CY7C67300 specification (tables 140 and 141) HPI read and
+ * write cycle duration Tcyc must be at least 6T long, where T is 1/48MHz,
+ * which is 125ns.
+ */
+#define HPI_T_CYC_NS	125
+
 static inline u16 hpi_read_reg(struct c67x00_device *dev, int reg)
 {
+	ndelay(HPI_T_CYC_NS);
 	return __raw_readw(dev->hpi.base + reg * dev->hpi.regstep);
 }
 
 static inline void hpi_write_reg(struct c67x00_device *dev, int reg, u16 value)
 {
+	ndelay(HPI_T_CYC_NS);
 	__raw_writew(value, dev->hpi.base + reg * dev->hpi.regstep);
 }
 
@@ -237,7 +233,7 @@ void c67x00_ll_hpi_disable_sofeop(struct c67x00_sie *sie)
 /* -------------------------------------------------------------------------- */
 /* Transactions */
 
-static inline u16 ll_recv_msg(struct c67x00_device *dev)
+static inline int ll_recv_msg(struct c67x00_device *dev)
 {
 	u16 res;
 
@@ -266,7 +262,7 @@ u16 c67x00_ll_get_usb_ctl(struct c67x00_sie *sie)
 	return hpi_read_word(sie->dev, USB_CTL_REG(sie->sie_num));
 }
 
-/**
+/*
  * c67x00_ll_usb_clear_status - clear the USB status bits
  */
 void c67x00_ll_usb_clear_status(struct c67x00_sie *sie, u16 bits)
@@ -399,7 +395,7 @@ int c67x00_ll_reset(struct c67x00_device *dev)
 
 /* -------------------------------------------------------------------------- */
 
-/**
+/*
  * c67x00_ll_write_mem_le16 - write into c67x00 memory
  * Only data is little endian, addr has cpu endianess.
  */
@@ -438,7 +434,7 @@ void c67x00_ll_write_mem_le16(struct c67x00_device *dev, u16 addr,
 	}
 }
 
-/**
+/*
  * c67x00_ll_read_mem_le16 - read from c67x00 memory
  * Only data is little endian, addr has cpu endianess.
  */

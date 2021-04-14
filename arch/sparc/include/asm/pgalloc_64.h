@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _SPARC64_PGALLOC_H
 #define _SPARC64_PGALLOC_H
 
@@ -5,7 +6,6 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
-#include <linux/quicklist.h>
 
 #include <asm/spitfire.h>
 #include <asm/cpudata.h>
@@ -14,68 +14,102 @@
 
 /* Page table allocation/freeing. */
 
+extern struct kmem_cache *pgtable_cache;
+
+static inline void __p4d_populate(p4d_t *p4d, pud_t *pud)
+{
+	p4d_set(p4d, pud);
+}
+
+#define p4d_populate(MM, P4D, PUD)	__p4d_populate(P4D, PUD)
+
 static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-	return quicklist_alloc(0, GFP_KERNEL, NULL);
+	return kmem_cache_alloc(pgtable_cache, GFP_KERNEL);
 }
 
 static inline void pgd_free(struct mm_struct *mm, pgd_t *pgd)
 {
-	quicklist_free(0, NULL, pgd);
+	kmem_cache_free(pgtable_cache, pgd);
 }
 
-#define pud_populate(MM, PUD, PMD)	pud_set(PUD, PMD)
+static inline void __pud_populate(pud_t *pud, pmd_t *pmd)
+{
+	pud_set(pud, pmd);
+}
+
+#define pud_populate(MM, PUD, PMD)	__pud_populate(PUD, PMD)
+
+static inline pud_t *pud_alloc_one(struct mm_struct *mm, unsigned long addr)
+{
+	return kmem_cache_alloc(pgtable_cache, GFP_KERNEL);
+}
+
+static inline void pud_free(struct mm_struct *mm, pud_t *pud)
+{
+	kmem_cache_free(pgtable_cache, pud);
+}
 
 static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
-	return quicklist_alloc(0, GFP_KERNEL, NULL);
+	return kmem_cache_alloc(pgtable_cache, GFP_KERNEL);
 }
 
 static inline void pmd_free(struct mm_struct *mm, pmd_t *pmd)
 {
-	quicklist_free(0, NULL, pmd);
+	kmem_cache_free(pgtable_cache, pmd);
 }
 
-static inline pte_t *pte_alloc_one_kernel(struct mm_struct *mm,
-					  unsigned long address)
+pte_t *pte_alloc_one_kernel(struct mm_struct *mm);
+pgtable_t pte_alloc_one(struct mm_struct *mm);
+void pte_free_kernel(struct mm_struct *mm, pte_t *pte);
+void pte_free(struct mm_struct *mm, pgtable_t ptepage);
+
+#define pmd_populate_kernel(MM, PMD, PTE)	pmd_set(MM, PMD, PTE)
+#define pmd_populate(MM, PMD, PTE)		pmd_set(MM, PMD, PTE)
+#define pmd_pgtable(PMD)			((pte_t *)pmd_page_vaddr(PMD))
+
+void pgtable_free(void *table, bool is_page);
+
+#ifdef CONFIG_SMP
+
+struct mmu_gather;
+void tlb_remove_table(struct mmu_gather *, void *);
+
+static inline void pgtable_free_tlb(struct mmu_gather *tlb, void *table, bool is_page)
 {
-	return quicklist_alloc(0, GFP_KERNEL, NULL);
+	unsigned long pgf = (unsigned long)table;
+	if (is_page)
+		pgf |= 0x1UL;
+	tlb_remove_table(tlb, (void *)pgf);
 }
 
-static inline pgtable_t pte_alloc_one(struct mm_struct *mm,
-					unsigned long address)
+static inline void __tlb_remove_table(void *_table)
 {
-	struct page *page;
-	void *pg;
+	void *table = (void *)((unsigned long)_table & ~0x1UL);
+	bool is_page = false;
 
-	pg = quicklist_alloc(0, GFP_KERNEL, NULL);
-	if (!pg)
-		return NULL;
-	page = virt_to_page(pg);
-	pgtable_page_ctor(page);
-	return page;
+	if ((unsigned long)_table & 0x1UL)
+		is_page = true;
+	pgtable_free(table, is_page);
 }
-
-static inline void pte_free_kernel(struct mm_struct *mm, pte_t *pte)
+#else /* CONFIG_SMP */
+static inline void pgtable_free_tlb(struct mmu_gather *tlb, void *table, bool is_page)
 {
-	quicklist_free(0, NULL, pte);
+	pgtable_free(table, is_page);
 }
+#endif /* !CONFIG_SMP */
 
-static inline void pte_free(struct mm_struct *mm, pgtable_t ptepage)
+static inline void __pte_free_tlb(struct mmu_gather *tlb, pte_t *pte,
+				  unsigned long address)
 {
-	pgtable_page_dtor(ptepage);
-	quicklist_free_page(0, NULL, ptepage);
+	pgtable_free_tlb(tlb, pte, true);
 }
 
+#define __pmd_free_tlb(tlb, pmd, addr)		      \
+	pgtable_free_tlb(tlb, pmd, false)
 
-#define pmd_populate_kernel(MM, PMD, PTE)	pmd_set(PMD, PTE)
-#define pmd_populate(MM,PMD,PTE_PAGE)		\
-	pmd_populate_kernel(MM,PMD,page_address(PTE_PAGE))
-#define pmd_pgtable(pmd) pmd_page(pmd)
-
-static inline void check_pgt_cache(void)
-{
-	quicklist_trim(0, NULL, 25, 16);
-}
+#define __pud_free_tlb(tlb, pud, addr)		      \
+	pgtable_free_tlb(tlb, pud, false)
 
 #endif /* _SPARC64_PGALLOC_H */

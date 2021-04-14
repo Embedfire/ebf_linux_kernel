@@ -1,19 +1,14 @@
-/*
+/* SPDX-License-Identifier: GPL-2.0
+ *
  * include/asm-sh/dreamcast/dma.h
  *
  * Copyright (C) 2003 Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #ifndef __ASM_SH_DREAMCAST_DMA_H
 #define __ASM_SH_DREAMCAST_DMA_H
 
 /* Number of DMA channels */
-#define ONCHIP_NR_DMA_CHANNELS	4
 #define G2_NR_DMA_CHANNELS	4
-#define PVR2_NR_DMA_CHANNELS	1
 
 /* Channels for cascading */
 #define PVR2_CASCADE_CHAN	2

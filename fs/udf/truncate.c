@@ -22,16 +22,15 @@
 #include "udfdecl.h"
 #include <linux/fs.h>
 #include <linux/mm.h>
-#include <linux/buffer_head.h>
 
 #include "udf_i.h"
 #include "udf_sb.h"
 
 static void extent_trunc(struct inode *inode, struct extent_position *epos,
-			 kernel_lb_addr eloc, int8_t etype, uint32_t elen,
+			 struct kernel_lb_addr *eloc, int8_t etype, uint32_t elen,
 			 uint32_t nelen)
 {
-	kernel_lb_addr neloc = {};
+	struct kernel_lb_addr neloc = {};
 	int last_block = (elen + inode->i_sb->s_blocksize - 1) >>
 		inode->i_sb->s_blocksize_bits;
 	int first_block = (nelen + inode->i_sb->s_blocksize - 1) >>
@@ -43,13 +42,13 @@ static void extent_trunc(struct inode *inode, struct extent_position *epos,
 					last_block);
 			etype = (EXT_NOT_RECORDED_NOT_ALLOCATED >> 30);
 		} else
-			neloc = eloc;
+			neloc = *eloc;
 		nelen = (etype << 30) | nelen;
 	}
 
 	if (elen != nelen) {
-		udf_write_aext(inode, epos, neloc, nelen, 0);
-		if (last_block - first_block > 0) {
+		udf_write_aext(inode, epos, &neloc, nelen, 0);
+		if (last_block > first_block) {
 			if (etype == (EXT_RECORDED_ALLOCATED >> 30))
 				mark_inode_dirty(inode);
 
@@ -68,7 +67,7 @@ static void extent_trunc(struct inode *inode, struct extent_position *epos,
 void udf_truncate_tail_extent(struct inode *inode)
 {
 	struct extent_position epos = {};
-	kernel_lb_addr eloc;
+	struct kernel_lb_addr eloc;
 	uint32_t elen, nelen;
 	uint64_t lbcount = 0;
 	int8_t etype = -1, netype;
@@ -83,9 +82,9 @@ void udf_truncate_tail_extent(struct inode *inode)
 		return;
 
 	if (iinfo->i_alloc_type == ICBTAG_FLAG_AD_SHORT)
-		adsize = sizeof(short_ad);
+		adsize = sizeof(struct short_ad);
 	else if (iinfo->i_alloc_type == ICBTAG_FLAG_AD_LONG)
-		adsize = sizeof(long_ad);
+		adsize = sizeof(struct long_ad);
 	else
 		BUG();
 
@@ -95,23 +94,21 @@ void udf_truncate_tail_extent(struct inode *inode)
 		lbcount += elen;
 		if (lbcount > inode->i_size) {
 			if (lbcount - inode->i_size >= inode->i_sb->s_blocksize)
-				printk(KERN_WARNING
-				       "udf_truncate_tail_extent(): Too long "
-				       "extent after EOF in inode %u: i_size: "
-				       "%Ld lbcount: %Ld extent %u+%u\n",
-				       (unsigned)inode->i_ino,
-				       (long long)inode->i_size,
-				       (long long)lbcount,
-				       (unsigned)eloc.logicalBlockNum,
-				       (unsigned)elen);
+				udf_warn(inode->i_sb,
+					 "Too long extent after EOF in inode %u: i_size: %lld lbcount: %lld extent %u+%u\n",
+					 (unsigned)inode->i_ino,
+					 (long long)inode->i_size,
+					 (long long)lbcount,
+					 (unsigned)eloc.logicalBlockNum,
+					 (unsigned)elen);
 			nelen = elen - (lbcount - inode->i_size);
 			epos.offset -= adsize;
-			extent_trunc(inode, &epos, eloc, etype, elen, nelen);
+			extent_trunc(inode, &epos, &eloc, etype, elen, nelen);
 			epos.offset += adsize;
 			if (udf_next_aext(inode, &epos, &eloc, &elen, 1) != -1)
-				printk(KERN_ERR "udf_truncate_tail_extent(): "
-				       "Extent after EOF in inode %u.\n",
-				       (unsigned)inode->i_ino);
+				udf_err(inode->i_sb,
+					"Extent after EOF in inode %u\n",
+					(unsigned)inode->i_ino);
 			break;
 		}
 	}
@@ -124,7 +121,7 @@ void udf_truncate_tail_extent(struct inode *inode)
 void udf_discard_prealloc(struct inode *inode)
 {
 	struct extent_position epos = { NULL, 0, {0, 0} };
-	kernel_lb_addr eloc;
+	struct kernel_lb_addr eloc;
 	uint32_t elen;
 	uint64_t lbcount = 0;
 	int8_t etype = -1, netype;
@@ -136,9 +133,9 @@ void udf_discard_prealloc(struct inode *inode)
 		return;
 
 	if (iinfo->i_alloc_type == ICBTAG_FLAG_AD_SHORT)
-		adsize = sizeof(short_ad);
+		adsize = sizeof(struct short_ad);
 	else if (iinfo->i_alloc_type == ICBTAG_FLAG_AD_LONG)
-		adsize = sizeof(long_ad);
+		adsize = sizeof(struct long_ad);
 	else
 		adsize = 0;
 
@@ -152,7 +149,7 @@ void udf_discard_prealloc(struct inode *inode)
 	if (etype == (EXT_NOT_RECORDED_ALLOCATED >> 30)) {
 		epos.offset -= adsize;
 		lbcount -= elen;
-		extent_trunc(inode, &epos, eloc, etype, elen, 0);
+		extent_trunc(inode, &epos, &eloc, etype, elen, 0);
 		if (!epos.bh) {
 			iinfo->i_lenAlloc =
 				epos.offset -
@@ -197,10 +194,15 @@ static void udf_update_alloc_ext_desc(struct inode *inode,
 	mark_buffer_dirty_inode(epos->bh, inode);
 }
 
-void udf_truncate_extents(struct inode *inode)
+/*
+ * Truncate extents of inode to inode->i_size. This function can be used only
+ * for making file shorter. For making file longer, udf_extend_file() has to
+ * be used.
+ */
+int udf_truncate_extents(struct inode *inode)
 {
 	struct extent_position epos;
-	kernel_lb_addr eloc, neloc = {};
+	struct kernel_lb_addr eloc, neloc = {};
 	uint32_t elen, nelen = 0, indirect_ext_len = 0, lenalloc;
 	int8_t etype;
 	struct super_block *sb = inode->i_sb;
@@ -210,106 +212,79 @@ void udf_truncate_extents(struct inode *inode)
 	struct udf_inode_info *iinfo = UDF_I(inode);
 
 	if (iinfo->i_alloc_type == ICBTAG_FLAG_AD_SHORT)
-		adsize = sizeof(short_ad);
+		adsize = sizeof(struct short_ad);
 	else if (iinfo->i_alloc_type == ICBTAG_FLAG_AD_LONG)
-		adsize = sizeof(long_ad);
+		adsize = sizeof(struct long_ad);
 	else
 		BUG();
 
 	etype = inode_bmap(inode, first_block, &epos, &eloc, &elen, &offset);
 	byte_offset = (offset << sb->s_blocksize_bits) +
 		(inode->i_size & (sb->s_blocksize - 1));
-	if (etype != -1) {
-		epos.offset -= adsize;
-		extent_trunc(inode, &epos, eloc, etype, elen, byte_offset);
-		epos.offset += adsize;
-		if (byte_offset)
-			lenalloc = epos.offset;
-		else
-			lenalloc = epos.offset - adsize;
+	if (etype == -1) {
+		/* We should extend the file? */
+		WARN_ON(byte_offset);
+		return 0;
+	}
+	epos.offset -= adsize;
+	extent_trunc(inode, &epos, &eloc, etype, elen, byte_offset);
+	epos.offset += adsize;
+	if (byte_offset)
+		lenalloc = epos.offset;
+	else
+		lenalloc = epos.offset - adsize;
 
-		if (!epos.bh)
-			lenalloc -= udf_file_entry_alloc_offset(inode);
-		else
-			lenalloc -= sizeof(struct allocExtDesc);
+	if (!epos.bh)
+		lenalloc -= udf_file_entry_alloc_offset(inode);
+	else
+		lenalloc -= sizeof(struct allocExtDesc);
 
-		while ((etype = udf_current_aext(inode, &epos, &eloc,
-						 &elen, 0)) != -1) {
-			if (etype == (EXT_NEXT_EXTENT_ALLOCDECS >> 30)) {
-				udf_write_aext(inode, &epos, neloc, nelen, 0);
-				if (indirect_ext_len) {
-					/* We managed to free all extents in the
-					 * indirect extent - free it too */
-					BUG_ON(!epos.bh);
-					udf_free_blocks(sb, inode, epos.block,
-							0, indirect_ext_len);
-				} else if (!epos.bh) {
-					iinfo->i_lenAlloc = lenalloc;
-					mark_inode_dirty(inode);
-				} else
-					udf_update_alloc_ext_desc(inode,
-							&epos, lenalloc);
-				brelse(epos.bh);
-				epos.offset = sizeof(struct allocExtDesc);
-				epos.block = eloc;
-				epos.bh = udf_tread(sb,
-						udf_get_lb_pblock(sb, eloc, 0));
-				if (elen)
-					indirect_ext_len =
-						(elen + sb->s_blocksize - 1) >>
-						sb->s_blocksize_bits;
-				else
-					indirect_ext_len = 1;
-			} else {
-				extent_trunc(inode, &epos, eloc, etype,
-					     elen, 0);
-				epos.offset += adsize;
-			}
-		}
-
-		if (indirect_ext_len) {
-			BUG_ON(!epos.bh);
-			udf_free_blocks(sb, inode, epos.block, 0,
-					indirect_ext_len);
-		} else if (!epos.bh) {
-			iinfo->i_lenAlloc = lenalloc;
-			mark_inode_dirty(inode);
-		} else
-			udf_update_alloc_ext_desc(inode, &epos, lenalloc);
-	} else if (inode->i_size) {
-		if (byte_offset) {
-			kernel_long_ad extent;
-
-			/*
-			 *  OK, there is not extent covering inode->i_size and
-			 *  no extent above inode->i_size => truncate is
-			 *  extending the file by 'offset' blocks.
-			 */
-			if ((!epos.bh &&
-			     epos.offset ==
-					udf_file_entry_alloc_offset(inode)) ||
-			    (epos.bh && epos.offset ==
-						sizeof(struct allocExtDesc))) {
-				/* File has no extents at all or has empty last
-				 * indirect extent! Create a fake extent... */
-				extent.extLocation.logicalBlockNum = 0;
-				extent.extLocation.partitionReferenceNum = 0;
-				extent.extLength =
-					EXT_NOT_RECORDED_NOT_ALLOCATED;
-			} else {
-				epos.offset -= adsize;
-				etype = udf_next_aext(inode, &epos,
-						      &extent.extLocation,
-						      &extent.extLength, 0);
-				extent.extLength |= etype << 30;
-			}
-			udf_extend_file(inode, &epos, &extent,
-					offset +
-					((inode->i_size &
-						(sb->s_blocksize - 1)) != 0));
+	while ((etype = udf_current_aext(inode, &epos, &eloc,
+					 &elen, 0)) != -1) {
+		if (etype == (EXT_NEXT_EXTENT_ALLOCDESCS >> 30)) {
+			udf_write_aext(inode, &epos, &neloc, nelen, 0);
+			if (indirect_ext_len) {
+				/* We managed to free all extents in the
+				 * indirect extent - free it too */
+				BUG_ON(!epos.bh);
+				udf_free_blocks(sb, NULL, &epos.block,
+						0, indirect_ext_len);
+			} else if (!epos.bh) {
+				iinfo->i_lenAlloc = lenalloc;
+				mark_inode_dirty(inode);
+			} else
+				udf_update_alloc_ext_desc(inode,
+						&epos, lenalloc);
+			brelse(epos.bh);
+			epos.offset = sizeof(struct allocExtDesc);
+			epos.block = eloc;
+			epos.bh = udf_tread(sb,
+					udf_get_lb_pblock(sb, &eloc, 0));
+			/* Error reading indirect block? */
+			if (!epos.bh)
+				return -EIO;
+			if (elen)
+				indirect_ext_len =
+					(elen + sb->s_blocksize - 1) >>
+					sb->s_blocksize_bits;
+			else
+				indirect_ext_len = 1;
+		} else {
+			extent_trunc(inode, &epos, &eloc, etype, elen, 0);
+			epos.offset += adsize;
 		}
 	}
+
+	if (indirect_ext_len) {
+		BUG_ON(!epos.bh);
+		udf_free_blocks(sb, NULL, &epos.block, 0, indirect_ext_len);
+	} else if (!epos.bh) {
+		iinfo->i_lenAlloc = lenalloc;
+		mark_inode_dirty(inode);
+	} else
+		udf_update_alloc_ext_desc(inode, &epos, lenalloc);
 	iinfo->i_lenExtents = inode->i_size;
 
 	brelse(epos.bh);
+	return 0;
 }

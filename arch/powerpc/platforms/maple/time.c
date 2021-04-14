@@ -1,12 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  (c) Copyright 2004 Benjamin Herrenschmidt (benh@kernel.crashing.org),
  *                     IBM Corp. 
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
- *
  */
 
 #undef DEBUG
@@ -27,9 +22,7 @@
 
 #include <asm/sections.h>
 #include <asm/prom.h>
-#include <asm/system.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/machdep.h>
 #include <asm/time.h>
 
@@ -68,17 +61,17 @@ void maple_get_rtc_time(struct rtc_time *tm)
 
 	if (!(maple_clock_read(RTC_CONTROL) & RTC_DM_BINARY)
 	    || RTC_ALWAYS_BCD) {
-		BCD_TO_BIN(tm->tm_sec);
-		BCD_TO_BIN(tm->tm_min);
-		BCD_TO_BIN(tm->tm_hour);
-		BCD_TO_BIN(tm->tm_mday);
-		BCD_TO_BIN(tm->tm_mon);
-		BCD_TO_BIN(tm->tm_year);
+		tm->tm_sec = bcd2bin(tm->tm_sec);
+		tm->tm_min = bcd2bin(tm->tm_min);
+		tm->tm_hour = bcd2bin(tm->tm_hour);
+		tm->tm_mday = bcd2bin(tm->tm_mday);
+		tm->tm_mon = bcd2bin(tm->tm_mon);
+		tm->tm_year = bcd2bin(tm->tm_year);
 	  }
 	if ((tm->tm_year + 1900) < 1970)
 		tm->tm_year += 100;
 
-	GregorianDay(tm);
+	tm->tm_wday = -1;
 }
 
 int maple_set_rtc_time(struct rtc_time *tm)
@@ -104,12 +97,12 @@ int maple_set_rtc_time(struct rtc_time *tm)
 	year = tm->tm_year;
 
 	if (!(save_control & RTC_DM_BINARY) || RTC_ALWAYS_BCD) {
-		BIN_TO_BCD(sec);
-		BIN_TO_BCD(min);
-		BIN_TO_BCD(hour);
-		BIN_TO_BCD(mon);
-		BIN_TO_BCD(mday);
-		BIN_TO_BCD(year);
+		sec = bin2bcd(sec);
+		min = bin2bcd(min);
+		hour = bin2bcd(hour);
+		mon = bin2bcd(mon);
+		mday = bin2bcd(mday);
+		year = bin2bcd(year);
 	}
 	maple_clock_write(sec, RTC_SECONDS);
 	maple_clock_write(min, RTC_MINUTES);
@@ -135,10 +128,10 @@ int maple_set_rtc_time(struct rtc_time *tm)
 
 static struct resource rtc_iores = {
 	.name = "rtc",
-	.flags = IORESOURCE_BUSY,
+	.flags = IORESOURCE_IO | IORESOURCE_BUSY,
 };
 
-unsigned long __init maple_get_boot_time(void)
+time64_t __init maple_get_boot_time(void)
 {
 	struct rtc_time tm;
 	struct device_node *rtcs;
@@ -171,7 +164,6 @@ unsigned long __init maple_get_boot_time(void)
 	request_resource(&ioport_resource, &rtc_iores);
 
 	maple_get_rtc_time(&tm);
-	return mktime(tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
-		      tm.tm_hour, tm.tm_min, tm.tm_sec);
+	return rtc_tm_to_time64(&tm);
 }
 

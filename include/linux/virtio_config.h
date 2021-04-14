@@ -1,38 +1,28 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_VIRTIO_CONFIG_H
 #define _LINUX_VIRTIO_CONFIG_H
-/* This header, excluding the #ifdef __KERNEL__ part, is BSD licensed so
- * anyone can use the definitions to implement compatible drivers/servers. */
 
-/* Virtio devices use a standardized configuration space to define their
- * features and pass configuration information, but each implementation can
- * store and access that space differently. */
-#include <linux/types.h>
-
-/* Status byte for guest to report progress, and synchronize features. */
-/* We have seen device and processed generic fields (VIRTIO_CONFIG_F_VIRTIO) */
-#define VIRTIO_CONFIG_S_ACKNOWLEDGE	1
-/* We have found a driver for the device. */
-#define VIRTIO_CONFIG_S_DRIVER		2
-/* Driver has used its parts of the config, and is happy */
-#define VIRTIO_CONFIG_S_DRIVER_OK	4
-/* We've given up on this device. */
-#define VIRTIO_CONFIG_S_FAILED		0x80
-
-/* Some virtio feature bits (currently bits 28 through 31) are reserved for the
- * transport being used (eg. virtio_ring), the rest are per-device feature
- * bits. */
-#define VIRTIO_TRANSPORT_F_START	28
-#define VIRTIO_TRANSPORT_F_END		32
-
-/* Do we get callbacks when the ring is completely used, even if we've
- * suppressed them? */
-#define VIRTIO_F_NOTIFY_ON_EMPTY	24
-
-#ifdef __KERNEL__
+#include <linux/err.h>
+#include <linux/bug.h>
 #include <linux/virtio.h>
+#include <linux/virtio_byteorder.h>
+#include <linux/compiler_types.h>
+#include <uapi/linux/virtio_config.h>
+
+struct irq_affinity;
+
+struct virtio_shm_region {
+	u64 addr;
+	u64 len;
+};
 
 /**
  * virtio_config_ops - operations for configuring a virtio device
+ * Note: Do not assume that a transport implements all of the operations
+ *       getting/setting a value as a simple read/write! Generally speaking,
+ *       any of @get/@set, @get_status/@set_status, or @get_features/
+ *       @finalize_features are NOT safe to be called from an atomic
+ *       context.
  * @get: read the value of a configuration field
  *	vdev: the virtio_device
  *	offset: the offset of the configuration field
@@ -43,6 +33,9 @@
  *	offset: the offset of the configuration field
  *	buf: the buffer to read the field value from.
  *	len: the length of the buffer
+ * @generation: config generation counter (optional)
+ *	vdev: the virtio_device
+ *	Returns the config generation counter
  * @get_status: read the status byte
  *	vdev: the virtio_device
  *	Returns the status byte
@@ -52,40 +45,116 @@
  * @reset: reset the device
  *	vdev: the virtio device
  *	After this, status and feature negotiation must be done again
- * @find_vq: find a virtqueue and instantiate it.
+ *	Device must not be reset from its vq/config callbacks, or in
+ *	parallel with being added/removed.
+ * @find_vqs: find virtqueues and instantiate them.
  *	vdev: the virtio_device
- *	index: the 0-based virtqueue number in case there's more than one.
- *	callback: the virqtueue callback
- *	Returns the new virtqueue or ERR_PTR() (eg. -ENOENT).
- * @del_vq: free a virtqueue found by find_vq().
+ *	nvqs: the number of virtqueues to find
+ *	vqs: on success, includes new virtqueues
+ *	callbacks: array of callbacks, for each virtqueue
+ *		include a NULL entry for vqs that do not need a callback
+ *	names: array of virtqueue names (mainly for debugging)
+ *		include a NULL entry for vqs unused by driver
+ *	Returns 0 on success or error status
+ * @del_vqs: free virtqueues found by find_vqs().
  * @get_features: get the array of feature bits for this device.
  *	vdev: the virtio_device
- *	Returns the first 32 feature bits (all we currently need).
+ *	Returns the first 64 feature bits (all we currently need).
  * @finalize_features: confirm what device features we'll be using.
  *	vdev: the virtio_device
  *	This gives the final feature bits for the device: it can change
  *	the dev->feature bits if it wants.
+ *	Returns 0 on success or error status
+ * @bus_name: return the bus name associated with the device (optional)
+ *	vdev: the virtio_device
+ *      This returns a pointer to the bus name a la pci_name from which
+ *      the caller can then copy.
+ * @set_vq_affinity: set the affinity for a virtqueue (optional).
+ * @get_vq_affinity: get the affinity for a virtqueue (optional).
+ * @get_shm_region: get a shared memory region based on the index.
  */
-struct virtio_config_ops
-{
+typedef void vq_callback_t(struct virtqueue *);
+struct virtio_config_ops {
 	void (*get)(struct virtio_device *vdev, unsigned offset,
 		    void *buf, unsigned len);
 	void (*set)(struct virtio_device *vdev, unsigned offset,
 		    const void *buf, unsigned len);
+	u32 (*generation)(struct virtio_device *vdev);
 	u8 (*get_status)(struct virtio_device *vdev);
 	void (*set_status)(struct virtio_device *vdev, u8 status);
 	void (*reset)(struct virtio_device *vdev);
-	struct virtqueue *(*find_vq)(struct virtio_device *vdev,
-				     unsigned index,
-				     void (*callback)(struct virtqueue *));
-	void (*del_vq)(struct virtqueue *vq);
-	u32 (*get_features)(struct virtio_device *vdev);
-	void (*finalize_features)(struct virtio_device *vdev);
+	int (*find_vqs)(struct virtio_device *, unsigned nvqs,
+			struct virtqueue *vqs[], vq_callback_t *callbacks[],
+			const char * const names[], const bool *ctx,
+			struct irq_affinity *desc);
+	void (*del_vqs)(struct virtio_device *);
+	u64 (*get_features)(struct virtio_device *vdev);
+	int (*finalize_features)(struct virtio_device *vdev);
+	const char *(*bus_name)(struct virtio_device *vdev);
+	int (*set_vq_affinity)(struct virtqueue *vq,
+			       const struct cpumask *cpu_mask);
+	const struct cpumask *(*get_vq_affinity)(struct virtio_device *vdev,
+			int index);
+	bool (*get_shm_region)(struct virtio_device *vdev,
+			       struct virtio_shm_region *region, u8 id);
 };
 
 /* If driver didn't advertise the feature, it will never appear. */
 void virtio_check_driver_offered_feature(const struct virtio_device *vdev,
 					 unsigned int fbit);
+
+/**
+ * __virtio_test_bit - helper to test feature bits. For use by transports.
+ *                     Devices should normally use virtio_has_feature,
+ *                     which includes more checks.
+ * @vdev: the device
+ * @fbit: the feature bit
+ */
+static inline bool __virtio_test_bit(const struct virtio_device *vdev,
+				     unsigned int fbit)
+{
+	/* Did you forget to fix assumptions on max features? */
+	if (__builtin_constant_p(fbit))
+		BUILD_BUG_ON(fbit >= 64);
+	else
+		BUG_ON(fbit >= 64);
+
+	return vdev->features & BIT_ULL(fbit);
+}
+
+/**
+ * __virtio_set_bit - helper to set feature bits. For use by transports.
+ * @vdev: the device
+ * @fbit: the feature bit
+ */
+static inline void __virtio_set_bit(struct virtio_device *vdev,
+				    unsigned int fbit)
+{
+	/* Did you forget to fix assumptions on max features? */
+	if (__builtin_constant_p(fbit))
+		BUILD_BUG_ON(fbit >= 64);
+	else
+		BUG_ON(fbit >= 64);
+
+	vdev->features |= BIT_ULL(fbit);
+}
+
+/**
+ * __virtio_clear_bit - helper to clear feature bits. For use by transports.
+ * @vdev: the device
+ * @fbit: the feature bit
+ */
+static inline void __virtio_clear_bit(struct virtio_device *vdev,
+				      unsigned int fbit)
+{
+	/* Did you forget to fix assumptions on max features? */
+	if (__builtin_constant_p(fbit))
+		BUILD_BUG_ON(fbit >= 64);
+	else
+		BUG_ON(fbit >= 64);
+
+	vdev->features &= ~BIT_ULL(fbit);
+}
 
 /**
  * virtio_has_feature - helper to determine if this device has this feature.
@@ -95,36 +164,407 @@ void virtio_check_driver_offered_feature(const struct virtio_device *vdev,
 static inline bool virtio_has_feature(const struct virtio_device *vdev,
 				      unsigned int fbit)
 {
-	/* Did you forget to fix assumptions on max features? */
-	if (__builtin_constant_p(fbit))
-		BUILD_BUG_ON(fbit >= 32);
+	if (fbit < VIRTIO_TRANSPORT_F_START)
+		virtio_check_driver_offered_feature(vdev, fbit);
 
-	virtio_check_driver_offered_feature(vdev, fbit);
-	return test_bit(fbit, vdev->features);
+	return __virtio_test_bit(vdev, fbit);
 }
 
 /**
- * virtio_config_val - look for a feature and get a virtio config entry.
- * @vdev: the virtio device
- * @fbit: the feature bit
- * @offset: the type to search for.
- * @val: a pointer to the value to fill in.
- *
- * The return value is -ENOENT if the feature doesn't exist.  Otherwise
- * the config value is copied into whatever is pointed to by v. */
-#define virtio_config_val(vdev, fbit, offset, v) \
-	virtio_config_buf((vdev), (fbit), (offset), (v), sizeof(*v))
-
-static inline int virtio_config_buf(struct virtio_device *vdev,
-				    unsigned int fbit,
-				    unsigned int offset,
-				    void *buf, unsigned len)
+ * virtio_has_dma_quirk - determine whether this device has the DMA quirk
+ * @vdev: the device
+ */
+static inline bool virtio_has_dma_quirk(const struct virtio_device *vdev)
 {
-	if (!virtio_has_feature(vdev, fbit))
-		return -ENOENT;
+	/*
+	 * Note the reverse polarity of the quirk feature (compared to most
+	 * other features), this is for compatibility with legacy systems.
+	 */
+	return !virtio_has_feature(vdev, VIRTIO_F_ACCESS_PLATFORM);
+}
 
-	vdev->config->get(vdev, offset, buf, len);
+static inline
+struct virtqueue *virtio_find_single_vq(struct virtio_device *vdev,
+					vq_callback_t *c, const char *n)
+{
+	vq_callback_t *callbacks[] = { c };
+	const char *names[] = { n };
+	struct virtqueue *vq;
+	int err = vdev->config->find_vqs(vdev, 1, &vq, callbacks, names, NULL,
+					 NULL);
+	if (err < 0)
+		return ERR_PTR(err);
+	return vq;
+}
+
+static inline
+int virtio_find_vqs(struct virtio_device *vdev, unsigned nvqs,
+			struct virtqueue *vqs[], vq_callback_t *callbacks[],
+			const char * const names[],
+			struct irq_affinity *desc)
+{
+	return vdev->config->find_vqs(vdev, nvqs, vqs, callbacks, names, NULL, desc);
+}
+
+static inline
+int virtio_find_vqs_ctx(struct virtio_device *vdev, unsigned nvqs,
+			struct virtqueue *vqs[], vq_callback_t *callbacks[],
+			const char * const names[], const bool *ctx,
+			struct irq_affinity *desc)
+{
+	return vdev->config->find_vqs(vdev, nvqs, vqs, callbacks, names, ctx,
+				      desc);
+}
+
+/**
+ * virtio_device_ready - enable vq use in probe function
+ * @vdev: the device
+ *
+ * Driver must call this to use vqs in the probe function.
+ *
+ * Note: vqs are enabled automatically after probe returns.
+ */
+static inline
+void virtio_device_ready(struct virtio_device *dev)
+{
+	unsigned status = dev->config->get_status(dev);
+
+	BUG_ON(status & VIRTIO_CONFIG_S_DRIVER_OK);
+	dev->config->set_status(dev, status | VIRTIO_CONFIG_S_DRIVER_OK);
+}
+
+static inline
+const char *virtio_bus_name(struct virtio_device *vdev)
+{
+	if (!vdev->config->bus_name)
+		return "virtio";
+	return vdev->config->bus_name(vdev);
+}
+
+/**
+ * virtqueue_set_affinity - setting affinity for a virtqueue
+ * @vq: the virtqueue
+ * @cpu: the cpu no.
+ *
+ * Pay attention the function are best-effort: the affinity hint may not be set
+ * due to config support, irq type and sharing.
+ *
+ */
+static inline
+int virtqueue_set_affinity(struct virtqueue *vq, const struct cpumask *cpu_mask)
+{
+	struct virtio_device *vdev = vq->vdev;
+	if (vdev->config->set_vq_affinity)
+		return vdev->config->set_vq_affinity(vq, cpu_mask);
 	return 0;
 }
-#endif /* __KERNEL__ */
+
+static inline
+bool virtio_get_shm_region(struct virtio_device *vdev,
+			   struct virtio_shm_region *region, u8 id)
+{
+	if (!vdev->config->get_shm_region)
+		return false;
+	return vdev->config->get_shm_region(vdev, region, id);
+}
+
+static inline bool virtio_is_little_endian(struct virtio_device *vdev)
+{
+	return virtio_has_feature(vdev, VIRTIO_F_VERSION_1) ||
+		virtio_legacy_is_little_endian();
+}
+
+/* Memory accessors */
+static inline u16 virtio16_to_cpu(struct virtio_device *vdev, __virtio16 val)
+{
+	return __virtio16_to_cpu(virtio_is_little_endian(vdev), val);
+}
+
+static inline __virtio16 cpu_to_virtio16(struct virtio_device *vdev, u16 val)
+{
+	return __cpu_to_virtio16(virtio_is_little_endian(vdev), val);
+}
+
+static inline u32 virtio32_to_cpu(struct virtio_device *vdev, __virtio32 val)
+{
+	return __virtio32_to_cpu(virtio_is_little_endian(vdev), val);
+}
+
+static inline __virtio32 cpu_to_virtio32(struct virtio_device *vdev, u32 val)
+{
+	return __cpu_to_virtio32(virtio_is_little_endian(vdev), val);
+}
+
+static inline u64 virtio64_to_cpu(struct virtio_device *vdev, __virtio64 val)
+{
+	return __virtio64_to_cpu(virtio_is_little_endian(vdev), val);
+}
+
+static inline __virtio64 cpu_to_virtio64(struct virtio_device *vdev, u64 val)
+{
+	return __cpu_to_virtio64(virtio_is_little_endian(vdev), val);
+}
+
+#define virtio_to_cpu(vdev, x) \
+	_Generic((x), \
+		__u8: (x), \
+		__virtio16: virtio16_to_cpu((vdev), (x)), \
+		__virtio32: virtio32_to_cpu((vdev), (x)), \
+		__virtio64: virtio64_to_cpu((vdev), (x)) \
+		)
+
+#define cpu_to_virtio(vdev, x, m) \
+	_Generic((m), \
+		__u8: (x), \
+		__virtio16: cpu_to_virtio16((vdev), (x)), \
+		__virtio32: cpu_to_virtio32((vdev), (x)), \
+		__virtio64: cpu_to_virtio64((vdev), (x)) \
+		)
+
+#define __virtio_native_type(structname, member) \
+	typeof(virtio_to_cpu(NULL, ((structname*)0)->member))
+
+/* Config space accessors. */
+#define virtio_cread(vdev, structname, member, ptr)			\
+	do {								\
+		typeof(((structname*)0)->member) virtio_cread_v;	\
+									\
+		might_sleep();						\
+		/* Sanity check: must match the member's type */	\
+		typecheck(typeof(virtio_to_cpu((vdev), virtio_cread_v)), *(ptr)); \
+									\
+		switch (sizeof(virtio_cread_v)) {			\
+		case 1:							\
+		case 2:							\
+		case 4:							\
+			vdev->config->get((vdev), 			\
+					  offsetof(structname, member), \
+					  &virtio_cread_v,		\
+					  sizeof(virtio_cread_v));	\
+			break;						\
+		default:						\
+			__virtio_cread_many((vdev), 			\
+					  offsetof(structname, member), \
+					  &virtio_cread_v,		\
+					  1,				\
+					  sizeof(virtio_cread_v));	\
+			break;						\
+		}							\
+		*(ptr) = virtio_to_cpu(vdev, virtio_cread_v);		\
+	} while(0)
+
+/* Config space accessors. */
+#define virtio_cwrite(vdev, structname, member, ptr)			\
+	do {								\
+		typeof(((structname*)0)->member) virtio_cwrite_v =	\
+			cpu_to_virtio(vdev, *(ptr), ((structname*)0)->member); \
+									\
+		might_sleep();						\
+		/* Sanity check: must match the member's type */	\
+		typecheck(typeof(virtio_to_cpu((vdev), virtio_cwrite_v)), *(ptr)); \
+									\
+		vdev->config->set((vdev), offsetof(structname, member),	\
+				  &virtio_cwrite_v,			\
+				  sizeof(virtio_cwrite_v));		\
+	} while(0)
+
+/*
+ * Nothing virtio-specific about these, but let's worry about generalizing
+ * these later.
+ */
+#define virtio_le_to_cpu(x) \
+	_Generic((x), \
+		__u8: (u8)(x), \
+		 __le16: (u16)le16_to_cpu(x), \
+		 __le32: (u32)le32_to_cpu(x), \
+		 __le64: (u64)le64_to_cpu(x) \
+		)
+
+#define virtio_cpu_to_le(x, m) \
+	_Generic((m), \
+		 __u8: (x), \
+		 __le16: cpu_to_le16(x), \
+		 __le32: cpu_to_le32(x), \
+		 __le64: cpu_to_le64(x) \
+		)
+
+/* LE (e.g. modern) Config space accessors. */
+#define virtio_cread_le(vdev, structname, member, ptr)			\
+	do {								\
+		typeof(((structname*)0)->member) virtio_cread_v;	\
+									\
+		might_sleep();						\
+		/* Sanity check: must match the member's type */	\
+		typecheck(typeof(virtio_le_to_cpu(virtio_cread_v)), *(ptr)); \
+									\
+		switch (sizeof(virtio_cread_v)) {			\
+		case 1:							\
+		case 2:							\
+		case 4:							\
+			vdev->config->get((vdev), 			\
+					  offsetof(structname, member), \
+					  &virtio_cread_v,		\
+					  sizeof(virtio_cread_v));	\
+			break;						\
+		default:						\
+			__virtio_cread_many((vdev), 			\
+					  offsetof(structname, member), \
+					  &virtio_cread_v,		\
+					  1,				\
+					  sizeof(virtio_cread_v));	\
+			break;						\
+		}							\
+		*(ptr) = virtio_le_to_cpu(virtio_cread_v);		\
+	} while(0)
+
+#define virtio_cwrite_le(vdev, structname, member, ptr)			\
+	do {								\
+		typeof(((structname*)0)->member) virtio_cwrite_v =	\
+			virtio_cpu_to_le(*(ptr), ((structname*)0)->member); \
+									\
+		might_sleep();						\
+		/* Sanity check: must match the member's type */	\
+		typecheck(typeof(virtio_le_to_cpu(virtio_cwrite_v)), *(ptr)); \
+									\
+		vdev->config->set((vdev), offsetof(structname, member),	\
+				  &virtio_cwrite_v,			\
+				  sizeof(virtio_cwrite_v));		\
+	} while(0)
+
+
+/* Read @count fields, @bytes each. */
+static inline void __virtio_cread_many(struct virtio_device *vdev,
+				       unsigned int offset,
+				       void *buf, size_t count, size_t bytes)
+{
+	u32 old, gen = vdev->config->generation ?
+		vdev->config->generation(vdev) : 0;
+	int i;
+
+	might_sleep();
+	do {
+		old = gen;
+
+		for (i = 0; i < count; i++)
+			vdev->config->get(vdev, offset + bytes * i,
+					  buf + i * bytes, bytes);
+
+		gen = vdev->config->generation ?
+			vdev->config->generation(vdev) : 0;
+	} while (gen != old);
+}
+
+static inline void virtio_cread_bytes(struct virtio_device *vdev,
+				      unsigned int offset,
+				      void *buf, size_t len)
+{
+	__virtio_cread_many(vdev, offset, buf, len, 1);
+}
+
+static inline u8 virtio_cread8(struct virtio_device *vdev, unsigned int offset)
+{
+	u8 ret;
+
+	might_sleep();
+	vdev->config->get(vdev, offset, &ret, sizeof(ret));
+	return ret;
+}
+
+static inline void virtio_cwrite8(struct virtio_device *vdev,
+				  unsigned int offset, u8 val)
+{
+	might_sleep();
+	vdev->config->set(vdev, offset, &val, sizeof(val));
+}
+
+static inline u16 virtio_cread16(struct virtio_device *vdev,
+				 unsigned int offset)
+{
+	__virtio16 ret;
+
+	might_sleep();
+	vdev->config->get(vdev, offset, &ret, sizeof(ret));
+	return virtio16_to_cpu(vdev, ret);
+}
+
+static inline void virtio_cwrite16(struct virtio_device *vdev,
+				   unsigned int offset, u16 val)
+{
+	__virtio16 v;
+
+	might_sleep();
+	v = cpu_to_virtio16(vdev, val);
+	vdev->config->set(vdev, offset, &v, sizeof(v));
+}
+
+static inline u32 virtio_cread32(struct virtio_device *vdev,
+				 unsigned int offset)
+{
+	__virtio32 ret;
+
+	might_sleep();
+	vdev->config->get(vdev, offset, &ret, sizeof(ret));
+	return virtio32_to_cpu(vdev, ret);
+}
+
+static inline void virtio_cwrite32(struct virtio_device *vdev,
+				   unsigned int offset, u32 val)
+{
+	__virtio32 v;
+
+	might_sleep();
+	v = cpu_to_virtio32(vdev, val);
+	vdev->config->set(vdev, offset, &v, sizeof(v));
+}
+
+static inline u64 virtio_cread64(struct virtio_device *vdev,
+				 unsigned int offset)
+{
+	__virtio64 ret;
+
+	__virtio_cread_many(vdev, offset, &ret, 1, sizeof(ret));
+	return virtio64_to_cpu(vdev, ret);
+}
+
+static inline void virtio_cwrite64(struct virtio_device *vdev,
+				   unsigned int offset, u64 val)
+{
+	__virtio64 v;
+
+	might_sleep();
+	v = cpu_to_virtio64(vdev, val);
+	vdev->config->set(vdev, offset, &v, sizeof(v));
+}
+
+/* Conditional config space accessors. */
+#define virtio_cread_feature(vdev, fbit, structname, member, ptr)	\
+	({								\
+		int _r = 0;						\
+		if (!virtio_has_feature(vdev, fbit))			\
+			_r = -ENOENT;					\
+		else							\
+			virtio_cread((vdev), structname, member, ptr);	\
+		_r;							\
+	})
+
+/* Conditional config space accessors. */
+#define virtio_cread_le_feature(vdev, fbit, structname, member, ptr)	\
+	({								\
+		int _r = 0;						\
+		if (!virtio_has_feature(vdev, fbit))			\
+			_r = -ENOENT;					\
+		else							\
+			virtio_cread_le((vdev), structname, member, ptr); \
+		_r;							\
+	})
+
+#ifdef CONFIG_ARCH_HAS_RESTRICTED_VIRTIO_MEMORY_ACCESS
+int arch_has_restricted_virtio_memory_access(void);
+#else
+static inline int arch_has_restricted_virtio_memory_access(void)
+{
+	return 0;
+}
+#endif /* CONFIG_ARCH_HAS_RESTRICTED_VIRTIO_MEMORY_ACCESS */
+
 #endif /* _LINUX_VIRTIO_CONFIG_H */

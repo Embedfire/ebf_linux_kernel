@@ -1,12 +1,13 @@
-#!/usr/bin/perl -w
+#!/usr/bin/env perl
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # (C) Copyright IBM Corporation 2006.
-#	Released under GPL v2.
 #	Author : Ram Pai (linuxram@us.ibm.com)
 #
 # Usage: export_report.pl -k Module.symvers [-o report_file ] -f *.mod.c
 #
 
+use warnings;
 use Getopt::Std;
 use strict;
 
@@ -25,11 +26,12 @@ sub alphabetically {
 sub print_depends_on {
 	my ($href) = @_;
 	print "\n";
-	while (my ($mod, $list) = each %$href) {
+	for my $mod (sort keys %$href) {
+		my $list = $href->{$mod};
 		print "\t$mod:\n";
 		foreach my $sym (sort numerically @{$list}) {
 			my ($symbol, $no) = split /\s+/, $sym;
-			printf("\t\t%-25s\t%-25d\n", $symbol, $no);
+			printf("\t\t%-25s\n", $symbol);
 		}
 		print "\n";
 	}
@@ -49,10 +51,15 @@ sub usage {
 }
 
 sub collectcfiles {
-        my @file = `cat .tmp_versions/*.mod | grep '.*\.ko\$'`;
-        @file = grep {s/\.ko/.mod.c/} @file;
-	chomp @file;
-        return @file;
+    my @file;
+    open my $fh, '< modules.order' or die "cannot open modules.order: $!\n";
+    while (<$fh>) {
+	s/\.ko$/.mod.c/;
+	push (@file, $_)
+    }
+    close($fh);
+    chomp @file;
+    return @file;
 }
 
 my (%SYMBOL, %MODULE, %opt, @allcfiles);
@@ -71,37 +78,42 @@ if (not defined $opt{'k'}) {
 	$opt{'k'} = "Module.symvers";
 }
 
-unless (open(MODULE_SYMVERS, $opt{'k'})) {
-	die "Sorry, cannot open $opt{'k'}: $!\n";
-}
+open (my $module_symvers, '<', $opt{'k'})
+    or die "Sorry, cannot open $opt{'k'}: $!\n";
 
 if (defined $opt{'o'}) {
-	unless (open(OUTPUT_HANDLE, ">$opt{'o'}")) {
-		die "Sorry, cannot open $opt{'o'} $!\n";
-	}
-	select OUTPUT_HANDLE;
+    open (my $out, '>', $opt{'o'})
+	or die "Sorry, cannot open $opt{'o'} $!\n";
+
+    select $out;
 }
+
 #
 # collect all the symbols and their attributes from the
 # Module.symvers file
 #
-while ( <MODULE_SYMVERS> ) {
+while ( <$module_symvers> ) {
 	chomp;
-	my (undef, $symbol, $module, $gpl) = split;
+	my (undef, $symbol, $module, $gpl, $namespace) = split('\t');
 	$SYMBOL { $symbol } =  [ $module , "0" , $symbol, $gpl];
 }
-close(MODULE_SYMVERS);
+close($module_symvers);
 
 #
 # collect the usage count of each symbol.
 #
+my $modversion_warnings = 0;
+
 foreach my $thismod (@allcfiles) {
-	unless (open(MODULE_MODULE, $thismod)) {
-		print "Sorry, cannot open $thismod: $!\n";
+	my $module;
+
+	unless (open ($module, '<', $thismod)) {
+		warn "Sorry, cannot open $thismod: $!\n";
 		next;
 	}
+
 	my $state=0;
-	while ( <MODULE_MODULE> ) {
+	while ( <$module> ) {
 		chomp;
 		if ($state == 0) {
 			$state = 1 if ($_ =~ /static const struct modversion_info/);
@@ -122,9 +134,10 @@ foreach my $thismod (@allcfiles) {
 		}
 	}
 	if ($state != 2) {
-		print "WARNING:$thismod is not built with CONFIG_MODVERSION enabled\n";
+		warn "WARNING:$thismod is not built with CONFIG_MODVERSIONS enabled\n";
+		$modversion_warnings++;
 	}
-	close(MODULE_MODULE);
+	close($module);
 }
 
 print "\tThis file reports the exported symbols usage patterns by in-tree\n",
@@ -156,8 +169,12 @@ printf("SECTION 2:\n\tThis section reports export-symbol-usage of in-kernel
 modules. Each module lists the modules, and the symbols from that module that
 it uses.  Each listed symbol reports the number of modules using it\n");
 
+print "\nNOTE: Got $modversion_warnings CONFIG_MODVERSIONS warnings\n\n"
+    if $modversion_warnings;
+
 print "~"x80 , "\n";
-while (my ($thismod, $list) = each %MODULE) {
+for my $thismod (sort keys %MODULE) {
+	my $list = $MODULE{$thismod};
 	my %depends;
 	$thismod =~ s/\.mod\.c/.ko/;
 	print "\t\t\t$thismod\n";

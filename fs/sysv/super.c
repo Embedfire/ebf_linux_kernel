@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/fs/sysv/inode.c
  *
@@ -44,7 +45,7 @@ enum {
 	JAN_1_1980 = (10*365 + 2) * 24 * 60 * 60
 };
 
-static void detected_xenix(struct sysv_sb_info *sbi)
+static void detected_xenix(struct sysv_sb_info *sbi, unsigned *max_links)
 {
 	struct buffer_head *bh1 = sbi->s_bh1;
 	struct buffer_head *bh2 = sbi->s_bh2;
@@ -59,7 +60,7 @@ static void detected_xenix(struct sysv_sb_info *sbi)
 		sbd2 = (struct xenix_super_block *) (bh2->b_data - 512);
 	}
 
-	sbi->s_link_max = XENIX_LINK_MAX;
+	*max_links = XENIX_LINK_MAX;
 	sbi->s_fic_size = XENIX_NICINOD;
 	sbi->s_flc_size = XENIX_NICFREE;
 	sbi->s_sbd1 = (char *)sbd1;
@@ -75,7 +76,7 @@ static void detected_xenix(struct sysv_sb_info *sbi)
 	sbi->s_nzones = fs32_to_cpu(sbi, sbd1->s_fsize);
 }
 
-static void detected_sysv4(struct sysv_sb_info *sbi)
+static void detected_sysv4(struct sysv_sb_info *sbi, unsigned *max_links)
 {
 	struct sysv4_super_block * sbd;
 	struct buffer_head *bh1 = sbi->s_bh1;
@@ -86,7 +87,7 @@ static void detected_sysv4(struct sysv_sb_info *sbi)
 	else
 		sbd = (struct sysv4_super_block *) bh2->b_data;
 
-	sbi->s_link_max = SYSV_LINK_MAX;
+	*max_links = SYSV_LINK_MAX;
 	sbi->s_fic_size = SYSV_NICINOD;
 	sbi->s_flc_size = SYSV_NICFREE;
 	sbi->s_sbd1 = (char *)sbd;
@@ -103,7 +104,7 @@ static void detected_sysv4(struct sysv_sb_info *sbi)
 	sbi->s_nzones = fs32_to_cpu(sbi, sbd->s_fsize);
 }
 
-static void detected_sysv2(struct sysv_sb_info *sbi)
+static void detected_sysv2(struct sysv_sb_info *sbi, unsigned *max_links)
 {
 	struct sysv2_super_block *sbd;
 	struct buffer_head *bh1 = sbi->s_bh1;
@@ -114,7 +115,7 @@ static void detected_sysv2(struct sysv_sb_info *sbi)
 	else
 		sbd = (struct sysv2_super_block *) bh2->b_data;
 
-	sbi->s_link_max = SYSV_LINK_MAX;
+	*max_links = SYSV_LINK_MAX;
 	sbi->s_fic_size = SYSV_NICINOD;
 	sbi->s_flc_size = SYSV_NICFREE;
 	sbi->s_sbd1 = (char *)sbd;
@@ -131,14 +132,14 @@ static void detected_sysv2(struct sysv_sb_info *sbi)
 	sbi->s_nzones = fs32_to_cpu(sbi, sbd->s_fsize);
 }
 
-static void detected_coherent(struct sysv_sb_info *sbi)
+static void detected_coherent(struct sysv_sb_info *sbi, unsigned *max_links)
 {
 	struct coh_super_block * sbd;
 	struct buffer_head *bh1 = sbi->s_bh1;
 
 	sbd = (struct coh_super_block *) bh1->b_data;
 
-	sbi->s_link_max = COH_LINK_MAX;
+	*max_links = COH_LINK_MAX;
 	sbi->s_fic_size = COH_NICINOD;
 	sbi->s_flc_size = COH_NICFREE;
 	sbi->s_sbd1 = (char *)sbd;
@@ -154,12 +155,12 @@ static void detected_coherent(struct sysv_sb_info *sbi)
 	sbi->s_nzones = fs32_to_cpu(sbi, sbd->s_fsize);
 }
 
-static void detected_v7(struct sysv_sb_info *sbi)
+static void detected_v7(struct sysv_sb_info *sbi, unsigned *max_links)
 {
 	struct buffer_head *bh2 = sbi->s_bh2;
 	struct v7_super_block *sbd = (struct v7_super_block *)bh2->b_data;
 
-	sbi->s_link_max = V7_LINK_MAX;
+	*max_links = V7_LINK_MAX;
 	sbi->s_fic_size = V7_NICINOD;
 	sbi->s_flc_size = V7_NICFREE;
 	sbi->s_sbd1 = (char *)sbd;
@@ -216,7 +217,7 @@ static int detect_sysv(struct sysv_sb_info *sbi, struct buffer_head *bh)
  	if (fs16_to_cpu(sbi, sbd->s_nfree) == 0xffff) {
  		sbi->s_type = FSTYPE_AFS;
 		sbi->s_forced_ro = 1;
- 		if (!(sb->s_flags & MS_RDONLY)) {
+ 		if (!sb_rdonly(sb)) {
  			printk("SysV FS: SCO EAFS on %s detected, " 
  				"forcing read-only mode.\n", 
  				sb->s_id);
@@ -290,7 +291,7 @@ static char *flavour_names[] = {
 	[FSTYPE_AFS]	= "AFS",
 };
 
-static void (*flavour_setup[])(struct sysv_sb_info *) = {
+static void (*flavour_setup[])(struct sysv_sb_info *, unsigned *) = {
 	[FSTYPE_XENIX]	= detected_xenix,
 	[FSTYPE_SYSV4]	= detected_sysv4,
 	[FSTYPE_SYSV2]	= detected_sysv2,
@@ -310,9 +311,8 @@ static int complete_read_super(struct super_block *sb, int silent, int size)
 
 	sbi->s_firstinodezone = 2;
 
-	flavour_setup[sbi->s_type](sbi);
+	flavour_setup[sbi->s_type](sbi, &sb->s_max_links);
 	
-	sbi->s_truncate = 1;
 	sbi->s_ndatazones = sbi->s_nzones - sbi->s_firstdatazone;
 	sbi->s_inodes_per_block = bsize >> 6;
 	sbi->s_inodes_per_block_1 = (bsize >> 6)-1;
@@ -332,22 +332,18 @@ static int complete_read_super(struct super_block *sb, int silent, int size)
 	sb->s_magic = SYSV_MAGIC_BASE + sbi->s_type;
 	/* set up enough so that it can read an inode */
 	sb->s_op = &sysv_sops;
+	if (sbi->s_forced_ro)
+		sb->s_flags |= SB_RDONLY;
 	root_inode = sysv_iget(sb, SYSV_ROOT_INO);
 	if (IS_ERR(root_inode)) {
 		printk("SysV FS: get root inode failed\n");
 		return 0;
 	}
-	sb->s_root = d_alloc_root(root_inode);
+	sb->s_root = d_make_root(root_inode);
 	if (!sb->s_root) {
-		iput(root_inode);
 		printk("SysV FS: get root dentry failed\n");
 		return 0;
 	}
-	if (sbi->s_forced_ro)
-		sb->s_flags |= MS_RDONLY;
-	if (sbi->s_truncate)
-		sb->s_root->d_op = &sysv_dentry_operations;
-	sb->s_dirt = 1;
 	return 1;
 }
 
@@ -370,8 +366,10 @@ static int sysv_fill_super(struct super_block *sb, void *data, int silent)
 
 	sbi->s_sb = sb;
 	sbi->s_block_base = 0;
+	mutex_init(&sbi->s_lock);
 	sb->s_fs_info = sbi;
-
+	sb->s_time_min = 0;
+	sb->s_time_max = U32_MAX;
 	sb_set_blocksize(sb, BLOCK_SIZE);
 
 	for (i = 0; i < ARRAY_SIZE(flavours) && !size; i++) {
@@ -435,12 +433,46 @@ Ebadsize:
 	goto failed;
 }
 
+static int v7_sanity_check(struct super_block *sb, struct buffer_head *bh)
+{
+	struct v7_super_block *v7sb;
+	struct sysv_inode *v7i;
+	struct buffer_head *bh2;
+	struct sysv_sb_info *sbi;
+
+	sbi = sb->s_fs_info;
+
+	/* plausibility check on superblock */
+	v7sb = (struct v7_super_block *) bh->b_data;
+	if (fs16_to_cpu(sbi, v7sb->s_nfree) > V7_NICFREE ||
+	    fs16_to_cpu(sbi, v7sb->s_ninode) > V7_NICINOD ||
+	    fs32_to_cpu(sbi, v7sb->s_fsize) > V7_MAXSIZE)
+		return 0;
+
+	/* plausibility check on root inode: it is a directory,
+	   with a nonzero size that is a multiple of 16 */
+	bh2 = sb_bread(sb, 2);
+	if (bh2 == NULL)
+		return 0;
+
+	v7i = (struct sysv_inode *)(bh2->b_data + 64);
+	if ((fs16_to_cpu(sbi, v7i->i_mode) & ~0777) != S_IFDIR ||
+	    (fs32_to_cpu(sbi, v7i->i_size) == 0) ||
+	    (fs32_to_cpu(sbi, v7i->i_size) & 017) ||
+	    (fs32_to_cpu(sbi, v7i->i_size) > V7_NFILES *
+	     sizeof(struct sysv_dir_entry))) {
+		brelse(bh2);
+		return 0;
+	}
+
+	brelse(bh2);
+	return 1;
+}
+
 static int v7_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct sysv_sb_info *sbi;
-	struct buffer_head *bh, *bh2 = NULL;
-	struct v7_super_block *v7sb;
-	struct sysv_inode *v7i;
+	struct buffer_head *bh;
 
 	if (440 != sizeof (struct v7_super_block))
 		panic("V7 FS: bad super-block size");
@@ -454,8 +486,10 @@ static int v7_fill_super(struct super_block *sb, void *data, int silent)
 	sbi->s_sb = sb;
 	sbi->s_block_base = 0;
 	sbi->s_type = FSTYPE_V7;
-	sbi->s_bytesex = BYTESEX_PDP;
+	mutex_init(&sbi->s_lock);
 	sb->s_fs_info = sbi;
+	sb->s_time_min = 0;
+	sb->s_time_max = U32_MAX;
 	
 	sb_set_blocksize(sb, 512);
 
@@ -466,32 +500,27 @@ static int v7_fill_super(struct super_block *sb, void *data, int silent)
 		goto failed;
 	}
 
-	/* plausibility check on superblock */
-	v7sb = (struct v7_super_block *) bh->b_data;
-	if (fs16_to_cpu(sbi, v7sb->s_nfree) > V7_NICFREE ||
-	    fs16_to_cpu(sbi, v7sb->s_ninode) > V7_NICINOD ||
-	    fs32_to_cpu(sbi, v7sb->s_time) == 0)
-		goto failed;
+	/* Try PDP-11 UNIX */
+	sbi->s_bytesex = BYTESEX_PDP;
+	if (v7_sanity_check(sb, bh))
+		goto detected;
 
-	/* plausibility check on root inode: it is a directory,
-	   with a nonzero size that is a multiple of 16 */
-	if ((bh2 = sb_bread(sb, 2)) == NULL)
-		goto failed;
-	v7i = (struct sysv_inode *)(bh2->b_data + 64);
-	if ((fs16_to_cpu(sbi, v7i->i_mode) & ~0777) != S_IFDIR ||
-	    (fs32_to_cpu(sbi, v7i->i_size) == 0) ||
-	    (fs32_to_cpu(sbi, v7i->i_size) & 017) != 0)
-		goto failed;
-	brelse(bh2);
-	bh2 = NULL;
+	/* Try PC/IX, v7/x86 */
+	sbi->s_bytesex = BYTESEX_LE;
+	if (v7_sanity_check(sb, bh))
+		goto detected;
 
+	goto failed;
+
+detected:
 	sbi->s_bh1 = bh;
 	sbi->s_bh2 = bh;
 	if (complete_read_super(sb, silent, 1))
 		return 0;
 
 failed:
-	brelse(bh2);
+	printk(KERN_ERR "VFS: could not find a valid V7 on %s.\n",
+		sb->s_id);
 	brelse(bh);
 	kfree(sbi);
 	return -EINVAL;
@@ -499,34 +528,36 @@ failed:
 
 /* Every kernel module contains stuff like this. */
 
-static int sysv_get_sb(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data, struct vfsmount *mnt)
+static struct dentry *sysv_mount(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
 {
-	return get_sb_bdev(fs_type, flags, dev_name, data, sysv_fill_super,
-			   mnt);
+	return mount_bdev(fs_type, flags, dev_name, data, sysv_fill_super);
 }
 
-static int v7_get_sb(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data, struct vfsmount *mnt)
+static struct dentry *v7_mount(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
 {
-	return get_sb_bdev(fs_type, flags, dev_name, data, v7_fill_super, mnt);
+	return mount_bdev(fs_type, flags, dev_name, data, v7_fill_super);
 }
 
 static struct file_system_type sysv_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "sysv",
-	.get_sb		= sysv_get_sb,
+	.mount		= sysv_mount,
 	.kill_sb	= kill_block_super,
 	.fs_flags	= FS_REQUIRES_DEV,
 };
+MODULE_ALIAS_FS("sysv");
 
 static struct file_system_type v7_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "v7",
-	.get_sb		= v7_get_sb,
+	.mount		= v7_mount,
 	.kill_sb	= kill_block_super,
 	.fs_flags	= FS_REQUIRES_DEV,
 };
+MODULE_ALIAS_FS("v7");
+MODULE_ALIAS("v7");
 
 static int __init init_sysv_fs(void)
 {

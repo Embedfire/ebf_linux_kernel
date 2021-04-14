@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 1995  Linus Torvalds
  *  Adapted from 'alpha' version by Gary Thomas
@@ -15,16 +16,14 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
 #include <linux/tty.h>
 #include <linux/major.h>
 #include <linux/interrupt.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
 #include <linux/pci.h>
-#include <linux/utsrelease.h>
+#include <generated/utsrelease.h>
 #include <linux/adb.h>
 #include <linux/module.h>
 #include <linux/delay.h>
@@ -35,7 +34,6 @@
 #include <linux/timer.h>
 
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
 #include <asm/dma.h>
@@ -95,7 +93,7 @@ static const char *chrp_names[] = {
 	"Total Impact Briq"
 };
 
-void chrp_show_cpuinfo(struct seq_file *m)
+static void chrp_show_cpuinfo(struct seq_file *m)
 {
 	int i, sdramen;
 	unsigned int t;
@@ -241,7 +239,7 @@ out:
 	of_node_put(np);
 }
 
-static void briq_restart(char *cmd)
+static void __noreturn briq_restart(char *cmd)
 {
 	local_irq_disable();
 	if (briq_SPOR)
@@ -255,12 +253,12 @@ static void briq_restart(char *cmd)
  * But unfortunately, the firmware does not connect /chosen/{stdin,stdout}
  * the the built-in serial node. Instead, a /failsafe node is created.
  */
-static void chrp_init_early(void)
+static __init void chrp_init(void)
 {
 	struct device_node *node;
 	const char *property;
 
-	if (strstr(cmd_line, "console="))
+	if (strstr(boot_command_line, "console="))
 		return;
 	/* find the boot console from /chosen/stdout */
 	if (!of_chosen)
@@ -281,26 +279,20 @@ static void chrp_init_early(void)
 	node = of_find_node_by_path(property);
 	if (!node)
 		return;
-	property = of_get_property(node, "device_type", NULL);
-	if (!property)
-		goto out_put;
-	if (strcmp(property, "serial"))
+	if (!of_node_is_type(node, "serial"))
 		goto out_put;
 	/*
 	 * The 9pin connector is either /failsafe
 	 * or /pci@80000000/isa@C/serial@i2F8
 	 * The optional graphics card has also type 'serial' in VGA mode.
 	 */
-	property = of_get_property(node, "name", NULL);
-	if (!property)
-		goto out_put;
-	if (!strcmp(property, "failsafe") || !strcmp(property, "serial"))
+	if (of_node_name_eq(node, "failsafe") || of_node_name_eq(node, "serial"))
 		add_preferred_console("ttyS", 0, NULL);
 out_put:
 	of_node_put(node);
 }
 
-void __init chrp_setup_arch(void)
+static void __init chrp_setup_arch(void)
 {
 	struct device_node *root = of_find_node_by_path("/");
 	const char *machine = NULL;
@@ -365,25 +357,15 @@ void __init chrp_setup_arch(void)
 	if (ppc_md.progress) ppc_md.progress("Linux/PPC "UTS_RELEASE"\n", 0x0);
 }
 
-void
-chrp_event_scan(unsigned long unused)
+static void chrp_8259_cascade(struct irq_desc *desc)
 {
-	unsigned char log[1024];
-	int ret = 0;
-
-	/* XXX: we should loop until the hardware says no more error logs -- Cort */
-	rtas_call(rtas_token("event-scan"), 4, 1, &ret, 0xffffffff, 0,
-		  __pa(log), 1024);
-	mod_timer(&__get_cpu_var(heartbeat_timer),
-		  jiffies + event_scan_interval);
-}
-
-static void chrp_8259_cascade(unsigned int irq, struct irq_desc *desc)
-{
+	struct irq_chip *chip = irq_desc_get_chip(desc);
 	unsigned int cascade_irq = i8259_irq();
-	if (cascade_irq != NO_IRQ)
+
+	if (cascade_irq)
 		generic_handle_irq(cascade_irq);
-	desc->chip->eoi(irq);
+
+	chip->irq_eoi(&desc->irq_data);
 }
 
 /*
@@ -393,7 +375,7 @@ static void __init chrp_find_openpic(void)
 {
 	struct device_node *np, *root;
 	int len, i, j;
-	int isu_size, idu_size;
+	int isu_size;
 	const unsigned int *iranges, *opprop = NULL;
 	int oplen = 0;
 	unsigned long opaddr;
@@ -438,17 +420,15 @@ static void __init chrp_find_openpic(void)
 	}
 
 	isu_size = 0;
-	idu_size = 0;
 	if (len > 0 && iranges[1] != 0) {
 		printk(KERN_INFO "OpenPIC irqs %d..%d in IDU\n",
 		       iranges[0], iranges[0] + iranges[1] - 1);
-		idu_size = iranges[1];
 	}
 	if (len > 1)
 		isu_size = iranges[3];
 
-	chrp_mpic = mpic_alloc(np, opaddr, MPIC_PRIMARY,
-			       isu_size, 0, " MPIC    ");
+	chrp_mpic = mpic_alloc(np, opaddr, MPIC_NO_RESET,
+			isu_size, 0, " MPIC    ");
 	if (chrp_mpic == NULL) {
 		printk(KERN_ERR "Failed to allocate MPIC structure\n");
 		goto bail;
@@ -469,14 +449,6 @@ static void __init chrp_find_openpic(void)
 	of_node_put(root);
 	of_node_put(np);
 }
-
-#if defined(CONFIG_VT) && defined(CONFIG_INPUT_ADBHID) && defined(CONFIG_XMON)
-static struct irqaction xmon_irqaction = {
-	.handler = xmon_irq,
-	.mask = CPU_MASK_NONE,
-	.name = "XMON break",
-};
-#endif
 
 static void __init chrp_find_8259(void)
 {
@@ -527,15 +499,15 @@ static void __init chrp_find_8259(void)
 	}
 	if (chrp_mpic != NULL) {
 		cascade_irq = irq_of_parse_and_map(pic, 0);
-		if (cascade_irq == NO_IRQ)
+		if (!cascade_irq)
 			printk(KERN_ERR "i8259: failed to map cascade irq\n");
 		else
-			set_irq_chained_handler(cascade_irq,
+			irq_set_chained_handler(cascade_irq,
 						chrp_8259_cascade);
 	}
 }
 
-void __init chrp_init_IRQ(void)
+static void __init chrp_init_IRQ(void)
 {
 #if defined(CONFIG_VT) && defined(CONFIG_INPUT_ADBHID) && defined(CONFIG_XMON)
 	struct device_node *kbd;
@@ -558,22 +530,21 @@ void __init chrp_init_IRQ(void)
 	/* see if there is a keyboard in the device tree
 	   with a parent of type "adb" */
 	for_each_node_by_name(kbd, "keyboard")
-		if (kbd->parent && kbd->parent->type
-		    && strcmp(kbd->parent->type, "adb") == 0)
+		if (of_node_is_type(kbd->parent, "adb"))
 			break;
 	of_node_put(kbd);
-	if (kbd)
-		setup_irq(HYDRA_INT_ADB_NMI, &xmon_irqaction);
+	if (kbd) {
+		if (request_irq(HYDRA_INT_ADB_NMI, xmon_irq, 0, "XMON break",
+				NULL))
+			pr_err("Failed to register XMON break interrupt\n");
+	}
 #endif
 }
 
-void __init
+static void __init
 chrp_init2(void)
 {
-	struct device_node *device;
-	const unsigned int *p = NULL;
-
-#ifdef CONFIG_NVRAM
+#if IS_ENABLED(CONFIG_NVRAM)
 	chrp_nvram_init();
 #endif
 
@@ -584,56 +555,25 @@ chrp_init2(void)
 	request_region(0x80,0x10,"dma page reg");
 	request_region(0xc0,0x20,"dma2");
 
-	/* Get the event scan rate for the rtas so we know how
-	 * often it expects a heartbeat. -- Cort
-	 */
-	device = of_find_node_by_name(NULL, "rtas");
-	if (device)
-		p = of_get_property(device, "rtas-event-scan-rate", NULL);
-	if (p && *p) {
-		/*
-		 * Arrange to call chrp_event_scan at least *p times
-		 * per minute.  We use 59 rather than 60 here so that
-		 * the rate will be slightly higher than the minimum.
-		 * This all assumes we don't do hotplug CPU on any
-		 * machine that needs the event scans done.
-		 */
-		unsigned long interval, offset;
-		int cpu, ncpus;
-		struct timer_list *timer;
-
-		interval = HZ * 59 / *p;
-		offset = HZ;
-		ncpus = num_online_cpus();
-		event_scan_interval = ncpus * interval;
-		for (cpu = 0; cpu < ncpus; ++cpu) {
-			timer = &per_cpu(heartbeat_timer, cpu);
-			setup_timer(timer, chrp_event_scan, 0);
-			timer->expires = jiffies + offset;
-			add_timer_on(timer, cpu);
-			offset += interval;
-		}
-		printk("RTAS Event Scan Rate: %u (%lu jiffies)\n",
-		       *p, interval);
-	}
-	of_node_put(device);
-
 	if (ppc_md.progress)
 		ppc_md.progress("  Have fun!    ", 0x7777);
 }
 
 static int __init chrp_probe(void)
 {
- 	char *dtype = of_get_flat_dt_prop(of_get_flat_dt_root(),
- 					  "device_type", NULL);
+	const char *dtype = of_get_flat_dt_prop(of_get_flat_dt_root(),
+						"device_type", NULL);
  	if (dtype == NULL)
  		return 0;
  	if (strcmp(dtype, "chrp"))
 		return 0;
 
-	ISA_DMA_THRESHOLD = ~0L;
 	DMA_MODE_READ = 0x44;
 	DMA_MODE_WRITE = 0x48;
+
+	pm_power_off = rtas_power_off;
+
+	chrp_init();
 
 	return 1;
 }
@@ -643,11 +583,9 @@ define_machine(chrp) {
 	.probe			= chrp_probe,
 	.setup_arch		= chrp_setup_arch,
 	.init			= chrp_init2,
-	.init_early		= chrp_init_early,
 	.show_cpuinfo		= chrp_show_cpuinfo,
 	.init_IRQ		= chrp_init_IRQ,
 	.restart		= rtas_restart,
-	.power_off		= rtas_power_off,
 	.halt			= rtas_halt,
 	.time_init		= chrp_time_init,
 	.set_rtc_time		= chrp_set_rtc_time,

@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * An rtc driver for the Dallas DS1742
  *
  * Copyright (C) 2006 Atsushi Nemoto <anemo@mba.ocn.ne.jp>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Copyright (C) 2006 Torsten Ertbjerg Rasmussen <tr@newtec.dk>
  *  - nvram size determined from resource
@@ -13,15 +10,16 @@
  */
 
 #include <linux/bcd.h>
-#include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/gfp.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include <linux/rtc.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
-
-#define DRV_VERSION "0.3"
+#include <linux/module.h>
 
 #define RTC_SIZE		8
 
@@ -50,33 +48,28 @@
 #define RTC_BATT_FLAG		0x80
 
 struct rtc_plat_data {
-	struct rtc_device *rtc;
 	void __iomem *ioaddr_nvram;
 	void __iomem *ioaddr_rtc;
-	size_t size_nvram;
-	size_t size;
-	resource_size_t baseaddr;
 	unsigned long last_jiffies;
 };
 
 static int ds1742_rtc_set_time(struct device *dev, struct rtc_time *tm)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct rtc_plat_data *pdata = platform_get_drvdata(pdev);
+	struct rtc_plat_data *pdata = dev_get_drvdata(dev);
 	void __iomem *ioaddr = pdata->ioaddr_rtc;
 	u8 century;
 
-	century = BIN2BCD((tm->tm_year + 1900) / 100);
+	century = bin2bcd((tm->tm_year + 1900) / 100);
 
 	writeb(RTC_WRITE, ioaddr + RTC_CONTROL);
 
-	writeb(BIN2BCD(tm->tm_year % 100), ioaddr + RTC_YEAR);
-	writeb(BIN2BCD(tm->tm_mon + 1), ioaddr + RTC_MONTH);
-	writeb(BIN2BCD(tm->tm_wday) & RTC_DAY_MASK, ioaddr + RTC_DAY);
-	writeb(BIN2BCD(tm->tm_mday), ioaddr + RTC_DATE);
-	writeb(BIN2BCD(tm->tm_hour), ioaddr + RTC_HOURS);
-	writeb(BIN2BCD(tm->tm_min), ioaddr + RTC_MINUTES);
-	writeb(BIN2BCD(tm->tm_sec) & RTC_SECONDS_MASK, ioaddr + RTC_SECONDS);
+	writeb(bin2bcd(tm->tm_year % 100), ioaddr + RTC_YEAR);
+	writeb(bin2bcd(tm->tm_mon + 1), ioaddr + RTC_MONTH);
+	writeb(bin2bcd(tm->tm_wday) & RTC_DAY_MASK, ioaddr + RTC_DAY);
+	writeb(bin2bcd(tm->tm_mday), ioaddr + RTC_DATE);
+	writeb(bin2bcd(tm->tm_hour), ioaddr + RTC_HOURS);
+	writeb(bin2bcd(tm->tm_min), ioaddr + RTC_MINUTES);
+	writeb(bin2bcd(tm->tm_sec) & RTC_SECONDS_MASK, ioaddr + RTC_SECONDS);
 
 	/* RTC_CENTURY and RTC_CONTROL share same register */
 	writeb(RTC_WRITE | (century & RTC_CENTURY_MASK), ioaddr + RTC_CENTURY);
@@ -86,8 +79,7 @@ static int ds1742_rtc_set_time(struct device *dev, struct rtc_time *tm)
 
 static int ds1742_rtc_read_time(struct device *dev, struct rtc_time *tm)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct rtc_plat_data *pdata = platform_get_drvdata(pdev);
+	struct rtc_plat_data *pdata = dev_get_drvdata(dev);
 	void __iomem *ioaddr = pdata->ioaddr_rtc;
 	unsigned int year, month, day, hour, minute, second, week;
 	unsigned int century;
@@ -106,19 +98,15 @@ static int ds1742_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	year = readb(ioaddr + RTC_YEAR);
 	century = readb(ioaddr + RTC_CENTURY) & RTC_CENTURY_MASK;
 	writeb(0, ioaddr + RTC_CONTROL);
-	tm->tm_sec = BCD2BIN(second);
-	tm->tm_min = BCD2BIN(minute);
-	tm->tm_hour = BCD2BIN(hour);
-	tm->tm_mday = BCD2BIN(day);
-	tm->tm_wday = BCD2BIN(week);
-	tm->tm_mon = BCD2BIN(month) - 1;
+	tm->tm_sec = bcd2bin(second);
+	tm->tm_min = bcd2bin(minute);
+	tm->tm_hour = bcd2bin(hour);
+	tm->tm_mday = bcd2bin(day);
+	tm->tm_wday = bcd2bin(week);
+	tm->tm_mon = bcd2bin(month) - 1;
 	/* year is 1900 + tm->tm_year */
-	tm->tm_year = BCD2BIN(year) + BCD2BIN(century) * 100 - 1900;
+	tm->tm_year = bcd2bin(year) + bcd2bin(century) * 100 - 1900;
 
-	if (rtc_valid_tm(tm) < 0) {
-		dev_err(dev, "retrieved date/time is not valid.\n");
-		rtc_time_to_tm(0, tm);
-	}
 	return 0;
 }
 
@@ -127,77 +115,59 @@ static const struct rtc_class_ops ds1742_rtc_ops = {
 	.set_time	= ds1742_rtc_set_time,
 };
 
-static ssize_t ds1742_nvram_read(struct kobject *kobj,
-				 struct bin_attribute *bin_attr,
-				 char *buf, loff_t pos, size_t size)
+static int ds1742_nvram_read(void *priv, unsigned int pos, void *val,
+			     size_t bytes)
 {
-	struct platform_device *pdev =
-		to_platform_device(container_of(kobj, struct device, kobj));
-	struct rtc_plat_data *pdata = platform_get_drvdata(pdev);
+	struct rtc_plat_data *pdata = priv;
 	void __iomem *ioaddr = pdata->ioaddr_nvram;
-	ssize_t count;
+	u8 *buf = val;
 
-	for (count = 0; size > 0 && pos < pdata->size_nvram; count++, size--)
+	for (; bytes; bytes--)
 		*buf++ = readb(ioaddr + pos++);
-	return count;
+	return 0;
 }
 
-static ssize_t ds1742_nvram_write(struct kobject *kobj,
-				  struct bin_attribute *bin_attr,
-				  char *buf, loff_t pos, size_t size)
+static int ds1742_nvram_write(void *priv, unsigned int pos, void *val,
+			      size_t bytes)
 {
-	struct platform_device *pdev =
-		to_platform_device(container_of(kobj, struct device, kobj));
-	struct rtc_plat_data *pdata = platform_get_drvdata(pdev);
+	struct rtc_plat_data *pdata = priv;
 	void __iomem *ioaddr = pdata->ioaddr_nvram;
-	ssize_t count;
+	u8 *buf = val;
 
-	for (count = 0; size > 0 && pos < pdata->size_nvram; count++, size--)
+	for (; bytes; bytes--)
 		writeb(*buf++, ioaddr + pos++);
-	return count;
+	return 0;
 }
 
-static struct bin_attribute ds1742_nvram_attr = {
-	.attr = {
-		.name = "nvram",
-		.mode = S_IRUGO | S_IWUSR,
-	},
-	.read = ds1742_nvram_read,
-	.write = ds1742_nvram_write,
-	/* REVISIT: size in sysfs won't match actual size... if it's
-	 * not a constant, each RTC should have its own attribute.
-	 */
-};
-
-static int __devinit ds1742_rtc_probe(struct platform_device *pdev)
+static int ds1742_rtc_probe(struct platform_device *pdev)
 {
 	struct rtc_device *rtc;
 	struct resource *res;
 	unsigned int cen, sec;
-	struct rtc_plat_data *pdata = NULL;
-	void __iomem *ioaddr = NULL;
+	struct rtc_plat_data *pdata;
+	void __iomem *ioaddr;
 	int ret = 0;
+	struct nvmem_config nvmem_cfg = {
+		.name = "ds1742_nvram",
+		.reg_read = ds1742_nvram_read,
+		.reg_write = ds1742_nvram_write,
+	};
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res)
-		return -ENODEV;
-	pdata = kzalloc(sizeof(*pdata), GFP_KERNEL);
+
+	pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
 	if (!pdata)
 		return -ENOMEM;
-	pdata->size = res->end - res->start + 1;
-	if (!request_mem_region(res->start, pdata->size, pdev->name)) {
-		ret = -EBUSY;
-		goto out;
-	}
-	pdata->baseaddr = res->start;
-	ioaddr = ioremap(pdata->baseaddr, pdata->size);
-	if (!ioaddr) {
-		ret = -ENOMEM;
-		goto out;
-	}
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	ioaddr = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(ioaddr))
+		return PTR_ERR(ioaddr);
+
 	pdata->ioaddr_nvram = ioaddr;
-	pdata->size_nvram = pdata->size - RTC_SIZE;
-	pdata->ioaddr_rtc = ioaddr + pdata->size_nvram;
+	pdata->ioaddr_rtc = ioaddr + resource_size(res) - RTC_SIZE;
+
+	nvmem_cfg.size = resource_size(res) - RTC_SIZE;
+	nvmem_cfg.priv = pdata;
 
 	/* turn RTC on if it was not on */
 	ioaddr = pdata->ioaddr_rtc;
@@ -212,68 +182,43 @@ static int __devinit ds1742_rtc_probe(struct platform_device *pdev)
 	if (!(readb(ioaddr + RTC_DAY) & RTC_BATT_FLAG))
 		dev_warn(&pdev->dev, "voltage-low detected.\n");
 
-	rtc = rtc_device_register(pdev->name, &pdev->dev,
-				  &ds1742_rtc_ops, THIS_MODULE);
-	if (IS_ERR(rtc)) {
-		ret = PTR_ERR(rtc);
-		goto out;
-	}
-	pdata->rtc = rtc;
 	pdata->last_jiffies = jiffies;
 	platform_set_drvdata(pdev, pdata);
-	ds1742_nvram_attr.size = max(ds1742_nvram_attr.size,
-				     pdata->size_nvram);
-	ret = sysfs_create_bin_file(&pdev->dev.kobj, &ds1742_nvram_attr);
+
+	rtc = devm_rtc_allocate_device(&pdev->dev);
+	if (IS_ERR(rtc))
+		return PTR_ERR(rtc);
+
+	rtc->ops = &ds1742_rtc_ops;
+	rtc->nvram_old_abi = true;
+
+	ret = rtc_register_device(rtc);
 	if (ret)
-		goto out;
-	return 0;
- out:
-	if (pdata->rtc)
-		rtc_device_unregister(pdata->rtc);
-	if (pdata->ioaddr_nvram)
-		iounmap(pdata->ioaddr_nvram);
-	if (pdata->baseaddr)
-		release_mem_region(pdata->baseaddr, pdata->size);
-	kfree(pdata);
-	return ret;
-}
+		return ret;
 
-static int __devexit ds1742_rtc_remove(struct platform_device *pdev)
-{
-	struct rtc_plat_data *pdata = platform_get_drvdata(pdev);
+	if (rtc_nvmem_register(rtc, &nvmem_cfg))
+		dev_err(&pdev->dev, "Unable to register nvmem\n");
 
-	sysfs_remove_bin_file(&pdev->dev.kobj, &ds1742_nvram_attr);
-	rtc_device_unregister(pdata->rtc);
-	iounmap(pdata->ioaddr_nvram);
-	release_mem_region(pdata->baseaddr, pdata->size);
-	kfree(pdata);
 	return 0;
 }
+
+static const struct of_device_id __maybe_unused ds1742_rtc_of_match[] = {
+	{ .compatible = "maxim,ds1742", },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, ds1742_rtc_of_match);
 
 static struct platform_driver ds1742_rtc_driver = {
 	.probe		= ds1742_rtc_probe,
-	.remove		= __devexit_p(ds1742_rtc_remove),
 	.driver		= {
 		.name	= "rtc-ds1742",
-		.owner	= THIS_MODULE,
+		.of_match_table = of_match_ptr(ds1742_rtc_of_match),
 	},
 };
 
-static __init int ds1742_init(void)
-{
-	return platform_driver_register(&ds1742_rtc_driver);
-}
-
-static __exit void ds1742_exit(void)
-{
-	platform_driver_unregister(&ds1742_rtc_driver);
-}
-
-module_init(ds1742_init);
-module_exit(ds1742_exit);
+module_platform_driver(ds1742_rtc_driver);
 
 MODULE_AUTHOR("Atsushi Nemoto <anemo@mba.ocn.ne.jp>");
 MODULE_DESCRIPTION("Dallas DS1742 RTC driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION(DRV_VERSION);
 MODULE_ALIAS("platform:rtc-ds1742");

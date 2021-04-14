@@ -1,28 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  pci-vr41xx.c, PCI Control Unit routines for the NEC VR4100 series.
  *
  *  Copyright (C) 2001-2003 MontaVista Software Inc.
- *    Author: Yoichi Yuasa <yyuasa@mvista.com or source@mvista.com>
- *  Copyright (C) 2004-2008  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
+ *    Author: Yoichi Yuasa <source@mvista.com>
+ *  Copyright (C) 2004-2008  Yoichi Yuasa <yuasa@linux-mips.org>
  *  Copyright (C) 2004 by Ralf Baechle (ralf@linux-mips.org)
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 /*
  * Changes:
- *  MontaVista Software Inc. <yyuasa@mvista.com> or <source@mvista.com>
+ *  MontaVista Software Inc. <source@mvista.com>
  *  - New creation, NEC VR4122 and VR4131 are supported.
  */
 #include <linux/init.h>
@@ -69,17 +56,17 @@ static struct pci_target_address_window pci_target_window1 = {
 };
 
 static struct resource pci_mem_resource = {
-	.name   = "PCI Memory resources",
-	.start  = PCI_MEM_RESOURCE_START,
-	.end    = PCI_MEM_RESOURCE_END,
-	.flags  = IORESOURCE_MEM,
+	.name	= "PCI Memory resources",
+	.start	= PCI_MEM_RESOURCE_START,
+	.end	= PCI_MEM_RESOURCE_END,
+	.flags	= IORESOURCE_MEM,
 };
 
 static struct resource pci_io_resource = {
-	.name   = "PCI I/O resources",
-	.start  = PCI_IO_RESOURCE_START,
-	.end    = PCI_IO_RESOURCE_END,
-	.flags  = IORESOURCE_IO,
+	.name	= "PCI I/O resources",
+	.start	= PCI_IO_RESOURCE_START,
+	.end	= PCI_IO_RESOURCE_END,
+	.flags	= IORESOURCE_IO,
 };
 
 static struct pci_controller_unit_setup vr41xx_pci_controller_unit_setup = {
@@ -97,7 +84,7 @@ static struct pci_controller_unit_setup vr41xx_pci_controller_unit_setup = {
 };
 
 static struct pci_controller vr41xx_pci_controller = {
-	.pci_ops        = &vr41xx_pci_ops,
+	.pci_ops	= &vr41xx_pci_ops,
 	.mem_resource	= &pci_mem_resource,
 	.io_resource	= &pci_io_resource,
 };
@@ -148,7 +135,7 @@ static int __init vr41xx_pciu_init(void)
 	else if ((vtclock / 2) < pci_clock_max)
 		pciu_write(PCICLKSELREG, HALF_VTCLOCK);
 	else if (current_cpu_data.processor_id >= PRID_VR4131_REV2_1 &&
-	         (vtclock / 3) < pci_clock_max)
+		 (vtclock / 3) < pci_clock_max)
 		pciu_write(PCICLKSELREG, ONE_THIRD_VTCLOCK);
 	else if ((vtclock / 4) < pci_clock_max)
 		pciu_write(PCICLKSELREG, QUARTER_VTCLOCK);
@@ -281,7 +268,7 @@ static int __init vr41xx_pciu_init(void)
 	pciu_write(PCIAPCNTREG, val);
 
 	pciu_write(COMMANDREG, PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
-	                       PCI_COMMAND_MASTER | PCI_COMMAND_PARITY |
+			       PCI_COMMAND_MASTER | PCI_COMMAND_PARITY |
 			       PCI_COMMAND_SERR);
 
 	/* Clear bus error */
@@ -305,7 +292,7 @@ static int __init vr41xx_pciu_init(void)
 		struct resource *res = vr41xx_pci_controller.io_resource;
 		master = setup->master_io;
 		io_map_base = ioremap(master->bus_base_address,
-				      res->end - res->start + 1);
+				      resource_size(res));
 		if (!io_map_base)
 			return -EBUSY;
 

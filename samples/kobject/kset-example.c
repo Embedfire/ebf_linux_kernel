@@ -1,15 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Sample kset and ktype implementation
  *
  * Copyright (C) 2004-2007 Greg Kroah-Hartman <greg@kroah.com>
  * Copyright (C) 2007 Novell Inc.
- *
- * Released under the GPL version 2 only.
- *
  */
 #include <linux/kobject.h>
 #include <linux/string.h>
 #include <linux/sysfs.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/init.h>
 
@@ -87,7 +86,7 @@ static ssize_t foo_attr_store(struct kobject *kobj,
 }
 
 /* Our custom sysfs_ops that we will associate with our ktype later on */
-static struct sysfs_ops foo_sysfs_ops = {
+static const struct sysfs_ops foo_sysfs_ops = {
 	.show = foo_attr_show,
 	.store = foo_attr_store,
 };
@@ -119,15 +118,21 @@ static ssize_t foo_show(struct foo_obj *foo_obj, struct foo_attribute *attr,
 static ssize_t foo_store(struct foo_obj *foo_obj, struct foo_attribute *attr,
 			 const char *buf, size_t count)
 {
-	sscanf(buf, "%du", &foo_obj->foo);
+	int ret;
+
+	ret = kstrtoint(buf, 10, &foo_obj->foo);
+	if (ret < 0)
+		return ret;
+
 	return count;
 }
 
+/* Sysfs attributes cannot be world-writable. */
 static struct foo_attribute foo_attribute =
-	__ATTR(foo, 0666, foo_show, foo_store);
+	__ATTR(foo, 0664, foo_show, foo_store);
 
 /*
- * More complex function where we determine which varible is being accessed by
+ * More complex function where we determine which variable is being accessed by
  * looking at the attribute for the "baz" and "bar" files.
  */
 static ssize_t b_show(struct foo_obj *foo_obj, struct foo_attribute *attr,
@@ -145,9 +150,12 @@ static ssize_t b_show(struct foo_obj *foo_obj, struct foo_attribute *attr,
 static ssize_t b_store(struct foo_obj *foo_obj, struct foo_attribute *attr,
 		       const char *buf, size_t count)
 {
-	int var;
+	int var, ret;
 
-	sscanf(buf, "%du", &var);
+	ret = kstrtoint(buf, 10, &var);
+	if (ret < 0)
+		return ret;
+
 	if (strcmp(attr->attr.name, "baz") == 0)
 		foo_obj->baz = var;
 	else
@@ -156,12 +164,12 @@ static ssize_t b_store(struct foo_obj *foo_obj, struct foo_attribute *attr,
 }
 
 static struct foo_attribute baz_attribute =
-	__ATTR(baz, 0666, b_show, b_store);
+	__ATTR(baz, 0664, b_show, b_store);
 static struct foo_attribute bar_attribute =
-	__ATTR(bar, 0666, b_show, b_store);
+	__ATTR(bar, 0664, b_show, b_store);
 
 /*
- * Create a group of attributes so that we can create and destory them all
+ * Create a group of attributes so that we can create and destroy them all
  * at once.
  */
 static struct attribute *foo_default_attrs[] = {
@@ -170,6 +178,7 @@ static struct attribute *foo_default_attrs[] = {
 	&bar_attribute.attr,
 	NULL,	/* need to NULL terminate the list of attributes */
 };
+ATTRIBUTE_GROUPS(foo_default);
 
 /*
  * Our own ktype for our kobjects.  Here we specify our sysfs ops, the
@@ -179,7 +188,7 @@ static struct attribute *foo_default_attrs[] = {
 static struct kobj_type foo_ktype = {
 	.sysfs_ops = &foo_sysfs_ops,
 	.release = foo_release,
-	.default_attrs = foo_default_attrs,
+	.default_groups = foo_default_groups,
 };
 
 static struct kset *example_kset;
@@ -229,7 +238,7 @@ static void destroy_foo_obj(struct foo_obj *foo)
 	kobject_put(&foo->kobj);
 }
 
-static int example_init(void)
+static int __init example_init(void)
 {
 	/*
 	 * Create a kset with the name of "kset_example",
@@ -261,10 +270,11 @@ baz_error:
 bar_error:
 	destroy_foo_obj(foo_obj);
 foo_error:
+	kset_unregister(example_kset);
 	return -EINVAL;
 }
 
-static void example_exit(void)
+static void __exit example_exit(void)
 {
 	destroy_foo_obj(baz_obj);
 	destroy_foo_obj(bar_obj);
@@ -274,5 +284,5 @@ static void example_exit(void)
 
 module_init(example_init);
 module_exit(example_exit);
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Greg Kroah-Hartman <greg@kroah.com>");

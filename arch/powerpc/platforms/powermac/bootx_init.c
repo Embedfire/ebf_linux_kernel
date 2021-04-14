@@ -1,24 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Early boot support code for BootX bootloader
  *
  *  Copyright (C) 2005 Ben. Herrenschmidt (benh@kernel.crashing.org)
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
  */
 
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <linux/utsrelease.h>
+#include <generated/utsrelease.h>
 #include <asm/sections.h>
 #include <asm/prom.h>
 #include <asm/page.h>
 #include <asm/bootx.h>
 #include <asm/btext.h>
 #include <asm/io.h>
+#include <asm/setup.h>
 
 #undef DEBUG
 #define SET_BOOT_BAT
@@ -83,6 +80,7 @@ static void __init bootx_printf(const char *format, ...)
 			break;
 		}
 	}
+	va_end(args);
 }
 #else /* CONFIG_BOOTX_TEXT */
 static void __init bootx_printf(const char *format, ...) {}
@@ -110,7 +108,7 @@ static void * __init bootx_early_getprop(unsigned long base,
 
 #define dt_push_token(token, mem) \
 	do { \
-		*(mem) = _ALIGN_UP(*(mem),4); \
+		*(mem) = ALIGN(*(mem),4); \
 		*((u32 *)*(mem)) = token; \
 		*(mem) += 4; \
 	} while(0)
@@ -152,7 +150,7 @@ static void __init bootx_dt_add_prop(char *name, void *data, int size,
 	/* push property content */
 	if (size && data) {
 		memcpy((void *)*mem_end, data, size);
-		*mem_end = _ALIGN_UP(*mem_end + size, 4);
+		*mem_end = ALIGN(*mem_end + size, 4);
 	}
 }
 
@@ -245,7 +243,7 @@ static void __init bootx_scan_dt_build_strings(unsigned long base,
 		DBG(" detected display ! adding properties names !\n");
 		bootx_dt_add_string("linux,boot-display", mem_end);
 		bootx_dt_add_string("linux,opened", mem_end);
-		strncpy(bootx_disp_path, namep, 255);
+		strlcpy(bootx_disp_path, namep, sizeof(bootx_disp_path));
 	}
 
 	/* get and store all property names */
@@ -305,7 +303,7 @@ static void __init bootx_scan_dt_build_struct(unsigned long base,
 			*lp++ = *p;
 	}
 	*lp = 0;
-	*mem_end = _ALIGN_UP((unsigned long)lp + 1, 4);
+	*mem_end = ALIGN((unsigned long)lp + 1, 4);
 
 	/* get and store all properties */
 	while (*ppp) {
@@ -358,11 +356,11 @@ static unsigned long __init bootx_flatten_dt(unsigned long start)
 	/* Start using memory after the big blob passed by BootX, get
 	 * some space for the header
 	 */
-	mem_start = mem_end = _ALIGN_UP(((unsigned long)bi) + start, 4);
+	mem_start = mem_end = ALIGN(((unsigned long)bi) + start, 4);
 	DBG("Boot params header at: %x\n", mem_start);
 	hdr = (struct boot_param_header *)mem_start;
 	mem_end += sizeof(struct boot_param_header);
-	rsvmap = (u64 *)(_ALIGN_UP(mem_end, 8));
+	rsvmap = (u64 *)(ALIGN(mem_end, 8));
 	hdr->off_mem_rsvmap = ((unsigned long)rsvmap) - mem_start;
 	mem_end = ((unsigned long)rsvmap) + 8 * sizeof(u64);
 
@@ -388,7 +386,7 @@ static unsigned long __init bootx_flatten_dt(unsigned long start)
 	hdr->dt_strings_size = bootx_dt_strend - bootx_dt_strbase;
 
 	/* Build structure */
-	mem_end = _ALIGN(mem_end, 16);
+	mem_end = ALIGN(mem_end, 16);
 	DBG("Building device tree structure at: %x\n", mem_end);
 	hdr->off_dt_struct = mem_end - mem_start;
 	bootx_scan_dt_build_struct(base, 4, &mem_end);
@@ -406,7 +404,7 @@ static unsigned long __init bootx_flatten_dt(unsigned long start)
 	 * also bump mem_reserve_cnt to cause further reservations to
 	 * fail since it's too late.
 	 */
-	mem_end = _ALIGN(mem_end, PAGE_SIZE);
+	mem_end = ALIGN(mem_end, PAGE_SIZE);
 	DBG("End of boot params: %x\n", mem_end);
 	rsvmap[0] = mem_start;
 	rsvmap[1] = mem_end;
@@ -466,7 +464,7 @@ void __init bootx_init(unsigned long r3, unsigned long r4)
 	boot_infos_t *bi = (boot_infos_t *) r4;
 	unsigned long hdr;
 	unsigned long space;
-	unsigned long ptr, x;
+	unsigned long ptr;
 	char *model;
 	unsigned long offset = reloc_offset();
 
@@ -517,7 +515,7 @@ void __init bootx_init(unsigned long r3, unsigned long r4)
 			;
 	}
 	if (bi->architecture != BOOT_ARCH_PCI) {
-		bootx_printf(" !!! WARNING - Usupported machine"
+		bootx_printf(" !!! WARNING - Unsupported machine"
 			     " architecture !\n");
 		for (;;)
 			;
@@ -539,7 +537,7 @@ void __init bootx_init(unsigned long r3, unsigned long r4)
 		if (model
 		    && (strcmp(model, "iMac,1") == 0
 			|| strcmp(model, "PowerMac1,1") == 0)) {
-			bootx_printf("iMac,1 detected, shutting down USB \n");
+			bootx_printf("iMac,1 detected, shutting down USB\n");
 			out_le32((unsigned __iomem *)0x80880008, 1);	/* XXX */
 		}
 	}
@@ -554,12 +552,14 @@ void __init bootx_init(unsigned long r3, unsigned long r4)
 	} else
 		space = bi->totalParamsSize;
 
-	bootx_printf("Total space used by parameters & ramdisk: 0x%x \n", space);
+	bootx_printf("Total space used by parameters & ramdisk: 0x%x\n", space);
 
 	/* New BootX will have flushed all TLBs and enters kernel with
 	 * MMU switched OFF, so this should not be useful anymore.
 	 */
 	if (bi->version < 4) {
+		unsigned long x __maybe_unused;
+
 		bootx_printf("Touching pages...\n");
 
 		/*

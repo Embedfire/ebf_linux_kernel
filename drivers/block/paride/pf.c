@@ -59,7 +59,7 @@
                         the slower the port i/o.  In some cases, setting
                         this to zero will speed up the device. (default -1)
 
-	    major	You may use this parameter to overide the
+	    major	You may use this parameter to override the
 			default major number (47) that this driver
 			will use.  Be sure to change the device
 			name as well.
@@ -118,13 +118,15 @@
 #define PF_NAME		"pf"
 #define PF_UNITS	4
 
+#include <linux/types.h>
+
 /* Here are things one can override from the insmod command.
    Most are autoprobed by paride unless set here.  Verbose is off
    by default.
 
 */
 
-static int verbose = 0;
+static bool verbose = 0;
 static int major = PF_MAJOR;
 static char *name = PF_NAME;
 static int cluster = 64;
@@ -150,10 +152,12 @@ enum {D_PRT, D_PRO, D_UNI, D_MOD, D_SLV, D_LUN, D_DLY};
 #include <linux/hdreg.h>
 #include <linux/cdrom.h>
 #include <linux/spinlock.h>
-#include <linux/blkdev.h>
+#include <linux/blk-mq.h>
 #include <linux/blkpg.h>
-#include <asm/uaccess.h>
+#include <linux/mutex.h>
+#include <linux/uaccess.h>
 
+static DEFINE_MUTEX(pf_mutex);
 static DEFINE_SPINLOCK(pf_spin_lock);
 
 module_param(verbose, bool, 0644);
@@ -201,13 +205,14 @@ module_param_array(drive3, int, NULL, 0);
 #define ATAPI_READ_10		0x28
 #define ATAPI_WRITE_10		0x2a
 
-static int pf_open(struct inode *inode, struct file *file);
-static void do_pf_request(struct request_queue * q);
-static int pf_ioctl(struct inode *inode, struct file *file,
+static int pf_open(struct block_device *bdev, fmode_t mode);
+static blk_status_t pf_queue_rq(struct blk_mq_hw_ctx *hctx,
+				const struct blk_mq_queue_data *bd);
+static int pf_ioctl(struct block_device *bdev, fmode_t mode,
 		    unsigned int cmd, unsigned long arg);
 static int pf_getgeo(struct block_device *bdev, struct hd_geometry *geo);
 
-static int pf_release(struct inode *inode, struct file *file);
+static void pf_release(struct gendisk *disk, fmode_t mode);
 
 static int pf_detect(void);
 static void do_pf_read(void);
@@ -234,6 +239,8 @@ struct pf_unit {
 	int present;		/* device present ? */
 	char name[PF_NAMELEN];	/* pf0, pf1, ... */
 	struct gendisk *disk;
+	struct blk_mq_tag_set tag_set;
+	struct list_head rq_list;
 };
 
 static struct pf_unit units[PF_UNITS];
@@ -241,7 +248,8 @@ static struct pf_unit units[PF_UNITS];
 static int pf_identify(struct pf_unit *pf);
 static void pf_lock(struct pf_unit *pf, int func);
 static void pf_eject(struct pf_unit *pf);
-static int pf_check_media(struct gendisk *disk);
+static unsigned int pf_check_events(struct gendisk *disk,
+				    unsigned int clearing);
 
 static char pf_scratch[512];	/* scratch block buffer */
 
@@ -259,16 +267,22 @@ static int pf_cmd;		/* current command READ/WRITE */
 static struct pf_unit *pf_current;/* unit of current request */
 static int pf_mask;		/* stopper for pseudo-int */
 static char *pf_buf;		/* buffer for request in progress */
+static void *par_drv;		/* reference of parport driver */
 
 /* kernel glue structures */
 
-static struct block_device_operations pf_fops = {
+static const struct block_device_operations pf_fops = {
 	.owner		= THIS_MODULE,
 	.open		= pf_open,
 	.release	= pf_release,
 	.ioctl		= pf_ioctl,
+	.compat_ioctl	= pf_ioctl,
 	.getgeo		= pf_getgeo,
-	.media_changed	= pf_check_media,
+	.check_events	= pf_check_events,
+};
+
+static const struct blk_mq_ops pf_mq_ops = {
+	.queue_rq	= pf_queue_rq,
 };
 
 static void __init pf_init_units(void)
@@ -278,9 +292,24 @@ static void __init pf_init_units(void)
 
 	pf_drive_count = 0;
 	for (unit = 0, pf = units; unit < PF_UNITS; unit++, pf++) {
-		struct gendisk *disk = alloc_disk(1);
+		struct gendisk *disk;
+
+		disk = alloc_disk(1);
 		if (!disk)
 			continue;
+
+		disk->queue = blk_mq_init_sq_queue(&pf->tag_set, &pf_mq_ops,
+							1, BLK_MQ_F_SHOULD_MERGE);
+		if (IS_ERR(disk->queue)) {
+			disk->queue = NULL;
+			put_disk(disk);
+			continue;
+		}
+
+		INIT_LIST_HEAD(&pf->rq_list);
+		disk->queue->queuedata = pf;
+		blk_queue_max_segments(disk->queue, cluster);
+		blk_queue_bounce_limit(disk->queue, BLK_BOUNCE_HIGH);
 		pf->disk = disk;
 		pf->pi = &pf->pia;
 		pf->media_status = PF_NM;
@@ -291,28 +320,35 @@ static void __init pf_init_units(void)
 		disk->first_minor = unit;
 		strcpy(disk->disk_name, pf->name);
 		disk->fops = &pf_fops;
+		disk->events = DISK_EVENT_MEDIA_CHANGE;
 		if (!(*drives[unit])[D_PRT])
 			pf_drive_count++;
 	}
 }
 
-static int pf_open(struct inode *inode, struct file *file)
+static int pf_open(struct block_device *bdev, fmode_t mode)
 {
-	struct pf_unit *pf = inode->i_bdev->bd_disk->private_data;
+	struct pf_unit *pf = bdev->bd_disk->private_data;
+	int ret;
 
+	mutex_lock(&pf_mutex);
 	pf_identify(pf);
 
+	ret = -ENODEV;
 	if (pf->media_status == PF_NM)
-		return -ENODEV;
+		goto out;
 
-	if ((pf->media_status == PF_RO) && (file->f_mode & 2))
-		return -EROFS;
+	ret = -EROFS;
+	if ((pf->media_status == PF_RO) && (mode & FMODE_WRITE))
+		goto out;
 
+	ret = 0;
 	pf->access++;
 	if (pf->removable)
 		pf_lock(pf, 1);
-
-	return 0;
+out:
+	mutex_unlock(&pf_mutex);
+	return ret;
 }
 
 static int pf_getgeo(struct block_device *bdev, struct hd_geometry *geo)
@@ -333,38 +369,44 @@ static int pf_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 	return 0;
 }
 
-static int pf_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
+static int pf_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg)
 {
-	struct pf_unit *pf = inode->i_bdev->bd_disk->private_data;
+	struct pf_unit *pf = bdev->bd_disk->private_data;
 
 	if (cmd != CDROMEJECT)
 		return -EINVAL;
 
 	if (pf->access != 1)
 		return -EBUSY;
+	mutex_lock(&pf_mutex);
 	pf_eject(pf);
+	mutex_unlock(&pf_mutex);
+
 	return 0;
 }
 
-static int pf_release(struct inode *inode, struct file *file)
+static void pf_release(struct gendisk *disk, fmode_t mode)
 {
-	struct pf_unit *pf = inode->i_bdev->bd_disk->private_data;
+	struct pf_unit *pf = disk->private_data;
 
-	if (pf->access <= 0)
-		return -EINVAL;
+	mutex_lock(&pf_mutex);
+	if (pf->access <= 0) {
+		mutex_unlock(&pf_mutex);
+		WARN_ON(1);
+		return;
+	}
 
 	pf->access--;
 
 	if (!pf->access && pf->removable)
 		pf_lock(pf, 0);
 
-	return 0;
-
+	mutex_unlock(&pf_mutex);
 }
 
-static int pf_check_media(struct gendisk *disk)
+static unsigned int pf_check_events(struct gendisk *disk, unsigned int clearing)
 {
-	return 1;
+	return DISK_EVENT_MEDIA_CHANGE;
 }
 
 static inline int status_reg(struct pf_unit *pf)
@@ -391,11 +433,11 @@ static int pf_wait(struct pf_unit *pf, int go, int stop, char *fun, char *msg)
 	       && (j++ < PF_SPIN))
 		udelay(PF_SPIN_DEL);
 
-	if ((r & (STAT_ERR & stop)) || (j >= PF_SPIN)) {
+	if ((r & (STAT_ERR & stop)) || (j > PF_SPIN)) {
 		s = read_reg(pf, 7);
 		e = read_reg(pf, 1);
 		p = read_reg(pf, 2);
-		if (j >= PF_SPIN)
+		if (j > PF_SPIN)
 			e |= 0x100;
 		if (fun)
 			printk("%s: %s %s: alt=0x%x stat=0x%x err=0x%x"
@@ -686,6 +728,11 @@ static int pf_detect(void)
 	printk("%s: %s version %s, major %d, cluster %d, nice %d\n",
 	       name, name, PF_VERSION, major, cluster, nice);
 
+	par_drv = pi_register_driver(name);
+	if (!par_drv) {
+		pr_err("failed to register %s driver\n", name);
+		return -1;
+	}
 	k = 0;
 	if (pf_drive_count == 0) {
 		if (pi_init(pf->pi, 1, -1, -1, -1, -1, -1, pf_scratch, PI_PF,
@@ -716,8 +763,15 @@ static int pf_detect(void)
 		return 0;
 
 	printk("%s: No ATAPI disk detected\n", name);
-	for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++)
+	for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++) {
+		if (!pf->disk)
+			continue;
+		blk_cleanup_queue(pf->disk->queue);
+		pf->disk->queue = NULL;
+		blk_mq_free_tag_set(&pf->tag_set);
 		put_disk(pf->disk);
+	}
+	pi_unregister_driver(par_drv);
 	return -1;
 }
 
@@ -748,37 +802,59 @@ static int pf_ready(void)
 	return (((status_reg(pf_current) & (STAT_BUSY | pf_mask)) == pf_mask));
 }
 
-static struct request_queue *pf_queue;
+static int pf_queue;
 
-static void pf_end_request(int uptodate)
+static int set_next_request(void)
 {
-	if (pf_req) {
-		end_request(pf_req, uptodate);
+	struct pf_unit *pf;
+	int old_pos = pf_queue;
+
+	do {
+		pf = &units[pf_queue];
+		if (++pf_queue == PF_UNITS)
+			pf_queue = 0;
+		if (pf->present && !list_empty(&pf->rq_list)) {
+			pf_req = list_first_entry(&pf->rq_list, struct request,
+							queuelist);
+			list_del_init(&pf_req->queuelist);
+			blk_mq_start_request(pf_req);
+			break;
+		}
+	} while (pf_queue != old_pos);
+
+	return pf_req != NULL;
+}
+
+static void pf_end_request(blk_status_t err)
+{
+	if (!pf_req)
+		return;
+	if (!blk_update_request(pf_req, err, blk_rq_cur_bytes(pf_req))) {
+		__blk_mq_end_request(pf_req, err);
 		pf_req = NULL;
 	}
 }
 
-static void do_pf_request(struct request_queue * q)
+static void pf_request(void)
 {
 	if (pf_busy)
 		return;
 repeat:
-	pf_req = elv_next_request(q);
-	if (!pf_req)
+	if (!pf_req && !set_next_request())
 		return;
 
 	pf_current = pf_req->rq_disk->private_data;
-	pf_block = pf_req->sector;
-	pf_run = pf_req->nr_sectors;
-	pf_count = pf_req->current_nr_sectors;
+	pf_block = blk_rq_pos(pf_req);
+	pf_run = blk_rq_sectors(pf_req);
+	pf_count = blk_rq_cur_sectors(pf_req);
 
 	if (pf_block + pf_count > get_capacity(pf_req->rq_disk)) {
-		pf_end_request(0);
+		pf_end_request(BLK_STS_IOERR);
 		goto repeat;
 	}
 
 	pf_cmd = rq_data_dir(pf_req);
-	pf_buf = pf_req->buffer;
+	pf_buf = bio_data(pf_req->bio);
 	pf_retries = 0;
 
 	pf_busy = 1;
@@ -788,9 +864,22 @@ repeat:
 		pi_do_claimed(pf_current->pi, do_pf_write);
 	else {
 		pf_busy = 0;
-		pf_end_request(0);
+		pf_end_request(BLK_STS_IOERR);
 		goto repeat;
 	}
+}
+
+static blk_status_t pf_queue_rq(struct blk_mq_hw_ctx *hctx,
+				const struct blk_mq_queue_data *bd)
+{
+	struct pf_unit *pf = hctx->queue->queuedata;
+
+	spin_lock_irq(&pf_spin_lock);
+	list_add_tail(&bd->rq->queuelist, &pf->rq_list);
+	pf_request();
+	spin_unlock_irq(&pf_spin_lock);
+
+	return BLK_STS_OK;
 }
 
 static int pf_next_buf(void)
@@ -805,25 +894,24 @@ static int pf_next_buf(void)
 		return 1;
 	if (!pf_count) {
 		spin_lock_irqsave(&pf_spin_lock, saved_flags);
-		pf_end_request(1);
-		pf_req = elv_next_request(pf_queue);
+		pf_end_request(0);
 		spin_unlock_irqrestore(&pf_spin_lock, saved_flags);
 		if (!pf_req)
 			return 1;
-		pf_count = pf_req->current_nr_sectors;
-		pf_buf = pf_req->buffer;
+		pf_count = blk_rq_cur_sectors(pf_req);
+		pf_buf = bio_data(pf_req->bio);
 	}
 	return 0;
 }
 
-static inline void next_request(int success)
+static inline void next_request(blk_status_t err)
 {
 	unsigned long saved_flags;
 
 	spin_lock_irqsave(&pf_spin_lock, saved_flags);
-	pf_end_request(success);
+	pf_end_request(err);
 	pf_busy = 0;
-	do_pf_request(pf_queue);
+	pf_request();
 	spin_unlock_irqrestore(&pf_spin_lock, saved_flags);
 }
 
@@ -844,7 +932,7 @@ static void do_pf_read_start(void)
 			pi_do_claimed(pf_current->pi, do_pf_read_start);
 			return;
 		}
-		next_request(0);
+		next_request(BLK_STS_IOERR);
 		return;
 	}
 	pf_mask = STAT_DRQ;
@@ -863,7 +951,7 @@ static void do_pf_read_drq(void)
 				pi_do_claimed(pf_current->pi, do_pf_read_start);
 				return;
 			}
-			next_request(0);
+			next_request(BLK_STS_IOERR);
 			return;
 		}
 		pi_read_block(pf_current->pi, pf_buf, 512);
@@ -871,7 +959,7 @@ static void do_pf_read_drq(void)
 			break;
 	}
 	pi_disconnect(pf_current->pi);
-	next_request(1);
+	next_request(0);
 }
 
 static void do_pf_write(void)
@@ -890,7 +978,7 @@ static void do_pf_write_start(void)
 			pi_do_claimed(pf_current->pi, do_pf_write_start);
 			return;
 		}
-		next_request(0);
+		next_request(BLK_STS_IOERR);
 		return;
 	}
 
@@ -903,7 +991,7 @@ static void do_pf_write_start(void)
 				pi_do_claimed(pf_current->pi, do_pf_write_start);
 				return;
 			}
-			next_request(0);
+			next_request(BLK_STS_IOERR);
 			return;
 		}
 		pi_write_block(pf_current->pi, pf_buf, 512);
@@ -923,11 +1011,11 @@ static void do_pf_write_done(void)
 			pi_do_claimed(pf_current->pi, do_pf_write_start);
 			return;
 		}
-		next_request(0);
+		next_request(BLK_STS_IOERR);
 		return;
 	}
 	pi_disconnect(pf_current->pi);
-	next_request(1);
+	next_request(0);
 }
 
 static int __init pf_init(void)
@@ -945,20 +1033,15 @@ static int __init pf_init(void)
 	pf_busy = 0;
 
 	if (register_blkdev(major, name)) {
-		for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++)
+		for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++) {
+			if (!pf->disk)
+				continue;
+			blk_cleanup_queue(pf->disk->queue);
+			blk_mq_free_tag_set(&pf->tag_set);
 			put_disk(pf->disk);
+		}
 		return -EBUSY;
 	}
-	pf_queue = blk_init_queue(do_pf_request, &pf_spin_lock);
-	if (!pf_queue) {
-		unregister_blkdev(major, name);
-		for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++)
-			put_disk(pf->disk);
-		return -ENOMEM;
-	}
-
-	blk_queue_max_phys_segments(pf_queue, cluster);
-	blk_queue_max_hw_segments(pf_queue, cluster);
 
 	for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++) {
 		struct gendisk *disk = pf->disk;
@@ -966,7 +1049,6 @@ static int __init pf_init(void)
 		if (!pf->present)
 			continue;
 		disk->private_data = pf;
-		disk->queue = pf_queue;
 		add_disk(disk);
 	}
 	return 0;
@@ -978,13 +1060,19 @@ static void __exit pf_exit(void)
 	int unit;
 	unregister_blkdev(major, name);
 	for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++) {
-		if (!pf->present)
+		if (!pf->disk)
 			continue;
-		del_gendisk(pf->disk);
+
+		if (pf->present)
+			del_gendisk(pf->disk);
+
+		blk_cleanup_queue(pf->disk->queue);
+		blk_mq_free_tag_set(&pf->tag_set);
 		put_disk(pf->disk);
-		pi_release(pf->pi);
+
+		if (pf->present)
+			pi_release(pf->pi);
 	}
-	blk_cleanup_queue(pf_queue);
 }
 
 MODULE_LICENSE("GPL");

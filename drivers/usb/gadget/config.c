@@ -1,32 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * usb/gadget/config.c -- simplify building config descriptors
  *
  * Copyright (C) 2003 David Brownell
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/errno.h>
+#include <linux/slab.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/list.h>
 #include <linux/string.h>
 #include <linux/device.h>
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
-
+#include <linux/usb/composite.h>
+#include <linux/usb/otg.h>
 
 /**
  * usb_descriptor_fillbuf - fill buffer with descriptors
@@ -61,7 +51,7 @@ usb_descriptor_fillbuf(void *buf, unsigned buflen,
 	}
 	return dest - (u8 *)buf;
 }
-
+EXPORT_SYMBOL_GPL(usb_descriptor_fillbuf);
 
 /**
  * usb_gadget_config_buf - builts a complete configuration descriptor
@@ -99,7 +89,7 @@ int usb_gadget_config_buf(
 	*cp = *config;
 
 	/* then interface/endpoint/class/vendor/... */
-	len = usb_descriptor_fillbuf(USB_DT_CONFIG_SIZE + (u8*)buf,
+	len = usb_descriptor_fillbuf(USB_DT_CONFIG_SIZE + (u8 *)buf,
 			length - USB_DT_CONFIG_SIZE, desc);
 	if (len < 0)
 		return len;
@@ -114,6 +104,7 @@ int usb_gadget_config_buf(
 	cp->bmAttributes |= USB_CONFIG_ATT_ONE;
 	return len;
 }
+EXPORT_SYMBOL_GPL(usb_gadget_config_buf);
 
 /**
  * usb_copy_descriptors - copy a vector of USB descriptors
@@ -127,7 +118,7 @@ int usb_gadget_config_buf(
  * with identifiers (for interfaces, strings, endpoints, and more)
  * as needed by a given function instance.
  */
-struct usb_descriptor_header **__init
+struct usb_descriptor_header **
 usb_copy_descriptors(struct usb_descriptor_header **src)
 {
 	struct usb_descriptor_header **tmp;
@@ -163,29 +154,103 @@ usb_copy_descriptors(struct usb_descriptor_header **src)
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(usb_copy_descriptors);
 
-/**
- * usb_find_endpoint - find a copy of an endpoint descriptor
- * @src: original vector of descriptors
- * @copy: copy of @src
- * @ep: endpoint descriptor found in @src
- *
- * This returns the copy of the @match descriptor made for @copy.  Its
- * intended use is to help remembering the endpoint descriptor to use
- * when enabling a given endpoint.
- */
-struct usb_endpoint_descriptor *__init
-usb_find_endpoint(
-	struct usb_descriptor_header **src,
-	struct usb_descriptor_header **copy,
-	struct usb_endpoint_descriptor *match
-)
+int usb_assign_descriptors(struct usb_function *f,
+		struct usb_descriptor_header **fs,
+		struct usb_descriptor_header **hs,
+		struct usb_descriptor_header **ss,
+		struct usb_descriptor_header **ssp)
 {
-	while (*src) {
-		if (*src == (void *) match)
-			return (void *)*copy;
-		src++;
-		copy++;
+	struct usb_gadget *g = f->config->cdev->gadget;
+
+	if (fs) {
+		f->fs_descriptors = usb_copy_descriptors(fs);
+		if (!f->fs_descriptors)
+			goto err;
 	}
-	return NULL;
+	if (hs && gadget_is_dualspeed(g)) {
+		f->hs_descriptors = usb_copy_descriptors(hs);
+		if (!f->hs_descriptors)
+			goto err;
+	}
+	if (ss && gadget_is_superspeed(g)) {
+		f->ss_descriptors = usb_copy_descriptors(ss);
+		if (!f->ss_descriptors)
+			goto err;
+	}
+	if (ssp && gadget_is_superspeed_plus(g)) {
+		f->ssp_descriptors = usb_copy_descriptors(ssp);
+		if (!f->ssp_descriptors)
+			goto err;
+	}
+	return 0;
+err:
+	usb_free_all_descriptors(f);
+	return -ENOMEM;
 }
+EXPORT_SYMBOL_GPL(usb_assign_descriptors);
+
+void usb_free_all_descriptors(struct usb_function *f)
+{
+	usb_free_descriptors(f->fs_descriptors);
+	usb_free_descriptors(f->hs_descriptors);
+	usb_free_descriptors(f->ss_descriptors);
+	usb_free_descriptors(f->ssp_descriptors);
+}
+EXPORT_SYMBOL_GPL(usb_free_all_descriptors);
+
+struct usb_descriptor_header *usb_otg_descriptor_alloc(
+				struct usb_gadget *gadget)
+{
+	struct usb_descriptor_header *otg_desc;
+	unsigned length = 0;
+
+	if (gadget->otg_caps && (gadget->otg_caps->otg_rev >= 0x0200))
+		length = sizeof(struct usb_otg20_descriptor);
+	else
+		length = sizeof(struct usb_otg_descriptor);
+
+	otg_desc = kzalloc(length, GFP_KERNEL);
+	return otg_desc;
+}
+EXPORT_SYMBOL_GPL(usb_otg_descriptor_alloc);
+
+int usb_otg_descriptor_init(struct usb_gadget *gadget,
+		struct usb_descriptor_header *otg_desc)
+{
+	struct usb_otg_descriptor *otg1x_desc;
+	struct usb_otg20_descriptor *otg20_desc;
+	struct usb_otg_caps *otg_caps = gadget->otg_caps;
+	u8 otg_attributes = 0;
+
+	if (!otg_desc)
+		return -EINVAL;
+
+	if (otg_caps && otg_caps->otg_rev) {
+		if (otg_caps->hnp_support)
+			otg_attributes |= USB_OTG_HNP;
+		if (otg_caps->srp_support)
+			otg_attributes |= USB_OTG_SRP;
+		if (otg_caps->adp_support && (otg_caps->otg_rev >= 0x0200))
+			otg_attributes |= USB_OTG_ADP;
+	} else {
+		otg_attributes = USB_OTG_SRP | USB_OTG_HNP;
+	}
+
+	if (otg_caps && (otg_caps->otg_rev >= 0x0200)) {
+		otg20_desc = (struct usb_otg20_descriptor *)otg_desc;
+		otg20_desc->bLength = sizeof(struct usb_otg20_descriptor);
+		otg20_desc->bDescriptorType = USB_DT_OTG;
+		otg20_desc->bmAttributes = otg_attributes;
+		otg20_desc->bcdOTG = cpu_to_le16(otg_caps->otg_rev);
+	} else {
+		otg1x_desc = (struct usb_otg_descriptor *)otg_desc;
+		otg1x_desc->bLength = sizeof(struct usb_otg_descriptor);
+		otg1x_desc->bDescriptorType = USB_DT_OTG;
+		otg1x_desc->bmAttributes = otg_attributes;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(usb_otg_descriptor_init);

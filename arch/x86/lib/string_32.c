@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Most of the string-functions are rather heavily hand-optimized,
  * see especially strsep,strstr,str[c]spn. They should work, but are not
@@ -11,7 +12,7 @@
  */
 
 #include <linux/string.h>
-#include <linux/module.h>
+#include <linux/export.h>
 
 #ifdef __HAVE_ARCH_STRCPY
 char *strcpy(char *dest, const char *src)
@@ -22,7 +23,7 @@ char *strcpy(char *dest, const char *src)
 		"testb %%al,%%al\n\t"
 		"jne 1b"
 		: "=&S" (d0), "=&D" (d1), "=&a" (d2)
-		:"0" (src), "1" (dest) : "memory");
+		: "0" (src), "1" (dest) : "memory");
 	return dest;
 }
 EXPORT_SYMBOL(strcpy);
@@ -42,7 +43,7 @@ char *strncpy(char *dest, const char *src, size_t count)
 		"stosb\n"
 		"2:"
 		: "=&S" (d0), "=&D" (d1), "=&c" (d2), "=&a" (d3)
-		:"0" (src), "1" (dest), "2" (count) : "memory");
+		: "0" (src), "1" (dest), "2" (count) : "memory");
 	return dest;
 }
 EXPORT_SYMBOL(strncpy);
@@ -60,7 +61,7 @@ char *strcat(char *dest, const char *src)
 		"testb %%al,%%al\n\t"
 		"jne 1b"
 		: "=&S" (d0), "=&D" (d1), "=&a" (d2), "=&c" (d3)
-		: "0" (src), "1" (dest), "2" (0), "3" (0xffffffffu): "memory");
+		: "0" (src), "1" (dest), "2" (0), "3" (0xffffffffu) : "memory");
 	return dest;
 }
 EXPORT_SYMBOL(strcat);
@@ -105,9 +106,9 @@ int strcmp(const char *cs, const char *ct)
 		"2:\tsbbl %%eax,%%eax\n\t"
 		"orb $1,%%al\n"
 		"3:"
-		:"=a" (res), "=&S" (d0), "=&D" (d1)
-		:"1" (cs), "2" (ct)
-		:"memory");
+		: "=a" (res), "=&S" (d0), "=&D" (d1)
+		: "1" (cs), "2" (ct)
+		: "memory");
 	return res;
 }
 EXPORT_SYMBOL(strcmp);
@@ -130,9 +131,9 @@ int strncmp(const char *cs, const char *ct, size_t count)
 		"3:\tsbbl %%eax,%%eax\n\t"
 		"orb $1,%%al\n"
 		"4:"
-		:"=a" (res), "=&S" (d0), "=&D" (d1), "=&c" (d2)
-		:"1" (cs), "2" (ct), "3" (count)
-		:"memory");
+		: "=a" (res), "=&S" (d0), "=&D" (d1), "=&c" (d2)
+		: "1" (cs), "2" (ct), "3" (count)
+		: "memory");
 	return res;
 }
 EXPORT_SYMBOL(strncmp);
@@ -152,9 +153,9 @@ char *strchr(const char *s, int c)
 		"movl $1,%1\n"
 		"2:\tmovl %1,%0\n\t"
 		"decl %0"
-		:"=a" (res), "=&S" (d0)
-		:"1" (s), "0" (c)
-		:"memory");
+		: "=a" (res), "=&S" (d0)
+		: "1" (s), "0" (c)
+		: "memory");
 	return res;
 }
 EXPORT_SYMBOL(strchr);
@@ -164,15 +165,13 @@ EXPORT_SYMBOL(strchr);
 size_t strlen(const char *s)
 {
 	int d0;
-	int res;
+	size_t res;
 	asm volatile("repne\n\t"
-		"scasb\n\t"
-		"notl %0\n\t"
-		"decl %0"
-		:"=c" (res), "=&D" (d0)
-		:"1" (s), "a" (0), "0" (0xffffffffu)
-		:"memory");
-	return res;
+		"scasb"
+		: "=c" (res), "=&D" (d0)
+		: "1" (s), "a" (0), "0" (0xffffffffu)
+		: "memory");
+	return ~res - 1;
 }
 EXPORT_SYMBOL(strlen);
 #endif
@@ -189,9 +188,9 @@ void *memchr(const void *cs, int c, size_t count)
 		"je 1f\n\t"
 		"movl $1,%0\n"
 		"1:\tdecl %0"
-		:"=D" (res), "=&c" (d0)
-		:"a" (c), "0" (cs), "1" (count)
-		:"memory");
+		: "=D" (res), "=&c" (d0)
+		: "a" (c), "0" (cs), "1" (count)
+		: "memory");
 	return res;
 }
 EXPORT_SYMBOL(memchr);
@@ -228,9 +227,9 @@ size_t strnlen(const char *s, size_t count)
 		"cmpl $-1,%1\n\t"
 		"jne 1b\n"
 		"3:\tsubl %2,%0"
-		:"=a" (res), "=&d" (d0)
-		:"c" (s), "1" (count)
-		:"memory");
+		: "=a" (res), "=&d" (d0)
+		: "c" (s), "1" (count)
+		: "memory");
 	return res;
 }
 EXPORT_SYMBOL(strnlen);

@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * MPC8272 ADS Device Tree Source
  *
  * Copyright 2005,2008 Freescale Semiconductor Inc.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 /dts-v1/;
@@ -16,6 +12,13 @@
 	compatible = "fsl,mpc8272ads";
 	#address-cells = <1>;
 	#size-cells = <1>;
+
+	aliases {
+		ethernet0 = &eth0;
+		ethernet1 = &eth1;
+		serial0 = &scc1;
+		serial1 = &scc4;
+	};
 
 	cpus {
 		#address-cells = <1>;
@@ -46,13 +49,13 @@
 		#size-cells = <1>;
 		reg = <0xf0010100 0x40>;
 
-		ranges = <0x0 0x0 0xfe000000 0x2000000
+		ranges = <0x0 0x0 0xff800000 0x00800000
 		          0x1 0x0 0xf4500000 0x8000
 		          0x3 0x0 0xf8200000 0x8000>;
 
 		flash@0,0 {
 			compatible = "jedec-flash";
-			reg = <0x0 0x0 0x2000000>;
+			reg = <0x0 0x0 0x00800000>;
 			bank-width = <4>;
 			device-width = <1>;
 		};
@@ -144,7 +147,7 @@
 				reg = <0x119f0 0x10 0x115f0 0x10>;
 			};
 
-			serial@11a00 {
+			scc1: serial@11a00 {
 				device_type = "serial";
 				compatible = "fsl,mpc8272-scc-uart",
 				             "fsl,cpm2-scc-uart";
@@ -155,7 +158,7 @@
 				fsl,cpm-command = <0x800000>;
 			};
 
-			serial@11a60 {
+			scc4: serial@11a60 {
 				device_type = "serial";
 				compatible = "fsl,mpc8272-scc-uart",
 				             "fsl,cpm2-scc-uart";
@@ -166,8 +169,15 @@
 				fsl,cpm-command = <0xce00000>;
 			};
 
+			usb@11b60 {
+				compatible = "fsl,mpc8272-cpm-usb";
+				reg = <0x11b60 0x40 0x8b00 0x100>;
+				interrupts = <11 8>;
+				interrupt-parent = <&PIC>;
+				mode = "peripheral";
+			};
+
 			mdio@10d40 {
-				device_type = "mdio";
 				compatible = "fsl,mpc8272ads-mdio-bitbang",
 				             "fsl,mpc8272-mdio-bitbang",
 				             "fsl,cpm2-mdio-bitbang";
@@ -181,18 +191,16 @@
 					interrupt-parent = <&PIC>;
 					interrupts = <23 8>;
 					reg = <0x0>;
-					device_type = "ethernet-phy";
 				};
 
 				PHY1: ethernet-phy@1 {
 					interrupt-parent = <&PIC>;
 					interrupts = <23 8>;
 					reg = <0x3>;
-					device_type = "ethernet-phy";
 				};
 			};
 
-			ethernet@11300 {
+			eth0: ethernet@11300 {
 				device_type = "network";
 				compatible = "fsl,mpc8272-fcc-enet",
 				             "fsl,cpm2-fcc-enet";
@@ -205,7 +213,7 @@
 				fsl,cpm-command = <0x12000300>;
 			};
 
-			ethernet@11320 {
+			eth1: ethernet@11320 {
 				device_type = "network";
 				compatible = "fsl,mpc8272-fcc-enet",
 				             "fsl,cpm2-fcc-enet";
@@ -250,6 +258,6 @@
 	};
 
 	chosen {
-		linux,stdout-path = "/soc/cpm/serial@11a00";
+		stdout-path = "/soc/cpm/serial@11a00";
 	};
 };

@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Windfarm PowerMac thermal control. Core
  *
  * (c) Copyright 2005 Benjamin Herrenschmidt, IBM Corp.
  *                    <benh@kernel.crashing.org>
- *
- * Released under the term of the GNU GPL v2.
  *
  * This core code tracks the list of sensors & controls, register
  * clients, and holds the kernel thread used for control.
@@ -25,6 +24,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/kthread.h>
@@ -71,10 +71,10 @@ static inline void wf_notify(int event, void *param)
 	blocking_notifier_call_chain(&wf_client_list, event, param);
 }
 
-int wf_critical_overtemp(void)
+static int wf_critical_overtemp(void)
 {
-	static char * critical_overtemp_path = "/sbin/critical_overtemp";
-	char *argv[] = { critical_overtemp_path, NULL };
+	static char const critical_overtemp_path[] = "/sbin/critical_overtemp";
+	char *argv[] = { (char *)critical_overtemp_path, NULL };
 	static char *envp[] = { "HOME=/",
 				"TERM=linux",
 				"PATH=/sbin:/usr/sbin:/bin:/usr/bin",
@@ -83,7 +83,6 @@ int wf_critical_overtemp(void)
 	return call_usermodehelper(critical_overtemp_path,
 				   argv, envp, UMH_WAIT_EXEC);
 }
-EXPORT_SYMBOL_GPL(wf_critical_overtemp);
 
 static int wf_thread_func(void *data)
 {
@@ -163,13 +162,27 @@ static ssize_t wf_show_control(struct device *dev,
 			       struct device_attribute *attr, char *buf)
 {
 	struct wf_control *ctrl = container_of(attr, struct wf_control, attr);
+	const char *typestr;
 	s32 val = 0;
 	int err;
 
 	err = ctrl->ops->get_value(ctrl, &val);
-	if (err < 0)
+	if (err < 0) {
+		if (err == -EFAULT)
+			return sprintf(buf, "<HW FAULT>\n");
 		return err;
-	return sprintf(buf, "%d\n", val);
+	}
+	switch(ctrl->type) {
+	case WF_CONTROL_RPM_FAN:
+		typestr = " RPM";
+		break;
+	case WF_CONTROL_PWM_FAN:
+		typestr = " %";
+		break;
+	default:
+		typestr = "";
+	}
+	return sprintf(buf, "%d%s\n", val, typestr);
 }
 
 /* This is really only for debugging... */
@@ -209,6 +222,7 @@ int wf_register_control(struct wf_control *new_ct)
 	kref_init(&new_ct->ref);
 	list_add(&new_ct->link, &wf_controls);
 
+	sysfs_attr_init(&new_ct->attr.attr);
 	new_ct->attr.attr.name = new_ct->name;
 	new_ct->attr.attr.mode = 0644;
 	new_ct->attr.show = wf_show_control;
@@ -238,24 +252,6 @@ void wf_unregister_control(struct wf_control *ct)
 	kref_put(&ct->ref, wf_control_release);
 }
 EXPORT_SYMBOL_GPL(wf_unregister_control);
-
-struct wf_control * wf_find_control(const char *name)
-{
-	struct wf_control *ct;
-
-	mutex_lock(&wf_lock);
-	list_for_each_entry(ct, &wf_controls, link) {
-		if (!strcmp(ct->name, name)) {
-			if (wf_get_control(ct))
-				ct = NULL;
-			mutex_unlock(&wf_lock);
-			return ct;
-		}
-	}
-	mutex_unlock(&wf_lock);
-	return NULL;
-}
-EXPORT_SYMBOL_GPL(wf_find_control);
 
 int wf_get_control(struct wf_control *ct)
 {
@@ -321,6 +317,7 @@ int wf_register_sensor(struct wf_sensor *new_sr)
 	kref_init(&new_sr->ref);
 	list_add(&new_sr->link, &wf_sensors);
 
+	sysfs_attr_init(&new_sr->attr.attr);
 	new_sr->attr.attr.name = new_sr->name;
 	new_sr->attr.attr.mode = 0444;
 	new_sr->attr.show = wf_show_sensor;
@@ -350,24 +347,6 @@ void wf_unregister_sensor(struct wf_sensor *sr)
 	wf_put_sensor(sr);
 }
 EXPORT_SYMBOL_GPL(wf_unregister_sensor);
-
-struct wf_sensor * wf_find_sensor(const char *name)
-{
-	struct wf_sensor *sr;
-
-	mutex_lock(&wf_lock);
-	list_for_each_entry(sr, &wf_sensors, link) {
-		if (!strcmp(sr->name, name)) {
-			if (wf_get_sensor(sr))
-				sr = NULL;
-			mutex_unlock(&wf_lock);
-			return sr;
-		}
-	}
-	mutex_unlock(&wf_lock);
-	return NULL;
-}
-EXPORT_SYMBOL_GPL(wf_find_sensor);
 
 int wf_get_sensor(struct wf_sensor *sr)
 {
@@ -418,7 +397,7 @@ int wf_unregister_client(struct notifier_block *nb)
 {
 	mutex_lock(&wf_lock);
 	blocking_notifier_chain_unregister(&wf_client_list, nb);
-	wf_client_count++;
+	wf_client_count--;
 	if (wf_client_count == 0)
 		wf_stop_thread();
 	mutex_unlock(&wf_lock);
@@ -457,21 +436,10 @@ void wf_clear_overtemp(void)
 }
 EXPORT_SYMBOL_GPL(wf_clear_overtemp);
 
-int wf_is_overtemp(void)
-{
-	return (wf_overtemp != 0);
-}
-EXPORT_SYMBOL_GPL(wf_is_overtemp);
-
 static int __init windfarm_core_init(void)
 {
 	DBG("wf: core loaded\n");
 
-	/* Don't register on old machines that use therm_pm72 for now */
-	if (machine_is_compatible("PowerMac7,2") ||
-	    machine_is_compatible("PowerMac7,3") ||
-	    machine_is_compatible("RackMac3,1"))
-		return -ENODEV;
 	platform_device_register(&wf_platform_device);
 	return 0;
 }

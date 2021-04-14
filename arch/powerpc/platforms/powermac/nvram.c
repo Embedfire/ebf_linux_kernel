@@ -1,30 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (C) 2002 Benjamin Herrenschmidt (benh@kernel.crashing.org)
  *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
- *
  *  Todo: - add support for the OF persistent properties
  */
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
 #include <linux/nvram.h>
 #include <linux/init.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/adb.h>
 #include <linux/pmu.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/completion.h>
 #include <linux/spinlock.h>
 #include <asm/sections.h>
 #include <asm/io.h>
-#include <asm/system.h>
 #include <asm/prom.h>
 #include <asm/machdep.h>
 #include <asm/nvram.h>
@@ -61,7 +55,7 @@ struct chrp_header {
   u8		cksum;
   u16		len;
   char          name[12];
-  u8		data[0];
+  u8		data[];
 };
 
 struct core99_header {
@@ -80,7 +74,7 @@ static int is_core_99;
 static int core99_bank = 0;
 static int nvram_partitions[3];
 // XXX Turn that into a sem
-static DEFINE_SPINLOCK(nv_lock);
+static DEFINE_RAW_SPINLOCK(nv_lock);
 
 static int (*core99_write_bank)(int bank, u8* datas);
 static int (*core99_erase_bank)(int bank);
@@ -149,6 +143,11 @@ static ssize_t core99_nvram_size(void)
 static volatile unsigned char __iomem *nvram_addr;
 static int nvram_mult;
 
+static ssize_t ppc32_nvram_size(void)
+{
+	return NVRAM_SIZE;
+}
+
 static unsigned char direct_nvram_read_byte(int addr)
 {
 	return in_8(&nvram_data[(addr & (NVRAM_SIZE - 1)) * nvram_mult]);
@@ -165,10 +164,10 @@ static unsigned char indirect_nvram_read_byte(int addr)
 	unsigned char val;
 	unsigned long flags;
 
-	spin_lock_irqsave(&nv_lock, flags);
+	raw_spin_lock_irqsave(&nv_lock, flags);
 	out_8(nvram_addr, addr >> 5);
 	val = in_8(&nvram_data[(addr & 0x1f) << 4]);
-	spin_unlock_irqrestore(&nv_lock, flags);
+	raw_spin_unlock_irqrestore(&nv_lock, flags);
 
 	return val;
 }
@@ -177,10 +176,10 @@ static void indirect_nvram_write_byte(int addr, unsigned char val)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&nv_lock, flags);
+	raw_spin_lock_irqsave(&nv_lock, flags);
 	out_8(nvram_addr, addr >> 5);
 	out_8(&nvram_data[(addr & 0x1f) << 4], val);
-	spin_unlock_irqrestore(&nv_lock, flags);
+	raw_spin_unlock_irqrestore(&nv_lock, flags);
 }
 
 
@@ -280,7 +279,7 @@ static u32 core99_check(u8* datas)
 
 static int sm_erase_bank(int bank)
 {
-	int stat, i;
+	int stat;
 	unsigned long timeout;
 
 	u8 __iomem *base = (u8 __iomem *)nvram_data + core99_bank*NVRAM_SIZE;
@@ -302,11 +301,10 @@ static int sm_erase_bank(int bank)
 	out_8(base, SM_FLASH_CMD_CLEAR_STATUS);
 	out_8(base, SM_FLASH_CMD_RESET);
 
-	for (i=0; i<NVRAM_SIZE; i++)
-		if (base[i] != 0xff) {
-			printk(KERN_ERR "nvram: Sharp/Micron flash erase failed !\n");
-			return -ENXIO;
-		}
+	if (memchr_inv(base, 0xff, NVRAM_SIZE)) {
+		printk(KERN_ERR "nvram: Sharp/Micron flash erase failed !\n");
+		return -ENXIO;
+	}
 	return 0;
 }
 
@@ -337,17 +335,16 @@ static int sm_write_bank(int bank, u8* datas)
 	}
 	out_8(base, SM_FLASH_CMD_CLEAR_STATUS);
 	out_8(base, SM_FLASH_CMD_RESET);
-	for (i=0; i<NVRAM_SIZE; i++)
-		if (base[i] != datas[i]) {
-			printk(KERN_ERR "nvram: Sharp/Micron flash write failed !\n");
-			return -ENXIO;
-		}
+	if (memcmp(base, datas, NVRAM_SIZE)) {
+		printk(KERN_ERR "nvram: Sharp/Micron flash write failed !\n");
+		return -ENXIO;
+	}
 	return 0;
 }
 
 static int amd_erase_bank(int bank)
 {
-	int i, stat = 0;
+	int stat = 0;
 	unsigned long timeout;
 
 	u8 __iomem *base = (u8 __iomem *)nvram_data + core99_bank*NVRAM_SIZE;
@@ -383,12 +380,11 @@ static int amd_erase_bank(int bank)
 	/* Reset */
 	out_8(base, 0xf0);
 	udelay(1);
-	
-	for (i=0; i<NVRAM_SIZE; i++)
-		if (base[i] != 0xff) {
-			printk(KERN_ERR "nvram: AMD flash erase failed !\n");
-			return -ENXIO;
-		}
+
+	if (memchr_inv(base, 0xff, NVRAM_SIZE)) {
+		printk(KERN_ERR "nvram: AMD flash erase failed !\n");
+		return -ENXIO;
+	}
 	return 0;
 }
 
@@ -430,11 +426,10 @@ static int amd_write_bank(int bank, u8* datas)
 	out_8(base, 0xf0);
 	udelay(1);
 
-	for (i=0; i<NVRAM_SIZE; i++)
-		if (base[i] != datas[i]) {
-			printk(KERN_ERR "nvram: AMD flash write failed !\n");
-			return -ENXIO;
-		}
+	if (memcmp(base, datas, NVRAM_SIZE)) {
+		printk(KERN_ERR "nvram: AMD flash write failed !\n");
+		return -ENXIO;
+	}
 	return 0;
 }
 
@@ -481,7 +476,7 @@ static void core99_nvram_sync(void)
 	if (!is_core_99 || !nvram_data || !nvram_image)
 		return;
 
-	spin_lock_irqsave(&nv_lock, flags);
+	raw_spin_lock_irqsave(&nv_lock, flags);
 	if (!memcmp(nvram_image, (u8*)nvram_data + core99_bank*NVRAM_SIZE,
 		NVRAM_SIZE))
 		goto bail;
@@ -503,7 +498,7 @@ static void core99_nvram_sync(void)
 		if (core99_write_bank(core99_bank, nvram_image))
 			printk("nvram: Error writing bank %d\n", core99_bank);
  bail:
-	spin_unlock_irqrestore(&nv_lock, flags);
+	raw_spin_unlock_irqrestore(&nv_lock, flags);
 
 #ifdef DEBUG
        	mdelay(2000);
@@ -519,11 +514,10 @@ static int __init core99_nvram_setup(struct device_node *dp, unsigned long addr)
 		printk(KERN_ERR "nvram: no address\n");
 		return -EINVAL;
 	}
-	nvram_image = alloc_bootmem(NVRAM_SIZE);
-	if (nvram_image == NULL) {
-		printk(KERN_ERR "nvram: can't allocate ram image\n");
-		return -ENOMEM;
-	}
+	nvram_image = memblock_alloc(NVRAM_SIZE, SMP_CACHE_BYTES);
+	if (!nvram_image)
+		panic("%s: Failed to allocate %u bytes\n", __func__,
+		      NVRAM_SIZE);
 	nvram_data = ioremap(addr, NVRAM_SIZE*2);
 	nvram_naddrs = 1; /* Make sure we get the correct case */
 
@@ -581,10 +575,10 @@ int __init pmac_nvram_init(void)
 	/* Try to obtain an address */
 	if (of_address_to_resource(dp, 0, &r1) == 0) {
 		nvram_naddrs = 1;
-		s1 = (r1.end - r1.start) + 1;
+		s1 = resource_size(&r1);
 		if (of_address_to_resource(dp, 1, &r2) == 0) {
 			nvram_naddrs = 2;
-			s2 = (r2.end - r2.start) + 1;
+			s2 = resource_size(&r2);
 		}
 	}
 
@@ -600,21 +594,25 @@ int __init pmac_nvram_init(void)
 		nvram_mult = 1;
 		ppc_md.nvram_read_val	= direct_nvram_read_byte;
 		ppc_md.nvram_write_val	= direct_nvram_write_byte;
+		ppc_md.nvram_size	= ppc32_nvram_size;
 	} else if (nvram_naddrs == 1) {
 		nvram_data = ioremap(r1.start, s1);
 		nvram_mult = (s1 + NVRAM_SIZE - 1) / NVRAM_SIZE;
 		ppc_md.nvram_read_val	= direct_nvram_read_byte;
 		ppc_md.nvram_write_val	= direct_nvram_write_byte;
+		ppc_md.nvram_size	= ppc32_nvram_size;
 	} else if (nvram_naddrs == 2) {
 		nvram_addr = ioremap(r1.start, s1);
 		nvram_data = ioremap(r2.start, s2);
 		ppc_md.nvram_read_val	= indirect_nvram_read_byte;
 		ppc_md.nvram_write_val	= indirect_nvram_write_byte;
+		ppc_md.nvram_size	= ppc32_nvram_size;
 	} else if (nvram_naddrs == 0 && sys_ctrler == SYS_CTRLER_PMU) {
 #ifdef CONFIG_ADB_PMU
 		nvram_naddrs = -1;
 		ppc_md.nvram_read_val	= pmu_nvram_read_byte;
 		ppc_md.nvram_write_val	= pmu_nvram_write_byte;
+		ppc_md.nvram_size	= ppc32_nvram_size;
 #endif /* CONFIG_ADB_PMU */
 	} else {
 		printk(KERN_ERR "Incompatible type of NVRAM\n");

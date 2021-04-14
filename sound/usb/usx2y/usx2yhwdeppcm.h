@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #define MAXPACK 50
 #define MAXBUFFERMS 100
 #define MAXSTRIDE 3
@@ -18,3 +19,5 @@ struct snd_usX2Y_hwdep_pcm_shm {
 	volatile unsigned captured_iso_frames;
 	int capture_iso_start;
 };
+
+int usX2Y_hwdep_pcm_new(struct snd_card *card);

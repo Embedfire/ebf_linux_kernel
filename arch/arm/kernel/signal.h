@@ -1,12 +1,13 @@
-/*
- *  linux/arch/arm/kernel/signal.h
- *
- *  Copyright (C) 2005 Russell King.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
-#define KERN_SIGRETURN_CODE	(CONFIG_VECTORS_BASE + 0x00000500)
+#include <asm/ucontext.h>
 
-extern const unsigned long sigreturn_codes[7];
+struct sigframe {
+	struct ucontext uc;
+	unsigned long retcode[4];
+};
+
+struct rt_sigframe {
+	struct siginfo info;
+	struct sigframe sig;
+};
+
+extern struct page *get_signal_page(void);

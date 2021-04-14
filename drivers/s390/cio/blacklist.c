@@ -1,29 +1,32 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *  drivers/s390/cio/blacklist.c
  *   S/390 common I/O routines -- blacklisting of specific devices
  *
- *    Copyright (C) 1999-2002 IBM Deutschland Entwicklung GmbH,
- *			      IBM Corporation
+ *    Copyright IBM Corp. 1999, 2013
  *    Author(s): Ingo Adlung (adlung@de.ibm.com)
  *		 Cornelia Huck (cornelia.huck@de.ibm.com)
  *		 Arnd Bergmann (arndb@de.ibm.com)
  */
 
+#define KMSG_COMPONENT "cio"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/init.h>
 #include <linux/vmalloc.h>
-#include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/ctype.h>
 #include <linux/device.h>
 
+#include <linux/uaccess.h>
 #include <asm/cio.h>
-#include <asm/uaccess.h>
+#include <asm/ipl.h>
 
 #include "blacklist.h"
 #include "cio.h"
 #include "cio_debug.h"
 #include "css.h"
+#include "device.h"
 
 /*
  * "Blacklisting" of certain devices:
@@ -49,9 +52,9 @@ static int blacklist_range(range_action action, unsigned int from_ssid,
 {
 	if ((from_ssid > to_ssid) || ((from_ssid == to_ssid) && (from > to))) {
 		if (msgtrigger)
-			printk(KERN_WARNING "cio: Invalid cio_ignore range "
-			       "0.%x.%04x-0.%x.%04x\n", from_ssid, from,
-			       to_ssid, to);
+			pr_warn("0.%x.%04x to 0.%x.%04x is not a valid range for cio_ignore\n",
+				from_ssid, from, to_ssid, to);
+
 		return 1;
 	}
 
@@ -75,17 +78,15 @@ static int pure_hex(char **cp, unsigned int *val, int min_digit,
 		    int max_digit, int max_val)
 {
 	int diff;
-	unsigned int value;
 
 	diff = 0;
 	*val = 0;
 
-	while (isxdigit(**cp) && (diff <= max_digit)) {
+	while (diff <= max_digit) {
+		int value = hex_to_bin(**cp);
 
-		if (isdigit(**cp))
-			value = **cp - '0';
-		else
-			value = tolower(**cp) - 'a' + 10;
+		if (value < 0)
+			break;
 		*val = *val * 16 + value;
 		(*cp)++;
 		diff++;
@@ -139,8 +140,8 @@ static int parse_busid(char *str, unsigned int *cssid, unsigned int *ssid,
 	rc = 0;
 out:
 	if (rc && msgtrigger)
-		printk(KERN_WARNING "cio: Invalid cio_ignore device '%s'\n",
-		       str);
+		pr_warn("%s is not a valid device for the cio_ignore kernel parameter\n",
+			str);
 
 	return rc;
 }
@@ -172,6 +173,29 @@ static int blacklist_parse_parameters(char *str, range_action action,
 			to_cssid = __MAX_CSSID;
 			to_ssid = __MAX_SSID;
 			to = __MAX_SUBCHANNEL;
+		} else if (strcmp(parm, "ipldev") == 0) {
+			if (ipl_info.type == IPL_TYPE_CCW) {
+				from_cssid = 0;
+				from_ssid = ipl_info.data.ccw.dev_id.ssid;
+				from = ipl_info.data.ccw.dev_id.devno;
+			} else if (ipl_info.type == IPL_TYPE_FCP ||
+				   ipl_info.type == IPL_TYPE_FCP_DUMP) {
+				from_cssid = 0;
+				from_ssid = ipl_info.data.fcp.dev_id.ssid;
+				from = ipl_info.data.fcp.dev_id.devno;
+			} else {
+				continue;
+			}
+			to_cssid = from_cssid;
+			to_ssid = from_ssid;
+			to = from;
+		} else if (strcmp(parm, "condev") == 0) {
+			if (console_devno == -1)
+				continue;
+
+			from_cssid = to_cssid = 0;
+			from_ssid = to_ssid = 0;
+			from = to = console_devno;
 		} else {
 			rc = parse_busid(strsep(&parm, "-"), &from_cssid,
 					 &from_ssid, &from, msgtrigger);
@@ -191,9 +215,9 @@ static int blacklist_parse_parameters(char *str, range_action action,
 			rc = blacklist_range(ra, from_ssid, to_ssid, from, to,
 					     msgtrigger);
 			if (rc)
-				totalrc = 1;
+				totalrc = -EINVAL;
 		} else
-			totalrc = 1;
+			totalrc = -EINVAL;
 	}
 
 	return totalrc;
@@ -236,14 +260,16 @@ static int blacklist_parse_proc_parameters(char *buf)
 
 	parm = strsep(&buf, " ");
 
-	if (strcmp("free", parm) == 0)
+	if (strcmp("free", parm) == 0) {
 		rc = blacklist_parse_parameters(buf, free, 0);
-	else if (strcmp("add", parm) == 0)
+		css_schedule_eval_all_unreg(0);
+	} else if (strcmp("add", parm) == 0)
 		rc = blacklist_parse_parameters(buf, add, 0);
+	else if (strcmp("purge", parm) == 0)
+		return ccw_purge_blacklisted();
 	else
-		return 1;
+		return -EINVAL;
 
-	css_schedule_reprobe();
 
 	return rc;
 }
@@ -258,13 +284,11 @@ struct ccwdev_iter {
 static void *
 cio_ignore_proc_seq_start(struct seq_file *s, loff_t *offset)
 {
-	struct ccwdev_iter *iter;
+	struct ccwdev_iter *iter = s->private;
 
 	if (*offset >= (__MAX_SUBCHANNEL + 1) * (__MAX_SSID + 1))
 		return NULL;
-	iter = kzalloc(sizeof(struct ccwdev_iter), GFP_KERNEL);
-	if (!iter)
-		return ERR_PTR(-ENOMEM);
+	memset(iter, 0, sizeof(*iter));
 	iter->ssid = *offset / (__MAX_SUBCHANNEL + 1);
 	iter->devno = *offset % (__MAX_SUBCHANNEL + 1);
 	return iter;
@@ -273,16 +297,16 @@ cio_ignore_proc_seq_start(struct seq_file *s, loff_t *offset)
 static void
 cio_ignore_proc_seq_stop(struct seq_file *s, void *it)
 {
-	if (!IS_ERR(it))
-		kfree(it);
 }
 
 static void *
 cio_ignore_proc_seq_next(struct seq_file *s, void *it, loff_t *offset)
 {
 	struct ccwdev_iter *iter;
+	loff_t p = *offset;
 
-	if (*offset >= (__MAX_SUBCHANNEL + 1) * (__MAX_SSID + 1))
+	(*offset)++;
+	if (p >= (__MAX_SUBCHANNEL + 1) * (__MAX_SSID + 1))
 		return NULL;
 	iter = it;
 	if (iter->devno == __MAX_SUBCHANNEL) {
@@ -292,7 +316,6 @@ cio_ignore_proc_seq_next(struct seq_file *s, void *it, loff_t *offset)
 			return NULL;
 	} else
 		iter->devno++;
-	(*offset)++;
 	return iter;
 }
 
@@ -308,18 +331,20 @@ cio_ignore_proc_seq_show(struct seq_file *s, void *it)
 	if (!iter->in_range) {
 		/* First device in range. */
 		if ((iter->devno == __MAX_SUBCHANNEL) ||
-		    !is_blacklisted(iter->ssid, iter->devno + 1))
+		    !is_blacklisted(iter->ssid, iter->devno + 1)) {
 			/* Singular device. */
-			return seq_printf(s, "0.%x.%04x\n",
-					  iter->ssid, iter->devno);
+			seq_printf(s, "0.%x.%04x\n", iter->ssid, iter->devno);
+			return 0;
+		}
 		iter->in_range = 1;
-		return seq_printf(s, "0.%x.%04x-", iter->ssid, iter->devno);
+		seq_printf(s, "0.%x.%04x-", iter->ssid, iter->devno);
+		return 0;
 	}
 	if ((iter->devno == __MAX_SUBCHANNEL) ||
 	    !is_blacklisted(iter->ssid, iter->devno + 1)) {
 		/* Last device in range. */
 		iter->in_range = 0;
-		return seq_printf(s, "0.%x.%04x\n", iter->ssid, iter->devno);
+		seq_printf(s, "0.%x.%04x\n", iter->ssid, iter->devno);
 	}
 	return 0;
 }
@@ -329,17 +354,15 @@ cio_ignore_write(struct file *file, const char __user *user_buf,
 		 size_t user_len, loff_t *offset)
 {
 	char *buf;
-	size_t i;
-	ssize_t rc, ret;
+	ssize_t rc, ret, i;
 
 	if (*offset)
 		return -EINVAL;
 	if (user_len > 65536)
 		user_len = 65536;
-	buf = vmalloc (user_len + 1); /* maybe better use the stack? */
+	buf = vzalloc(user_len + 1); /* maybe better use the stack? */
 	if (buf == NULL)
 		return -ENOMEM;
-	memset(buf, 0, user_len + 1);
 
 	if (strncpy_from_user (buf, user_buf, user_len) < 0) {
 		rc = -EFAULT;
@@ -353,7 +376,7 @@ cio_ignore_write(struct file *file, const char __user *user_buf,
 	}
 	ret = blacklist_parse_proc_parameters(buf);
 	if (ret)
-		rc = -EINVAL;
+		rc = ret;
 	else
 		rc = user_len;
 
@@ -372,15 +395,16 @@ static const struct seq_operations cio_ignore_proc_seq_ops = {
 static int
 cio_ignore_proc_open(struct inode *inode, struct file *file)
 {
-	return seq_open(file, &cio_ignore_proc_seq_ops);
+	return seq_open_private(file, &cio_ignore_proc_seq_ops,
+				sizeof(struct ccwdev_iter));
 }
 
-static const struct file_operations cio_ignore_proc_fops = {
-	.open    = cio_ignore_proc_open,
-	.read    = seq_read,
-	.llseek  = seq_lseek,
-	.release = seq_release,
-	.write   = cio_ignore_write,
+static const struct proc_ops cio_ignore_proc_ops = {
+	.proc_open	= cio_ignore_proc_open,
+	.proc_read	= seq_read,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= seq_release_private,
+	.proc_write	= cio_ignore_write,
 };
 
 static int
@@ -389,7 +413,7 @@ cio_ignore_proc_init (void)
 	struct proc_dir_entry *entry;
 
 	entry = proc_create("cio_ignore", S_IFREG | S_IRUGO | S_IWUSR, NULL,
-			    &cio_ignore_proc_fops);
+			    &cio_ignore_proc_ops);
 	if (!entry)
 		return -ENOENT;
 	return 0;

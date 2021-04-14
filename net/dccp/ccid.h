@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef _CCID_H
 #define _CCID_H
 /*
@@ -7,10 +8,6 @@
  *  Arnaldo Carvalho de Melo <acme@conectiva.com.br>
  *
  *  CCID infrastructure
- *
- *	This program is free software; you can redistribute it and/or modify it
- *	under the terms of the GNU General Public License version 2 as
- *	published by the Free Software Foundation.
  */
 
 #include <net/sock.h>
@@ -19,7 +16,9 @@
 #include <linux/list.h>
 #include <linux/module.h>
 
-#define CCID_MAX 255
+/* maximum value for a CCID (RFC 4340, 19.5) */
+#define CCID_MAX		255
+#define CCID_SLAB_NAME_LENGTH	32
 
 struct tcp_info;
 
@@ -29,7 +28,6 @@ struct tcp_info;
  *  @ccid_id: numerical CCID ID (up to %CCID_MAX, cf. table 5 in RFC 4340, 10.)
  *  @ccid_ccmps: the CCMPS including network/transport headers (0 when disabled)
  *  @ccid_name: alphabetical identifier string for @ccid_id
- *  @ccid_owner: module which implements/owns this CCID
  *  @ccid_hc_{r,t}x_slab: memory pool for the receiver/sender half-connection
  *  @ccid_hc_{r,t}x_obj_size: size of the receiver/sender half-connection socket
  *
@@ -48,9 +46,10 @@ struct ccid_operations {
 	unsigned char		ccid_id;
 	__u32			ccid_ccmps;
 	const char		*ccid_name;
-	struct module		*ccid_owner;
 	struct kmem_cache	*ccid_hc_rx_slab,
 				*ccid_hc_tx_slab;
+	char			ccid_hc_rx_slab_name[CCID_SLAB_NAME_LENGTH];
+	char			ccid_hc_tx_slab_name[CCID_SLAB_NAME_LENGTH];
 	__u32			ccid_hc_rx_obj_size,
 				ccid_hc_tx_obj_size;
 	/* Interface Routines */
@@ -60,22 +59,18 @@ struct ccid_operations {
 	void		(*ccid_hc_tx_exit)(struct sock *sk);
 	void		(*ccid_hc_rx_packet_recv)(struct sock *sk,
 						  struct sk_buff *skb);
-	int		(*ccid_hc_rx_parse_options)(struct sock *sk,
-						    unsigned char option,
-						    unsigned char len, u16 idx,
-						    unsigned char* value);
+	int		(*ccid_hc_rx_parse_options)(struct sock *sk, u8 pkt,
+						    u8 opt, u8 *val, u8 len);
 	int		(*ccid_hc_rx_insert_options)(struct sock *sk,
 						     struct sk_buff *skb);
 	void		(*ccid_hc_tx_packet_recv)(struct sock *sk,
 						  struct sk_buff *skb);
-	int		(*ccid_hc_tx_parse_options)(struct sock *sk,
-						    unsigned char option,
-						    unsigned char len, u16 idx,
-						    unsigned char* value);
+	int		(*ccid_hc_tx_parse_options)(struct sock *sk, u8 pkt,
+						    u8 opt, u8 *val, u8 len);
 	int		(*ccid_hc_tx_send_packet)(struct sock *sk,
 						  struct sk_buff *skb);
 	void		(*ccid_hc_tx_packet_sent)(struct sock *sk,
-						  int more, unsigned int len);
+						  unsigned int len);
 	void		(*ccid_hc_rx_get_info)(struct sock *sk,
 					       struct tcp_info *info);
 	void		(*ccid_hc_tx_get_info)(struct sock *sk,
@@ -90,12 +85,17 @@ struct ccid_operations {
 						 int __user *optlen);
 };
 
-extern int ccid_register(struct ccid_operations *ccid_ops);
-extern int ccid_unregister(struct ccid_operations *ccid_ops);
+extern struct ccid_operations ccid2_ops;
+#ifdef CONFIG_IP_DCCP_CCID3
+extern struct ccid_operations ccid3_ops;
+#endif
+
+int ccid_initialize_builtins(void);
+void ccid_cleanup_builtins(void);
 
 struct ccid {
 	struct ccid_operations *ccid_ops;
-	char		       ccid_priv[0];
+	char		       ccid_priv[];
 };
 
 static inline void *ccid_priv(const struct ccid *ccid)
@@ -103,31 +103,76 @@ static inline void *ccid_priv(const struct ccid *ccid)
 	return (void *)ccid->ccid_priv;
 }
 
-extern struct ccid *ccid_new(unsigned char id, struct sock *sk, int rx,
-			     gfp_t gfp);
+bool ccid_support_check(u8 const *ccid_array, u8 array_len);
+int ccid_get_builtin_ccids(u8 **ccid_array, u8 *array_len);
+int ccid_getsockopt_builtin_ccids(struct sock *sk, int len,
+				  char __user *, int __user *);
 
-extern struct ccid *ccid_hc_rx_new(unsigned char id, struct sock *sk,
-				   gfp_t gfp);
-extern struct ccid *ccid_hc_tx_new(unsigned char id, struct sock *sk,
-				   gfp_t gfp);
+struct ccid *ccid_new(const u8 id, struct sock *sk, bool rx);
 
-extern void ccid_hc_rx_delete(struct ccid *ccid, struct sock *sk);
-extern void ccid_hc_tx_delete(struct ccid *ccid, struct sock *sk);
+static inline int ccid_get_current_rx_ccid(struct dccp_sock *dp)
+{
+	struct ccid *ccid = dp->dccps_hc_rx_ccid;
+
+	if (ccid == NULL || ccid->ccid_ops == NULL)
+		return -1;
+	return ccid->ccid_ops->ccid_id;
+}
+
+static inline int ccid_get_current_tx_ccid(struct dccp_sock *dp)
+{
+	struct ccid *ccid = dp->dccps_hc_tx_ccid;
+
+	if (ccid == NULL || ccid->ccid_ops == NULL)
+		return -1;
+	return ccid->ccid_ops->ccid_id;
+}
+
+void ccid_hc_rx_delete(struct ccid *ccid, struct sock *sk);
+void ccid_hc_tx_delete(struct ccid *ccid, struct sock *sk);
+
+/*
+ * Congestion control of queued data packets via CCID decision.
+ *
+ * The TX CCID performs its congestion-control by indicating whether and when a
+ * queued packet may be sent, using the return code of ccid_hc_tx_send_packet().
+ * The following modes are supported via the symbolic constants below:
+ * - timer-based pacing    (CCID returns a delay value in milliseconds);
+ * - autonomous dequeueing (CCID internally schedules dccps_xmitlet).
+ */
+
+enum ccid_dequeueing_decision {
+	CCID_PACKET_SEND_AT_ONCE =	 0x00000,  /* "green light": no delay */
+	CCID_PACKET_DELAY_MAX =		 0x0FFFF,  /* maximum delay in msecs  */
+	CCID_PACKET_DELAY =		 0x10000,  /* CCID msec-delay mode */
+	CCID_PACKET_WILL_DEQUEUE_LATER = 0x20000,  /* CCID autonomous mode */
+	CCID_PACKET_ERR =		 0xF0000,  /* error condition */
+};
+
+static inline int ccid_packet_dequeue_eval(const int return_code)
+{
+	if (return_code < 0)
+		return CCID_PACKET_ERR;
+	if (return_code == 0)
+		return CCID_PACKET_SEND_AT_ONCE;
+	if (return_code <= CCID_PACKET_DELAY_MAX)
+		return CCID_PACKET_DELAY;
+	return return_code;
+}
 
 static inline int ccid_hc_tx_send_packet(struct ccid *ccid, struct sock *sk,
 					 struct sk_buff *skb)
 {
-	int rc = 0;
 	if (ccid->ccid_ops->ccid_hc_tx_send_packet != NULL)
-		rc = ccid->ccid_ops->ccid_hc_tx_send_packet(sk, skb);
-	return rc;
+		return ccid->ccid_ops->ccid_hc_tx_send_packet(sk, skb);
+	return CCID_PACKET_SEND_AT_ONCE;
 }
 
 static inline void ccid_hc_tx_packet_sent(struct ccid *ccid, struct sock *sk,
-					  int more, unsigned int len)
+					  unsigned int len)
 {
 	if (ccid->ccid_ops->ccid_hc_tx_packet_sent != NULL)
-		ccid->ccid_ops->ccid_hc_tx_packet_sent(sk, more, len);
+		ccid->ccid_ops->ccid_hc_tx_packet_sent(sk, len);
 }
 
 static inline void ccid_hc_rx_packet_recv(struct ccid *ccid, struct sock *sk,
@@ -144,27 +189,31 @@ static inline void ccid_hc_tx_packet_recv(struct ccid *ccid, struct sock *sk,
 		ccid->ccid_ops->ccid_hc_tx_packet_recv(sk, skb);
 }
 
+/**
+ * ccid_hc_tx_parse_options  -  Parse CCID-specific options sent by the receiver
+ * @pkt: type of packet that @opt appears on (RFC 4340, 5.1)
+ * @opt: the CCID-specific option type (RFC 4340, 5.8 and 10.3)
+ * @val: value of @opt
+ * @len: length of @val in bytes
+ */
 static inline int ccid_hc_tx_parse_options(struct ccid *ccid, struct sock *sk,
-					   unsigned char option,
-					   unsigned char len, u16 idx,
-					   unsigned char* value)
+					   u8 pkt, u8 opt, u8 *val, u8 len)
 {
-	int rc = 0;
-	if (ccid->ccid_ops->ccid_hc_tx_parse_options != NULL)
-		rc = ccid->ccid_ops->ccid_hc_tx_parse_options(sk, option, len, idx,
-						    value);
-	return rc;
+	if (!ccid || !ccid->ccid_ops->ccid_hc_tx_parse_options)
+		return 0;
+	return ccid->ccid_ops->ccid_hc_tx_parse_options(sk, pkt, opt, val, len);
 }
 
+/**
+ * ccid_hc_rx_parse_options  -  Parse CCID-specific options sent by the sender
+ * Arguments are analogous to ccid_hc_tx_parse_options()
+ */
 static inline int ccid_hc_rx_parse_options(struct ccid *ccid, struct sock *sk,
-					   unsigned char option,
-					   unsigned char len, u16 idx,
-					   unsigned char* value)
+					   u8 pkt, u8 opt, u8 *val, u8 len)
 {
-	int rc = 0;
-	if (ccid->ccid_ops->ccid_hc_rx_parse_options != NULL)
-		rc = ccid->ccid_ops->ccid_hc_rx_parse_options(sk, option, len, idx, value);
-	return rc;
+	if (!ccid || !ccid->ccid_ops->ccid_hc_rx_parse_options)
+		return 0;
+	return ccid->ccid_ops->ccid_hc_rx_parse_options(sk, pkt, opt, val, len);
 }
 
 static inline int ccid_hc_rx_insert_options(struct ccid *ccid, struct sock *sk,
@@ -194,7 +243,7 @@ static inline int ccid_hc_rx_getsockopt(struct ccid *ccid, struct sock *sk,
 					u32 __user *optval, int __user *optlen)
 {
 	int rc = -ENOPROTOOPT;
-	if (ccid->ccid_ops->ccid_hc_rx_getsockopt != NULL)
+	if (ccid != NULL && ccid->ccid_ops->ccid_hc_rx_getsockopt != NULL)
 		rc = ccid->ccid_ops->ccid_hc_rx_getsockopt(sk, optname, len,
 						 optval, optlen);
 	return rc;
@@ -205,7 +254,7 @@ static inline int ccid_hc_tx_getsockopt(struct ccid *ccid, struct sock *sk,
 					u32 __user *optval, int __user *optlen)
 {
 	int rc = -ENOPROTOOPT;
-	if (ccid->ccid_ops->ccid_hc_tx_getsockopt != NULL)
+	if (ccid != NULL && ccid->ccid_ops->ccid_hc_tx_getsockopt != NULL)
 		rc = ccid->ccid_ops->ccid_hc_tx_getsockopt(sk, optname, len,
 						 optval, optlen);
 	return rc;

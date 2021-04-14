@@ -1,18 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Hardware specific definitions for SL-C7xx series of PDAs
  *
  * Copyright (c) 2004-2005 Richard Purdie
  *
  * Based on Sharp's 2.4 kernel patches
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 #ifndef __ASM_ARCH_CORGI_H
 #define __ASM_ARCH_CORGI_H  1
 
+#include "irqs.h" /* PXA_NR_BUILTIN_GPIO */
 
 /*
  * Corgi (Non Standard) GPIO Definitions
@@ -34,7 +31,7 @@
 #define CORGI_GPIO_LCDCON_CS		(19) /* LCD Control Chip Select */
 #define CORGI_GPIO_MAX1111_CS		(20) /* MAX1111 Chip Select */
 #define CORGI_GPIO_ADC_TEMP_ON		(21) /* Select battery voltage or temperature */
-#define CORGI_GPIO_IR_ON			(22) /* Enable IR Transciever */
+#define CORGI_GPIO_IR_ON			(22) /* Enable IR Transceiver */
 #define CORGI_GPIO_ADS7846_CS		(24) /* ADS7846 Chip Select */
 #define CORGI_GPIO_SD_PWR			(33) /* MMC/SD Power */
 #define CORGI_GPIO_CHRG_ON			(38) /* Enable battery Charging */
@@ -66,18 +63,18 @@
 /*
  * Corgi Interrupts
  */
-#define CORGI_IRQ_GPIO_KEY_INT		IRQ_GPIO(0)
-#define CORGI_IRQ_GPIO_AC_IN		IRQ_GPIO(1)
-#define CORGI_IRQ_GPIO_WAKEUP		IRQ_GPIO(3)
-#define CORGI_IRQ_GPIO_AK_INT		IRQ_GPIO(4)
-#define CORGI_IRQ_GPIO_TP_INT		IRQ_GPIO(5)
-#define CORGI_IRQ_GPIO_nSD_DETECT	IRQ_GPIO(9)
-#define CORGI_IRQ_GPIO_nSD_INT		IRQ_GPIO(10)
-#define CORGI_IRQ_GPIO_MAIN_BAT_LOW	IRQ_GPIO(11)
-#define CORGI_IRQ_GPIO_CF_CD		IRQ_GPIO(14)
-#define CORGI_IRQ_GPIO_CHRG_FULL	IRQ_GPIO(16)	/* Battery fully charged */
-#define CORGI_IRQ_GPIO_CF_IRQ		IRQ_GPIO(17)
-#define CORGI_IRQ_GPIO_KEY_SENSE(a)	IRQ_GPIO(58+(a))	/* Keyboard Sense lines */
+#define CORGI_IRQ_GPIO_KEY_INT		PXA_GPIO_TO_IRQ(0)
+#define CORGI_IRQ_GPIO_AC_IN		PXA_GPIO_TO_IRQ(1)
+#define CORGI_IRQ_GPIO_WAKEUP		PXA_GPIO_TO_IRQ(3)
+#define CORGI_IRQ_GPIO_AK_INT		PXA_GPIO_TO_IRQ(4)
+#define CORGI_IRQ_GPIO_TP_INT		PXA_GPIO_TO_IRQ(5)
+#define CORGI_IRQ_GPIO_nSD_DETECT	PXA_GPIO_TO_IRQ(9)
+#define CORGI_IRQ_GPIO_nSD_INT		PXA_GPIO_TO_IRQ(10)
+#define CORGI_IRQ_GPIO_MAIN_BAT_LOW	PXA_GPIO_TO_IRQ(11)
+#define CORGI_IRQ_GPIO_CF_CD		PXA_GPIO_TO_IRQ(14)
+#define CORGI_IRQ_GPIO_CHRG_FULL	PXA_GPIO_TO_IRQ(16)	/* Battery fully charged */
+#define CORGI_IRQ_GPIO_CF_IRQ		PXA_GPIO_TO_IRQ(17)
+#define CORGI_IRQ_GPIO_KEY_SENSE(a)	PXA_GPIO_TO_IRQ(58+(a))	/* Keyboard Sense lines */
 
 
 /*
@@ -98,12 +95,16 @@
 			CORGI_SCP_MIC_BIAS )
 #define CORGI_SCOOP_IO_OUT	( CORGI_SCP_MUTE_L | CORGI_SCP_MUTE_R )
 
-
-/*
- * Shared data structures
- */
-extern struct platform_device corgiscoop_device;
-extern struct platform_device corgissp_device;
+#define CORGI_SCOOP_GPIO_BASE		(PXA_NR_BUILTIN_GPIO)
+#define CORGI_GPIO_LED_GREEN		(CORGI_SCOOP_GPIO_BASE + 0)
+#define CORGI_GPIO_SWA			(CORGI_SCOOP_GPIO_BASE + 1)  /* Hinge Switch A */
+#define CORGI_GPIO_SWB			(CORGI_SCOOP_GPIO_BASE + 2)  /* Hinge Switch B */
+#define CORGI_GPIO_MUTE_L		(CORGI_SCOOP_GPIO_BASE + 3)
+#define CORGI_GPIO_MUTE_R		(CORGI_SCOOP_GPIO_BASE + 4)
+#define CORGI_GPIO_AKIN_PULLUP		(CORGI_SCOOP_GPIO_BASE + 5)
+#define CORGI_GPIO_APM_ON		(CORGI_SCOOP_GPIO_BASE + 6)
+#define CORGI_GPIO_BACKLIGHT_CONT	(CORGI_SCOOP_GPIO_BASE + 7)
+#define CORGI_GPIO_MIC_BIAS		(CORGI_SCOOP_GPIO_BASE + 8)
 
 #endif /* __ASM_ARCH_CORGI_H  */
 

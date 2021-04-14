@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   ALSA driver for ICEnsemble VT1724 (Envy24HT)
  *
@@ -5,24 +6,8 @@
  *
  *	Copyright (c) 2007 Shin-ya Okada  sh_okada(at)d4.dion.ne.jp
  *                                        (at) -> @
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */      
 
-#include <asm/io.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
@@ -114,7 +99,7 @@ struct se_spec {
 /*  WM8740 interface                                                        */
 /****************************************************************************/
 
-static void __devinit se200pci_WM8740_init(struct snd_ice1712 *ice)
+static void se200pci_WM8740_init(struct snd_ice1712 *ice)
 {
 	/* nothing to do */
 }
@@ -196,7 +181,7 @@ static void se200pci_WM8766_set_volume(struct snd_ice1712 *ice, int ch,
 	}
 }
 
-static void __devinit se200pci_WM8766_init(struct snd_ice1712 *ice)
+static void se200pci_WM8766_init(struct snd_ice1712 *ice)
 {
 	se200pci_WM8766_write(ice, 0x1f, 0x000); /* RESET ALL */
 	udelay(10);
@@ -253,14 +238,14 @@ static void se200pci_WM8776_set_input_volume(struct snd_ice1712 *ice,
 	se200pci_WM8776_write(ice, 0x0f, vol2 | 0x100);
 }
 
-static const char *se200pci_sel[] = {
+static const char * const se200pci_sel[] = {
 	"LINE-IN", "CD-IN", "MIC-IN", "ALL-MIX", NULL
 };
 
 static void se200pci_WM8776_set_input_selector(struct snd_ice1712 *ice,
 					       unsigned int sel)
 {
-	static unsigned char vals[] = {
+	static const unsigned char vals[] = {
 		/* LINE, CD, MIC, ALL, GND */
 		0x10, 0x04, 0x08, 0x1c, 0x03
 	};
@@ -278,7 +263,7 @@ static void se200pci_WM8776_set_afl(struct snd_ice1712 *ice, unsigned int afl)
 		se200pci_WM8776_write(ice, 0x16, 0x001);
 }
 
-static const char *se200pci_agc[] = {
+static const char * const se200pci_agc[] = {
 	"Off", "LimiterMode", "ALCMode", NULL
 };
 
@@ -300,10 +285,10 @@ static void se200pci_WM8776_set_agc(struct snd_ice1712 *ice, unsigned int agc)
 	}
 }
 
-static void __devinit se200pci_WM8776_init(struct snd_ice1712 *ice)
+static void se200pci_WM8776_init(struct snd_ice1712 *ice)
 {
 	int i;
-	static unsigned short __devinitdata default_values[] = {
+	static const unsigned short default_values[] = {
 		0x100, 0x100, 0x100,
 		0x100, 0x100, 0x100,
 		0x000, 0x090, 0x000, 0x000,
@@ -352,7 +337,7 @@ static void se200pci_set_pro_rate(struct snd_ice1712 *ice, unsigned int rate)
 }
 
 struct se200pci_control {
-	char *name;
+	const char *name;
 	enum {
 		WM8766,
 		WM8776in,
@@ -363,7 +348,7 @@ struct se200pci_control {
 	} target;
 	enum { VOLUME1, VOLUME2, BOOLEAN, ENUM } type;
 	int ch;
-	const char **member;
+	const char * const *member;
 	const char *comment;
 };
 
@@ -421,7 +406,7 @@ static const struct se200pci_control se200pci_cont[] = {
 
 static int se200pci_get_enum_count(int n)
 {
-	const char **member;
+	const char * const *member;
 	int c;
 
 	member = se200pci_cont[n].member;
@@ -453,14 +438,7 @@ static int se200pci_cont_enum_info(struct snd_kcontrol *kc,
 	c = se200pci_get_enum_count(n);
 	if (!c)
 		return -EINVAL;
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
-	uinfo->count = 1;
-	uinfo->value.enumerated.items = c;
-	if (uinfo->value.enumerated.item >= c)
-		uinfo->value.enumerated.item = c - 1;
-	strcpy(uinfo->value.enumerated.name,
-	       se200pci_cont[n].member[uinfo->value.enumerated.item]);
-	return 0;
+	return snd_ctl_enum_info(uinfo, 1, c, se200pci_cont[n].member);
 }
 
 static int se200pci_cont_volume_get(struct snd_kcontrol *kc,
@@ -600,7 +578,7 @@ static int se200pci_cont_enum_put(struct snd_kcontrol *kc,
 static const DECLARE_TLV_DB_SCALE(db_scale_gain1, -12750, 50, 1);
 static const DECLARE_TLV_DB_SCALE(db_scale_gain2, -10350, 50, 1);
 
-static int __devinit se200pci_add_controls(struct snd_ice1712 *ice)
+static int se200pci_add_controls(struct snd_ice1712 *ice)
 {
 	int i;
 	struct snd_kcontrol_new cont;
@@ -678,7 +656,7 @@ static int __devinit se200pci_add_controls(struct snd_ice1712 *ice)
 /*  probe/initialize/setup                                                  */
 /****************************************************************************/
 
-static int __devinit se_init(struct snd_ice1712 *ice)
+static int se_init(struct snd_ice1712 *ice)
 {
 	struct se_spec *spec;
 
@@ -706,7 +684,7 @@ static int __devinit se_init(struct snd_ice1712 *ice)
 	return -ENOENT;
 }
 
-static int __devinit se_add_controls(struct snd_ice1712 *ice)
+static int se_add_controls(struct snd_ice1712 *ice)
 {
 	int err;
 
@@ -723,7 +701,7 @@ static int __devinit se_add_controls(struct snd_ice1712 *ice)
 /*  entry point                                                             */
 /****************************************************************************/
 
-static unsigned char se200pci_eeprom[] __devinitdata = {
+static const unsigned char se200pci_eeprom[] = {
 	[ICE_EEP2_SYSCONF]	= 0x4b,	/* 49.152Hz, spdif-in/ADC, 4DACs */
 	[ICE_EEP2_ACLINK]	= 0x80,	/* I2S */
 	[ICE_EEP2_I2S]		= 0x78,	/* 96k-ok, 24bit, 192k-ok */
@@ -742,7 +720,7 @@ static unsigned char se200pci_eeprom[] __devinitdata = {
 	[ICE_EEP2_GPIO_STATE2]	= 0x07, /* WM8766 ML/MC/MD */
 };
 
-static unsigned char se90pci_eeprom[] __devinitdata = {
+static const unsigned char se90pci_eeprom[] = {
 	[ICE_EEP2_SYSCONF]	= 0x4b,	/* 49.152Hz, spdif-in/ADC, 4DACs */
 	[ICE_EEP2_ACLINK]	= 0x80,	/* I2S */
 	[ICE_EEP2_I2S]		= 0x78,	/* 96k-ok, 24bit, 192k-ok */
@@ -751,7 +729,7 @@ static unsigned char se90pci_eeprom[] __devinitdata = {
 	/* ALL GPIO bits are in input mode */
 };
 
-struct snd_ice1712_card_info snd_vt1724_se_cards[] __devinitdata = {
+struct snd_ice1712_card_info snd_vt1724_se_cards[] = {
 	{
 		.subvendor = VT1724_SUBDEVICE_SE200PCI,
 		.name = "ONKYO SE200PCI",

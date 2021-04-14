@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  pata_sch.c - Intel SCH PATA controllers
  *
  *  Copyright (c) 2008 Alek Du <alek.du@intel.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License 2 as published
- *  by the Free Software Foundation.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; see the file COPYING.  If not, write to
- *  the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
 /*
@@ -27,7 +14,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -65,7 +51,7 @@ static struct pci_driver sch_pci_driver = {
 	.id_table		= sch_pci_tbl,
 	.probe			= sch_init_one,
 	.remove			= ata_pci_remove_one,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	.suspend		= ata_pci_device_suspend,
 	.resume			= ata_pci_device_resume,
 #endif
@@ -82,11 +68,11 @@ static struct ata_port_operations sch_pata_ops = {
 	.set_dmamode		= sch_set_dmamode,
 };
 
-static struct ata_port_info sch_port_info = {
-	.flags		= 0,
-	.pio_mask	= ATA_PIO4,   /* pio0-4 */
-	.mwdma_mask	= ATA_MWDMA2, /* mwdma0-2 */
-	.udma_mask	= ATA_UDMA5,  /* udma0-5 */
+static const struct ata_port_info sch_port_info = {
+	.flags		= ATA_FLAG_SLAVE_POSS,
+	.pio_mask	= ATA_PIO4,
+	.mwdma_mask	= ATA_MWDMA2,
+	.udma_mask	= ATA_UDMA5,
 	.port_ops	= &sch_pata_ops,
 };
 
@@ -169,38 +155,13 @@ static void sch_set_dmamode(struct ata_port *ap, struct ata_device *adev)
  *	Zero on success, or -ERRNO value.
  */
 
-static int __devinit sch_init_one(struct pci_dev *pdev,
-				   const struct pci_device_id *ent)
+static int sch_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
-	static int printed_version;
 	const struct ata_port_info *ppi[] = { &sch_port_info, NULL };
-	struct ata_host *host;
-	int rc;
 
-	if (!printed_version++)
-		dev_printk(KERN_DEBUG, &pdev->dev,
-			   "version " DRV_VERSION "\n");
+	ata_print_version_once(&pdev->dev, DRV_VERSION);
 
-	/* enable device and prepare host */
-	rc = pcim_enable_device(pdev);
-	if (rc)
-		return rc;
-	rc = ata_pci_sff_prepare_host(pdev, ppi, &host);
-	if (rc)
-		return rc;
-	pci_set_master(pdev);
-	return ata_pci_sff_activate_host(host, ata_sff_interrupt, &sch_sht);
+	return ata_pci_bmdma_init_one(pdev, ppi, &sch_sht, NULL, 0);
 }
 
-static int __init sch_init(void)
-{
-	return pci_register_driver(&sch_pci_driver);
-}
-
-static void __exit sch_exit(void)
-{
-	pci_unregister_driver(&sch_pci_driver);
-}
-
-module_init(sch_init);
-module_exit(sch_exit);
+module_pci_driver(sch_pci_driver);

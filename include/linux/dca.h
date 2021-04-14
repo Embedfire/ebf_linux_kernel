@@ -1,5 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
+ * Copyright(c) 2007 - 2009 Intel Corporation. All rights reserved.
+ */
 #ifndef DCA_H
 #define DCA_H
+
+#include <linux/pci.h>
+
 /* DCA Provider API */
 
 /* DCA Notifier Interface */
@@ -11,9 +18,15 @@ void dca_unregister_notify(struct notifier_block *nb);
 
 struct dca_provider {
 	struct list_head	node;
-	struct dca_ops		*ops;
+	const struct dca_ops	*ops;
 	struct device 		*cd;
 	int			 id;
+};
+
+struct dca_domain {
+	struct list_head	node;
+	struct list_head	dca_providers;
+	struct pci_bus		*pci_rc;
 };
 
 struct dca_ops {
@@ -24,10 +37,11 @@ struct dca_ops {
 	int	(*dev_managed)      (struct dca_provider *, struct device *);
 };
 
-struct dca_provider *alloc_dca_provider(struct dca_ops *ops, int priv_size);
+struct dca_provider *alloc_dca_provider(const struct dca_ops *ops,
+					int priv_size);
 void free_dca_provider(struct dca_provider *dca);
 int register_dca_provider(struct dca_provider *dca, struct device *dev);
-void unregister_dca_provider(struct dca_provider *dca);
+void unregister_dca_provider(struct dca_provider *dca, struct device *dev);
 
 static inline void *dca_priv(struct dca_provider *dca)
 {

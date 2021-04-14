@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Kernel module to match FRAG parameters. */
 
 /* (C) 2001-2002 Andras Kis-Szabo <kisza@sch.bme.hu>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
-
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/ipv6.h>
@@ -27,7 +24,7 @@ static inline bool
 id_match(u_int32_t min, u_int32_t max, u_int32_t id, bool invert)
 {
 	bool r;
-	pr_debug("frag id_match:%c 0x%x <= 0x%x <= 0x%x", invert ? '!' : ' ',
+	pr_debug("id_match:%c 0x%x <= 0x%x <= 0x%x\n", invert ? '!' : ' ',
 		 min, id, max);
 	r = (id >= min && id <= max) ^ invert;
 	pr_debug(" result %s\n", r ? "PASS" : "FAILED");
@@ -35,27 +32,24 @@ id_match(u_int32_t min, u_int32_t max, u_int32_t id, bool invert)
 }
 
 static bool
-frag_mt6(const struct sk_buff *skb, const struct net_device *in,
-         const struct net_device *out, const struct xt_match *match,
-         const void *matchinfo, int offset, unsigned int protoff,
-         bool *hotdrop)
+frag_mt6(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	struct frag_hdr _frag;
 	const struct frag_hdr *fh;
-	const struct ip6t_frag *fraginfo = matchinfo;
-	unsigned int ptr;
+	const struct ip6t_frag *fraginfo = par->matchinfo;
+	unsigned int ptr = 0;
 	int err;
 
-	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_FRAGMENT, NULL);
+	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_FRAGMENT, NULL, NULL);
 	if (err < 0) {
 		if (err != -ENOENT)
-			*hotdrop = true;
+			par->hotdrop = true;
 		return false;
 	}
 
 	fh = skb_header_pointer(skb, ptr, sizeof(_frag), &_frag);
 	if (fh == NULL) {
-		*hotdrop = true;
+		par->hotdrop = true;
 		return false;
 	}
 
@@ -73,61 +67,51 @@ frag_mt6(const struct sk_buff *skb, const struct net_device *in,
 	pr_debug("res %02X %02X%04X %02X ",
 		 fraginfo->flags & IP6T_FRAG_RES, fh->reserved,
 		 ntohs(fh->frag_off) & 0x6,
-		 !((fraginfo->flags & IP6T_FRAG_RES)
-		   && (fh->reserved || (ntohs(fh->frag_off) & 0x06))));
+		 !((fraginfo->flags & IP6T_FRAG_RES) &&
+		   (fh->reserved || (ntohs(fh->frag_off) & 0x06))));
 	pr_debug("first %02X %02X %02X ",
 		 fraginfo->flags & IP6T_FRAG_FST,
 		 ntohs(fh->frag_off) & ~0x7,
-		 !((fraginfo->flags & IP6T_FRAG_FST)
-		   && (ntohs(fh->frag_off) & ~0x7)));
+		 !((fraginfo->flags & IP6T_FRAG_FST) &&
+		   (ntohs(fh->frag_off) & ~0x7)));
 	pr_debug("mf %02X %02X %02X ",
 		 fraginfo->flags & IP6T_FRAG_MF,
 		 ntohs(fh->frag_off) & IP6_MF,
-		 !((fraginfo->flags & IP6T_FRAG_MF)
-		   && !((ntohs(fh->frag_off) & IP6_MF))));
+		 !((fraginfo->flags & IP6T_FRAG_MF) &&
+		   !((ntohs(fh->frag_off) & IP6_MF))));
 	pr_debug("last %02X %02X %02X\n",
 		 fraginfo->flags & IP6T_FRAG_NMF,
 		 ntohs(fh->frag_off) & IP6_MF,
-		 !((fraginfo->flags & IP6T_FRAG_NMF)
-		   && (ntohs(fh->frag_off) & IP6_MF)));
+		 !((fraginfo->flags & IP6T_FRAG_NMF) &&
+		   (ntohs(fh->frag_off) & IP6_MF)));
 
-	return (fh != NULL)
-	       &&
-	       id_match(fraginfo->ids[0], fraginfo->ids[1],
-			ntohl(fh->identification),
-			!!(fraginfo->invflags & IP6T_FRAG_INV_IDS))
-	       &&
-	       !((fraginfo->flags & IP6T_FRAG_RES)
-		 && (fh->reserved || (ntohs(fh->frag_off) & 0x6)))
-	       &&
-	       !((fraginfo->flags & IP6T_FRAG_FST)
-		 && (ntohs(fh->frag_off) & ~0x7))
-	       &&
-	       !((fraginfo->flags & IP6T_FRAG_MF)
-		 && !(ntohs(fh->frag_off) & IP6_MF))
-	       &&
-	       !((fraginfo->flags & IP6T_FRAG_NMF)
-		 && (ntohs(fh->frag_off) & IP6_MF));
+	return id_match(fraginfo->ids[0], fraginfo->ids[1],
+			 ntohl(fh->identification),
+			 !!(fraginfo->invflags & IP6T_FRAG_INV_IDS)) &&
+		!((fraginfo->flags & IP6T_FRAG_RES) &&
+		  (fh->reserved || (ntohs(fh->frag_off) & 0x6))) &&
+		!((fraginfo->flags & IP6T_FRAG_FST) &&
+		  (ntohs(fh->frag_off) & ~0x7)) &&
+		!((fraginfo->flags & IP6T_FRAG_MF) &&
+		  !(ntohs(fh->frag_off) & IP6_MF)) &&
+		!((fraginfo->flags & IP6T_FRAG_NMF) &&
+		  (ntohs(fh->frag_off) & IP6_MF));
 }
 
-/* Called when user tries to insert an entry of this type. */
-static bool
-frag_mt6_check(const char *tablename, const void *ip,
-               const struct xt_match *match, void *matchinfo,
-               unsigned int hook_mask)
+static int frag_mt6_check(const struct xt_mtchk_param *par)
 {
-	const struct ip6t_frag *fraginfo = matchinfo;
+	const struct ip6t_frag *fraginfo = par->matchinfo;
 
 	if (fraginfo->invflags & ~IP6T_FRAG_INV_MASK) {
-		pr_debug("ip6t_frag: unknown flags %X\n", fraginfo->invflags);
-		return false;
+		pr_debug("unknown flags %X\n", fraginfo->invflags);
+		return -EINVAL;
 	}
-	return true;
+	return 0;
 }
 
 static struct xt_match frag_mt6_reg __read_mostly = {
 	.name		= "frag",
-	.family		= AF_INET6,
+	.family		= NFPROTO_IPV6,
 	.match		= frag_mt6,
 	.matchsize	= sizeof(struct ip6t_frag),
 	.checkentry	= frag_mt6_check,

@@ -1,11 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef _I8042_IO_H
 #define _I8042_IO_H
 
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- */
 
 /*
  * Names.
@@ -25,8 +21,11 @@
 #elif defined(__arm__)
 /* defined in include/asm-arm/arch-xxx/irqs.h */
 #include <asm/irq.h>
-#elif defined(CONFIG_SH_CAYMAN)
-#include <asm/irq.h>
+#elif defined(CONFIG_PPC)
+extern int of_i8042_kbd_irq;
+extern int of_i8042_aux_irq;
+# define I8042_KBD_IRQ  of_i8042_kbd_irq
+# define I8042_AUX_IRQ  of_i8042_aux_irq
 #else
 # define I8042_KBD_IRQ	1
 # define I8042_AUX_IRQ	12
@@ -67,16 +66,16 @@ static inline int i8042_platform_init(void)
  * On some platforms touching the i8042 data register region can do really
  * bad things. Because of this the region is always reserved on such boxes.
  */
-#if defined(CONFIG_PPC_MERGE)
+#if defined(CONFIG_PPC)
 	if (check_legacy_ioport(I8042_DATA_REG))
 		return -ENODEV;
 #endif
-#if !defined(__sh__) && !defined(__alpha__) && !defined(__mips__)
+#if !defined(__sh__) && !defined(__alpha__)
 	if (!request_region(I8042_DATA_REG, 16, "i8042"))
 		return -EBUSY;
 #endif
 
-	i8042_reset = 1;
+	i8042_reset = I8042_RESET_ALWAYS;
 	return 0;
 }
 

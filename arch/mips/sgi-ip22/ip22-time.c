@@ -10,17 +10,17 @@
  * Copyright (C) 2003, 06 Ralf Baechle (ralf@linux-mips.org)
  */
 #include <linux/bcd.h>
-#include <linux/ds1286.h>
+#include <linux/i8253.h>
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
 #include <linux/time.h>
+#include <linux/ftrace.h>
 
 #include <asm/cpu.h>
 #include <asm/mipsregs.h>
-#include <asm/i8253.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/time.h>
@@ -29,73 +29,10 @@
 #include <asm/sgi/hpc3.h>
 #include <asm/sgi/ip22.h>
 
-/*
- * Note that mktime uses month from 1 to 12 while rtc_time_to_tm
- * uses 0 to 11.
- */
-unsigned long read_persistent_clock(void)
-{
-	unsigned int yrs, mon, day, hrs, min, sec;
-	unsigned int save_control;
-	unsigned long flags;
-
-	spin_lock_irqsave(&rtc_lock, flags);
-	save_control = hpc3c0->rtcregs[RTC_CMD] & 0xff;
-	hpc3c0->rtcregs[RTC_CMD] = save_control | RTC_TE;
-
-	sec = BCD2BIN(hpc3c0->rtcregs[RTC_SECONDS] & 0xff);
-	min = BCD2BIN(hpc3c0->rtcregs[RTC_MINUTES] & 0xff);
-	hrs = BCD2BIN(hpc3c0->rtcregs[RTC_HOURS] & 0x3f);
-	day = BCD2BIN(hpc3c0->rtcregs[RTC_DATE] & 0xff);
-	mon = BCD2BIN(hpc3c0->rtcregs[RTC_MONTH] & 0x1f);
-	yrs = BCD2BIN(hpc3c0->rtcregs[RTC_YEAR] & 0xff);
-
-	hpc3c0->rtcregs[RTC_CMD] = save_control;
-	spin_unlock_irqrestore(&rtc_lock, flags);
-
-	if (yrs < 45)
-		yrs += 30;
-	if ((yrs += 40) < 70)
-		yrs += 100;
-
-	return mktime(yrs + 1900, mon, day, hrs, min, sec);
-}
-
-int rtc_mips_set_time(unsigned long tim)
-{
-	struct rtc_time tm;
-	unsigned int save_control;
-	unsigned long flags;
-
-	rtc_time_to_tm(tim, &tm);
-
-	tm.tm_mon += 1;		/* tm_mon starts at zero */
-	tm.tm_year -= 40;
-	if (tm.tm_year >= 100)
-		tm.tm_year -= 100;
-
-	spin_lock_irqsave(&rtc_lock, flags);
-	save_control = hpc3c0->rtcregs[RTC_CMD] & 0xff;
-	hpc3c0->rtcregs[RTC_CMD] = save_control | RTC_TE;
-
-	hpc3c0->rtcregs[RTC_YEAR] = BIN2BCD(tm.tm_year);
-	hpc3c0->rtcregs[RTC_MONTH] = BIN2BCD(tm.tm_mon);
-	hpc3c0->rtcregs[RTC_DATE] = BIN2BCD(tm.tm_mday);
-	hpc3c0->rtcregs[RTC_HOURS] = BIN2BCD(tm.tm_hour);
-	hpc3c0->rtcregs[RTC_MINUTES] = BIN2BCD(tm.tm_min);
-	hpc3c0->rtcregs[RTC_SECONDS] = BIN2BCD(tm.tm_sec);
-	hpc3c0->rtcregs[RTC_HUNDREDTH_SECOND] = 0;
-
-	hpc3c0->rtcregs[RTC_CMD] = save_control;
-	spin_unlock_irqrestore(&rtc_lock, flags);
-
-	return 0;
-}
-
 static unsigned long dosample(void)
 {
 	u32 ct0, ct1;
-	u8 msb, lsb;
+	u8 msb;
 
 	/* Start the counter. */
 	sgint->tcword = (SGINT_TCWORD_CNT2 | SGINT_TCWORD_CALL |
@@ -109,7 +46,7 @@ static unsigned long dosample(void)
 	/* Latch and spin until top byte of counter2 is zero */
 	do {
 		writeb(SGINT_TCWORD_CNT2 | SGINT_TCWORD_CLAT, &sgint->tcword);
-		lsb = readb(&sgint->tcnt2);
+		(void) readb(&sgint->tcnt2);
 		msb = readb(&sgint->tcnt2);
 		ct1 = read_c0_count();
 	} while (msb);
@@ -179,14 +116,14 @@ __init void plat_time_init(void)
 }
 
 /* Generic SGI handler for (spurious) 8254 interrupts */
-void indy_8254timer_irq(void)
+void __irq_entry indy_8254timer_irq(void)
 {
 	int irq = SGI_8254_0_IRQ;
 	ULONG cnt;
 	char c;
 
 	irq_enter();
-	kstat_this_cpu.irqs[irq]++;
+	kstat_incr_irq_this_cpu(irq);
 	printk(KERN_ALERT "Oops, got 8254 interrupt.\n");
 	ArcRead(0, &c, 1, &cnt);
 	ArcEnterInteractiveMode();

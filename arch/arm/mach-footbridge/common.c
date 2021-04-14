@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mach-footbridge/common.c
  *
  *  Copyright (C) 1998-2000 Russell King, Dave Gilbert.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/module.h>
 #include <linux/types.h>
@@ -13,25 +10,34 @@
 #include <linux/ioport.h>
 #include <linux/list.h>
 #include <linux/init.h>
- 
-#include <asm/pgtable.h>
+#include <linux/io.h>
+#include <linux/spinlock.h>
+#include <video/vga.h>
+
 #include <asm/page.h>
 #include <asm/irq.h>
-#include <asm/io.h>
 #include <asm/mach-types.h>
 #include <asm/setup.h>
+#include <asm/system_misc.h>
 #include <asm/hardware/dec21285.h>
 
 #include <asm/mach/irq.h>
 #include <asm/mach/map.h>
+#include <asm/mach/pci.h>
 
 #include "common.h"
-
-extern void __init isa_init_irq(unsigned int irq);
 
 unsigned int mem_fclk_21285 = 50000000;
 
 EXPORT_SYMBOL(mem_fclk_21285);
+
+static int __init early_fclk(char *arg)
+{
+	mem_fclk_21285 = simple_strtoul(arg, NULL, 0);
+	return 0;
+}
+
+early_param("mem_fclk_21285", early_fclk);
 
 static int __init parse_tag_memclk(const struct tag *tag)
 {
@@ -68,20 +74,20 @@ static const int fb_irq_mask[] = {
 	IRQ_MASK_PCI_PERR,	/* 19 */
 };
 
-static void fb_mask_irq(unsigned int irq)
+static void fb_mask_irq(struct irq_data *d)
 {
-	*CSR_IRQ_DISABLE = fb_irq_mask[_DC21285_INR(irq)];
+	*CSR_IRQ_DISABLE = fb_irq_mask[_DC21285_INR(d->irq)];
 }
 
-static void fb_unmask_irq(unsigned int irq)
+static void fb_unmask_irq(struct irq_data *d)
 {
-	*CSR_IRQ_ENABLE = fb_irq_mask[_DC21285_INR(irq)];
+	*CSR_IRQ_ENABLE = fb_irq_mask[_DC21285_INR(d->irq)];
 }
 
 static struct irq_chip fb_chip = {
-	.ack	= fb_mask_irq,
-	.mask	= fb_mask_irq,
-	.unmask = fb_unmask_irq,
+	.irq_ack	= fb_mask_irq,
+	.irq_mask	= fb_mask_irq,
+	.irq_unmask	= fb_unmask_irq,
 };
 
 static void __init __fb_init_irq(void)
@@ -95,9 +101,8 @@ static void __init __fb_init_irq(void)
 	*CSR_FIQ_DISABLE = -1;
 
 	for (irq = _DC21285_IRQ(0); irq < _DC21285_IRQ(20); irq++) {
-		set_irq_chip(irq, &fb_chip);
-		set_irq_handler(irq, handle_level_irq);
-		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
+		irq_set_chip_and_handler(irq, &fb_chip, handle_level_irq);
+		irq_clear_status_flags(irq, IRQ_NOREQUEST | IRQ_NOPROBE);
 	}
 }
 
@@ -134,11 +139,6 @@ static struct map_desc fb_common_io_desc[] __initdata = {
 		.pfn		= __phys_to_pfn(DC21285_ARMCSR_BASE),
 		.length		= ARMCSR_SIZE,
 		.type		= MT_DEVICE,
-	}, {
-		.virtual	= XBUS_BASE,
-		.pfn		= __phys_to_pfn(0x40000000),
-		.length		= XBUS_SIZE,
-		.type		= MT_DEVICE,
 	}
 };
 
@@ -168,11 +168,6 @@ static struct map_desc ebsa285_host_io_desc[] __initdata = {
 		.pfn		= __phys_to_pfn(DC21285_PCI_IACK),
 		.length		= PCIIACK_SIZE,
 		.type		= MT_DEVICE,
-	}, {
-		.virtual	= PCIO_BASE,
-		.pfn		= __phys_to_pfn(DC21285_PCI_IO),
-		.length		= PCIO_SIZE,
-		.type		= MT_DEVICE,
 	},
 #endif
 };
@@ -189,11 +184,47 @@ void __init footbridge_map_io(void)
 	 * Now, work out what we've got to map in addition on this
 	 * platform.
 	 */
-	if (footbridge_cfn_mode())
+	if (footbridge_cfn_mode()) {
 		iotable_init(ebsa285_host_io_desc, ARRAY_SIZE(ebsa285_host_io_desc));
+		pci_map_io_early(__phys_to_pfn(DC21285_PCI_IO));
+	}
+
+	vga_base = PCIMEM_BASE;
+}
+
+void footbridge_restart(enum reboot_mode mode, const char *cmd)
+{
+	if (mode == REBOOT_SOFT) {
+		/* Jump into the ROM */
+		soft_restart(0x41000000);
+	} else {
+		/*
+		 * Force the watchdog to do a CPU reset.
+		 *
+		 * After making sure that the watchdog is disabled
+		 * (so we can change the timer registers) we first
+		 * enable the timer to autoreload itself.  Next, the
+		 * timer interval is set really short and any
+		 * current interrupt request is cleared (so we can
+		 * see an edge transition).  Finally, TIMER4 is
+		 * enabled as the watchdog.
+		 */
+		*CSR_SA110_CNTL &= ~(1 << 13);
+		*CSR_TIMER4_CNTL = TIMER_CNTL_ENABLE |
+				   TIMER_CNTL_AUTORELOAD |
+				   TIMER_CNTL_DIV16;
+		*CSR_TIMER4_LOAD = 0x2;
+		*CSR_TIMER4_CLR  = 0;
+		*CSR_SA110_CNTL |= (1 << 13);
+	}
 }
 
 #ifdef CONFIG_FOOTBRIDGE_ADDIN
+
+static inline unsigned long fb_bus_sdram_offset(void)
+{
+	return *CSR_PCISDRAMBASE & 0xfffffff0;
+}
 
 /*
  * These two functions convert virtual addresses to PCI addresses and PCI
@@ -204,19 +235,30 @@ unsigned long __virt_to_bus(unsigned long res)
 {
 	WARN_ON(res < PAGE_OFFSET || res >= (unsigned long)high_memory);
 
-	return (res - PAGE_OFFSET) + (*CSR_PCISDRAMBASE & 0xfffffff0);
+	return res + (fb_bus_sdram_offset() - PAGE_OFFSET);
 }
 EXPORT_SYMBOL(__virt_to_bus);
 
 unsigned long __bus_to_virt(unsigned long res)
 {
-	res -= (*CSR_PCISDRAMBASE & 0xfffffff0);
-	res += PAGE_OFFSET;
+	res = res - (fb_bus_sdram_offset() - PAGE_OFFSET);
 
 	WARN_ON(res < PAGE_OFFSET || res >= (unsigned long)high_memory);
 
 	return res;
 }
 EXPORT_SYMBOL(__bus_to_virt);
+
+unsigned long __pfn_to_bus(unsigned long pfn)
+{
+	return __pfn_to_phys(pfn) + (fb_bus_sdram_offset() - PHYS_OFFSET);
+}
+EXPORT_SYMBOL(__pfn_to_bus);
+
+unsigned long __bus_to_pfn(unsigned long bus)
+{
+	return __phys_to_pfn(bus - (fb_bus_sdram_offset() - PHYS_OFFSET));
+}
+EXPORT_SYMBOL(__bus_to_pfn);
 
 #endif

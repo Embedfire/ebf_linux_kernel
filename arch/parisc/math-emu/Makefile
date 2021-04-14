@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for the linux/parisc floating point code
 #
 
 # See arch/parisc/math-emu/README
-EXTRA_CFLAGS += -Wno-parentheses -Wno-implicit-function-declaration \
+ccflags-y := -Wno-parentheses -Wno-implicit-function-declaration \
 	-Wno-uninitialized -Wno-strict-prototypes -Wno-return-type \
 	-Wno-implicit-int
 
@@ -17,3 +18,4 @@ obj-y	 := frnd.o driver.o decode_exc.o fpudispatch.o denormal.o \
 # other very old or stripped-down PA-RISC CPUs -- not currently supported
 
 obj-$(CONFIG_MATH_EMULATION)	+= unimplemented-math-emulation.o
+CFLAGS_REMOVE_fpudispatch.o	= -Wimplicit-fallthrough

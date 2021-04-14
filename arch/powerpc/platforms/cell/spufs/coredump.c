@@ -1,90 +1,25 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * SPU core dump code
  *
  * (C) Copyright 2006 IBM Corp.
  *
  * Author: Dwayne Grant McConnell <decimal@us.ibm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.	See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/elf.h>
 #include <linux/file.h>
 #include <linux/fdtable.h>
 #include <linux/fs.h>
+#include <linux/gfp.h>
 #include <linux/list.h>
-#include <linux/module.h>
 #include <linux/syscalls.h>
+#include <linux/coredump.h>
+#include <linux/binfmts.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "spufs.h"
-
-static ssize_t do_coredump_read(int num, struct spu_context *ctx, void *buffer,
-				size_t size, loff_t *off)
-{
-	u64 data;
-	int ret;
-
-	if (spufs_coredump_read[num].read)
-		return spufs_coredump_read[num].read(ctx, buffer, size, off);
-
-	data = spufs_coredump_read[num].get(ctx);
-	ret = snprintf(buffer, size, "0x%.16lx", data);
-	if (ret >= size)
-		return size;
-	return ++ret; /* count trailing NULL */
-}
-
-/*
- * These are the only things you should do on a core-file: use only these
- * functions to write out all the necessary info.
- */
-static int spufs_dump_write(struct file *file, const void *addr, int nr, loff_t *foffset)
-{
-	unsigned long limit = current->signal->rlim[RLIMIT_CORE].rlim_cur;
-	ssize_t written;
-
-	if (*foffset + nr > limit)
-		return -EIO;
-
-	written = file->f_op->write(file, addr, nr, &file->f_pos);
-	*foffset += written;
-
-	if (written != nr)
-		return -EIO;
-
-	return 0;
-}
-
-static int spufs_dump_align(struct file *file, char *buf, loff_t new_off,
-			    loff_t *foffset)
-{
-	int rc, size;
-
-	size = min((loff_t)PAGE_SIZE, new_off - *foffset);
-	memset(buf, 0, size);
-
-	rc = 0;
-	while (rc == 0 && new_off > *foffset) {
-		size = min((loff_t)PAGE_SIZE, new_off - *foffset);
-		rc = spufs_dump_write(file, buf, size, foffset);
-	}
-
-	return rc;
-}
 
 static int spufs_ctx_note_size(struct spu_context *ctx, int dfd)
 {
@@ -106,6 +41,17 @@ static int spufs_ctx_note_size(struct spu_context *ctx, int dfd)
 	return total;
 }
 
+static int match_context(const void *v, struct file *file, unsigned fd)
+{
+	struct spu_context *ctx;
+	if (file->f_op != &spufs_context_fops)
+		return 0;
+	ctx = SPUFS_I(file_inode(file))->i_ctx;
+	if (ctx->flags & SPU_CREATE_NOSCHED)
+		return 0;
+	return fd + 1;
+}
+
 /*
  * The additional architecture-specific notes for Cell are various
  * context files in the spu context.
@@ -115,27 +61,23 @@ static int spufs_ctx_note_size(struct spu_context *ctx, int dfd)
  * internal functionality to dump them without needing to actually
  * open the files.
  */
+/*
+ * descriptor table is not shared, so files can't change or go away.
+ */
 static struct spu_context *coredump_next_context(int *fd)
 {
-	struct fdtable *fdt = files_fdtable(current->files);
+	struct spu_context *ctx;
 	struct file *file;
-	struct spu_context *ctx = NULL;
+	int n = iterate_fd(current->files, *fd, match_context, NULL);
+	if (!n)
+		return NULL;
+	*fd = n - 1;
 
-	for (; *fd < fdt->max_fds; (*fd)++) {
-		if (!FD_ISSET(*fd, fdt->open_fds))
-			continue;
-
-		file = fcheck(*fd);
-
-		if (!file || file->f_op != &spufs_context_fops)
-			continue;
-
-		ctx = SPUFS_I(file->f_dentry->d_inode)->i_ctx;
-		if (ctx->flags & SPU_CREATE_NOSCHED)
-			continue;
-
-		break;
-	}
+	rcu_read_lock();
+	file = fcheck(*fd);
+	ctx = SPUFS_I(file_inode(file))->i_ctx;
+	get_spu_context(ctx);
+	rcu_read_unlock();
 
 	return ctx;
 }
@@ -148,80 +90,71 @@ int spufs_coredump_extra_notes_size(void)
 	fd = 0;
 	while ((ctx = coredump_next_context(&fd)) != NULL) {
 		rc = spu_acquire_saved(ctx);
-		if (rc)
+		if (rc) {
+			put_spu_context(ctx);
 			break;
+		}
+
 		rc = spufs_ctx_note_size(ctx, fd);
 		spu_release_saved(ctx);
-		if (rc < 0)
+		if (rc < 0) {
+			put_spu_context(ctx);
 			break;
+		}
 
 		size += rc;
 
 		/* start searching the next fd next time */
 		fd++;
+		put_spu_context(ctx);
 	}
 
 	return size;
 }
 
 static int spufs_arch_write_note(struct spu_context *ctx, int i,
-				  struct file *file, int dfd, loff_t *foffset)
+				  struct coredump_params *cprm, int dfd)
 {
-	loff_t pos = 0;
-	int sz, rc, nread, total = 0;
-	const int bufsz = PAGE_SIZE;
-	char *name;
-	char fullname[80], *buf;
+	size_t sz = spufs_coredump_read[i].size;
+	char fullname[80];
 	struct elf_note en;
+	int ret;
 
-	buf = (void *)get_zeroed_page(GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-
-	name = spufs_coredump_read[i].name;
-	sz = spufs_coredump_read[i].size;
-
-	sprintf(fullname, "SPU/%d/%s", dfd, name);
+	sprintf(fullname, "SPU/%d/%s", dfd, spufs_coredump_read[i].name);
 	en.n_namesz = strlen(fullname) + 1;
 	en.n_descsz = sz;
 	en.n_type = NT_SPU;
 
-	rc = spufs_dump_write(file, &en, sizeof(en), foffset);
-	if (rc)
-		goto out;
+	if (!dump_emit(cprm, &en, sizeof(en)))
+		return -EIO;
+	if (!dump_emit(cprm, fullname, en.n_namesz))
+		return -EIO;
+	if (!dump_align(cprm, 4))
+		return -EIO;
 
-	rc = spufs_dump_write(file, fullname, en.n_namesz, foffset);
-	if (rc)
-		goto out;
+	if (spufs_coredump_read[i].dump) {
+		ret = spufs_coredump_read[i].dump(ctx, cprm);
+		if (ret < 0)
+			return ret;
+	} else {
+		char buf[32];
 
-	rc = spufs_dump_align(file, buf, roundup(*foffset, 4), foffset);
-	if (rc)
-		goto out;
+		ret = snprintf(buf, sizeof(buf), "0x%.16llx",
+			       spufs_coredump_read[i].get(ctx));
+		if (ret >= sizeof(buf))
+			return sizeof(buf);
 
-	do {
-		nread = do_coredump_read(i, ctx, buf, bufsz, &pos);
-		if (nread > 0) {
-			rc = spufs_dump_write(file, buf, nread, foffset);
-			if (rc)
-				goto out;
-			total += nread;
-		}
-	} while (nread == bufsz && total < sz);
-
-	if (nread < 0) {
-		rc = nread;
-		goto out;
+		/* count trailing the NULL: */
+		if (!dump_emit(cprm, buf, ret + 1))
+			return -EIO;
 	}
 
-	rc = spufs_dump_align(file, buf, roundup(*foffset - total + sz, 4),
-			      foffset);
-
-out:
-	free_page((unsigned long)buf);
-	return rc;
+	if (!dump_skip(cprm, roundup(cprm->pos - ret + sz, 4) - cprm->pos))
+		return -EIO;
+	return 0;
 }
 
-int spufs_coredump_extra_notes_write(struct file *file, loff_t *foffset)
+int spufs_coredump_extra_notes_write(struct coredump_params *cprm)
 {
 	struct spu_context *ctx;
 	int fd, j, rc;
@@ -233,7 +166,7 @@ int spufs_coredump_extra_notes_write(struct file *file, loff_t *foffset)
 			return rc;
 
 		for (j = 0; spufs_coredump_read[j].name != NULL; j++) {
-			rc = spufs_arch_write_note(ctx, j, file, fd, foffset);
+			rc = spufs_arch_write_note(ctx, j, cprm, fd);
 			if (rc) {
 				spu_release_saved(ctx);
 				return rc;

@@ -1,12 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/init.h>
 #include <linux/suspend.h>
 #include <linux/io.h>
 #include <asm/time.h>
 #include <asm/cacheflush.h>
 #include <asm/mpc52xx.h>
-
-#include "mpc52xx_pic.h"
-
 
 /* these are defined in mpc52xx_sleep.S, and only used here */
 extern void mpc52xx_deep_sleep(void __iomem *sram, void __iomem *sdram_regs,
@@ -67,10 +65,19 @@ int mpc52xx_pm_prepare(void)
 		{ .type = "builtin", .compatible = "mpc5200", }, /* efika */
 		{}
 	};
+	struct resource res;
 
 	/* map the whole register space */
 	np = of_find_matching_node(NULL, immr_ids);
-	mbar = of_iomap(np, 0);
+
+	if (of_address_to_resource(np, 0, &res)) {
+		pr_err("mpc52xx_pm_prepare(): could not get IMMR address\n");
+		of_node_put(np);
+		return -ENOSYS;
+	}
+
+	mbar = ioremap(res.start, 0xc000); /* we should map whole region including SRAM */
+
 	of_node_put(np);
 	if (!mbar) {
 		pr_err("mpc52xx_pm_prepare(): could not map registers\n");
@@ -110,7 +117,10 @@ int mpc52xx_pm_enter(suspend_state_t state)
 	u32 intr_main_mask;
 	void __iomem * irq_0x500 = (void __iomem *)CONFIG_KERNEL_START + 0x500;
 	unsigned long irq_0x500_stop = (unsigned long)irq_0x500 + mpc52xx_ds_cached_size;
-	char saved_0x500[mpc52xx_ds_cached_size];
+	char saved_0x500[0x600-0x500];
+
+	if (WARN_ON(mpc52xx_ds_cached_size > sizeof(saved_0x500)))
+		return -ENOMEM;
 
 	/* disable all interrupts in PIC */
 	intr_main_mask = in_be32(&intr->main_mask);
@@ -165,9 +175,6 @@ int mpc52xx_pm_enter(suspend_state_t state)
 	/* restore SRAM */
 	memcpy(sram, saved_sram, sram_size);
 
-	/* restart jiffies */
-	wakeup_decrementer();
-
 	/* reenable interrupts in PIC */
 	out_be32(&intr->main_mask, intr_main_mask);
 
@@ -183,7 +190,7 @@ void mpc52xx_pm_finish(void)
 	iounmap(mbar);
 }
 
-static struct platform_suspend_ops mpc52xx_pm_ops = {
+static const struct platform_suspend_ops mpc52xx_pm_ops = {
 	.valid		= mpc52xx_pm_valid,
 	.prepare	= mpc52xx_pm_prepare,
 	.enter		= mpc52xx_pm_enter,

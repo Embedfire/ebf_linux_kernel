@@ -1,15 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright 2008  by Karsten Keil <kkeil@novell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #ifndef mISDN_CORE_H
@@ -45,11 +36,11 @@ extern int			get_mdevice_count(void);
 #define MGR_OPT_NETWORK		25
 
 extern int	connect_Bstack(struct mISDNdevice *, struct mISDNchannel *,
-			u_int, struct sockaddr_mISDN *);
+			       u_int, struct sockaddr_mISDN *);
 extern int	connect_layer1(struct mISDNdevice *, struct mISDNchannel *,
-			u_int, struct sockaddr_mISDN *);
+			       u_int, struct sockaddr_mISDN *);
 extern int	create_l2entity(struct mISDNdevice *, struct mISDNchannel *,
-			u_int, struct sockaddr_mISDN *);
+				u_int, struct sockaddr_mISDN *);
 
 extern int	create_stack(struct mISDNdevice *);
 extern int	create_teimanager(struct mISDNdevice *);
@@ -71,7 +62,9 @@ extern void	mISDN_timer_cleanup(void);
 
 extern int	l1_init(u_int *);
 extern void	l1_cleanup(void);
-extern int 	Isdnl2_Init(u_int *);
+extern int	Isdnl2_Init(u_int *);
 extern void	Isdnl2_cleanup(void);
+
+extern void	mISDN_init_clock(u_int *);
 
 #endif

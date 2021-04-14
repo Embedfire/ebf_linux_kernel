@@ -1,34 +1,17 @@
-/*
+/* SPDX-License-Identifier: GPL-2.0
+ *
  * include/asm-sh/dma.h
  *
  * Copyright (C) 2003, 2004  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #ifndef __ASM_SH_DMA_H
 #define __ASM_SH_DMA_H
-#ifdef __KERNEL__
 
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
-#include <linux/sysdev.h>
-#include <cpu/dma.h>
-
-/* The maximum address that we can perform a DMA transfer to on this platform */
-/* Don't define MAX_DMA_ADDRESS; it's useless on the SuperH and any
-   occurrence should be flagged as an error.  */
-/* But... */
-/* XXX: This is not applicable to SuperH, just needed for alloc_bootmem */
-#define MAX_DMA_ADDRESS		(PAGE_OFFSET+0x10000000)
-
-#ifdef CONFIG_NR_DMA_CHANNELS
-#  define MAX_DMA_CHANNELS	(CONFIG_NR_DMA_CHANNELS)
-#else
-#  define MAX_DMA_CHANNELS	(CONFIG_NR_ONCHIP_DMA_CHANNELS)
-#endif
+#include <linux/device.h>
+#include <asm-generic/dma.h>
 
 /*
  * Read and write modes can mean drastically different things depending on the
@@ -95,7 +78,7 @@ struct dma_channel {
 
 	wait_queue_head_t wait_queue;
 
-	struct sys_device dev;
+	struct device dev;
 	void *priv_data;
 };
 
@@ -137,8 +120,6 @@ extern int dma_xfer(unsigned int chan, unsigned long from,
 
 extern int request_dma_bycap(const char **dmac, const char **caps,
 			     const char *dev_id);
-extern int request_dma(unsigned int chan, const char *dev_id);
-extern void free_dma(unsigned int chan);
 extern int get_dma_residue(unsigned int chan);
 extern struct dma_info *get_dma_info(unsigned int chan);
 extern struct dma_channel *get_dma_channel(unsigned int chan);
@@ -162,5 +143,4 @@ extern int isa_dma_bridge_buggy;
 #define isa_dma_bridge_buggy	(0)
 #endif
 
-#endif /* __KERNEL__ */
 #endif /* __ASM_SH_DMA_H */

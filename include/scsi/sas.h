@@ -1,26 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * SAS structures and definitions header file
  *
  * Copyright (C) 2005 Adaptec, Inc.  All rights reserved.
  * Copyright (C) 2005 Luben Tuikov <luben_tuikov@adaptec.com>
- *
- * This file is licensed under GPLv2.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307
- * USA
- *
  */
 
 #ifndef _SAS_H_
@@ -89,25 +72,29 @@ enum sas_oob_mode {
 	SAS_OOB_MODE
 };
 
-/* See sas_discover.c if you plan on changing these.
- */
-enum sas_dev_type {
-	NO_DEVICE   = 0,	  /* protocol */
-	SAS_END_DEV = 1,	  /* protocol */
-	EDGE_DEV    = 2,	  /* protocol */
-	FANOUT_DEV  = 3,	  /* protocol */
-	SAS_HA      = 4,
-	SATA_DEV    = 5,
-	SATA_PM     = 7,
-	SATA_PM_PORT= 8,
+/* See sas_discover.c if you plan on changing these */
+enum sas_device_type {
+	/* these are SAS protocol defined (attached device type field) */
+	SAS_PHY_UNUSED = 0,
+	SAS_END_DEVICE = 1,
+	SAS_EDGE_EXPANDER_DEVICE = 2,
+	SAS_FANOUT_EXPANDER_DEVICE = 3,
+	/* these are internal to libsas */
+	SAS_HA = 4,
+	SAS_SATA_DEV = 5,
+	SAS_SATA_PM = 7,
+	SAS_SATA_PM_PORT = 8,
+	SAS_SATA_PENDING = 9,
 };
 
 enum sas_protocol {
+	SAS_PROTOCOL_NONE		= 0,
 	SAS_PROTOCOL_SATA		= 0x01,
 	SAS_PROTOCOL_SMP		= 0x02,
 	SAS_PROTOCOL_STP		= 0x04,
 	SAS_PROTOCOL_SSP		= 0x08,
 	SAS_PROTOCOL_ALL		= 0x0E,
+	SAS_PROTOCOL_STP_ALL		= SAS_PROTOCOL_STP|SAS_PROTOCOL_SATA,
 };
 
 /* From the spec; local phys only */
@@ -121,6 +108,7 @@ enum phy_func {
 	PHY_FUNC_TX_SATA_PS_SIGNAL,
 	PHY_FUNC_RELEASE_SPINUP_HOLD = 0x10, /* LOCAL PORT ONLY! */
 	PHY_FUNC_SET_LINK_RATE,
+	PHY_FUNC_GET_EVENTS,
 };
 
 /* SAS LLDD would need to report only _very_few_ of those, like BROADCAST.
@@ -193,6 +181,14 @@ enum sas_open_rej_reason {
 	SAS_OREJ_RSVD_STOP0 = 16,
 	SAS_OREJ_RSVD_STOP1 = 17,
 	SAS_OREJ_RSVD_RETRY = 18,
+};
+
+enum sas_gpio_reg_type {
+	SAS_GPIO_REG_CFG   = 0,
+	SAS_GPIO_REG_RX    = 1,
+	SAS_GPIO_REG_RX_GP = 2,
+	SAS_GPIO_REG_TX    = 3,
+	SAS_GPIO_REG_TX_GP = 4,
 };
 
 struct  dev_to_host_fis {
@@ -328,7 +324,44 @@ struct ssp_response_iu {
 	__be32 response_data_len;
 
 	u8     resp_data[0];
-	u8     sense_data[0];
+	u8     sense_data[];
+} __attribute__ ((packed));
+
+struct ssp_command_iu {
+	u8     lun[8];
+	u8     _r_a;
+
+	union {
+		struct {
+			u8  attr:3;
+			u8  prio:4;
+			u8  efb:1;
+		};
+		u8 efb_prio_attr;
+	};
+
+	u8    _r_b;
+
+	u8    _r_c:2;
+	u8    add_cdb_len:6;
+
+	u8    cdb[16];
+	u8    add_cdb[];
+} __attribute__ ((packed));
+
+struct xfer_rdy_iu {
+	__be32 requested_offset;
+	__be32 write_data_len;
+	__be32 _r_a;
+} __attribute__ ((packed));
+
+struct ssp_tmf_iu {
+	u8     lun[8];
+	u16    _r_a;
+	u8     tmf;
+	u8     _r_b;
+	__be16 tag;
+	u8     _r_c[14];
 } __attribute__ ((packed));
 
 /* ---------- SMP ---------- */
@@ -341,7 +374,12 @@ struct report_general_resp {
 
 	u8      conf_route_table:1;
 	u8      configuring:1;
-	u8      _r_b:6;
+	u8	config_others:1;
+	u8	orej_retry_supp:1;
+	u8	stp_cont_awt:1;
+	u8	self_config:1;
+	u8	zone_config:1;
+	u8	t2t_supp:1;
 
 	u8      _r_c;
 
@@ -517,7 +555,44 @@ struct ssp_response_iu {
 	__be32 response_data_len;
 
 	u8     resp_data[0];
-	u8     sense_data[0];
+	u8     sense_data[];
+} __attribute__ ((packed));
+
+struct ssp_command_iu {
+	u8     lun[8];
+	u8     _r_a;
+
+	union {
+		struct {
+			u8  efb:1;
+			u8  prio:4;
+			u8  attr:3;
+		};
+		u8 efb_prio_attr;
+	};
+
+	u8    _r_b;
+
+	u8    add_cdb_len:6;
+	u8    _r_c:2;
+
+	u8    cdb[16];
+	u8    add_cdb[];
+} __attribute__ ((packed));
+
+struct xfer_rdy_iu {
+	__be32 requested_offset;
+	__be32 write_data_len;
+	__be32 _r_a;
+} __attribute__ ((packed));
+
+struct ssp_tmf_iu {
+	u8     lun[8];
+	u16    _r_a;
+	u8     tmf;
+	u8     _r_b;
+	__be16 tag;
+	u8     _r_c[14];
 } __attribute__ ((packed));
 
 /* ---------- SMP ---------- */
@@ -528,7 +603,12 @@ struct report_general_resp {
 	u8      _r_a;
 	u8      num_phys;
 
-	u8      _r_b:6;
+	u8	t2t_supp:1;
+	u8	zone_config:1;
+	u8	self_config:1;
+	u8	stp_cont_awt:1;
+	u8	orej_retry_supp:1;
+	u8	config_others:1;
 	u8      configuring:1;
 	u8      conf_route_table:1;
 

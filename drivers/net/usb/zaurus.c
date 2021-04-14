@@ -1,27 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2002 Pavel Machek <pavel@ucw.cz>
  * Copyright (C) 2002-2005 by David Brownell
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 // #define	DEBUG			// error path messages, extra info
 // #define	VERBOSE			// more; success messages
 
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/netdevice.h>
 #include <linux/ethtool.h>
 #include <linux/workqueue.h>
@@ -76,10 +62,10 @@ done:
 		fcs = crc32_le(~0, skb->data, skb->len);
 		fcs = ~fcs;
 
-		*skb_put (skb, 1) = fcs       & 0xff;
-		*skb_put (skb, 1) = (fcs>> 8) & 0xff;
-		*skb_put (skb, 1) = (fcs>>16) & 0xff;
-		*skb_put (skb, 1) = (fcs>>24) & 0xff;
+		skb_put_u8(skb, fcs & 0xff);
+		skb_put_u8(skb, (fcs >> 8) & 0xff);
+		skb_put_u8(skb, (fcs >> 16) & 0xff);
+		skb_put_u8(skb, (fcs >> 24) & 0xff);
 	}
 	return skb;
 }
@@ -102,7 +88,7 @@ static int always_connected (struct usbnet *dev)
 
 static const struct driver_info	zaurus_sl5x00_info = {
 	.description =	"Sharp Zaurus SL-5x00",
-	.flags =	FLAG_FRAMING_Z,
+	.flags =	FLAG_POINTTOPOINT | FLAG_FRAMING_Z,
 	.check_connect = always_connected,
 	.bind =		zaurus_bind,
 	.unbind =	usbnet_cdc_unbind,
@@ -112,7 +98,7 @@ static const struct driver_info	zaurus_sl5x00_info = {
 
 static const struct driver_info	zaurus_pxa_info = {
 	.description =	"Sharp Zaurus, PXA-2xx based",
-	.flags =	FLAG_FRAMING_Z,
+	.flags =	FLAG_POINTTOPOINT | FLAG_FRAMING_Z,
 	.check_connect = always_connected,
 	.bind =		zaurus_bind,
 	.unbind =	usbnet_cdc_unbind,
@@ -122,7 +108,7 @@ static const struct driver_info	zaurus_pxa_info = {
 
 static const struct driver_info	olympus_mxl_info = {
 	.description =	"Olympus R1000",
-	.flags =	FLAG_FRAMING_Z,
+	.flags =	FLAG_POINTTOPOINT | FLAG_FRAMING_Z,
 	.check_connect = always_connected,
 	.bind =		zaurus_bind,
 	.unbind =	usbnet_cdc_unbind,
@@ -174,8 +160,8 @@ static int blan_mdlm_bind(struct usbnet *dev, struct usb_interface *intf)
 				goto bad_desc;
 			}
 			/* expect bcdVersion 1.0, ignore */
-			if (memcmp(&desc->bGUID, blan_guid, 16)
-				    && memcmp(&desc->bGUID, safe_guid, 16) ) {
+			if (memcmp(&desc->bGUID, blan_guid, 16) &&
+			    memcmp(&desc->bGUID, safe_guid, 16)) {
 				/* hey, this one might _really_ be MDLM! */
 				dev_dbg(&intf->dev, "MDLM guid\n");
 				goto bad_desc;
@@ -258,7 +244,7 @@ bad_desc:
 
 static const struct driver_info	bogus_mdlm_info = {
 	.description =	"pseudo-MDLM (BLAN) device",
-	.flags =	FLAG_FRAMING_Z,
+	.flags =	FLAG_POINTTOPOINT | FLAG_FRAMING_Z,
 	.check_connect = always_connected,
 	.tx_fixup =	zaurus_tx_fixup,
 	.bind =		blan_mdlm_bind,
@@ -316,6 +302,11 @@ static const struct usb_device_id	products [] = {
 	ZAURUS_MASTER_INTERFACE,
 	.driver_info = ZAURUS_PXA_INFO,
 }, {
+	/* C-750/C-760/C-860/SL-C3000 PDA in MDLM mode */
+	USB_DEVICE_AND_INTERFACE_INFO(0x04DD, 0x9031, USB_CLASS_COMM,
+			USB_CDC_SUBCLASS_MDLM, USB_CDC_PROTO_NONE),
+	.driver_info = (unsigned long) &bogus_mdlm_info,
+}, {
 	.match_flags    =   USB_DEVICE_ID_MATCH_INT_INFO
 		 | USB_DEVICE_ID_MATCH_DEVICE,
 	.idVendor               = 0x04DD,
@@ -331,15 +322,15 @@ static const struct usb_device_id	products [] = {
 	ZAURUS_MASTER_INTERFACE,
 	.driver_info = ZAURUS_PXA_INFO,
 },
-
-
-/* At least some of the newest PXA units have very different lies about
- * their standards support:  they claim to be cell phones offering
- * direct access to their radios!  (No, they don't conform to CDC MDLM.)
- */
 {
-	USB_INTERFACE_INFO(USB_CLASS_COMM, USB_CDC_SUBCLASS_MDLM,
-			USB_CDC_PROTO_NONE),
+	/* Motorola Rokr E6 */
+	USB_DEVICE_AND_INTERFACE_INFO(0x22b8, 0x6027, USB_CLASS_COMM,
+			USB_CDC_SUBCLASS_MDLM, USB_CDC_PROTO_NONE),
+	.driver_info = (unsigned long) &bogus_mdlm_info,
+}, {
+	/* Motorola MOTOMAGX phones */
+	USB_DEVICE_AND_INTERFACE_INFO(0x22b8, 0x6425, USB_CLASS_COMM,
+			USB_CDC_SUBCLASS_MDLM, USB_CDC_PROTO_NONE),
 	.driver_info = (unsigned long) &bogus_mdlm_info,
 },
 
@@ -354,6 +345,13 @@ static const struct usb_device_id	products [] = {
 	ZAURUS_MASTER_INTERFACE,
 	.driver_info = OLYMPUS_MXL_INFO,
 },
+
+/* Logitech Harmony 900 - uses the pseudo-MDLM (BLAN) driver */
+{
+	USB_DEVICE_AND_INTERFACE_INFO(0x046d, 0xc11f, USB_CLASS_COMM,
+			USB_CDC_SUBCLASS_MDLM, USB_CDC_PROTO_NONE),
+	.driver_info = (unsigned long) &bogus_mdlm_info,
+},
 	{ },		// END
 };
 MODULE_DEVICE_TABLE(usb, products);
@@ -365,19 +363,10 @@ static struct usb_driver zaurus_driver = {
 	.disconnect =	usbnet_disconnect,
 	.suspend =	usbnet_suspend,
 	.resume =	usbnet_resume,
+	.disable_hub_initiated_lpm = 1,
 };
 
-static int __init zaurus_init(void)
-{
-	return usb_register(&zaurus_driver);
-}
-module_init(zaurus_init);
-
-static void __exit zaurus_exit(void)
-{
-	usb_deregister(&zaurus_driver);
-}
-module_exit(zaurus_exit);
+module_usb_driver(zaurus_driver);
 
 MODULE_AUTHOR("Pavel Machek, David Brownell");
 MODULE_DESCRIPTION("Sharp Zaurus PDA, and compatible products");

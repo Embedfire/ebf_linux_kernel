@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Fault Injection Test harness (FI)
  *  Copyright (C) Intel Crop.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version 2
- *  of the License, or (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307,
- *  USA.
- *
  */
 
 /*  Id: pf_in.c,v 1.1.1.1 2002/11/12 05:56:32 brlock Exp
@@ -26,7 +11,6 @@
  *  Bjorn Steinbrink (B.Steinbrink@gmx.de), 2007
  */
 
-#include <linux/module.h>
 #include <linux/ptrace.h> /* struct pt_regs */
 #include "pf_in.h"
 
@@ -34,22 +18,22 @@
 /* IA32 Manual 3, 2-1 */
 static unsigned char prefix_codes[] = {
 	0xF0, 0xF2, 0xF3, 0x2E, 0x36, 0x3E, 0x26, 0x64,
-	0x65, 0x2E, 0x3E, 0x66, 0x67
+	0x65, 0x66, 0x67
 };
 /* IA32 Manual 3, 3-432*/
 static unsigned int reg_rop[] = {
 	0x8A, 0x8B, 0xB60F, 0xB70F, 0xBE0F, 0xBF0F
 };
-static unsigned int reg_wop[] = { 0x88, 0x89 };
+static unsigned int reg_wop[] = { 0x88, 0x89, 0xAA, 0xAB };
 static unsigned int imm_wop[] = { 0xC6, 0xC7 };
 /* IA32 Manual 3, 3-432*/
-static unsigned int rw8[] = { 0x88, 0x8A, 0xC6 };
+static unsigned int rw8[] = { 0x88, 0x8A, 0xC6, 0xAA };
 static unsigned int rw32[] = {
-	0x89, 0x8B, 0xC7, 0xB60F, 0xB70F, 0xBE0F, 0xBF0F
+	0x89, 0x8B, 0xC7, 0xB60F, 0xB70F, 0xBE0F, 0xBF0F, 0xAB
 };
-static unsigned int mw8[] = { 0x88, 0x8A, 0xC6, 0xB60F, 0xBE0F };
+static unsigned int mw8[] = { 0x88, 0x8A, 0xC6, 0xB60F, 0xBE0F, 0xAA };
 static unsigned int mw16[] = { 0xB70F, 0xBF0F };
-static unsigned int mw32[] = { 0x89, 0x8B, 0xC7 };
+static unsigned int mw32[] = { 0x89, 0x8B, 0xC7, 0xAB };
 static unsigned int mw64[] = {};
 #else /* not __i386__ */
 static unsigned char prefix_codes[] = {
@@ -63,41 +47,50 @@ static unsigned char prefix_codes[] = {
 static unsigned int reg_rop[] = {
 	0x8A, 0x8B, 0xB60F, 0xB70F, 0xBE0F, 0xBF0F
 };
-static unsigned int reg_wop[] = { 0x88, 0x89 };
+static unsigned int reg_wop[] = { 0x88, 0x89, 0xAA, 0xAB };
 static unsigned int imm_wop[] = { 0xC6, 0xC7 };
-static unsigned int rw8[] = { 0xC6, 0x88, 0x8A };
+static unsigned int rw8[] = { 0xC6, 0x88, 0x8A, 0xAA };
 static unsigned int rw32[] = {
-	0xC7, 0x89, 0x8B, 0xB60F, 0xB70F, 0xBE0F, 0xBF0F
+	0xC7, 0x89, 0x8B, 0xB60F, 0xB70F, 0xBE0F, 0xBF0F, 0xAB
 };
 /* 8 bit only */
-static unsigned int mw8[] = { 0xC6, 0x88, 0x8A, 0xB60F, 0xBE0F };
+static unsigned int mw8[] = { 0xC6, 0x88, 0x8A, 0xB60F, 0xBE0F, 0xAA };
 /* 16 bit only */
 static unsigned int mw16[] = { 0xB70F, 0xBF0F };
 /* 16 or 32 bit */
 static unsigned int mw32[] = { 0xC7 };
 /* 16, 32 or 64 bit */
-static unsigned int mw64[] = { 0x89, 0x8B };
+static unsigned int mw64[] = { 0x89, 0x8B, 0xAB };
 #endif /* not __i386__ */
 
-static int skip_prefix(unsigned char *addr, int *shorted, int *enlarged,
-								int *rexr)
+struct prefix_bits {
+	unsigned shorted:1;
+	unsigned enlarged:1;
+	unsigned rexr:1;
+	unsigned rex:1;
+};
+
+static int skip_prefix(unsigned char *addr, struct prefix_bits *prf)
 {
 	int i;
 	unsigned char *p = addr;
-	*shorted = 0;
-	*enlarged = 0;
-	*rexr = 0;
+	prf->shorted = 0;
+	prf->enlarged = 0;
+	prf->rexr = 0;
+	prf->rex = 0;
 
 restart:
 	for (i = 0; i < ARRAY_SIZE(prefix_codes); i++) {
 		if (*p == prefix_codes[i]) {
 			if (*p == 0x66)
-				*shorted = 1;
+				prf->shorted = 1;
 #ifdef __amd64__
 			if ((*p & 0xf8) == 0x48)
-				*enlarged = 1;
+				prf->enlarged = 1;
 			if ((*p & 0xf4) == 0x44)
-				*rexr = 1;
+				prf->rexr = 1;
+			if ((*p & 0xf0) == 0x40)
+				prf->rex = 1;
 #endif
 			p++;
 			goto restart;
@@ -135,12 +128,12 @@ enum reason_type get_ins_type(unsigned long ins_addr)
 {
 	unsigned int opcode;
 	unsigned char *p;
-	int shorted, enlarged, rexr;
+	struct prefix_bits prf;
 	int i;
 	enum reason_type rv = OTHERS;
 
 	p = (unsigned char *)ins_addr;
-	p += skip_prefix(p, &shorted, &enlarged, &rexr);
+	p += skip_prefix(p, &prf);
 	p += get_opcode(p, &opcode);
 
 	CHECK_OP_TYPE(opcode, reg_rop, REG_READ);
@@ -156,10 +149,11 @@ static unsigned int get_ins_reg_width(unsigned long ins_addr)
 {
 	unsigned int opcode;
 	unsigned char *p;
-	int i, shorted, enlarged, rexr;
+	struct prefix_bits prf;
+	int i;
 
 	p = (unsigned char *)ins_addr;
-	p += skip_prefix(p, &shorted, &enlarged, &rexr);
+	p += skip_prefix(p, &prf);
 	p += get_opcode(p, &opcode);
 
 	for (i = 0; i < ARRAY_SIZE(rw8); i++)
@@ -168,7 +162,7 @@ static unsigned int get_ins_reg_width(unsigned long ins_addr)
 
 	for (i = 0; i < ARRAY_SIZE(rw32); i++)
 		if (rw32[i] == opcode)
-			return (shorted ? 2 : (enlarged ? 8 : 4));
+			return prf.shorted ? 2 : (prf.enlarged ? 8 : 4);
 
 	printk(KERN_ERR "mmiotrace: Unknown opcode 0x%02x\n", opcode);
 	return 0;
@@ -178,10 +172,11 @@ unsigned int get_ins_mem_width(unsigned long ins_addr)
 {
 	unsigned int opcode;
 	unsigned char *p;
-	int i, shorted, enlarged, rexr;
+	struct prefix_bits prf;
+	int i;
 
 	p = (unsigned char *)ins_addr;
-	p += skip_prefix(p, &shorted, &enlarged, &rexr);
+	p += skip_prefix(p, &prf);
 	p += get_opcode(p, &opcode);
 
 	for (i = 0; i < ARRAY_SIZE(mw8); i++)
@@ -194,11 +189,11 @@ unsigned int get_ins_mem_width(unsigned long ins_addr)
 
 	for (i = 0; i < ARRAY_SIZE(mw32); i++)
 		if (mw32[i] == opcode)
-			return shorted ? 2 : 4;
+			return prf.shorted ? 2 : 4;
 
 	for (i = 0; i < ARRAY_SIZE(mw64); i++)
 		if (mw64[i] == opcode)
-			return shorted ? 2 : (enlarged ? 8 : 4);
+			return prf.shorted ? 2 : (prf.enlarged ? 8 : 4);
 
 	printk(KERN_ERR "mmiotrace: Unknown opcode 0x%02x\n", opcode);
 	return 0;
@@ -238,7 +233,7 @@ enum {
 #endif
 };
 
-static unsigned char *get_reg_w8(int no, struct pt_regs *regs)
+static unsigned char *get_reg_w8(int no, int rex, struct pt_regs *regs)
 {
 	unsigned char *rv = NULL;
 
@@ -254,18 +249,6 @@ static unsigned char *get_reg_w8(int no, struct pt_regs *regs)
 		break;
 	case arg_DL:
 		rv = (unsigned char *)&regs->dx;
-		break;
-	case arg_AH:
-		rv = 1 + (unsigned char *)&regs->ax;
-		break;
-	case arg_BH:
-		rv = 1 + (unsigned char *)&regs->bx;
-		break;
-	case arg_CH:
-		rv = 1 + (unsigned char *)&regs->cx;
-		break;
-	case arg_DH:
-		rv = 1 + (unsigned char *)&regs->dx;
 		break;
 #ifdef __amd64__
 	case arg_R8:
@@ -294,9 +277,55 @@ static unsigned char *get_reg_w8(int no, struct pt_regs *regs)
 		break;
 #endif
 	default:
-		printk(KERN_ERR "mmiotrace: Error reg no# %d\n", no);
 		break;
 	}
+
+	if (rv)
+		return rv;
+
+	if (rex) {
+		/*
+		 * If REX prefix exists, access low bytes of SI etc.
+		 * instead of AH etc.
+		 */
+		switch (no) {
+		case arg_SI:
+			rv = (unsigned char *)&regs->si;
+			break;
+		case arg_DI:
+			rv = (unsigned char *)&regs->di;
+			break;
+		case arg_BP:
+			rv = (unsigned char *)&regs->bp;
+			break;
+		case arg_SP:
+			rv = (unsigned char *)&regs->sp;
+			break;
+		default:
+			break;
+		}
+	} else {
+		switch (no) {
+		case arg_AH:
+			rv = 1 + (unsigned char *)&regs->ax;
+			break;
+		case arg_BH:
+			rv = 1 + (unsigned char *)&regs->bx;
+			break;
+		case arg_CH:
+			rv = 1 + (unsigned char *)&regs->cx;
+			break;
+		case arg_DH:
+			rv = 1 + (unsigned char *)&regs->dx;
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (!rv)
+		printk(KERN_ERR "mmiotrace: Error reg no# %d\n", no);
+
 	return rv;
 }
 
@@ -365,37 +394,37 @@ static unsigned long *get_reg_w32(int no, struct pt_regs *regs)
 unsigned long get_ins_reg_val(unsigned long ins_addr, struct pt_regs *regs)
 {
 	unsigned int opcode;
-	unsigned char mod_rm;
 	int reg;
 	unsigned char *p;
-	int i, shorted, enlarged, rexr;
-	unsigned long rv;
+	struct prefix_bits prf;
+	int i;
 
 	p = (unsigned char *)ins_addr;
-	p += skip_prefix(p, &shorted, &enlarged, &rexr);
+	p += skip_prefix(p, &prf);
 	p += get_opcode(p, &opcode);
 	for (i = 0; i < ARRAY_SIZE(reg_rop); i++)
-		if (reg_rop[i] == opcode) {
-			rv = REG_READ;
+		if (reg_rop[i] == opcode)
 			goto do_work;
-		}
 
 	for (i = 0; i < ARRAY_SIZE(reg_wop); i++)
-		if (reg_wop[i] == opcode) {
-			rv = REG_WRITE;
+		if (reg_wop[i] == opcode)
 			goto do_work;
-		}
 
 	printk(KERN_ERR "mmiotrace: Not a register instruction, opcode "
 							"0x%02x\n", opcode);
 	goto err;
 
 do_work:
-	mod_rm = *p;
-	reg = ((mod_rm >> 3) & 0x7) | (rexr << 3);
+	/* for STOS, source register is fixed */
+	if (opcode == 0xAA || opcode == 0xAB) {
+		reg = arg_AX;
+	} else {
+		unsigned char mod_rm = *p;
+		reg = ((mod_rm >> 3) & 0x7) | (prf.rexr << 3);
+	}
 	switch (get_ins_reg_width(ins_addr)) {
 	case 1:
-		return *get_reg_w8(reg, regs);
+		return *get_reg_w8(reg, prf.rex, regs);
 
 	case 2:
 		return *(unsigned short *)get_reg_w32(reg, regs);
@@ -422,17 +451,15 @@ unsigned long get_ins_imm_val(unsigned long ins_addr)
 	unsigned char mod_rm;
 	unsigned char mod;
 	unsigned char *p;
-	int i, shorted, enlarged, rexr;
-	unsigned long rv;
+	struct prefix_bits prf;
+	int i;
 
 	p = (unsigned char *)ins_addr;
-	p += skip_prefix(p, &shorted, &enlarged, &rexr);
+	p += skip_prefix(p, &prf);
 	p += get_opcode(p, &opcode);
 	for (i = 0; i < ARRAY_SIZE(imm_wop); i++)
-		if (imm_wop[i] == opcode) {
-			rv = IMM_WRITE;
+		if (imm_wop[i] == opcode)
 			goto do_work;
-		}
 
 	printk(KERN_ERR "mmiotrace: Not an immediate instruction, opcode "
 							"0x%02x\n", opcode);

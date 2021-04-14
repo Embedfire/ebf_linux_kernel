@@ -1,8 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- *  drivers/s390/char/tape_std.h
  *    standard tape device functions for ibm tapes.
  *
- *    Copyright (C) IBM Corp. 2001,2006
+ *    Copyright IBM Corp. 2001, 2006
  *    Author(s): Carsten Otte <cotte@de.ibm.com>
  *		 Tuan Ngo-Anh <ngoanh@de.ibm.com>
  *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
@@ -101,11 +101,6 @@ struct tape_request *tape_std_read_block(struct tape_device *, size_t);
 void tape_std_read_backward(struct tape_device *device,
 			    struct tape_request *request);
 struct tape_request *tape_std_write_block(struct tape_device *, size_t);
-struct tape_request *tape_std_bread(struct tape_device *, struct request *);
-void tape_std_free_bread(struct tape_request *);
-void tape_std_check_locate(struct tape_device *, struct tape_request *);
-struct tape_request *tape_std_bwrite(struct request *,
-				     struct tape_device *, int);
 
 /* Some non-mtop commands. */
 int tape_std_assign(struct tape_device *);
@@ -135,18 +130,7 @@ int tape_std_mtunload(struct tape_device *, int);
 int tape_std_mtweof(struct tape_device *, int);
 
 /* Event handlers */
-void tape_std_default_handler(struct tape_device *);
-void tape_std_unexpect_uchk_handler(struct tape_device *);
-void tape_std_irq(struct tape_device *);
 void tape_std_process_eov(struct tape_device *);
-
-// the error recovery stuff:
-void tape_std_error_recovery(struct tape_device *);
-void tape_std_error_recovery_has_failed(struct tape_device *,int error_id);
-void tape_std_error_recovery_succeded(struct tape_device *);
-void tape_std_error_recovery_do_retry(struct tape_device *);
-void tape_std_error_recovery_read_opposite(struct tape_device *);
-void tape_std_error_recovery_HWBUG(struct tape_device *, int condno);
 
 /* S390 tape types */
 enum s390_tape_type {

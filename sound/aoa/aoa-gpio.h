@@ -1,9 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Apple Onboard Audio GPIO definitions
  *
  * Copyright 2006 Johannes Berg <johannes@sipsolutions.net>
- *
- * GPL v2, can be found in COPYING.
  */
 
 #ifndef __AOA_GPIO_H
@@ -34,10 +33,12 @@ struct gpio_methods {
 	void (*set_headphone)(struct gpio_runtime *rt, int on);
 	void (*set_speakers)(struct gpio_runtime *rt, int on);
 	void (*set_lineout)(struct gpio_runtime *rt, int on);
+	void (*set_master)(struct gpio_runtime *rt, int on);
 
 	int (*get_headphone)(struct gpio_runtime *rt);
 	int (*get_speakers)(struct gpio_runtime *rt);
 	int (*get_lineout)(struct gpio_runtime *rt);
+	int (*get_master)(struct gpio_runtime *rt);
 
 	void (*set_hw_reset)(struct gpio_runtime *rt, int on);
 

@@ -1,13 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # KVM configuration
 #
-config HAVE_KVM
-       bool
+source "virt/kvm/Kconfig"
 
 menuconfig VIRTUALIZATION
-	bool "Virtualization"
-	default y
-	---help---
+	def_bool y
+	prompt "KVM"
+	help
 	  Say Y here to get to see options for using your Linux host to run other
 	  operating systems inside virtual machines (guests).
 	  This option alone does not add any kernel code.
@@ -17,12 +17,23 @@ menuconfig VIRTUALIZATION
 if VIRTUALIZATION
 
 config KVM
-	tristate "Kernel-based Virtual Machine (KVM) support"
-	depends on HAVE_KVM && EXPERIMENTAL
+	def_tristate y
+	prompt "Kernel-based Virtual Machine (KVM) support"
+	depends on HAVE_KVM
 	select PREEMPT_NOTIFIERS
-	select ANON_INODES
-	select S390_SWITCH_AMODE
-	---help---
+	select HAVE_KVM_CPU_RELAX_INTERCEPT
+	select HAVE_KVM_VCPU_ASYNC_IOCTL
+	select HAVE_KVM_EVENTFD
+	select KVM_ASYNC_PF
+	select KVM_ASYNC_PF_SYNC
+	select HAVE_KVM_IRQCHIP
+	select HAVE_KVM_IRQFD
+	select HAVE_KVM_IRQ_ROUTING
+	select HAVE_KVM_INVALID_WAKEUPS
+	select HAVE_KVM_NO_POLL
+	select SRCU
+	select KVM_VFIO
+	help
 	  Support hosting paravirtualized guest machines using the SIE
 	  virtualization capability on the mainframe. This should work
 	  on any 64bit machine.
@@ -35,11 +46,13 @@ config KVM
 
 	  If unsure, say N.
 
-config KVM_TRACE
-       bool
+config KVM_S390_UCONTROL
+	bool "Userspace controlled virtual machines"
+	depends on KVM
+	help
+	  Allow CAP_SYS_ADMIN users to create KVM virtual machines that are
+	  controlled by userspace.
 
-# OK, it's a little counter-intuitive to do this, but it puts it neatly under
-# the virtualization menu.
-source drivers/virtio/Kconfig
+	  If unsure, say N.
 
 endif # VIRTUALIZATION

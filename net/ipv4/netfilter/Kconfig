@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # IP netfilter configuration
 #
@@ -5,44 +6,117 @@
 menu "IP: Netfilter Configuration"
 	depends on INET && NETFILTER
 
-config NF_CONNTRACK_IPV4
-	tristate "IPv4 connection tracking support (required for NAT)"
-	depends on NF_CONNTRACK
+config NF_DEFRAG_IPV4
+	tristate
+	default n
+
+config NF_SOCKET_IPV4
+	tristate "IPv4 socket lookup support"
+	help
+	  This option enables the IPv4 socket lookup infrastructure. This is
+	  is required by the {ip,nf}tables socket match.
+
+config NF_TPROXY_IPV4
+	tristate "IPv4 tproxy support"
+
+if NF_TABLES
+
+config NF_TABLES_IPV4
+	bool "IPv4 nf_tables support"
+	help
+	  This option enables the IPv4 support for nf_tables.
+
+if NF_TABLES_IPV4
+
+config NFT_REJECT_IPV4
+	select NF_REJECT_IPV4
+	default NFT_REJECT
+	tristate
+
+config NFT_DUP_IPV4
+	tristate "IPv4 nf_tables packet duplication support"
+	depends on !NF_CONNTRACK || NF_CONNTRACK
+	select NF_DUP_IPV4
+	help
+	  This module enables IPv4 packet duplication support for nf_tables.
+
+config NFT_FIB_IPV4
+	select NFT_FIB
+	tristate "nf_tables fib / ip route lookup support"
+	help
+	  This module enables IPv4 FIB lookups, e.g. for reverse path filtering.
+	  It also allows query of the FIB for the route type, e.g. local, unicast,
+	  multicast or blackhole.
+
+endif # NF_TABLES_IPV4
+
+config NF_TABLES_ARP
+	bool "ARP nf_tables support"
+	select NETFILTER_FAMILY_ARP
+	help
+	  This option enables the ARP support for nf_tables.
+
+endif # NF_TABLES
+
+config NF_FLOW_TABLE_IPV4
+	tristate "Netfilter flow table IPv4 module"
+	depends on NF_FLOW_TABLE
+	help
+	  This option adds the flow table IPv4 support.
+
+	  To compile it as a module, choose M here.
+
+config NF_DUP_IPV4
+	tristate "Netfilter IPv4 packet duplication to alternate destination"
+	depends on !NF_CONNTRACK || NF_CONNTRACK
+	help
+	  This option enables the nf_dup_ipv4 core, which duplicates an IPv4
+	  packet to be rerouted to another destination.
+
+config NF_LOG_ARP
+	tristate "ARP packet logging"
 	default m if NETFILTER_ADVANCED=n
-	---help---
-	  Connection tracking keeps a record of what packets have passed
-	  through your machine, in order to figure out how they are related
-	  into connections.
+	select NF_LOG_COMMON
 
-	  This is IPv4 support on Layer 3 independent connection tracking.
-	  Layer 3 independent connection tracking is experimental scheme
-	  which generalize ip_conntrack to support other layer 3 protocols.
+config NF_LOG_IPV4
+	tristate "IPv4 packet logging"
+	default m if NETFILTER_ADVANCED=n
+	select NF_LOG_COMMON
 
-	  To compile it as a module, choose M here.  If unsure, say N.
+config NF_REJECT_IPV4
+	tristate "IPv4 packet rejection"
+	default m if NETFILTER_ADVANCED=n
 
-config NF_CONNTRACK_PROC_COMPAT
-	bool "proc/sysctl compatibility with old connection tracking"
-	depends on NF_CONNTRACK_IPV4
-	default y
-	help
-	  This option enables /proc and sysctl compatibility with the old
-	  layer 3 dependant connection tracking. This is needed to keep
-	  old programs that have not been adapted to the new names working.
-
-	  If unsure, say Y.
-
-config IP_NF_QUEUE
-	tristate "IP Userspace queueing via NETLINK (OBSOLETE)"
+if NF_NAT
+config NF_NAT_SNMP_BASIC
+	tristate "Basic SNMP-ALG support"
+	depends on NF_CONNTRACK_SNMP
 	depends on NETFILTER_ADVANCED
+	default NF_NAT && NF_CONNTRACK_SNMP
+	select ASN1
 	help
-	  Netfilter has the ability to queue packets to user space: the
-	  netlink device can be used to access them using this driver.
 
-	  This option enables the old IPv4-only "ip_queue" implementation
-	  which has been obsoleted by the new "nfnetlink_queue" code (see
-	  CONFIG_NETFILTER_NETLINK_QUEUE).
+	  This module implements an Application Layer Gateway (ALG) for
+	  SNMP payloads.  In conjunction with NAT, it allows a network
+	  management system to access multiple private networks with
+	  conflicting addresses.  It works by modifying IP addresses
+	  inside SNMP payloads to match IP-layer NAT mapping.
+
+	  This is the "basic" form of SNMP-ALG, as described in RFC 2962
 
 	  To compile it as a module, choose M here.  If unsure, say N.
+
+config NF_NAT_PPTP
+	tristate
+	depends on NF_CONNTRACK
+	default NF_CONNTRACK_PPTP
+
+config NF_NAT_H323
+	tristate
+	depends on NF_CONNTRACK
+	default NF_CONNTRACK_H323
+
+endif # NF_NAT
 
 config IP_NF_IPTABLES
 	tristate "IP tables support (required for filtering/masq/NAT)"
@@ -56,33 +130,11 @@ config IP_NF_IPTABLES
 
 	  To compile it as a module, choose M here.  If unsure, say N.
 
+if IP_NF_IPTABLES
+
 # The matches.
-config IP_NF_MATCH_RECENT
-	tristate '"recent" match support'
-	depends on IP_NF_IPTABLES
-	depends on NETFILTER_ADVANCED
-	help
-	  This match is used for creating one or many lists of recently
-	  used addresses and then matching against that/those list(s).
-
-	  Short options are available by using 'iptables -m recent -h'
-	  Official Website: <http://snowman.net/projects/ipt_recent/>
-
-	  To compile it as a module, choose M here.  If unsure, say N.
-
-config IP_NF_MATCH_ECN
-	tristate '"ecn" match support'
-	depends on IP_NF_IPTABLES
-	depends on NETFILTER_ADVANCED
-	help
-	  This option adds a `ECN' match, which allows you to match against
-	  the IPv4 and TCP header ECN fields.
-
-	  To compile it as a module, choose M here.  If unsure, say N.
-
 config IP_NF_MATCH_AH
 	tristate '"ah" match support'
-	depends on IP_NF_IPTABLES
 	depends on NETFILTER_ADVANCED
 	help
 	  This match extension allows you to match a range of SPIs
@@ -90,31 +142,38 @@ config IP_NF_MATCH_AH
 
 	  To compile it as a module, choose M here.  If unsure, say N.
 
-config IP_NF_MATCH_TTL
-	tristate '"ttl" match support'
-	depends on IP_NF_IPTABLES
+config IP_NF_MATCH_ECN
+	tristate '"ecn" match support'
 	depends on NETFILTER_ADVANCED
+	select NETFILTER_XT_MATCH_ECN
 	help
-	  This adds CONFIG_IP_NF_MATCH_TTL option, which enabled the user
-	  to match packets by their TTL value.
+	This is a backwards-compat option for the user's convenience
+	(e.g. when running oldconfig). It selects
+	CONFIG_NETFILTER_XT_MATCH_ECN.
+
+config IP_NF_MATCH_RPFILTER
+	tristate '"rpfilter" reverse path filter match support'
+	depends on NETFILTER_ADVANCED
+	depends on IP_NF_MANGLE || IP_NF_RAW
+	help
+	  This option allows you to match packets whose replies would
+	  go out via the interface the packet came in.
 
 	  To compile it as a module, choose M here.  If unsure, say N.
+	  The module will be called ipt_rpfilter.
 
-config IP_NF_MATCH_ADDRTYPE
-	tristate '"addrtype" address type match support'
-	depends on IP_NF_IPTABLES
+config IP_NF_MATCH_TTL
+	tristate '"ttl" match support'
 	depends on NETFILTER_ADVANCED
+	select NETFILTER_XT_MATCH_HL
 	help
-	  This option allows you to match what routing thinks of an address,
-	  eg. UNICAST, LOCAL, BROADCAST, ...
-
-	  If you want to compile it as a module, say M here and read
-	  <file:Documentation/kbuild/modules.txt>.  If unsure, say `N'.
+	This is a backwards-compat option for the user's convenience
+	(e.g. when running oldconfig). It selects
+	CONFIG_NETFILTER_XT_MATCH_HL.
 
 # `filter', generic and specific targets
 config IP_NF_FILTER
 	tristate "Packet filtering"
-	depends on IP_NF_IPTABLES
 	default m if NETFILTER_ADVANCED=n
 	help
 	  Packet filtering defines a table `filter', which has a series of
@@ -126,6 +185,7 @@ config IP_NF_FILTER
 config IP_NF_TARGET_REJECT
 	tristate "REJECT target support"
 	depends on IP_NF_FILTER
+	select NF_REJECT_IPV4
 	default m if NETFILTER_ADVANCED=n
 	help
 	  The REJECT target allows a filtering rule to specify that an ICMP
@@ -134,172 +194,65 @@ config IP_NF_TARGET_REJECT
 
 	  To compile it as a module, choose M here.  If unsure, say N.
 
-config IP_NF_TARGET_LOG
-	tristate "LOG target support"
-	depends on IP_NF_IPTABLES
-	default m if NETFILTER_ADVANCED=n
+config IP_NF_TARGET_SYNPROXY
+	tristate "SYNPROXY target support"
+	depends on NF_CONNTRACK && NETFILTER_ADVANCED
+	select NETFILTER_SYNPROXY
+	select SYN_COOKIES
 	help
-	  This option adds a `LOG' target, which allows you to create rules in
-	  any iptables table which records the packet header to the syslog.
+	  The SYNPROXY target allows you to intercept TCP connections and
+	  establish them using syncookies before they are passed on to the
+	  server. This allows to avoid conntrack and server resource usage
+	  during SYN-flood attacks.
 
-	  To compile it as a module, choose M here.  If unsure, say N.
-
-config IP_NF_TARGET_ULOG
-	tristate "ULOG target support"
-	depends on IP_NF_IPTABLES
-	default m if NETFILTER_ADVANCED=n
-	---help---
-
-	  This option enables the old IPv4-only "ipt_ULOG" implementation
-	  which has been obsoleted by the new "nfnetlink_log" code (see
-	  CONFIG_NETFILTER_NETLINK_LOG).
-
-	  This option adds a `ULOG' target, which allows you to create rules in
-	  any iptables table. The packet is passed to a userspace logging
-	  daemon using netlink multicast sockets; unlike the LOG target
-	  which can only be viewed through syslog.
-
-	  The appropriate userspace logging daemon (ulogd) may be obtained from
-	  <http://www.gnumonks.org/projects/ulogd/>
-
-	  To compile it as a module, choose M here.  If unsure, say N.
+	  To compile it as a module, choose M here. If unsure, say N.
 
 # NAT + specific targets: nf_conntrack
-config NF_NAT
-	tristate "Full NAT"
-	depends on IP_NF_IPTABLES && NF_CONNTRACK_IPV4
+config IP_NF_NAT
+	tristate "iptables NAT support"
+	depends on NF_CONNTRACK
 	default m if NETFILTER_ADVANCED=n
+	select NF_NAT
+	select NETFILTER_XT_NAT
 	help
-	  The Full NAT option allows masquerading, port forwarding and other
-	  forms of full Network Address Port Translation.  It is controlled by
-	  the `nat' table in iptables: see the man page for iptables(8).
+	  This enables the `nat' table in iptables. This allows masquerading,
+	  port forwarding and other forms of full Network Address Port
+	  Translation.
 
 	  To compile it as a module, choose M here.  If unsure, say N.
 
-config NF_NAT_NEEDED
-	bool
-	depends on NF_NAT
-	default y
+if IP_NF_NAT
 
 config IP_NF_TARGET_MASQUERADE
 	tristate "MASQUERADE target support"
-	depends on NF_NAT
-	default m if NETFILTER_ADVANCED=n
+	select NETFILTER_XT_TARGET_MASQUERADE
 	help
-	  Masquerading is a special case of NAT: all outgoing connections are
-	  changed to seem to come from a particular interface's address, and
-	  if the interface goes down, those connections are lost.  This is
-	  only useful for dialup accounts with dynamic IP address (ie. your IP
-	  address will be different on next dialup).
-
-	  To compile it as a module, choose M here.  If unsure, say N.
-
-config IP_NF_TARGET_REDIRECT
-	tristate "REDIRECT target support"
-	depends on NF_NAT
-	depends on NETFILTER_ADVANCED
-	help
-	  REDIRECT is a special case of NAT: all incoming connections are
-	  mapped onto the incoming interface's address, causing the packets to
-	  come to the local machine instead of passing through.  This is
-	  useful for transparent proxies.
-
-	  To compile it as a module, choose M here.  If unsure, say N.
+	  This is a backwards-compat option for the user's convenience
+	  (e.g. when running oldconfig). It selects NETFILTER_XT_TARGET_MASQUERADE.
 
 config IP_NF_TARGET_NETMAP
 	tristate "NETMAP target support"
-	depends on NF_NAT
 	depends on NETFILTER_ADVANCED
+	select NETFILTER_XT_TARGET_NETMAP
 	help
-	  NETMAP is an implementation of static 1:1 NAT mapping of network
-	  addresses. It maps the network address part, while keeping the host
-	  address part intact.
+	This is a backwards-compat option for the user's convenience
+	(e.g. when running oldconfig). It selects
+	CONFIG_NETFILTER_XT_TARGET_NETMAP.
 
-	  To compile it as a module, choose M here.  If unsure, say N.
-
-config NF_NAT_SNMP_BASIC
-	tristate "Basic SNMP-ALG support"
-	depends on NF_NAT
+config IP_NF_TARGET_REDIRECT
+	tristate "REDIRECT target support"
 	depends on NETFILTER_ADVANCED
-	---help---
+	select NETFILTER_XT_TARGET_REDIRECT
+	help
+	This is a backwards-compat option for the user's convenience
+	(e.g. when running oldconfig). It selects
+	CONFIG_NETFILTER_XT_TARGET_REDIRECT.
 
-	  This module implements an Application Layer Gateway (ALG) for
-	  SNMP payloads.  In conjunction with NAT, it allows a network
-	  management system to access multiple private networks with
-	  conflicting addresses.  It works by modifying IP addresses
-	  inside SNMP payloads to match IP-layer NAT mapping.
-
-	  This is the "basic" form of SNMP-ALG, as described in RFC 2962
-
-	  To compile it as a module, choose M here.  If unsure, say N.
-
-# If they want FTP, set to $CONFIG_IP_NF_NAT (m or y),
-# or $CONFIG_IP_NF_FTP (m or y), whichever is weaker.
-# From kconfig-language.txt:
-#
-#           <expr> '&&' <expr>                   (6)
-#
-# (6) Returns the result of min(/expr/, /expr/).
-config NF_NAT_PROTO_DCCP
-	tristate
-	depends on NF_NAT && NF_CT_PROTO_DCCP
-	default NF_NAT && NF_CT_PROTO_DCCP
-
-config NF_NAT_PROTO_GRE
-	tristate
-	depends on NF_NAT && NF_CT_PROTO_GRE
-
-config NF_NAT_PROTO_UDPLITE
-	tristate
-	depends on NF_NAT && NF_CT_PROTO_UDPLITE
-	default NF_NAT && NF_CT_PROTO_UDPLITE
-
-config NF_NAT_PROTO_SCTP
-	tristate
-	default NF_NAT && NF_CT_PROTO_SCTP
-	depends on NF_NAT && NF_CT_PROTO_SCTP
-	select LIBCRC32C
-
-config NF_NAT_FTP
-	tristate
-	depends on IP_NF_IPTABLES && NF_CONNTRACK && NF_NAT
-	default NF_NAT && NF_CONNTRACK_FTP
-
-config NF_NAT_IRC
-	tristate
-	depends on IP_NF_IPTABLES && NF_CONNTRACK && NF_NAT
-	default NF_NAT && NF_CONNTRACK_IRC
-
-config NF_NAT_TFTP
-	tristate
-	depends on IP_NF_IPTABLES && NF_CONNTRACK && NF_NAT
-	default NF_NAT && NF_CONNTRACK_TFTP
-
-config NF_NAT_AMANDA
-	tristate
-	depends on IP_NF_IPTABLES && NF_CONNTRACK && NF_NAT
-	default NF_NAT && NF_CONNTRACK_AMANDA
-
-config NF_NAT_PPTP
-	tristate
-	depends on IP_NF_IPTABLES && NF_CONNTRACK && NF_NAT
-	default NF_NAT && NF_CONNTRACK_PPTP
-	select NF_NAT_PROTO_GRE
-
-config NF_NAT_H323
-	tristate
-	depends on IP_NF_IPTABLES && NF_CONNTRACK && NF_NAT
-	default NF_NAT && NF_CONNTRACK_H323
-
-config NF_NAT_SIP
-	tristate
-	depends on IP_NF_IPTABLES && NF_CONNTRACK && NF_NAT
-	default NF_NAT && NF_CONNTRACK_SIP
+endif # IP_NF_NAT
 
 # mangle + specific targets
 config IP_NF_MANGLE
 	tristate "Packet mangling"
-	depends on IP_NF_IPTABLES
 	default m if NETFILTER_ADVANCED=n
 	help
 	  This option adds a `mangle' table to iptables: see the man page for
@@ -308,13 +261,27 @@ config IP_NF_MANGLE
 
 	  To compile it as a module, choose M here.  If unsure, say N.
 
+config IP_NF_TARGET_CLUSTERIP
+	tristate "CLUSTERIP target support"
+	depends on IP_NF_MANGLE
+	depends on NF_CONNTRACK
+	depends on NETFILTER_ADVANCED
+	select NF_CONNTRACK_MARK
+	select NETFILTER_FAMILY_ARP
+	help
+	  The CLUSTERIP target allows you to build load-balancing clusters of
+	  network servers without having a dedicated load-balancing
+	  router/server/switch.
+
+	  To compile it as a module, choose M here.  If unsure, say N.
+
 config IP_NF_TARGET_ECN
 	tristate "ECN target support"
 	depends on IP_NF_MANGLE
 	depends on NETFILTER_ADVANCED
-	---help---
+	help
 	  This option adds a `ECN' target, which can be used in the iptables mangle
-	  table.  
+	  table.
 
 	  You can use this target to remove the ECN bits from the IPv4 header of
 	  an IP packet.  This is particularly useful, if you need to work around
@@ -324,62 +291,43 @@ config IP_NF_TARGET_ECN
 	  To compile it as a module, choose M here.  If unsure, say N.
 
 config IP_NF_TARGET_TTL
-	tristate  'TTL target support'
-	depends on IP_NF_MANGLE
-	depends on NETFILTER_ADVANCED
+	tristate '"TTL" target support'
+	depends on NETFILTER_ADVANCED && IP_NF_MANGLE
+	select NETFILTER_XT_TARGET_HL
 	help
-	  This option adds a `TTL' target, which enables the user to modify
-	  the TTL value of the IP header.
-
-	  While it is safe to decrement/lower the TTL, this target also enables
-	  functionality to increment and set the TTL value of the IP header to
-	  arbitrary values.  This is EXTREMELY DANGEROUS since you can easily
-	  create immortal packets that loop forever on the network.
-
-	  To compile it as a module, choose M here.  If unsure, say N.
-
-config IP_NF_TARGET_CLUSTERIP
-	tristate "CLUSTERIP target support (EXPERIMENTAL)"
-	depends on IP_NF_MANGLE && EXPERIMENTAL
-	depends on NF_CONNTRACK_IPV4
-	depends on NETFILTER_ADVANCED
-	select NF_CONNTRACK_MARK
-	help
-	  The CLUSTERIP target allows you to build load-balancing clusters of
-	  network servers without having a dedicated load-balancing
-	  router/server/switch.
-	
-	  To compile it as a module, choose M here.  If unsure, say N.
+	This is a backwards-compatible option for the user's convenience
+	(e.g. when running oldconfig). It selects
+	CONFIG_NETFILTER_XT_TARGET_HL.
 
 # raw + specific targets
 config IP_NF_RAW
 	tristate  'raw table support (required for NOTRACK/TRACE)'
-	depends on IP_NF_IPTABLES
-	depends on NETFILTER_ADVANCED
 	help
 	  This option adds a `raw' table to iptables. This table is the very
 	  first in the netfilter framework and hooks in at the PREROUTING
 	  and OUTPUT chains.
-	
+
 	  If you want to compile it as a module, say M here and read
-	  <file:Documentation/kbuild/modules.txt>.  If unsure, say `N'.
+	  <file:Documentation/kbuild/modules.rst>.  If unsure, say `N'.
 
 # security table for MAC policy
 config IP_NF_SECURITY
 	tristate "Security table"
-	depends on IP_NF_IPTABLES
 	depends on SECURITY
 	depends on NETFILTER_ADVANCED
 	help
 	  This option adds a `security' table to iptables, for use
 	  with Mandatory Access Control (MAC) policy.
-	 
+
 	  If unsure, say N.
+
+endif # IP_NF_IPTABLES
 
 # ARP tables
 config IP_NF_ARPTABLES
 	tristate "ARP tables support"
 	select NETFILTER_XTABLES
+	select NETFILTER_FAMILY_ARP
 	depends on NETFILTER_ADVANCED
 	help
 	  arptables is a general, extensible packet identification framework.
@@ -388,9 +336,10 @@ config IP_NF_ARPTABLES
 
 	  To compile it as a module, choose M here.  If unsure, say N.
 
+if IP_NF_ARPTABLES
+
 config IP_NF_ARPFILTER
 	tristate "ARP packet filtering"
-	depends on IP_NF_ARPTABLES
 	help
 	  ARP packet filtering defines a table `filter', which has a series of
 	  rules for simple ARP packet filtering at local input and
@@ -401,10 +350,11 @@ config IP_NF_ARPFILTER
 
 config IP_NF_ARP_MANGLE
 	tristate "ARP payload mangling"
-	depends on IP_NF_ARPTABLES
 	help
 	  Allows altering the ARP packet payload: source and destination
 	  hardware and network addresses.
+
+endif # IP_NF_ARPTABLES
 
 endmenu
 

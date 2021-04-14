@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-omap1/board-palmte.c
  *
@@ -11,66 +12,75 @@
  *                palmtelinux-developpers@lists.sf.net
  *
  * Copyright (c) 2006 Andrzej Zaborowski  <balrog@zabor.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
-
+#include <linux/gpio.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/input.h>
 #include <linux/platform_device.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
+#include <linux/mtd/physmap.h>
 #include <linux/spi/spi.h>
 #include <linux/interrupt.h>
 #include <linux/apm-emulation.h>
+#include <linux/omapfb.h>
+#include <linux/platform_data/omap1_bl.h>
 
-#include <mach/hardware.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
-#include <asm/mach/flash.h>
 
-#include <mach/gpio.h>
+#include "flash.h"
 #include <mach/mux.h>
-#include <mach/usb.h>
 #include <mach/tc.h>
-#include <mach/dma.h>
-#include <mach/board.h>
-#include <mach/irda.h>
-#include <mach/keypad.h>
-#include <mach/common.h>
-#include <mach/mcbsp.h>
-#include <mach/omap-alsa.h>
+#include <linux/omap-dma.h>
+#include <linux/platform_data/keypad-omap.h>
 
-static void __init omap_palmte_init_irq(void)
-{
-	omap1_init_common_hw();
-	omap_init_irq();
-	omap_gpio_init();
-}
+#include <mach/hardware.h>
+#include <mach/usb.h>
 
-static const int palmte_keymap[] = {
+#include "mmc.h"
+#include "common.h"
+
+#define PALMTE_USBDETECT_GPIO	0
+#define PALMTE_USB_OR_DC_GPIO	1
+#define PALMTE_TSC_GPIO		4
+#define PALMTE_PINTDAV_GPIO	6
+#define PALMTE_MMC_WP_GPIO	8
+#define PALMTE_MMC_POWER_GPIO	9
+#define PALMTE_HDQ_GPIO		11
+#define PALMTE_HEADPHONES_GPIO	14
+#define PALMTE_SPEAKER_GPIO	15
+#define PALMTE_DC_GPIO		OMAP_MPUIO(2)
+#define PALMTE_MMC_SWITCH_GPIO	OMAP_MPUIO(4)
+#define PALMTE_MMC1_GPIO	OMAP_MPUIO(6)
+#define PALMTE_MMC2_GPIO	OMAP_MPUIO(7)
+#define PALMTE_MMC3_GPIO	OMAP_MPUIO(11)
+
+static const unsigned int palmte_keymap[] = {
 	KEY(0, 0, KEY_F1),		/* Calendar */
-	KEY(0, 1, KEY_F2),		/* Contacts */
-	KEY(0, 2, KEY_F3),		/* Tasks List */
-	KEY(0, 3, KEY_F4),		/* Note Pad */
-	KEY(0, 4, KEY_POWER),
-	KEY(1, 0, KEY_LEFT),
+	KEY(1, 0, KEY_F2),		/* Contacts */
+	KEY(2, 0, KEY_F3),		/* Tasks List */
+	KEY(3, 0, KEY_F4),		/* Note Pad */
+	KEY(4, 0, KEY_POWER),
+	KEY(0, 1, KEY_LEFT),
 	KEY(1, 1, KEY_DOWN),
-	KEY(1, 2, KEY_UP),
-	KEY(1, 3, KEY_RIGHT),
-	KEY(1, 4, KEY_ENTER),
-	0,
+	KEY(2, 1, KEY_UP),
+	KEY(3, 1, KEY_RIGHT),
+	KEY(4, 1, KEY_ENTER),
+};
+
+static const struct matrix_keymap_data palmte_keymap_data = {
+	.keymap		= palmte_keymap,
+	.keymap_size	= ARRAY_SIZE(palmte_keymap),
 };
 
 static struct omap_kp_platform_data palmte_kp_data = {
 	.rows	= 8,
 	.cols	= 8,
-	.keymap = (int *) palmte_keymap,
-	.rep	= 1,
+	.keymap_data = &palmte_keymap_data,
+	.rep	= true,
 	.delay	= 12,
 };
 
@@ -113,9 +123,9 @@ static struct mtd_partition palmte_rom_partitions[] = {
 	},
 };
 
-static struct flash_platform_data palmte_rom_data = {
-	.map_name	= "map_rom",
+static struct physmap_flash_data palmte_rom_data = {
 	.width		= 2,
+	.set_vpp	= omap1_set_vpp,
 	.parts		= palmte_rom_partitions,
 	.nr_parts	= ARRAY_SIZE(palmte_rom_partitions),
 };
@@ -127,7 +137,7 @@ static struct resource palmte_rom_resource = {
 };
 
 static struct platform_device palmte_rom_device = {
-	.name		= "omapflash",
+	.name		= "physmap-flash",
 	.id		= -1,
 	.dev		= {
 		.platform_data	= &palmte_rom_data,
@@ -153,40 +163,11 @@ static struct platform_device palmte_backlight_device = {
 	},
 };
 
-static struct omap_irda_config palmte_irda_config = {
-	.transceiver_cap	= IR_SIRMODE,
-	.rx_channel		= OMAP_DMA_UART3_RX,
-	.tx_channel		= OMAP_DMA_UART3_TX,
-	.dest_start		= UART3_THR,
-	.src_start		= UART3_RHR,
-	.tx_trigger		= 0,
-	.rx_trigger		= 0,
-};
-
-static struct resource palmte_irda_resources[] = {
-	[0]	= {
-		.start	= INT_UART3,
-		.end	= INT_UART3,
-		.flags	= IORESOURCE_IRQ,
-	},
-};
-
-static struct platform_device palmte_irda_device = {
-	.name		= "omapirda",
-	.id		= -1,
-	.dev		= {
-		.platform_data	= &palmte_irda_config,
-	},
-	.num_resources	= ARRAY_SIZE(palmte_irda_resources),
-	.resource	= palmte_irda_resources,
-};
-
 static struct platform_device *palmte_devices[] __initdata = {
 	&palmte_rom_device,
 	&palmte_kp_device,
 	&palmte_lcd_device,
 	&palmte_backlight_device,
-	&palmte_irda_device,
 };
 
 static struct omap_usb_config palmte_usb_config __initdata = {
@@ -195,130 +176,8 @@ static struct omap_usb_config palmte_usb_config __initdata = {
 	.pins[0]	= 2,
 };
 
-static struct omap_mmc_config palmte_mmc_config __initdata = {
-	.mmc[0]		= {
-		.enabled 	= 1,
-		.wp_pin		= PALMTE_MMC_WP_GPIO,
-		.power_pin	= PALMTE_MMC_POWER_GPIO,
-		.switch_pin	= PALMTE_MMC_SWITCH_GPIO,
-	},
-};
-
-static struct omap_lcd_config palmte_lcd_config __initdata = {
+static const struct omap_lcd_config palmte_lcd_config __initconst = {
 	.ctrl_name	= "internal",
-};
-
-static struct omap_uart_config palmte_uart_config __initdata = {
-	.enabled_uarts = (1 << 0) | (1 << 1) | (0 << 2),
-};
-
-static struct omap_mcbsp_reg_cfg palmte_mcbsp1_regs = {
-	.spcr2	= FRST | GRST | XRST | XINTM(3),
-	.xcr2	= XDATDLY(1) | XFIG,
-	.xcr1	= XWDLEN1(OMAP_MCBSP_WORD_32),
-	.pcr0	= SCLKME | FSXP | CLKXP,
-};
-
-static struct omap_alsa_codec_config palmte_alsa_config = {
-	.name			= "TSC2102 audio",
-	.mcbsp_regs_alsa	= &palmte_mcbsp1_regs,
-	.codec_configure_dev	= NULL,	/* tsc2102_configure, */
-	.codec_set_samplerate	= NULL,	/* tsc2102_set_samplerate, */
-	.codec_clock_setup	= NULL,	/* tsc2102_clock_setup, */
-	.codec_clock_on		= NULL,	/* tsc2102_clock_on, */
-	.codec_clock_off	= NULL,	/* tsc2102_clock_off, */
-	.get_default_samplerate	= NULL,	/* tsc2102_get_default_samplerate, */
-};
-
-#ifdef CONFIG_APM
-/*
- * Values measured in 10 minute intervals averaged over 10 samples.
- * May differ slightly from device to device but should be accurate
- * enough to give basic idea of battery life left and trigger
- * potential alerts.
- */
-static const int palmte_battery_sample[] = {
-	2194, 2157, 2138, 2120,
-	2104, 2089, 2075, 2061,
-	2048, 2038, 2026, 2016,
-	2008, 1998, 1989, 1980,
-	1970, 1958, 1945, 1928,
-	1910, 1888, 1860, 1827,
-	1791, 1751, 1709, 1656,
-};
-
-#define INTERVAL		10
-#define BATTERY_HIGH_TRESHOLD	66
-#define BATTERY_LOW_TRESHOLD	33
-
-static void palmte_get_power_status(struct apm_power_info *info, int *battery)
-{
-	int charging, batt, hi, lo, mid;
-
-	charging = !omap_get_gpio_datain(PALMTE_DC_GPIO);
-	batt = battery[0];
-	if (charging)
-		batt -= 60;
-
-	hi = ARRAY_SIZE(palmte_battery_sample);
-	lo = 0;
-
-	info->battery_flag = 0;
-	info->units = APM_UNITS_MINS;
-
-	if (batt > palmte_battery_sample[lo]) {
-		info->battery_life = 100;
-		info->time = INTERVAL * ARRAY_SIZE(palmte_battery_sample);
-	} else if (batt <= palmte_battery_sample[hi - 1]) {
-		info->battery_life = 0;
-		info->time = 0;
-	} else {
-		while (hi > lo + 1) {
-			mid = (hi + lo) >> 1;
-			if (batt <= palmte_battery_sample[mid])
-				lo = mid;
-			else
-				hi = mid;
-		}
-
-		mid = palmte_battery_sample[lo] - palmte_battery_sample[hi];
-		hi = palmte_battery_sample[lo] - batt;
-		info->battery_life = 100 - (100 * lo + 100 * hi / mid) /
-			ARRAY_SIZE(palmte_battery_sample);
-		info->time = INTERVAL * (ARRAY_SIZE(palmte_battery_sample) -
-				lo) - INTERVAL * hi / mid;
-	}
-
-	if (charging) {
-		info->ac_line_status = APM_AC_ONLINE;
-		info->battery_status = APM_BATTERY_STATUS_CHARGING;
-		info->battery_flag |= APM_BATTERY_FLAG_CHARGING;
-	} else {
-		info->ac_line_status = APM_AC_OFFLINE;
-		if (info->battery_life > BATTERY_HIGH_TRESHOLD)
-			info->battery_status = APM_BATTERY_STATUS_HIGH;
-		else if (info->battery_life > BATTERY_LOW_TRESHOLD)
-			info->battery_status = APM_BATTERY_STATUS_LOW;
-		else
-			info->battery_status = APM_BATTERY_STATUS_CRITICAL;
-	}
-
-	if (info->battery_life > BATTERY_HIGH_TRESHOLD)
-		info->battery_flag |= APM_BATTERY_FLAG_HIGH;
-	else if (info->battery_life > BATTERY_LOW_TRESHOLD)
-		info->battery_flag |= APM_BATTERY_FLAG_LOW;
-	else
-		info->battery_flag |= APM_BATTERY_FLAG_CRITICAL;
-}
-#else
-#define palmte_get_power_status	NULL
-#endif
-
-static struct omap_board_config_kernel palmte_config[] __initdata = {
-	{ OMAP_TAG_USB,		&palmte_usb_config },
-	{ OMAP_TAG_MMC,		&palmte_mmc_config },
-	{ OMAP_TAG_LCD,		&palmte_lcd_config },
-	{ OMAP_TAG_UART,	&palmte_uart_config },
 };
 
 static struct spi_board_info palmte_spi_info[] __initdata = {
@@ -326,65 +185,85 @@ static struct spi_board_info palmte_spi_info[] __initdata = {
 		.modalias	= "tsc2102",
 		.bus_num	= 2,	/* uWire (officially) */
 		.chip_select	= 0,	/* As opposed to 3 */
-		.irq		= OMAP_GPIO_IRQ(PALMTE_PINTDAV_GPIO),
 		.max_speed_hz	= 8000000,
 	},
 };
 
-static void palmte_headphones_detect(void *data, int state)
-{
-	if (state) {
-		/* Headphones connected, disable speaker */
-		omap_set_gpio_dataout(PALMTE_SPEAKER_GPIO, 0);
-		printk(KERN_INFO "PM: speaker off\n");
-	} else {
-		/* Headphones unplugged, re-enable speaker */
-		omap_set_gpio_dataout(PALMTE_SPEAKER_GPIO, 1);
-		printk(KERN_INFO "PM: speaker on\n");
-	}
-}
-
 static void __init palmte_misc_gpio_setup(void)
 {
 	/* Set TSC2102 PINTDAV pin as input (used by TSC2102 driver) */
-	if (omap_request_gpio(PALMTE_PINTDAV_GPIO)) {
+	if (gpio_request(PALMTE_PINTDAV_GPIO, "TSC2102 PINTDAV") < 0) {
 		printk(KERN_ERR "Could not reserve PINTDAV GPIO!\n");
 		return;
 	}
-	omap_set_gpio_direction(PALMTE_PINTDAV_GPIO, 1);
+	gpio_direction_input(PALMTE_PINTDAV_GPIO);
 
 	/* Set USB-or-DC-IN pin as input (unused) */
-	if (omap_request_gpio(PALMTE_USB_OR_DC_GPIO)) {
+	if (gpio_request(PALMTE_USB_OR_DC_GPIO, "USB/DC-IN") < 0) {
 		printk(KERN_ERR "Could not reserve cable signal GPIO!\n");
 		return;
 	}
-	omap_set_gpio_direction(PALMTE_USB_OR_DC_GPIO, 1);
+	gpio_direction_input(PALMTE_USB_OR_DC_GPIO);
 }
+
+#if IS_ENABLED(CONFIG_MMC_OMAP)
+
+static struct omap_mmc_platform_data _palmte_mmc_config = {
+	.nr_slots			= 1,
+	.slots[0]			= {
+		.ocr_mask		= MMC_VDD_32_33|MMC_VDD_33_34,
+		.name			= "mmcblk",
+	},
+};
+
+static struct omap_mmc_platform_data *palmte_mmc_config[OMAP15XX_NR_MMC] = {
+	[0] = &_palmte_mmc_config,
+};
+
+static void palmte_mmc_init(void)
+{
+	omap1_init_mmc(palmte_mmc_config, OMAP15XX_NR_MMC);
+}
+
+#else /* CONFIG_MMC_OMAP */
+
+static void palmte_mmc_init(void)
+{
+}
+
+#endif /* CONFIG_MMC_OMAP */
 
 static void __init omap_palmte_init(void)
 {
-	omap_board_config = palmte_config;
-	omap_board_config_size = ARRAY_SIZE(palmte_config);
+	/* mux pins for uarts */
+	omap_cfg_reg(UART1_TX);
+	omap_cfg_reg(UART1_RTS);
+	omap_cfg_reg(UART2_TX);
+	omap_cfg_reg(UART2_RTS);
+	omap_cfg_reg(UART3_TX);
+	omap_cfg_reg(UART3_RX);
 
 	platform_add_devices(palmte_devices, ARRAY_SIZE(palmte_devices));
 
+	palmte_spi_info[0].irq = gpio_to_irq(PALMTE_PINTDAV_GPIO);
 	spi_register_board_info(palmte_spi_info, ARRAY_SIZE(palmte_spi_info));
 	palmte_misc_gpio_setup();
 	omap_serial_init();
+	omap1_usb_init(&palmte_usb_config);
 	omap_register_i2c_bus(1, 100, NULL, 0);
-}
 
-static void __init omap_palmte_map_io(void)
-{
-	omap1_map_common_io();
+	omapfb_set_lcd_config(&palmte_lcd_config);
+	palmte_mmc_init();
 }
 
 MACHINE_START(OMAP_PALMTE, "OMAP310 based Palm Tungsten E")
-	.phys_io	= 0xfff00000,
-	.io_pg_offst	= ((0xfef00000) >> 18) & 0xfffc,
-	.boot_params	= 0x10000100,
-	.map_io		= omap_palmte_map_io,
-	.init_irq	= omap_palmte_init_irq,
+	.atag_offset	= 0x100,
+	.map_io		= omap15xx_map_io,
+	.init_early     = omap1_init_early,
+	.init_irq	= omap1_init_irq,
+	.handle_irq	= omap1_handle_irq,
 	.init_machine	= omap_palmte_init,
-	.timer		= &omap_timer,
+	.init_late	= omap1_init_late,
+	.init_time	= omap1_timer_init,
+	.restart	= omap1_restart,
 MACHINE_END

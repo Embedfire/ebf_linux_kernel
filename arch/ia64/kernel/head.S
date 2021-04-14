@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Here is where the ball gets rolling as far as the kernel is concerned.
  * When control is transferred to _start, the bootload has already
@@ -20,20 +21,20 @@
  */
 
 
+#include <linux/pgtable.h>
 #include <asm/asmmacro.h>
 #include <asm/fpu.h>
 #include <asm/kregs.h>
 #include <asm/mmu_context.h>
 #include <asm/asm-offsets.h>
 #include <asm/pal.h>
-#include <asm/paravirt.h>
-#include <asm/pgtable.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/mca_asm.h>
 #include <linux/init.h>
 #include <linux/linkage.h>
+#include <linux/pgtable.h>
+#include <asm/export.h>
 
 #ifdef CONFIG_HOTPLUG_CPU
 #define SAL_PSR_BITS_TO_SET				\
@@ -167,9 +168,10 @@ RestRR:											\
 	mov _tmp2=((ia64_rid(IA64_REGION_ID_KERNEL, (num<<61)) << 8) | (pgsize << 2) | vhpt);; \
 	mov rr[_tmp1]=_tmp2
 
-	.section __special_page_section,"ax"
+	__PAGE_ALIGNED_DATA
 
 	.global empty_zero_page
+EXPORT_DATA_SYMBOL_GPL(empty_zero_page)
 empty_zero_page:
 	.skip PAGE_SIZE
 
@@ -181,7 +183,7 @@ swapper_pg_dir:
 halt_msg:
 	stringz "Halting kernel\n"
 
-	.section .text.head,"ax"
+	__REF
 
 	.global start_ap
 
@@ -367,16 +369,17 @@ start_ap:
 	;;
 #else
 (isAP)	br.few 2f
-	mov r20=r19
-	sub r19=r19,r18
+	movl r20=__cpu0_per_cpu
 	;;
 	shr.u r18=r18,3
 1:
-	ld8 r21=[r20],8;;
-	st8[r19]=r21,8
+	ld8 r21=[r19],8;;
+	st8[r20]=r21,8
 	adds r18=-1,r18;;
 	cmp4.lt p7,p6=0,r18
 (p7)	br.cond.dptk.few 1b
+	mov r19=r20
+	;;
 2:
 #endif
 	tpa r19=r19
@@ -393,44 +396,6 @@ start_ap:
 (isBP)	movl r2=ia64_boot_param
 	;;
 (isBP)	st8 [r2]=r28		// save the address of the boot param area passed by the bootloader
-
-#ifdef CONFIG_PARAVIRT
-
-	movl r14=hypervisor_setup_hooks
-	movl r15=hypervisor_type
-	mov r16=num_hypervisor_hooks
-	;;
-	ld8 r2=[r15]
-	;;
-	cmp.ltu p7,p0=r2,r16	// array size check
-	shladd r8=r2,3,r14
-	;;
-(p7)	ld8 r9=[r8]
-	;;
-(p7)	mov b1=r9
-(p7)	cmp.ne.unc p7,p0=r9,r0	// no actual branch to NULL
-	;;
-(p7)	br.call.sptk.many rp=b1
-
-	__INITDATA
-
-default_setup_hook = 0		// Currently nothing needs to be done.
-
-	.weak xen_setup_hook
-
-	.global hypervisor_type
-hypervisor_type:
-	data8		PARAVIRT_HYPERVISOR_TYPE_DEFAULT
-
-	// must have the same order with PARAVIRT_HYPERVISOR_TYPE_xxx
-
-hypervisor_setup_hooks:
-	data8		default_setup_hook
-	data8		xen_setup_hook
-num_hypervisor_hooks = (. - hypervisor_setup_hooks) / 8
-	.previous
-
-#endif
 
 #ifdef CONFIG_SMP
 (isAP)	br.call.sptk.many rp=start_secondary
@@ -1035,7 +1000,7 @@ END(ia64_delay_loop)
  * Return a CPU-local timestamp in nano-seconds.  This timestamp is
  * NOT synchronized across CPUs its return value must never be
  * compared against the values returned on another CPU.  The usage in
- * kernel/sched.c ensures that.
+ * kernel/sched/core.c ensures that.
  *
  * The return-value of sched_clock() is NOT supposed to wrap-around.
  * If it did, it would cause some scheduling hiccups (at the worst).
@@ -1049,8 +1014,8 @@ END(ia64_delay_loop)
  * except that the multiplication and the shift are done with 128-bit
  * intermediate precision so that we can produce a full 64-bit result.
  */
-GLOBAL_ENTRY(sched_clock)
-	addl r8=THIS_CPU(cpu_info) + IA64_CPUINFO_NSEC_PER_CYC_OFFSET,r0
+GLOBAL_ENTRY(ia64_native_sched_clock)
+	addl r8=THIS_CPU(ia64_cpu_info) + IA64_CPUINFO_NSEC_PER_CYC_OFFSET,r0
 	mov.m r9=ar.itc		// fetch cycle-counter				(35 cyc)
 	;;
 	ldf8 f8=[r8]
@@ -1065,12 +1030,12 @@ GLOBAL_ENTRY(sched_clock)
 	;;
 	shrp r8=r9,r8,IA64_NSEC_PER_CYC_SHIFT
 	br.ret.sptk.many rp
-END(sched_clock)
+END(ia64_native_sched_clock)
 
-#ifdef CONFIG_VIRT_CPU_ACCOUNTING
-GLOBAL_ENTRY(cycle_to_cputime)
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
+GLOBAL_ENTRY(cycle_to_nsec)
 	alloc r16=ar.pfs,1,0,0,0
-	addl r8=THIS_CPU(cpu_info) + IA64_CPUINFO_NSEC_PER_CYC_OFFSET,r0
+	addl r8=THIS_CPU(ia64_cpu_info) + IA64_CPUINFO_NSEC_PER_CYC_OFFSET,r0
 	;;
 	ldf8 f8=[r8]
 	;;
@@ -1084,21 +1049,8 @@ GLOBAL_ENTRY(cycle_to_cputime)
 	;;
 	shrp r8=r9,r8,IA64_NSEC_PER_CYC_SHIFT
 	br.ret.sptk.many rp
-END(cycle_to_cputime)
-#endif /* CONFIG_VIRT_CPU_ACCOUNTING */
-
-GLOBAL_ENTRY(start_kernel_thread)
-	.prologue
-	.save rp, r0				// this is the end of the call-chain
-	.body
-	alloc r2 = ar.pfs, 0, 0, 2, 0
-	mov out0 = r9
-	mov out1 = r11;;
-	br.call.sptk.many rp = kernel_thread_helper;;
-	mov out0 = r8
-	br.call.sptk.many rp = sys_exit;;
-1:	br.sptk.few 1b				// not reached
-END(start_kernel_thread)
+END(cycle_to_nsec)
+#endif /* CONFIG_VIRT_CPU_ACCOUNTING_NATIVE */
 
 #ifdef CONFIG_IA64_BRL_EMU
 
@@ -1123,95 +1075,6 @@ SET_REG(b5);
 #endif /* CONFIG_IA64_BRL_EMU */
 
 #ifdef CONFIG_SMP
-	/*
-	 * This routine handles spinlock contention.  It uses a non-standard calling
-	 * convention to avoid converting leaf routines into interior routines.  Because
-	 * of this special convention, there are several restrictions:
-	 *
-	 * - do not use gp relative variables, this code is called from the kernel
-	 *   and from modules, r1 is undefined.
-	 * - do not use stacked registers, the caller owns them.
-	 * - do not use the scratch stack space, the caller owns it.
-	 * - do not use any registers other than the ones listed below
-	 *
-	 * Inputs:
-	 *   ar.pfs - saved CFM of caller
-	 *   ar.ccv - 0 (and available for use)
-	 *   r27    - flags from spin_lock_irqsave or 0.  Must be preserved.
-	 *   r28    - available for use.
-	 *   r29    - available for use.
-	 *   r30    - available for use.
-	 *   r31    - address of lock, available for use.
-	 *   b6     - return address
-	 *   p14    - available for use.
-	 *   p15    - used to track flag status.
-	 *
-	 * If you patch this code to use more registers, do not forget to update
-	 * the clobber lists for spin_lock() in arch/ia64/include/asm/spinlock.h.
-	 */
-
-#if (__GNUC__ == 3 && __GNUC_MINOR__ < 3)
-
-GLOBAL_ENTRY(ia64_spinlock_contention_pre3_4)
-	.prologue
-	.save ar.pfs, r0	// this code effectively has a zero frame size
-	.save rp, r28
-	.body
-	nop 0
-	tbit.nz p15,p0=r27,IA64_PSR_I_BIT
-	.restore sp		// pop existing prologue after next insn
-	mov b6 = r28
-	.prologue
-	.save ar.pfs, r0
-	.altrp b6
-	.body
-	;;
-(p15)	ssm psr.i		// reenable interrupts if they were on
-				// DavidM says that srlz.d is slow and is not required in this case
-.wait:
-	// exponential backoff, kdb, lockmeter etc. go in here
-	hint @pause
-	ld4 r30=[r31]		// don't use ld4.bias; if it's contended, we won't write the word
-	nop 0
-	;;
-	cmp4.ne p14,p0=r30,r0
-(p14)	br.cond.sptk.few .wait
-(p15)	rsm psr.i		// disable interrupts if we reenabled them
-	br.cond.sptk.few b6	// lock is now free, try to acquire
-	.global ia64_spinlock_contention_pre3_4_end	// for kernprof
-ia64_spinlock_contention_pre3_4_end:
-END(ia64_spinlock_contention_pre3_4)
-
-#else
-
-GLOBAL_ENTRY(ia64_spinlock_contention)
-	.prologue
-	.altrp b6
-	.body
-	tbit.nz p15,p0=r27,IA64_PSR_I_BIT
-	;;
-.wait:
-(p15)	ssm psr.i		// reenable interrupts if they were on
-				// DavidM says that srlz.d is slow and is not required in this case
-.wait2:
-	// exponential backoff, kdb, lockmeter etc. go in here
-	hint @pause
-	ld4 r30=[r31]		// don't use ld4.bias; if it's contended, we won't write the word
-	;;
-	cmp4.ne p14,p0=r30,r0
-	mov r30 = 1
-(p14)	br.cond.sptk.few .wait2
-(p15)	rsm psr.i		// disable interrupts if we reenabled them
-	;;
-	cmpxchg4.acq r30=[r31], r30, ar.ccv
-	;;
-	cmp4.ne p14,p0=r0,r30
-(p14)	br.cond.sptk.few .wait
-
-	br.ret.sptk.many b6	// lock is now taken
-END(ia64_spinlock_contention)
-
-#endif
 
 #ifdef CONFIG_HOTPLUG_CPU
 GLOBAL_ENTRY(ia64_jump_to_sal)
@@ -1235,7 +1098,7 @@ GLOBAL_ENTRY(ia64_jump_to_sal)
 	movl r16=SAL_PSR_BITS_TO_SET;;
 	mov cr.ipsr=r16
 	mov cr.ifs=r0;;
-	rfi;;
+	rfi;;			// note: this unmask MCA/INIT (psr.mc)
 1:
 	/*
 	 * Invalidate all TLB data/inst

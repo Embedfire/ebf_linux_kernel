@@ -1,12 +1,21 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __LINUX_DEBUG_LOCKING_H
 #define __LINUX_DEBUG_LOCKING_H
 
-#include <linux/kernel.h>
+#include <linux/atomic.h>
+#include <linux/bug.h>
+#include <linux/printk.h>
 
 struct task_struct;
 
-extern int debug_locks;
-extern int debug_locks_silent;
+extern int debug_locks __read_mostly;
+extern int debug_locks_silent __read_mostly;
+
+
+static __always_inline int __debug_locks_off(void)
+{
+	return xchg(&debug_locks, 0);
+}
 
 /*
  * Generic 'turn off all lock debugging' function:
@@ -17,9 +26,9 @@ extern int debug_locks_off(void);
 ({									\
 	int __ret = 0;							\
 									\
-	if (unlikely(c)) {						\
+	if (!oops_in_progress && unlikely(c)) {				\
 		if (debug_locks_off() && !debug_locks_silent)		\
-			WARN_ON(1);					\
+			WARN(1, "DEBUG_LOCKS_WARN_ON(%s)", #c);		\
 		__ret = 1;						\
 	}								\
 	__ret;								\
@@ -41,16 +50,11 @@ struct task_struct;
 
 #ifdef CONFIG_LOCKDEP
 extern void debug_show_all_locks(void);
-extern void __debug_show_held_locks(struct task_struct *task);
 extern void debug_show_held_locks(struct task_struct *task);
 extern void debug_check_no_locks_freed(const void *from, unsigned long len);
-extern void debug_check_no_locks_held(struct task_struct *task);
+extern void debug_check_no_locks_held(void);
 #else
 static inline void debug_show_all_locks(void)
-{
-}
-
-static inline void __debug_show_held_locks(struct task_struct *task)
 {
 }
 
@@ -64,7 +68,7 @@ debug_check_no_locks_freed(const void *from, unsigned long len)
 }
 
 static inline void
-debug_check_no_locks_held(struct task_struct *task)
+debug_check_no_locks_held(void)
 {
 }
 #endif

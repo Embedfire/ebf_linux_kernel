@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	fs/bfs/file.c
  *	BFS file operations.
- *	Copyright (C) 1999,2000 Tigran Aivazian <tigran@veritas.com>
+ *	Copyright (C) 1999-2018 Tigran Aivazian <aivazian.tigran@gmail.com>
  *
  *	Make the file block allocation algorithm understand the size
  *	of the underlying block device.
@@ -11,7 +12,6 @@
 
 #include <linux/fs.h>
 #include <linux/buffer_head.h>
-#include <linux/smp_lock.h>
 #include "bfs.h"
 
 #undef DEBUG
@@ -24,10 +24,8 @@
 
 const struct file_operations bfs_file_operations = {
 	.llseek 	= generic_file_llseek,
-	.read		= do_sync_read,
-	.aio_read	= generic_file_aio_read,
-	.write		= do_sync_write,
-	.aio_write	= generic_file_aio_write,
+	.read_iter	= generic_file_read_iter,
+	.write_iter	= generic_file_write_iter,
 	.mmap		= generic_file_mmap,
 	.splice_read	= generic_file_splice_read,
 };
@@ -71,7 +69,6 @@ static int bfs_get_block(struct inode *inode, sector_t block,
 	struct super_block *sb = inode->i_sb;
 	struct bfs_sb_info *info = BFS_SB(sb);
 	struct bfs_inode_info *bi = BFS_I(inode);
-	struct buffer_head *sbh = info->si_sbh;
 
 	phys = bi->i_sblock + block;
 	if (!create) {
@@ -113,7 +110,6 @@ static int bfs_get_block(struct inode *inode, sector_t block,
 		info->si_freeb -= phys - bi->i_eblock;
 		info->si_lf_eblk = bi->i_eblock = phys;
 		mark_inode_dirty(inode);
-		mark_buffer_dirty(sbh);
 		err = 0;
 		goto out;
 	}
@@ -148,7 +144,6 @@ static int bfs_get_block(struct inode *inode, sector_t block,
 	 */
 	info->si_freeb -= bi->i_eblock - bi->i_sblock + 1 - inode->i_blocks;
 	mark_inode_dirty(inode);
-	mark_buffer_dirty(sbh);
 	map_bh(bh_result, sb, phys);
 out:
 	mutex_unlock(&info->bfs_lock);
@@ -165,13 +160,26 @@ static int bfs_readpage(struct file *file, struct page *page)
 	return block_read_full_page(page, bfs_get_block);
 }
 
+static void bfs_write_failed(struct address_space *mapping, loff_t to)
+{
+	struct inode *inode = mapping->host;
+
+	if (to > inode->i_size)
+		truncate_pagecache(inode, inode->i_size);
+}
+
 static int bfs_write_begin(struct file *file, struct address_space *mapping,
 			loff_t pos, unsigned len, unsigned flags,
 			struct page **pagep, void **fsdata)
 {
-	*pagep = NULL;
-	return block_write_begin(file, mapping, pos, len, flags,
-					pagep, fsdata, bfs_get_block);
+	int ret;
+
+	ret = block_write_begin(mapping, pos, len, flags, pagep,
+				bfs_get_block);
+	if (unlikely(ret))
+		bfs_write_failed(mapping, pos + len);
+
+	return ret;
 }
 
 static sector_t bfs_bmap(struct address_space *mapping, sector_t block)
@@ -182,7 +190,6 @@ static sector_t bfs_bmap(struct address_space *mapping, sector_t block)
 const struct address_space_operations bfs_aops = {
 	.readpage	= bfs_readpage,
 	.writepage	= bfs_writepage,
-	.sync_page	= block_sync_page,
 	.write_begin	= bfs_write_begin,
 	.write_end	= generic_write_end,
 	.bmap		= bfs_bmap,

@@ -1,28 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * IUCV special message driver
  *
- * Copyright 2003 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ * Copyright IBM Corp. 2003, 2009
+ *
  * Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/device.h>
+#include <linux/slab.h>
 #include <net/iucv/iucv.h>
 #include <asm/cpcmd.h>
 #include <asm/ebcdic.h>
@@ -30,9 +19,9 @@
 
 struct smsg_callback {
 	struct list_head list;
-	char *prefix;
+	const char *prefix;
 	int len;
-	void (*callback)(char *from, char *str);
+	void (*callback)(const char *from, char *str);
 };
 
 MODULE_AUTHOR
@@ -44,7 +33,7 @@ static struct iucv_path *smsg_path;
 static DEFINE_SPINLOCK(smsg_list_lock);
 static LIST_HEAD(smsg_list);
 
-static int smsg_path_pending(struct iucv_path *, u8 ipvmid[8], u8 ipuser[16]);
+static int smsg_path_pending(struct iucv_path *, u8 *, u8 *);
 static void smsg_message_pending(struct iucv_path *, struct iucv_message *);
 
 static struct iucv_handler smsg_handler = {
@@ -52,10 +41,9 @@ static struct iucv_handler smsg_handler = {
 	.message_pending = smsg_message_pending,
 };
 
-static int smsg_path_pending(struct iucv_path *path, u8 ipvmid[8],
-			     u8 ipuser[16])
+static int smsg_path_pending(struct iucv_path *path, u8 *ipvmid, u8 *ipuser)
 {
-	if (strncmp(ipvmid, "*MSG    ", sizeof(ipvmid)) != 0)
+	if (strncmp(ipvmid, "*MSG    ", 8) != 0)
 		return -EINVAL;
 	/* Path pending from *MSG. */
 	return iucv_path_accept(path, &smsg_handler, "SMSGIUCV        ", NULL);
@@ -97,8 +85,8 @@ static void smsg_message_pending(struct iucv_path *path,
 	kfree(buffer);
 }
 
-int smsg_register_callback(char *prefix,
-			   void (*callback)(char *from, char *str))
+int smsg_register_callback(const char *prefix,
+			   void (*callback)(const char *from, char *str))
 {
 	struct smsg_callback *cb;
 
@@ -114,8 +102,9 @@ int smsg_register_callback(char *prefix,
 	return 0;
 }
 
-void smsg_unregister_callback(char *prefix,
-			      void (*callback)(char *from, char *str))
+void smsg_unregister_callback(const char *prefix,
+			      void (*callback)(const char *from,
+					       char *str))
 {
 	struct smsg_callback *cb, *tmp;
 
@@ -133,13 +122,14 @@ void smsg_unregister_callback(char *prefix,
 }
 
 static struct device_driver smsg_driver = {
-	.name = "SMSGIUCV",
+	.owner = THIS_MODULE,
+	.name = SMSGIUCV_DRV_NAME,
 	.bus  = &iucv_bus,
 };
 
 static void __exit smsg_exit(void)
 {
-	cpcmd("SET SMSG IUCV", NULL, 0, NULL);
+	cpcmd("SET SMSG OFF", NULL, 0, NULL);
 	iucv_unregister(&smsg_handler, 1);
 	driver_unregister(&smsg_driver);
 }
@@ -166,12 +156,14 @@ static int __init smsg_init(void)
 	rc = iucv_path_connect(smsg_path, &smsg_handler, "*MSG    ",
 			       NULL, NULL, NULL);
 	if (rc)
-		goto out_free;
+		goto out_free_path;
+
 	cpcmd("SET SMSG IUCV", NULL, 0, NULL);
 	return 0;
 
-out_free:
+out_free_path:
 	iucv_path_free(smsg_path);
+	smsg_path = NULL;
 out_register:
 	iucv_unregister(&smsg_handler, 1);
 out_driver:

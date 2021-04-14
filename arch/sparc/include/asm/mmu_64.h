@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __MMU_H
 #define __MMU_H
 
@@ -30,22 +31,8 @@
 #define CTX_PGSZ_MASK		((CTX_PGSZ_BITS << CTX_PGSZ0_SHIFT) | \
 				 (CTX_PGSZ_BITS << CTX_PGSZ1_SHIFT))
 
-#if defined(CONFIG_SPARC64_PAGE_SIZE_8KB)
 #define CTX_PGSZ_BASE	CTX_PGSZ_8KB
-#elif defined(CONFIG_SPARC64_PAGE_SIZE_64KB)
-#define CTX_PGSZ_BASE	CTX_PGSZ_64KB
-#else
-#error No page size specified in kernel configuration
-#endif
-
-#if defined(CONFIG_HUGETLB_PAGE_SIZE_4MB)
-#define CTX_PGSZ_HUGE		CTX_PGSZ_4MB
-#elif defined(CONFIG_HUGETLB_PAGE_SIZE_512K)
-#define CTX_PGSZ_HUGE		CTX_PGSZ_512KB
-#elif defined(CONFIG_HUGETLB_PAGE_SIZE_64K)
-#define CTX_PGSZ_HUGE		CTX_PGSZ_64KB
-#endif
-
+#define CTX_PGSZ_HUGE	CTX_PGSZ_4MB
 #define CTX_PGSZ_KERN	CTX_PGSZ_4MB
 
 /* Thus, when running on UltraSPARC-III+ and later, we use the following
@@ -66,7 +53,7 @@
 #define CTX_NR_MASK		TAG_CONTEXT_BITS
 #define CTX_HW_MASK		(CTX_NR_MASK | CTX_PGSZ_MASK)
 
-#define CTX_FIRST_VERSION	((_AC(1,UL) << CTX_VERSION_SHIFT) + _AC(1,UL))
+#define CTX_FIRST_VERSION	BIT(CTX_VERSION_SHIFT)
 #define CTX_VALID(__ctx)	\
 	 (!(((__ctx.sparc64_ctx_val) ^ tlb_context_cache) & CTX_VERSION_MASK))
 #define CTX_HWBITS(__ctx)	((__ctx.sparc64_ctx_val) & CTX_HW_MASK)
@@ -81,9 +68,9 @@ struct tsb {
 	unsigned long pte;
 } __attribute__((aligned(TSB_ENTRY_ALIGNMENT)));
 
-extern void __tsb_insert(unsigned long ent, unsigned long tag, unsigned long pte);
-extern void tsb_flush(unsigned long ent, unsigned long tag);
-extern void tsb_init(struct tsb *tsb, unsigned long size);
+void __tsb_insert(unsigned long ent, unsigned long tag, unsigned long pte);
+void tsb_flush(unsigned long ent, unsigned long tag);
+void tsb_init(struct tsb *tsb, unsigned long size);
 
 struct tsb_config {
 	struct tsb		*tsb;
@@ -96,19 +83,38 @@ struct tsb_config {
 
 #define MM_TSB_BASE	0
 
-#ifdef CONFIG_HUGETLB_PAGE
+#if defined(CONFIG_HUGETLB_PAGE) || defined(CONFIG_TRANSPARENT_HUGEPAGE)
 #define MM_TSB_HUGE	1
 #define MM_NUM_TSBS	2
 #else
 #define MM_NUM_TSBS	1
 #endif
 
+/* ADI tags are stored when a page is swapped out and the storage for
+ * tags is allocated dynamically. There is a tag storage descriptor
+ * associated with each set of tag storage pages. Tag storage descriptors
+ * are allocated dynamically. Since kernel will allocate a full page for
+ * each tag storage descriptor, we can store up to
+ * PAGE_SIZE/sizeof(tag storage descriptor) descriptors on that page.
+ */
+typedef struct {
+	unsigned long	start;		/* Start address for this tag storage */
+	unsigned long	end;		/* Last address for tag storage */
+	unsigned char	*tags;		/* Where the tags are */
+	unsigned long	tag_users;	/* number of references to descriptor */
+} tag_storage_desc_t;
+
 typedef struct {
 	spinlock_t		lock;
 	unsigned long		sparc64_ctx_val;
-	unsigned long		huge_pte_count;
+	unsigned long		hugetlb_pte_count;
+	unsigned long		thp_pte_count;
 	struct tsb_config	tsb_block[MM_NUM_TSBS];
 	struct hv_tsb_descr	tsb_descr[MM_NUM_TSBS];
+	void			*vdso;
+	bool			adi;
+	tag_storage_desc_t	*tag_store;
+	spinlock_t		tag_lock;
 } mm_context_t;
 
 #endif /* !__ASSEMBLY__ */

@@ -1,25 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef __SOUND_CS4231_REGS_H
 #define __SOUND_CS4231_REGS_H
 
 /*
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Definitions for CS4231 & InterWave chips & compatible chips registers
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 /* IO ports */
@@ -70,7 +55,6 @@
 #define AD1845_PWR_DOWN		0x1b	/* power down control */
 #define CS4235_LEFT_MASTER	0x1b	/* left master output control */
 #define CS4231_REC_FORMAT	0x1c	/* clock and data format - record - bits 7-0 MCE */
-#define CS4231_PLY_VAR_FREQ	0x1d	/* playback variable frequency */
 #define AD1845_CLOCK		0x1d	/* crystal clock select and total power down */
 #define CS4235_RIGHT_MASTER	0x1d	/* right master output control */
 #define CS4231_REC_UPR_CNT	0x1e	/* record upper count */

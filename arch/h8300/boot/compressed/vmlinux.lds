@@ -1,10 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 SECTIONS
 {
         .text :
         {
         __stext = . ;
 	__text = .;
-	       *(.text.startup)
+	       *(.text..startup)
 	       *(.text)
         __etext = . ;
         }
@@ -13,20 +14,22 @@ SECTIONS
 	{
 		*(.rodata)
 	}
+        . = ALIGN(0x4) ;
         .data :
 
         {
+        . = ALIGN(0x4) ;
         __sdata = . ;
         ___data_start = . ;
                 *(.data.*)
 	}
+        . = ALIGN(0x4) ;
         .bss :
         {
-        . = ALIGN(0x4) ;
         __sbss = . ;
                 *(.bss*)
         . = ALIGN(0x4) ;
         __ebss = . ;
-        __end = . ;
         }
+        _end = . ;
 }

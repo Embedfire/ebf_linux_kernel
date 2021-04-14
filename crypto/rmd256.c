@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Cryptographic API.
  *
@@ -5,19 +6,12 @@
  *
  * Based on the reference implementation by Antoon Bosselaers, ESAT-COSIC
  *
- * Copyright (c) 2008 Adrian-Ken Rueegsegger <rueegsegger (at) swiss-it.ch>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
+ * Copyright (c) 2008 Adrian-Ken Rueegsegger <ken@codelabs.ch>
  */
+#include <crypto/internal/hash.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/mm.h>
-#include <linux/crypto.h>
-#include <linux/cryptohash.h>
 #include <linux/types.h>
 #include <asm/byteorder.h>
 
@@ -50,7 +44,7 @@ struct rmd256_ctx {
 
 static void rmd256_transform(u32 *state, const __le32 *in)
 {
-	u32 aa, bb, cc, dd, aaa, bbb, ccc, ddd, tmp;
+	u32 aa, bb, cc, dd, aaa, bbb, ccc, ddd;
 
 	/* Initialize left lane */
 	aa = state[0];
@@ -101,7 +95,7 @@ static void rmd256_transform(u32 *state, const __le32 *in)
 	ROUND(bbb, ccc, ddd, aaa, F4, KK1, in[12],  6);
 
 	/* Swap contents of "a" registers */
-	tmp = aa; aa = aaa; aaa = tmp;
+	swap(aa, aaa);
 
 	/* round 2: left lane */
 	ROUND(aa, bb, cc, dd, F2, K2, in[7],   7);
@@ -140,7 +134,7 @@ static void rmd256_transform(u32 *state, const __le32 *in)
 	ROUND(bbb, ccc, ddd, aaa, F3, KK2, in[2],  11);
 
 	/* Swap contents of "b" registers */
-	tmp = bb; bb = bbb; bbb = tmp;
+	swap(bb, bbb);
 
 	/* round 3: left lane */
 	ROUND(aa, bb, cc, dd, F3, K3, in[3],  11);
@@ -179,7 +173,7 @@ static void rmd256_transform(u32 *state, const __le32 *in)
 	ROUND(bbb, ccc, ddd, aaa, F2, KK3, in[13],  5);
 
 	/* Swap contents of "c" registers */
-	tmp = cc; cc = ccc; ccc = tmp;
+	swap(cc, ccc);
 
 	/* round 4: left lane */
 	ROUND(aa, bb, cc, dd, F4, K4, in[1],  11);
@@ -218,7 +212,7 @@ static void rmd256_transform(u32 *state, const __le32 *in)
 	ROUND(bbb, ccc, ddd, aaa, F1, KK4, in[14],  8);
 
 	/* Swap contents of "d" registers */
-	tmp = dd; dd = ddd; ddd = tmp;
+	swap(dd, ddd);
 
 	/* combine results */
 	state[0] += aa;
@@ -229,13 +223,11 @@ static void rmd256_transform(u32 *state, const __le32 *in)
 	state[5] += bbb;
 	state[6] += ccc;
 	state[7] += ddd;
-
-	return;
 }
 
-static void rmd256_init(struct crypto_tfm *tfm)
+static int rmd256_init(struct shash_desc *desc)
 {
-	struct rmd256_ctx *rctx = crypto_tfm_ctx(tfm);
+	struct rmd256_ctx *rctx = shash_desc_ctx(desc);
 
 	rctx->byte_count = 0;
 
@@ -249,12 +241,14 @@ static void rmd256_init(struct crypto_tfm *tfm)
 	rctx->state[7] = RMD_H8;
 
 	memset(rctx->buffer, 0, sizeof(rctx->buffer));
+
+	return 0;
 }
 
-static void rmd256_update(struct crypto_tfm *tfm, const u8 *data,
-			  unsigned int len)
+static int rmd256_update(struct shash_desc *desc, const u8 *data,
+			 unsigned int len)
 {
-	struct rmd256_ctx *rctx = crypto_tfm_ctx(tfm);
+	struct rmd256_ctx *rctx = shash_desc_ctx(desc);
 	const u32 avail = sizeof(rctx->buffer) - (rctx->byte_count & 0x3f);
 
 	rctx->byte_count += len;
@@ -263,7 +257,7 @@ static void rmd256_update(struct crypto_tfm *tfm, const u8 *data,
 	if (avail > len) {
 		memcpy((char *)rctx->buffer + (sizeof(rctx->buffer) - avail),
 		       data, len);
-		return;
+		goto out;
 	}
 
 	memcpy((char *)rctx->buffer + (sizeof(rctx->buffer) - avail),
@@ -281,12 +275,15 @@ static void rmd256_update(struct crypto_tfm *tfm, const u8 *data,
 	}
 
 	memcpy(rctx->buffer, data, len);
+
+out:
+	return 0;
 }
 
 /* Add padding and return the message digest. */
-static void rmd256_final(struct crypto_tfm *tfm, u8 *out)
+static int rmd256_final(struct shash_desc *desc, u8 *out)
 {
-	struct rmd256_ctx *rctx = crypto_tfm_ctx(tfm);
+	struct rmd256_ctx *rctx = shash_desc_ctx(desc);
 	u32 i, index, padlen;
 	__le64 bits;
 	__le32 *dst = (__le32 *)out;
@@ -297,10 +294,10 @@ static void rmd256_final(struct crypto_tfm *tfm, u8 *out)
 	/* Pad out to 56 mod 64 */
 	index = rctx->byte_count & 0x3f;
 	padlen = (index < 56) ? (56 - index) : ((64+56) - index);
-	rmd256_update(tfm, padding, padlen);
+	rmd256_update(desc, padding, padlen);
 
 	/* Append length */
-	rmd256_update(tfm, (const u8 *)&bits, sizeof(bits));
+	rmd256_update(desc, (const u8 *)&bits, sizeof(bits));
 
 	/* Store state in digest */
 	for (i = 0; i < 8; i++)
@@ -308,37 +305,38 @@ static void rmd256_final(struct crypto_tfm *tfm, u8 *out)
 
 	/* Wipe context */
 	memset(rctx, 0, sizeof(*rctx));
+
+	return 0;
 }
 
-static struct crypto_alg alg = {
-	.cra_name	 =	"rmd256",
-	.cra_driver_name =	"rmd256",
-	.cra_flags	 =	CRYPTO_ALG_TYPE_DIGEST,
-	.cra_blocksize	 =	RMD256_BLOCK_SIZE,
-	.cra_ctxsize	 =	sizeof(struct rmd256_ctx),
-	.cra_module	 =	THIS_MODULE,
-	.cra_list	 =	LIST_HEAD_INIT(alg.cra_list),
-	.cra_u		 =	{ .digest = {
-	.dia_digestsize	 =	RMD256_DIGEST_SIZE,
-	.dia_init	 =	rmd256_init,
-	.dia_update	 =	rmd256_update,
-	.dia_final	 =	rmd256_final } }
+static struct shash_alg alg = {
+	.digestsize	=	RMD256_DIGEST_SIZE,
+	.init		=	rmd256_init,
+	.update		=	rmd256_update,
+	.final		=	rmd256_final,
+	.descsize	=	sizeof(struct rmd256_ctx),
+	.base		=	{
+		.cra_name	 =	"rmd256",
+		.cra_driver_name =	"rmd256-generic",
+		.cra_blocksize	 =	RMD256_BLOCK_SIZE,
+		.cra_module	 =	THIS_MODULE,
+	}
 };
 
 static int __init rmd256_mod_init(void)
 {
-	return crypto_register_alg(&alg);
+	return crypto_register_shash(&alg);
 }
 
 static void __exit rmd256_mod_fini(void)
 {
-	crypto_unregister_alg(&alg);
+	crypto_unregister_shash(&alg);
 }
 
-module_init(rmd256_mod_init);
+subsys_initcall(rmd256_mod_init);
 module_exit(rmd256_mod_fini);
 
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Adrian-Ken Rueegsegger <ken@codelabs.ch>");
 MODULE_DESCRIPTION("RIPEMD-256 Message Digest");
-
-MODULE_ALIAS("rmd256");
+MODULE_ALIAS_CRYPTO("rmd256");

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __LINUX_PARPORT_PC_H
 #define __LINUX_PARPORT_PC_H
 
@@ -228,10 +229,11 @@ extern void parport_pc_release_resources(struct parport *p);
 extern int parport_pc_claim_resources(struct parport *p);
 
 /* PCMCIA code will want to get us to look at a port.  Provide a mechanism. */
-extern struct parport *parport_pc_probe_port (unsigned long base,
-					      unsigned long base_hi,
-					      int irq, int dma,
-					      struct device *dev);
-extern void parport_pc_unregister_port (struct parport *p);
+extern struct parport *parport_pc_probe_port(unsigned long base,
+					     unsigned long base_hi,
+					     int irq, int dma,
+					     struct device *dev,
+					     int irqflags);
+extern void parport_pc_unregister_port(struct parport *p);
 
 #endif

@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2020 FriendlyElec Computer Tech. Co., Ltd.
+ * (http://www.friendlyarm.com)
+ */
+
+/dts-v1/;
+#include "rk3328-nanopi-r2-common.dtsi"
+
+/ {
+	model = "FriendlyElec NanoPi R2S";
+	compatible = "friendlyelec,nanopi-r2", "rockchip,rk3328";
+
+	vcc_rtl8153: vcc-rtl8153-regulator {
+		compatible = "regulator-fixed";
+		gpio = <&gpio2 RK_PC6 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&usb30_en_drv>;
+		regulator-always-on;
+		regulator-name = "vcc_rtl8153";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		off-on-delay-us = <5000>;
+		enable-active-high;
+	};
+};
+
+&mach {
+	hwrev = <0>;
+	model = "NanoPi R2S";
+};
+
+&leds {
+	status = "okay";
+
+	led@2 {
+		gpios = <&gpio2 RK_PB7 GPIO_ACTIVE_HIGH>;
+		label = "lan_led";
+	};
+
+	led@3 {
+		gpios = <&gpio2 RK_PC2 GPIO_ACTIVE_HIGH>;
+		label = "wan_led";
+	};
+};
+
+&leds_gpio {
+	rockchip,pins =
+		<0 RK_PA2 RK_FUNC_GPIO &pcfg_pull_none>,
+		<2 RK_PB7 RK_FUNC_GPIO &pcfg_pull_none>,
+		<2 RK_PC2 RK_FUNC_GPIO &pcfg_pull_none>;
+};
+
+&vccio_sd {
+	status = "okay";
+};
+
+&io_domains {
+	vccio3-supply = <&vccio_sd>;
+};
+
+&sdmmc {
+	vqmmc-supply = <&vccio_sd>;
+	max-frequency = <150000000>;
+	sd-uhs-sdr50;
+	sd-uhs-sdr104;
+	status = "okay";
+};
+
+&uart1 {
+	status = "okay";
+	pinctrl-0 = <&uart1_xfer>;
+};

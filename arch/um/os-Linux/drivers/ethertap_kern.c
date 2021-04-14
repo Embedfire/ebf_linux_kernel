@@ -1,15 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2001 Lennert Buytenhek (buytenh@gnu.org) and
  * James Leu (jleu@mindspring.net).
  * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Copyright (C) 2001 by various other people who didn't put their name here.
- * Licensed under the GPL.
  */
 
 #include <linux/init.h>
 #include <linux/netdevice.h>
 #include "etap.h"
-#include "net_kern.h"
+#include <net_kern.h>
 
 struct ethertap_init {
 	char *dev_name;
@@ -22,7 +22,7 @@ static void etap_init(struct net_device *dev, void *data)
 	struct ethertap_data *epri;
 	struct ethertap_init *init = data;
 
-	pri = dev->priv;
+	pri = netdev_priv(dev);
 	epri = (struct ethertap_data *) pri->user;
 	epri->dev_name = init->dev_name;
 	epri->gate_addr = init->gate_addr;

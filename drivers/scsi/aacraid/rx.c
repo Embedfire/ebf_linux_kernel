@@ -1,31 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	Adaptec AAC series RAID controller driver
- *	(c) Copyright 2001 Red Hat Inc.	<alan@redhat.com>
+ *	(c) Copyright 2001 Red Hat Inc.
  *
  * based on the old aacraid driver that is..
  * Adaptec aacraid device driver for Linux.
  *
- * Copyright (c) 2000-2007 Adaptec, Inc. (aacraid@adaptec.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; see the file COPYING.  If not, write to
- * the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Copyright (c) 2000-2010 Adaptec, Inc.
+ *               2010-2015 PMC-Sierra, Inc. (aacraid@pmc-sierra.com)
+ *		 2016-2017 Microsemi Corp. (aacraid@microsemi.com)
  *
  * Module Name:
  *  rx.c
  *
  * Abstract: Hardware miniport for Drawbridge specific hardware functions.
- *
  */
 
 #include <linux/kernel.h>
@@ -33,7 +21,6 @@
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
-#include <linux/slab.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/completion.h>
@@ -85,15 +72,35 @@ static irqreturn_t aac_rx_intr_producer(int irq, void *dev_id)
 
 static irqreturn_t aac_rx_intr_message(int irq, void *dev_id)
 {
+	int isAif, isFastResponse, isSpecial;
 	struct aac_dev *dev = dev_id;
 	u32 Index = rx_readl(dev, MUnit.OutboundQueue);
 	if (unlikely(Index == 0xFFFFFFFFL))
 		Index = rx_readl(dev, MUnit.OutboundQueue);
 	if (likely(Index != 0xFFFFFFFFL)) {
 		do {
-			if (unlikely(aac_intr_normal(dev, Index))) {
-				rx_writel(dev, MUnit.OutboundQueue, Index);
-				rx_writel(dev, MUnit.ODR, DoorBellAdapterNormRespReady);
+			isAif = isFastResponse = isSpecial = 0;
+			if (Index & 0x00000002L) {
+				isAif = 1;
+				if (Index == 0xFFFFFFFEL)
+					isSpecial = 1;
+				Index &= ~0x00000002L;
+			} else {
+				if (Index & 0x00000001L)
+					isFastResponse = 1;
+				Index >>= 2;
+			}
+			if (!isSpecial) {
+				if (unlikely(aac_intr_normal(dev,
+						Index, isAif,
+						isFastResponse, NULL))) {
+					rx_writel(dev,
+						MUnit.OutboundQueue,
+						Index);
+					rx_writel(dev,
+						MUnit.ODR,
+						DoorBellAdapterNormRespReady);
+				}
 			}
 			Index = rx_readl(dev, MUnit.OutboundQueue);
 		} while (Index != 0xFFFFFFFFL);
@@ -137,7 +144,16 @@ static void aac_rx_enable_interrupt_message(struct aac_dev *dev)
  *	@dev: Adapter
  *	@command: Command to execute
  *	@p1: first parameter
- *	@ret: adapter status
+ *	@p2: second parameter
+ *	@p3: third parameter
+ *	@p4: forth parameter
+ *	@p5: fifth parameter
+ *	@p6: sixth parameter
+ *	@status: adapter status
+ *	@r1: first return value
+ *	@r2: second return value
+ *	@r3: third return value
+ *	@r4: forth return value
  *
  *	This routine will send a synchronous command to the adapter and wait 
  *	for its	completion.
@@ -295,10 +311,10 @@ static void aac_rx_notify_adapter(struct aac_dev *dev, u32 event)
 
 static void aac_rx_start_adapter(struct aac_dev *dev)
 {
-	struct aac_init *init;
+	union aac_init *init;
 
 	init = dev->init;
-	init->HostElapsedSeconds = cpu_to_le32(get_seconds());
+	init->r7.host_elapsed_seconds = cpu_to_le32(ktime_get_real_seconds());
 	// We can only use a 32 bit address here
 	rx_sync_cmd(dev, INIT_STRUCT_BASE_ADDRESS, (u32)(ulong)dev->init_pa,
 	  0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, NULL);
@@ -334,14 +350,16 @@ static int aac_rx_check_health(struct aac_dev *dev)
 
 		if (likely((status & 0xFF000000L) == 0xBC000000L))
 			return (status >> 16) & 0xFF;
-		buffer = pci_alloc_consistent(dev->pdev, 512, &baddr);
+		buffer = dma_alloc_coherent(&dev->pdev->dev, 512, &baddr,
+					    GFP_KERNEL);
 		ret = -2;
 		if (unlikely(buffer == NULL))
 			return ret;
-		post = pci_alloc_consistent(dev->pdev,
-		  sizeof(struct POSTSTATUS), &paddr);
+		post = dma_alloc_coherent(&dev->pdev->dev,
+					  sizeof(struct POSTSTATUS), &paddr,
+					  GFP_KERNEL);
 		if (unlikely(post == NULL)) {
-			pci_free_consistent(dev->pdev, 512, buffer, baddr);
+			dma_free_coherent(&dev->pdev->dev, 512, buffer, baddr);
 			return ret;
 		}
 		memset(buffer, 0, 512);
@@ -350,14 +368,13 @@ static int aac_rx_check_health(struct aac_dev *dev)
 		rx_writel(dev, MUnit.IMRx[0], paddr);
 		rx_sync_cmd(dev, COMMAND_POST_RESULTS, baddr, 0, 0, 0, 0, 0,
 		  NULL, NULL, NULL, NULL, NULL);
-		pci_free_consistent(dev->pdev, sizeof(struct POSTSTATUS),
-		  post, paddr);
+		dma_free_coherent(&dev->pdev->dev, sizeof(struct POSTSTATUS),
+				  post, paddr);
 		if (likely((buffer[0] == '0') && ((buffer[1] == 'x') || (buffer[1] == 'X')))) {
-			ret = (buffer[2] <= '9') ? (buffer[2] - '0') : (buffer[2] - 'A' + 10);
-			ret <<= 4;
-			ret += (buffer[3] <= '9') ? (buffer[3] - '0') : (buffer[3] - 'A' + 10);
+			ret = (hex_to_bin(buffer[2]) << 4) +
+				hex_to_bin(buffer[3]);
 		}
-		pci_free_consistent(dev->pdev, 512, buffer, baddr);
+		dma_free_coherent(&dev->pdev->dev, 512, buffer, baddr);
 		return ret;
 	}
 	/*
@@ -381,16 +398,13 @@ int aac_rx_deliver_producer(struct fib * fib)
 {
 	struct aac_dev *dev = fib->dev;
 	struct aac_queue *q = &dev->queues->queue[AdapNormCmdQueue];
-	unsigned long qflags;
 	u32 Index;
 	unsigned long nointr = 0;
 
-	spin_lock_irqsave(q->lock, qflags);
 	aac_queue_get( dev, &Index, AdapNormCmdQueue, fib->hw_fib_va, 1, fib, &nointr);
 
-	q->numpending++;
+	atomic_inc(&q->numpending);
 	*(q->headers.producer) = cpu_to_le32(Index + 1);
-	spin_unlock_irqrestore(q->lock, qflags);
 	if (!(nointr & aac_config.irq_mod))
 		aac_adapter_notify(dev, AdapNormCmdQueue);
 
@@ -407,15 +421,12 @@ static int aac_rx_deliver_message(struct fib * fib)
 {
 	struct aac_dev *dev = fib->dev;
 	struct aac_queue *q = &dev->queues->queue[AdapNormCmdQueue];
-	unsigned long qflags;
 	u32 Index;
 	u64 addr;
 	volatile void __iomem *device;
 
 	unsigned long count = 10000000L; /* 50 seconds */
-	spin_lock_irqsave(q->lock, qflags);
-	q->numpending++;
-	spin_unlock_irqrestore(q->lock, qflags);
+	atomic_inc(&q->numpending);
 	for(;;) {
 		Index = rx_readl(dev, MUnit.InboundQueue);
 		if (unlikely(Index == 0xFFFFFFFFL))
@@ -423,9 +434,7 @@ static int aac_rx_deliver_message(struct fib * fib)
 		if (likely(Index != 0xFFFFFFFFL))
 			break;
 		if (--count == 0) {
-			spin_lock_irqsave(q->lock, qflags);
-			q->numpending--;
-			spin_unlock_irqrestore(q->lock, qflags);
+			atomic_dec(&q->numpending);
 			return -ETIMEDOUT;
 		}
 		udelay(5);
@@ -443,6 +452,7 @@ static int aac_rx_deliver_message(struct fib * fib)
 
 /**
  *	aac_rx_ioremap
+ *	@dev: adapter
  *	@size: mapping resize request
  *
  */
@@ -452,18 +462,18 @@ static int aac_rx_ioremap(struct aac_dev * dev, u32 size)
 		iounmap(dev->regs.rx);
 		return 0;
 	}
-	dev->base = dev->regs.rx = ioremap(dev->scsi_host_ptr->base, size);
+	dev->base = dev->regs.rx = ioremap(dev->base_start, size);
 	if (dev->base == NULL)
 		return -1;
 	dev->IndexRegs = &dev->regs.rx->IndexRegs;
 	return 0;
 }
 
-static int aac_rx_restart_adapter(struct aac_dev *dev, int bled)
+static int aac_rx_restart_adapter(struct aac_dev *dev, int bled, u8 reset_type)
 {
-	u32 var;
+	u32 var = 0;
 
-	if (!(dev->supplement_adapter_info.SupportedOptions2 &
+	if (!(dev->supplement_adapter_info.supported_options2 &
 	  AAC_OPTION_MU_RESET) || (bled >= 0) || (bled == -2)) {
 		if (bled)
 			printk(KERN_ERR "%s%d: adapter kernel panic'd %x.\n",
@@ -481,13 +491,14 @@ static int aac_rx_restart_adapter(struct aac_dev *dev, int bled)
 		if (bled && (bled != -ETIMEDOUT))
 			return -EINVAL;
 	}
-	if (bled || (var == 0x3803000F)) { /* USE_OTHER_METHOD */
+	if (bled && (var == 0x3803000F)) { /* USE_OTHER_METHOD */
 		rx_writel(dev, MUnit.reserved2, 3);
 		msleep(5000); /* Delay 5 seconds */
 		var = 0x00000001;
 	}
-	if (var != 0x00000001)
+	if (bled && (var != 0x00000001))
 		return -EINVAL;
+	ssleep(5);
 	if (rx_readl(dev, MUnit.OMRx[0]) & KERNEL_PANIC)
 		return -ENODEV;
 	if (startup_timeout < 300)
@@ -546,17 +557,23 @@ int _aac_rx_init(struct aac_dev *dev)
 	dev->a_ops.adapter_sync_cmd = rx_sync_cmd;
 	dev->a_ops.adapter_enable_int = aac_rx_disable_interrupt;
 	dev->OIMR = status = rx_readb (dev, MUnit.OIMR);
-	if ((((status & 0x0c) != 0x0c) || aac_reset_devices || reset_devices) &&
-	  !aac_rx_restart_adapter(dev, 0))
-		/* Make sure the Hardware FIFO is empty */
-		while ((++restart < 512) &&
-		  (rx_readl(dev, MUnit.OutboundQueue) != 0xFFFFFFFFL));
+
+	if (((status & 0x0c) != 0x0c) || dev->init_reset) {
+		dev->init_reset = false;
+		if (!aac_rx_restart_adapter(dev, 0, IOP_HWSOFT_RESET)) {
+			/* Make sure the Hardware FIFO is empty */
+			while ((++restart < 512) &&
+			       (rx_readl(dev, MUnit.OutboundQueue) != 0xFFFFFFFFL));
+		}
+	}
+
 	/*
 	 *	Check to see if the board panic'd while booting.
 	 */
 	status = rx_readl(dev, MUnit.OMRx[0]);
 	if (status & KERNEL_PANIC) {
-		if (aac_rx_restart_adapter(dev, aac_rx_check_health(dev)))
+		if (aac_rx_restart_adapter(dev,
+			aac_rx_check_health(dev), IOP_HWSOFT_RESET))
 			goto error_iounmap;
 		++restart;
 	}
@@ -594,7 +611,8 @@ int _aac_rx_init(struct aac_dev *dev)
 		  ((startup_timeout > 60)
 		    ? (startup_timeout - 60)
 		    : (startup_timeout / 2))))) {
-			if (likely(!aac_rx_restart_adapter(dev, aac_rx_check_health(dev))))
+			if (likely(!aac_rx_restart_adapter(dev,
+				aac_rx_check_health(dev), IOP_HWSOFT_RESET)))
 				start = jiffies;
 			++restart;
 		}
@@ -611,6 +629,7 @@ int _aac_rx_init(struct aac_dev *dev)
 	dev->a_ops.adapter_sync_cmd = rx_sync_cmd;
 	dev->a_ops.adapter_check_health = aac_rx_check_health;
 	dev->a_ops.adapter_restart = aac_rx_restart_adapter;
+	dev->a_ops.adapter_start = aac_rx_start_adapter;
 
 	/*
 	 *	First clear out all interrupts.  Then enable the one's that we
@@ -624,15 +643,20 @@ int _aac_rx_init(struct aac_dev *dev)
 	if (aac_init_adapter(dev) == NULL)
 		goto error_iounmap;
 	aac_adapter_comm(dev, dev->comm_interface);
+	dev->sync_mode = 0;	/* sync. mode not supported */
 	dev->msi = aac_msi && !pci_enable_msi(dev->pdev);
 	if (request_irq(dev->pdev->irq, dev->a_ops.adapter_intr,
-			IRQF_SHARED|IRQF_DISABLED, "aacraid", dev) < 0) {
+			IRQF_SHARED, "aacraid", dev) < 0) {
 		if (dev->msi)
 			pci_disable_msi(dev->pdev);
 		printk(KERN_ERR "%s%d: Interrupt unavailable.\n",
 			name, instance);
 		goto error_iounmap;
 	}
+	dev->dbg_base = dev->base_start;
+	dev->dbg_base_mapped = dev->base;
+	dev->dbg_size = dev->base_size;
+
 	aac_adapter_enable_int(dev);
 	/*
 	 *	Tell the adapter that all is configured, and it can

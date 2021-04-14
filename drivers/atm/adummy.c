@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * adummy.c: a dummy ATM driver
  */
@@ -13,9 +14,10 @@
 #include <linux/mm.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 #include <asm/byteorder.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <linux/atmdev.h>
 #include <linux/atm.h>
@@ -38,6 +40,42 @@ struct adummy_dev {
 /* globals */
 
 static LIST_HEAD(adummy_devs);
+
+static ssize_t __set_signal(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t len)
+{
+	struct atm_dev *atm_dev = container_of(dev, struct atm_dev, class_dev);
+	int signal;
+
+	if (sscanf(buf, "%d", &signal) == 1) {
+
+		if (signal < ATM_PHY_SIG_LOST || signal > ATM_PHY_SIG_FOUND)
+			signal = ATM_PHY_SIG_UNKNOWN;
+
+		atm_dev_signal_change(atm_dev, signal);
+		return 1;
+	}
+	return -EINVAL;
+}
+
+static ssize_t __show_signal(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct atm_dev *atm_dev = container_of(dev, struct atm_dev, class_dev);
+	return sprintf(buf, "%d\n", atm_dev->signal);
+}
+static DEVICE_ATTR(signal, 0644, __show_signal, __set_signal);
+
+static struct attribute *adummy_attrs[] = {
+	&dev_attr_signal.attr,
+	NULL
+};
+
+static const struct attribute_group adummy_group_attrs = {
+	.name = NULL, /* We want them in dev's root folder */
+	.attrs = adummy_attrs
+};
 
 static int __init
 adummy_start(struct atm_dev *dev)
@@ -93,7 +131,7 @@ adummy_proc_read(struct atm_dev *dev, loff_t *pos, char *page)
 	return 0;
 }
 
-static struct atmdev_ops adummy_ops =
+static const struct atmdev_ops adummy_ops =
 {
 	.open =		adummy_open,
 	.close =	adummy_close,	
@@ -117,7 +155,7 @@ static int __init adummy_init(void)
 		err = -ENOMEM;
 		goto out;
 	}
-	atm_dev = atm_dev_register(DEV_LABEL, &adummy_ops, -1, NULL);
+	atm_dev = atm_dev_register(DEV_LABEL, NULL, &adummy_ops, -1, NULL);
 	if (!atm_dev) {
 		printk(KERN_ERR DEV_LABEL ": atm_dev_register() failed\n");
 		err = -ENODEV;
@@ -126,6 +164,9 @@ static int __init adummy_init(void)
 
 	adummy_dev->atm_dev = atm_dev;
 	atm_dev->dev_data = adummy_dev;
+
+	if (sysfs_create_group(&atm_dev->class_dev.kobj, &adummy_group_attrs))
+		dev_err(&atm_dev->class_dev, "Could not register attrs for adummy\n");
 
 	if (adummy_start(atm_dev)) {
 		printk(KERN_ERR DEV_LABEL ": adummy_start() failed\n");

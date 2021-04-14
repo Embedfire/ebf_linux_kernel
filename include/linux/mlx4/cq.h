@@ -34,6 +34,7 @@
 #define MLX4_CQ_H
 
 #include <linux/types.h>
+#include <uapi/linux/if_ether.h>
 
 #include <linux/mlx4/device.h>
 #include <linux/mlx4/doorbell.h>
@@ -43,10 +44,15 @@ struct mlx4_cqe {
 	__be32			immed_rss_invalid;
 	__be32			g_mlpath_rqpn;
 	__be16			sl_vid;
-	__be16			rlid;
-	__be16			status;
-	u8			ipv6_ext_mask;
-	u8			badfcs_enc;
+	union {
+		struct {
+			__be16	rlid;
+			__be16  status;
+			u8      ipv6_ext_mask;
+			u8      badfcs_enc;
+		};
+		u8  smac[ETH_ALEN];
+	};
 	__be32			byte_cnt;
 	__be16			wqe_index;
 	__be16			checksum;
@@ -64,9 +70,32 @@ struct mlx4_err_cqe {
 	u8			owner_sr_opcode;
 };
 
+struct mlx4_ts_cqe {
+	__be32			vlan_my_qpn;
+	__be32			immed_rss_invalid;
+	__be32			g_mlpath_rqpn;
+	__be32			timestamp_hi;
+	__be16			status;
+	u8			ipv6_ext_mask;
+	u8			badfcs_enc;
+	__be32			byte_cnt;
+	__be16			wqe_index;
+	__be16			checksum;
+	u8			reserved;
+	__be16			timestamp_lo;
+	u8			owner_sr_opcode;
+} __packed;
+
 enum {
-	MLX4_CQE_VLAN_PRESENT_MASK	= 1 << 29,
+	MLX4_CQE_L2_TUNNEL_IPOK		= 1 << 31,
+	MLX4_CQE_CVLAN_PRESENT_MASK	= 1 << 29,
+	MLX4_CQE_SVLAN_PRESENT_MASK	= 1 << 30,
+	MLX4_CQE_L2_TUNNEL		= 1 << 27,
+	MLX4_CQE_L2_TUNNEL_CSUM		= 1 << 26,
+	MLX4_CQE_L2_TUNNEL_IPV4		= 1 << 25,
+
 	MLX4_CQE_QPN_MASK		= 0xffffff,
+	MLX4_CQE_VID_MASK		= 0xfff,
 };
 
 enum {
@@ -101,11 +130,19 @@ enum {
 	MLX4_CQE_STATUS_IPOK		= 1 << 12,
 };
 
+/* L4_CSUM is logically part of status, but has to checked against badfcs_enc */
+enum {
+	MLX4_CQE_STATUS_L4_CSUM		= 1 << 2,
+};
+
 enum {
 	MLX4_CQE_LLC                     = 1,
 	MLX4_CQE_SNAP                    = 1 << 1,
 	MLX4_CQE_BAD_FCS                 = 1 << 4,
 };
+
+#define MLX4_MAX_CQ_PERIOD (BIT(16) - 1)
+#define MLX4_MAX_CQ_COUNT (BIT(16) - 1)
 
 static inline void mlx4_cq_arm(struct mlx4_cq *cq, u32 cmd,
 			       void __iomem *uar_page,

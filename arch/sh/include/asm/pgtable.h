@@ -1,19 +1,21 @@
-/*
+/* SPDX-License-Identifier: GPL-2.0
+ *
  * This file contains the functions and defines necessary to modify and
  * use the SuperH page table tree.
  *
  * Copyright (C) 1999 Niibe Yutaka
  * Copyright (C) 2002 - 2007 Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General
- * Public License.  See the file "COPYING" in the main directory of this
- * archive for more details.
  */
 #ifndef __ASM_SH_PGTABLE_H
 #define __ASM_SH_PGTABLE_H
 
-#include <asm-generic/pgtable-nopmd.h>
+#ifdef CONFIG_X2TLB
+#include <asm/pgtable-3level.h>
+#else
+#include <asm/pgtable-2level.h>
+#endif
 #include <asm/page.h>
+#include <asm/mmu.h>
 
 #ifndef __ASSEMBLY__
 #include <asm/addrspace.h>
@@ -36,6 +38,12 @@ extern unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)];
 #define	NEFF_SIGN	(1LL << (NEFF - 1))
 #define	NEFF_MASK	(-1LL << NEFF)
 
+static inline unsigned long long neff_sign_extend(unsigned long val)
+{
+	unsigned long long extended = val;
+	return (extended & NEFF_SIGN) ? (extended | NEFF_MASK) : extended;
+}
+
 #ifdef CONFIG_29BIT
 #define NPHYS		29
 #else
@@ -45,50 +53,33 @@ extern unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)];
 #define	NPHYS_SIGN	(1LL << (NPHYS - 1))
 #define	NPHYS_MASK	(-1LL << NPHYS)
 
-/*
- * traditional two-level paging structure
- */
-/* PTE bits */
-#if defined(CONFIG_X2TLB) || defined(CONFIG_SUPERH64)
-# define PTE_MAGNITUDE	3	/* 64-bit PTEs on extended mode SH-X2 TLB */
-#else
-# define PTE_MAGNITUDE	2	/* 32-bit PTEs */
-#endif
-#define PTE_SHIFT	PAGE_SHIFT
-#define PTE_BITS	(PTE_SHIFT - PTE_MAGNITUDE)
-
-/* PGD bits */
-#define PGDIR_SHIFT	(PTE_SHIFT + PTE_BITS)
 #define PGDIR_SIZE	(1UL << PGDIR_SHIFT)
 #define PGDIR_MASK	(~(PGDIR_SIZE-1))
 
 /* Entries per level */
 #define PTRS_PER_PTE	(PAGE_SIZE / (1 << PTE_MAGNITUDE))
-#define PTRS_PER_PGD	(PAGE_SIZE / sizeof(pgd_t))
 
-#define USER_PTRS_PER_PGD	(TASK_SIZE/PGDIR_SIZE)
-#define FIRST_USER_ADDRESS	0
+#define FIRST_USER_ADDRESS	0UL
 
-#ifdef CONFIG_32BIT
-#define PHYS_ADDR_MASK		0xffffffff
-#else
-#define PHYS_ADDR_MASK		0x1fffffff
-#endif
+#define PHYS_ADDR_MASK29		0x1fffffff
+#define PHYS_ADDR_MASK32		0xffffffff
 
-#define PTE_PHYS_MASK		(PHYS_ADDR_MASK & PAGE_MASK)
+static inline unsigned long phys_addr_mask(void)
+{
+	/* Is the MMU in 29bit mode? */
+	if (__in_29bit_mode())
+		return PHYS_ADDR_MASK29;
 
-#ifdef CONFIG_SUPERH32
+	return PHYS_ADDR_MASK32;
+}
+
+#define PTE_PHYS_MASK		(phys_addr_mask() & PAGE_MASK)
+#define PTE_FLAGS_MASK		(~(PTE_PHYS_MASK) << PAGE_SHIFT)
+
 #define VMALLOC_START	(P3SEG)
-#else
-#define VMALLOC_START	(0xf0000000)
-#endif
 #define VMALLOC_END	(FIXADDR_START-2*PAGE_SIZE)
 
-#if defined(CONFIG_SUPERH32)
 #include <asm/pgtable_32.h>
-#else
-#include <asm/pgtable_64.h>
-#endif
 
 /*
  * SH-X and lower (legacy) SuperH parts (SH-3, SH-4, some SH-4A) can't do page
@@ -122,31 +113,59 @@ typedef pte_t *pte_addr_t;
 
 #define kern_addr_valid(addr)	(1)
 
-#define io_remap_pfn_range(vma, vaddr, pfn, size, prot)		\
-		remap_pfn_range(vma, vaddr, pfn, size, prot)
-
 #define pte_pfn(x)		((unsigned long)(((x).pte_low >> PAGE_SHIFT)))
 
-/*
- * No page table caches to initialise
- */
-#define pgtable_cache_init()	do { } while (0)
-
-#if !defined(CONFIG_CACHE_OFF) && (defined(CONFIG_CPU_SH4) || \
-	defined(CONFIG_SH7705_CACHE_32KB))
-struct mm_struct;
-#define __HAVE_ARCH_PTEP_GET_AND_CLEAR
-pte_t ptep_get_and_clear(struct mm_struct *mm, unsigned long addr, pte_t *ptep);
-#endif
-
 struct vm_area_struct;
-extern void update_mmu_cache(struct vm_area_struct * vma,
-			     unsigned long address, pte_t pte);
+struct mm_struct;
+
+extern void __update_cache(struct vm_area_struct *vma,
+			   unsigned long address, pte_t pte);
+extern void __update_tlb(struct vm_area_struct *vma,
+			 unsigned long address, pte_t pte);
+
+static inline void
+update_mmu_cache(struct vm_area_struct *vma, unsigned long address, pte_t *ptep)
+{
+	pte_t pte = *ptep;
+	__update_cache(vma, address, pte);
+	__update_tlb(vma, address, pte);
+}
+
 extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 extern void paging_init(void);
 extern void page_table_range_init(unsigned long start, unsigned long end,
 				  pgd_t *pgd);
 
-#include <asm-generic/pgtable.h>
+static inline bool __pte_access_permitted(pte_t pte, u64 prot)
+{
+	return (pte_val(pte) & (prot | _PAGE_SPECIAL)) == prot;
+}
+
+#ifdef CONFIG_X2TLB
+static inline bool pte_access_permitted(pte_t pte, bool write)
+{
+	u64 prot = _PAGE_PRESENT;
+
+	prot |= _PAGE_EXT(_PAGE_EXT_KERN_READ | _PAGE_EXT_USER_READ);
+	if (write)
+		prot |= _PAGE_EXT(_PAGE_EXT_KERN_WRITE | _PAGE_EXT_USER_WRITE);
+	return __pte_access_permitted(pte, prot);
+}
+#else
+static inline bool pte_access_permitted(pte_t pte, bool write)
+{
+	u64 prot = _PAGE_PRESENT | _PAGE_USER;
+
+	if (write)
+		prot |= _PAGE_RW;
+	return __pte_access_permitted(pte, prot);
+}
+#endif
+
+#define pte_access_permitted pte_access_permitted
+
+/* arch/sh/mm/mmap.c */
+#define HAVE_ARCH_UNMAPPED_AREA
+#define HAVE_ARCH_UNMAPPED_AREA_TOPDOWN
 
 #endif /* __ASM_SH_PGTABLE_H */

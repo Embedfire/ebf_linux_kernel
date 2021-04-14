@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/sh/boards/se/770x/irq.c
  *
@@ -96,13 +97,13 @@ static struct ipr_desc ipr_irq_desc = {
 void __init init_se_IRQ(void)
 {
 	/* Disable all interrupts */
-	ctrl_outw(0, BCR_ILCRA);
-	ctrl_outw(0, BCR_ILCRB);
-	ctrl_outw(0, BCR_ILCRC);
-	ctrl_outw(0, BCR_ILCRD);
-	ctrl_outw(0, BCR_ILCRE);
-	ctrl_outw(0, BCR_ILCRF);
-	ctrl_outw(0, BCR_ILCRG);
+	__raw_writew(0, BCR_ILCRA);
+	__raw_writew(0, BCR_ILCRB);
+	__raw_writew(0, BCR_ILCRC);
+	__raw_writew(0, BCR_ILCRD);
+	__raw_writew(0, BCR_ILCRE);
+	__raw_writew(0, BCR_ILCRF);
+	__raw_writew(0, BCR_ILCRG);
 
 	register_ipr_controller(&ipr_irq_desc);
 }

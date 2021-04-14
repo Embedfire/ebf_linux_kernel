@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * include/net/9p/9p.h
  *
@@ -6,28 +7,10 @@
  *  Copyright (C) 2005 by Latchesar Ionkov <lucho@ionkov.net>
  *  Copyright (C) 2004 by Eric Van Hensbergen <ericvh@gmail.com>
  *  Copyright (C) 2002 by Ron Minnich <rminnich@lanl.gov>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2
- *  as published by the Free Software Foundation.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to:
- *  Free Software Foundation
- *  51 Franklin Street, Fifth Floor
- *  Boston, MA  02111-1301  USA
- *
  */
 
 #ifndef NET_9P_H
 #define NET_9P_H
-
-#ifdef CONFIG_NET_9P_DEBUG
 
 /**
  * enum p9_debug_flags - bits for mount time debug parameter
@@ -39,6 +22,10 @@
  * @P9_DEBUG_TRANS: transport tracing
  * @P9_DEBUG_SLABS: memory management tracing
  * @P9_DEBUG_FCALL: verbose dump of protocol messages
+ * @P9_DEBUG_FID: fid allocation/deallocation tracking
+ * @P9_DEBUG_PKT: packet marshalling/unmarshalling
+ * @P9_DEBUG_FSC: FS-cache tracing
+ * @P9_DEBUG_VPKT: Verbose packet debugging (full packet dump)
  *
  * These flags are passed at mount time to turn on various levels of
  * verbosity and tracing which will be output to the system logs.
@@ -53,34 +40,40 @@ enum p9_debug_flags {
 	P9_DEBUG_TRANS =	(1<<6),
 	P9_DEBUG_SLABS =      	(1<<7),
 	P9_DEBUG_FCALL =	(1<<8),
+	P9_DEBUG_FID =		(1<<9),
+	P9_DEBUG_PKT =		(1<<10),
+	P9_DEBUG_FSC =		(1<<11),
+	P9_DEBUG_VPKT =		(1<<12),
 };
 
+#ifdef CONFIG_NET_9P_DEBUG
 extern unsigned int p9_debug_level;
-
-#define P9_DPRINTK(level, format, arg...) \
-do {  \
-	if ((p9_debug_level & level) == level) \
-		printk(KERN_NOTICE "-- %s (%d): " \
-		format , __FUNCTION__, task_pid_nr(current) , ## arg); \
-} while (0)
-
-#define PRINT_FCALL_ERROR(s, fcall) P9_DPRINTK(P9_DEBUG_ERROR,   \
-	"%s: %.*s\n", s, fcall?fcall->params.rerror.error.len:0, \
-	fcall?fcall->params.rerror.error.str:"");
-
+__printf(3, 4)
+void _p9_debug(enum p9_debug_flags level, const char *func,
+	       const char *fmt, ...);
+#define p9_debug(level, fmt, ...)			\
+	_p9_debug(level, __func__, fmt, ##__VA_ARGS__)
 #else
-#define P9_DPRINTK(level, format, arg...)  do { } while (0)
-#define PRINT_FCALL_ERROR(s, fcall) do { } while (0)
+#define p9_debug(level, fmt, ...)			\
+	no_printk(fmt, ##__VA_ARGS__)
 #endif
-
-#define P9_EPRINTK(level, format, arg...) \
-do { \
-	printk(level "9p: %s (%d): " \
-		format , __FUNCTION__, task_pid_nr(current), ## arg); \
-} while (0)
 
 /**
  * enum p9_msg_t - 9P message types
+ * @P9_TLERROR: not used
+ * @P9_RLERROR: response for any failed request for 9P2000.L
+ * @P9_TSTATFS: file system status request
+ * @P9_RSTATFS: file system status response
+ * @P9_TSYMLINK: make symlink request
+ * @P9_RSYMLINK: make symlink response
+ * @P9_TMKNOD: create a special file object request
+ * @P9_RMKNOD: create a special file object response
+ * @P9_TLCREATE: prepare a handle for I/O on an new file for 9P2000.L
+ * @P9_RLCREATE: response with file access information for 9P2000.L
+ * @P9_TRENAME: rename request
+ * @P9_RRENAME: rename response
+ * @P9_TMKDIR: create a directory request
+ * @P9_RMKDIR: create a directory response
  * @P9_TVERSION: version handshake request
  * @P9_RVERSION: version handshake response
  * @P9_TAUTH: request to establish authentication channel
@@ -100,7 +93,7 @@ do { \
  * @P9_TREAD: request to transfer data from a file or directory
  * @P9_RREAD: response with data requested
  * @P9_TWRITE: reuqest to transfer data to a file
- * @P9_RWRITE: response with out much data was transfered to file
+ * @P9_RWRITE: response with out much data was transferred to file
  * @P9_TCLUNK: forget about a handle to an entity within the file system
  * @P9_RCLUNK: response when server has forgotten about the handle
  * @P9_TREMOVE: request to remove an entity from the hierarchy
@@ -120,6 +113,46 @@ do { \
  */
 
 enum p9_msg_t {
+	P9_TLERROR = 6,
+	P9_RLERROR,
+	P9_TSTATFS = 8,
+	P9_RSTATFS,
+	P9_TLOPEN = 12,
+	P9_RLOPEN,
+	P9_TLCREATE = 14,
+	P9_RLCREATE,
+	P9_TSYMLINK = 16,
+	P9_RSYMLINK,
+	P9_TMKNOD = 18,
+	P9_RMKNOD,
+	P9_TRENAME = 20,
+	P9_RRENAME,
+	P9_TREADLINK = 22,
+	P9_RREADLINK,
+	P9_TGETATTR = 24,
+	P9_RGETATTR,
+	P9_TSETATTR = 26,
+	P9_RSETATTR,
+	P9_TXATTRWALK = 30,
+	P9_RXATTRWALK,
+	P9_TXATTRCREATE = 32,
+	P9_RXATTRCREATE,
+	P9_TREADDIR = 40,
+	P9_RREADDIR,
+	P9_TFSYNC = 50,
+	P9_RFSYNC,
+	P9_TLOCK = 52,
+	P9_RLOCK,
+	P9_TGETLOCK = 54,
+	P9_RGETLOCK,
+	P9_TLINK = 70,
+	P9_RLINK,
+	P9_TMKDIR = 72,
+	P9_RMKDIR,
+	P9_TRENAMEAT = 74,
+	P9_RRENAMEAT,
+	P9_TUNLINKAT = 76,
+	P9_RUNLINKAT,
 	P9_TVERSION = 100,
 	P9_RVERSION,
 	P9_TAUTH = 102,
@@ -186,10 +219,10 @@ enum p9_open_mode_t {
 
 /**
  * enum p9_perm_t - 9P permissions
- * @P9_DMDIR: mode bite for directories
+ * @P9_DMDIR: mode bit for directories
  * @P9_DMAPPEND: mode bit for is append-only
  * @P9_DMEXCL: mode bit for excluse use (only one open handle allowed)
- * @P9_DMMOUNT: mode bite for mount points
+ * @P9_DMMOUNT: mode bit for mount points
  * @P9_DMAUTH: mode bit for authentication file
  * @P9_DMTMP: mode bit for non-backed-up files
  * @P9_DMSYMLINK: mode bit for symbolic links (9P2000.u)
@@ -223,6 +256,35 @@ enum p9_perm_t {
 	P9_DMSETVTX = 0x00010000,
 };
 
+/* 9p2000.L open flags */
+#define P9_DOTL_RDONLY        00000000
+#define P9_DOTL_WRONLY        00000001
+#define P9_DOTL_RDWR          00000002
+#define P9_DOTL_NOACCESS      00000003
+#define P9_DOTL_CREATE        00000100
+#define P9_DOTL_EXCL          00000200
+#define P9_DOTL_NOCTTY        00000400
+#define P9_DOTL_TRUNC         00001000
+#define P9_DOTL_APPEND        00002000
+#define P9_DOTL_NONBLOCK      00004000
+#define P9_DOTL_DSYNC         00010000
+#define P9_DOTL_FASYNC        00020000
+#define P9_DOTL_DIRECT        00040000
+#define P9_DOTL_LARGEFILE     00100000
+#define P9_DOTL_DIRECTORY     00200000
+#define P9_DOTL_NOFOLLOW      00400000
+#define P9_DOTL_NOATIME       01000000
+#define P9_DOTL_CLOEXEC       02000000
+#define P9_DOTL_SYNC          04000000
+
+/* 9p2000.L at flags */
+#define P9_DOTL_AT_REMOVEDIR		0x200
+
+/* 9p2000.L lock type */
+#define P9_LOCK_TYPE_RDLCK 0
+#define P9_LOCK_TYPE_WRLCK 1
+#define P9_LOCK_TYPE_UNLCK 2
+
 /**
  * enum p9_qid_t - QID types
  * @P9_QTDIR: directory
@@ -237,7 +299,7 @@ enum p9_perm_t {
  *
  * QID types are a subset of permissions - they are primarily
  * used to differentiate semantics for a file system entity via
- * a jump-table.  Their value is also the most signifigant 16 bits
+ * a jump-table.  Their value is also the most significant 16 bits
  * of the permission_t
  *
  * See Also: http://plan9.bell-labs.com/magic/man2html/2/stat
@@ -259,23 +321,17 @@ enum p9_qid_t {
 #define P9_NOFID	(u32)(~0)
 #define P9_MAXWELEM	16
 
+/* Minimal header size: size[4] type[1] tag[2] */
+#define P9_HDRSZ	7
+
 /* ample room for Twrite/Rread header */
 #define P9_IOHDRSZ	24
 
-/**
- * struct p9_str - length prefixed string type
- * @len: length of the string
- * @str: the string
- *
- * The protocol uses length prefixed strings for all
- * string data, so we replicate that for our internal
- * string members.
- */
+/* Room for readdir header */
+#define P9_READDIRHDRSZ	24
 
-struct p9_str {
-	u16 len;
-	char *str;
-};
+/* size of header for zero copy read/write */
+#define P9_ZC_HDR_SZ 4096
 
 /**
  * struct p9_qid - file system entity information
@@ -304,50 +360,23 @@ struct p9_qid {
 };
 
 /**
- * struct p9_stat - file system metadata information
+ * struct p9_wstat - file system metadata information
  * @size: length prefix for this stat structure instance
- * @type: the type of the server (equivilent to a major number)
- * @dev: the sub-type of the server (equivilent to a minor number)
+ * @type: the type of the server (equivalent to a major number)
+ * @dev: the sub-type of the server (equivalent to a minor number)
  * @qid: unique id from the server of type &p9_qid
  * @mode: Plan 9 format permissions of type &p9_perm_t
  * @atime: Last access/read time
  * @mtime: Last modify/write time
  * @length: file length
- * @name: last element of path (aka filename) in type &p9_str
- * @uid: owner name in type &p9_str
- * @gid: group owner in type &p9_str
- * @muid: last modifier in type &p9_str
- * @extension: area used to encode extended UNIX support in type &p9_str
+ * @name: last element of path (aka filename)
+ * @uid: owner name
+ * @gid: group owner
+ * @muid: last modifier
+ * @extension: area used to encode extended UNIX support
  * @n_uid: numeric user id of owner (part of 9p2000.u extension)
  * @n_gid: numeric group id (part of 9p2000.u extension)
  * @n_muid: numeric user id of laster modifier (part of 9p2000.u extension)
- *
- * See Also: http://plan9.bell-labs.com/magic/man2html/2/stat
- */
-
-struct p9_stat {
-	u16 size;
-	u16 type;
-	u32 dev;
-	struct p9_qid qid;
-	u32 mode;
-	u32 atime;
-	u32 mtime;
-	u64 length;
-	struct p9_str name;
-	struct p9_str uid;
-	struct p9_str gid;
-	struct p9_str muid;
-	struct p9_str extension;	/* 9p2000.u extensions */
-	u32 n_uid;			/* 9p2000.u extensions */
-	u32 n_gid;			/* 9p2000.u extensions */
-	u32 n_muid;			/* 9p2000.u extensions */
-};
-
-/*
- * file metadata (stat) structure used to create Twstat message
- * The is identical to &p9_stat, but the strings don't point to
- * the same memory block and should be freed separately
  *
  * See Also: http://plan9.bell-labs.com/magic/man2html/2/stat
  */
@@ -361,147 +390,136 @@ struct p9_wstat {
 	u32 atime;
 	u32 mtime;
 	u64 length;
-	char *name;
-	char *uid;
-	char *gid;
-	char *muid;
+	const char *name;
+	const char *uid;
+	const char *gid;
+	const char *muid;
 	char *extension;	/* 9p2000.u extensions */
-	u32 n_uid;		/* 9p2000.u extensions */
-	u32 n_gid;		/* 9p2000.u extensions */
-	u32 n_muid;		/* 9p2000.u extensions */
+	kuid_t n_uid;		/* 9p2000.u extensions */
+	kgid_t n_gid;		/* 9p2000.u extensions */
+	kuid_t n_muid;		/* 9p2000.u extensions */
 };
 
-/* Structures for Protocol Operations */
-struct p9_tversion {
-	u32 msize;
-	struct p9_str version;
-};
-
-struct p9_rversion {
-	u32 msize;
-	struct p9_str version;
-};
-
-struct p9_tauth {
-	u32 afid;
-	struct p9_str uname;
-	struct p9_str aname;
-	u32 n_uname;		/* 9P2000.u extensions */
-};
-
-struct p9_rauth {
+struct p9_stat_dotl {
+	u64 st_result_mask;
 	struct p9_qid qid;
+	u32 st_mode;
+	kuid_t st_uid;
+	kgid_t st_gid;
+	u64 st_nlink;
+	u64 st_rdev;
+	u64 st_size;
+	u64 st_blksize;
+	u64 st_blocks;
+	u64 st_atime_sec;
+	u64 st_atime_nsec;
+	u64 st_mtime_sec;
+	u64 st_mtime_nsec;
+	u64 st_ctime_sec;
+	u64 st_ctime_nsec;
+	u64 st_btime_sec;
+	u64 st_btime_nsec;
+	u64 st_gen;
+	u64 st_data_version;
 };
 
-struct p9_rerror {
-	struct p9_str error;
-	u32 errno;		/* 9p2000.u extension */
+#define P9_STATS_MODE		0x00000001ULL
+#define P9_STATS_NLINK		0x00000002ULL
+#define P9_STATS_UID		0x00000004ULL
+#define P9_STATS_GID		0x00000008ULL
+#define P9_STATS_RDEV		0x00000010ULL
+#define P9_STATS_ATIME		0x00000020ULL
+#define P9_STATS_MTIME		0x00000040ULL
+#define P9_STATS_CTIME		0x00000080ULL
+#define P9_STATS_INO		0x00000100ULL
+#define P9_STATS_SIZE		0x00000200ULL
+#define P9_STATS_BLOCKS		0x00000400ULL
+
+#define P9_STATS_BTIME		0x00000800ULL
+#define P9_STATS_GEN		0x00001000ULL
+#define P9_STATS_DATA_VERSION	0x00002000ULL
+
+#define P9_STATS_BASIC		0x000007ffULL /* Mask for fields up to BLOCKS */
+#define P9_STATS_ALL		0x00003fffULL /* Mask for All fields above */
+
+/**
+ * struct p9_iattr_dotl - P9 inode attribute for setattr
+ * @valid: bitfield specifying which fields are valid
+ *         same as in struct iattr
+ * @mode: File permission bits
+ * @uid: user id of owner
+ * @gid: group id
+ * @size: File size
+ * @atime_sec: Last access time, seconds
+ * @atime_nsec: Last access time, nanoseconds
+ * @mtime_sec: Last modification time, seconds
+ * @mtime_nsec: Last modification time, nanoseconds
+ */
+
+struct p9_iattr_dotl {
+	u32 valid;
+	u32 mode;
+	kuid_t uid;
+	kgid_t gid;
+	u64 size;
+	u64 atime_sec;
+	u64 atime_nsec;
+	u64 mtime_sec;
+	u64 mtime_nsec;
 };
 
-struct p9_tflush {
-	u16 oldtag;
+#define P9_LOCK_SUCCESS 0
+#define P9_LOCK_BLOCKED 1
+#define P9_LOCK_ERROR 2
+#define P9_LOCK_GRACE 3
+
+#define P9_LOCK_FLAGS_BLOCK 1
+#define P9_LOCK_FLAGS_RECLAIM 2
+
+/* struct p9_flock: POSIX lock structure
+ * @type - type of lock
+ * @flags - lock flags
+ * @start - starting offset of the lock
+ * @length - number of bytes
+ * @proc_id - process id which wants to take lock
+ * @client_id - client id
+ */
+
+struct p9_flock {
+	u8 type;
+	u32 flags;
+	u64 start;
+	u64 length;
+	u32 proc_id;
+	char *client_id;
 };
 
-struct p9_rflush {
+/* struct p9_getlock: getlock structure
+ * @type - type of lock
+ * @start - starting offset of the lock
+ * @length - number of bytes
+ * @proc_id - process id which wants to take lock
+ * @client_id - client id
+ */
+
+struct p9_getlock {
+	u8 type;
+	u64 start;
+	u64 length;
+	u32 proc_id;
+	char *client_id;
 };
 
-struct p9_tattach {
-	u32 fid;
-	u32 afid;
-	struct p9_str uname;
-	struct p9_str aname;
-	u32 n_uname;		/* 9P2000.u extensions */
-};
-
-struct p9_rattach {
-	struct p9_qid qid;
-};
-
-struct p9_twalk {
-	u32 fid;
-	u32 newfid;
-	u16 nwname;
-	struct p9_str wnames[16];
-};
-
-struct p9_rwalk {
-	u16 nwqid;
-	struct p9_qid wqids[16];
-};
-
-struct p9_topen {
-	u32 fid;
-	u8 mode;
-};
-
-struct p9_ropen {
-	struct p9_qid qid;
-	u32 iounit;
-};
-
-struct p9_tcreate {
-	u32 fid;
-	struct p9_str name;
-	u32 perm;
-	u8 mode;
-	struct p9_str extension;
-};
-
-struct p9_rcreate {
-	struct p9_qid qid;
-	u32 iounit;
-};
-
-struct p9_tread {
-	u32 fid;
-	u64 offset;
-	u32 count;
-};
-
-struct p9_rread {
-	u32 count;
-	u8 *data;
-};
-
-struct p9_twrite {
-	u32 fid;
-	u64 offset;
-	u32 count;
-	u8 *data;
-};
-
-struct p9_rwrite {
-	u32 count;
-};
-
-struct p9_tclunk {
-	u32 fid;
-};
-
-struct p9_rclunk {
-};
-
-struct p9_tremove {
-	u32 fid;
-};
-
-struct p9_rremove {
-};
-
-struct p9_tstat {
-	u32 fid;
-};
-
-struct p9_rstat {
-	struct p9_stat stat;
-};
-
-struct p9_twstat {
-	u32 fid;
-	struct p9_stat stat;
-};
-
-struct p9_rwstat {
+struct p9_rstatfs {
+	u32 type;
+	u32 bsize;
+	u64 blocks;
+	u64 bfree;
+	u64 bavail;
+	u64 files;
+	u64 ffree;
+	u64 fsid;
+	u32 namelen;
 };
 
 /**
@@ -509,8 +527,9 @@ struct p9_rwstat {
  * @size: prefixed length of the structure
  * @id: protocol operating identifier of type &p9_msg_t
  * @tag: transaction id of the request
+ * @offset: used by marshalling routines to track current position in buffer
+ * @capacity: used by marshalling routines to track total malloc'd capacity
  * @sdata: payload
- * @params: per-operation parameters
  *
  * &p9_fcall represents the structure for all 9P RPC
  * transactions.  Requests are packaged into fcalls, and reponses
@@ -523,77 +542,17 @@ struct p9_fcall {
 	u32 size;
 	u8 id;
 	u16 tag;
-	void *sdata;
 
-	union {
-		struct p9_tversion tversion;
-		struct p9_rversion rversion;
-		struct p9_tauth tauth;
-		struct p9_rauth rauth;
-		struct p9_rerror rerror;
-		struct p9_tflush tflush;
-		struct p9_rflush rflush;
-		struct p9_tattach tattach;
-		struct p9_rattach rattach;
-		struct p9_twalk twalk;
-		struct p9_rwalk rwalk;
-		struct p9_topen topen;
-		struct p9_ropen ropen;
-		struct p9_tcreate tcreate;
-		struct p9_rcreate rcreate;
-		struct p9_tread tread;
-		struct p9_rread rread;
-		struct p9_twrite twrite;
-		struct p9_rwrite rwrite;
-		struct p9_tclunk tclunk;
-		struct p9_rclunk rclunk;
-		struct p9_tremove tremove;
-		struct p9_rremove rremove;
-		struct p9_tstat tstat;
-		struct p9_rstat rstat;
-		struct p9_twstat twstat;
-		struct p9_rwstat rwstat;
-	} params;
+	size_t offset;
+	size_t capacity;
+
+	struct kmem_cache *cache;
+	u8 *sdata;
 };
 
-struct p9_idpool;
-
-int p9_deserialize_stat(void *buf, u32 buflen, struct p9_stat *stat,
-	int dotu);
-int p9_deserialize_fcall(void *buf, u32 buflen, struct p9_fcall *fc, int dotu);
-void p9_set_tag(struct p9_fcall *fc, u16 tag);
-struct p9_fcall *p9_create_tversion(u32 msize, char *version);
-struct p9_fcall *p9_create_tattach(u32 fid, u32 afid, char *uname,
-	char *aname, u32 n_uname, int dotu);
-struct p9_fcall *p9_create_tauth(u32 afid, char *uname, char *aname,
-	u32 n_uname, int dotu);
-struct p9_fcall *p9_create_tflush(u16 oldtag);
-struct p9_fcall *p9_create_twalk(u32 fid, u32 newfid, u16 nwname,
-	char **wnames);
-struct p9_fcall *p9_create_topen(u32 fid, u8 mode);
-struct p9_fcall *p9_create_tcreate(u32 fid, char *name, u32 perm, u8 mode,
-	char *extension, int dotu);
-struct p9_fcall *p9_create_tread(u32 fid, u64 offset, u32 count);
-struct p9_fcall *p9_create_twrite(u32 fid, u64 offset, u32 count,
-	const char *data);
-struct p9_fcall *p9_create_twrite_u(u32 fid, u64 offset, u32 count,
-	const char __user *data);
-struct p9_fcall *p9_create_tclunk(u32 fid);
-struct p9_fcall *p9_create_tremove(u32 fid);
-struct p9_fcall *p9_create_tstat(u32 fid);
-struct p9_fcall *p9_create_twstat(u32 fid, struct p9_wstat *wstat,
-	int dotu);
-
-int p9_printfcall(char *buf, int buflen, struct p9_fcall *fc, int dotu);
 int p9_errstr2errno(char *errstr, int len);
 
-struct p9_idpool *p9_idpool_create(void);
-void p9_idpool_destroy(struct p9_idpool *);
-int p9_idpool_get(struct p9_idpool *p);
-void p9_idpool_put(int id, struct p9_idpool *p);
-int p9_idpool_check(int id, struct p9_idpool *p);
-
 int p9_error_init(void);
-int p9_errstr2errno(char *, int);
 int p9_trans_fd_init(void);
+void p9_trans_fd_exit(void);
 #endif /* NET_9P_H */

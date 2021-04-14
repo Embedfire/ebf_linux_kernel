@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * IA-64-specific support for kernel module loader.
  *
@@ -35,6 +36,7 @@
 
 #include <asm/patch.h>
 #include <asm/unaligned.h>
+#include <asm/sections.h>
 
 #define ARCH_MODULE_DEBUG 0
 
@@ -153,7 +155,7 @@ slot (const struct insn *insn)
 static int
 apply_imm64 (struct module *mod, struct insn *insn, uint64_t val)
 {
-	if (slot(insn) != 2) {
+	if (slot(insn) != 1 && slot(insn) != 2) {
 		printk(KERN_ERR "%s: invalid slot number %d for IMM64\n",
 		       mod->name, slot(insn));
 		return 0;
@@ -165,13 +167,14 @@ apply_imm64 (struct module *mod, struct insn *insn, uint64_t val)
 static int
 apply_imm60 (struct module *mod, struct insn *insn, uint64_t val)
 {
-	if (slot(insn) != 2) {
+	if (slot(insn) != 1 && slot(insn) != 2) {
 		printk(KERN_ERR "%s: invalid slot number %d for IMM60\n",
 		       mod->name, slot(insn));
 		return 0;
 	}
 	if (val + ((uint64_t) 1 << 59) >= (1UL << 60)) {
-		printk(KERN_ERR "%s: value %ld out of IMM60 range\n", mod->name, (int64_t) val);
+		printk(KERN_ERR "%s: value %ld out of IMM60 range\n",
+			mod->name, (long) val);
 		return 0;
 	}
 	ia64_patch_imm60((u64) insn, val);
@@ -182,7 +185,8 @@ static int
 apply_imm22 (struct module *mod, struct insn *insn, uint64_t val)
 {
 	if (val + (1 << 21) >= (1 << 22)) {
-		printk(KERN_ERR "%s: value %li out of IMM22 range\n", mod->name, (int64_t)val);
+		printk(KERN_ERR "%s: value %li out of IMM22 range\n",
+			mod->name, (long)val);
 		return 0;
 	}
 	ia64_patch((u64) insn, 0x01fffcfe000UL, (  ((val & 0x200000UL) << 15) /* bit 21 -> 36 */
@@ -196,7 +200,8 @@ static int
 apply_imm21b (struct module *mod, struct insn *insn, uint64_t val)
 {
 	if (val + (1 << 20) >= (1 << 21)) {
-		printk(KERN_ERR "%s: value %li out of IMM21b range\n", mod->name, (int64_t)val);
+		printk(KERN_ERR "%s: value %li out of IMM21b range\n",
+			mod->name, (long)val);
 		return 0;
 	}
 	ia64_patch((u64) insn, 0x11ffffe000UL, (  ((val & 0x100000UL) << 16) /* bit 20 -> 36 */
@@ -301,23 +306,13 @@ plt_target (struct plt_entry *plt)
 
 #endif /* !USE_BRL */
 
-void *
-module_alloc (unsigned long size)
-{
-	if (!size)
-		return NULL;
-	return vmalloc(size);
-}
-
 void
-module_free (struct module *mod, void *module_region)
+module_arch_freeing_init (struct module *mod)
 {
-	if (mod && mod->arch.init_unw_table &&
-	    module_region == mod->module_init) {
+	if (mod->arch.init_unw_table) {
 		unw_remove_unwind_table(mod->arch.init_unw_table);
 		mod->arch.init_unw_table = NULL;
 	}
-	vfree(module_region);
 }
 
 /* Have we already seen one of these relocations? */
@@ -493,13 +488,13 @@ module_frob_arch_sections (Elf_Ehdr *ehdr, Elf_Shdr *sechdrs, char *secstrings,
 static inline int
 in_init (const struct module *mod, uint64_t addr)
 {
-	return addr - (uint64_t) mod->module_init < mod->init_size;
+	return addr - (uint64_t) mod->init_layout.base < mod->init_layout.size;
 }
 
 static inline int
 in_core (const struct module *mod, uint64_t addr)
 {
-	return addr - (uint64_t) mod->module_core < mod->core_size;
+	return addr - (uint64_t) mod->core_layout.base < mod->core_layout.size;
 }
 
 static inline int
@@ -525,8 +520,7 @@ get_ltoff (struct module *mod, uint64_t value, int *okp)
 			goto found;
 
 	/* Not enough GOT entries? */
-	if (e >= (struct got_entry *) (mod->arch.got->sh_addr + mod->arch.got->sh_size))
-		BUG();
+	BUG_ON(e >= (struct got_entry *) (mod->arch.got->sh_addr + mod->arch.got->sh_size));
 
 	e->val = value;
 	++mod->arch.next_got_entry;
@@ -660,7 +654,7 @@ do_reloc (struct module *mod, uint8_t r_type, Elf64_Sym *sym, uint64_t addend,
 				}
 			} else if (!is_internal(mod, val))
 				val = get_plt(mod, location, val, &ok);
-			/* FALL THROUGH */
+			fallthrough;
 		      default:
 			val -= bundle(location);
 			break;
@@ -683,7 +677,7 @@ do_reloc (struct module *mod, uint8_t r_type, Elf64_Sym *sym, uint64_t addend,
 		break;
 
 	      case RV_BDREL:
-		val -= (uint64_t) (in_init(mod, val) ? mod->module_init : mod->module_core);
+		val -= (uint64_t) (in_init(mod, val) ? mod->init_layout.base : mod->core_layout.base);
 		break;
 
 	      case RV_LTV:
@@ -694,8 +688,9 @@ do_reloc (struct module *mod, uint8_t r_type, Elf64_Sym *sym, uint64_t addend,
 	      case RV_PCREL2:
 		if (r_type == R_IA64_PCREL21BI) {
 			if (!is_internal(mod, val)) {
-				printk(KERN_ERR "%s: %s reloc against non-local symbol (%lx)\n",
-				       __func__, reloc_name[r_type], val);
+				printk(KERN_ERR "%s: %s reloc against "
+					"non-local symbol (%lx)\n", __func__,
+					reloc_name[r_type], (unsigned long)val);
 				return -ENOEXEC;
 			}
 			format = RF_INSN21B;
@@ -817,15 +812,15 @@ apply_relocate_add (Elf64_Shdr *sechdrs, const char *strtab, unsigned int symind
 		 *     addresses have been selected...
 		 */
 		uint64_t gp;
-		if (mod->core_size > MAX_LTOFF)
+		if (mod->core_layout.size > MAX_LTOFF)
 			/*
 			 * This takes advantage of fact that SHF_ARCH_SMALL gets allocated
 			 * at the end of the module.
 			 */
-			gp = mod->core_size - MAX_LTOFF / 2;
+			gp = mod->core_layout.size - MAX_LTOFF / 2;
 		else
-			gp = mod->core_size / 2;
-		gp = (uint64_t) mod->module_core + ((gp + 7) & -8);
+			gp = mod->core_layout.size / 2;
+		gp = (uint64_t) mod->core_layout.base + ((gp + 7) & -8);
 		mod->arch.gp = gp;
 		DEBUGP("%s: placing gp at 0x%lx\n", __func__, gp);
 	}
@@ -840,14 +835,6 @@ apply_relocate_add (Elf64_Shdr *sechdrs, const char *strtab, unsigned int symind
 			return ret;
 	}
 	return 0;
-}
-
-int
-apply_relocate (Elf64_Shdr *sechdrs, const char *strtab, unsigned int symindex,
-		unsigned int relsec, struct module *mod)
-{
-	printk(KERN_ERR "module %s: REL relocs in section %u unsupported\n", mod->name, relsec);
-	return -ENOEXEC;
 }
 
 /*
@@ -927,8 +914,23 @@ module_finalize (const Elf_Ehdr *hdr, const Elf_Shdr *sechdrs, struct module *mo
 void
 module_arch_cleanup (struct module *mod)
 {
-	if (mod->arch.init_unw_table)
+	if (mod->arch.init_unw_table) {
 		unw_remove_unwind_table(mod->arch.init_unw_table);
-	if (mod->arch.core_unw_table)
+		mod->arch.init_unw_table = NULL;
+	}
+	if (mod->arch.core_unw_table) {
 		unw_remove_unwind_table(mod->arch.core_unw_table);
+		mod->arch.core_unw_table = NULL;
+	}
+}
+
+void *dereference_module_function_descriptor(struct module *mod, void *ptr)
+{
+	Elf64_Shdr *opd = mod->arch.opd;
+
+	if (ptr < (void *)opd->sh_addr ||
+			ptr >= (void *)(opd->sh_addr + opd->sh_size))
+		return ptr;
+
+	return dereference_function_descriptor(ptr);
 }

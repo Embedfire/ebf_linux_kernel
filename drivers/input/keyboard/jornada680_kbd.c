@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * drivers/input/keyboard/jornada680_kbd.c
  *
@@ -10,20 +11,16 @@
  * Split from drivers/input/keyboard/hp600_keyb.c
  *  Copyright (C) 2000 Yaegashi Takeshi (hp6xx kbd scan routine and translation table)
  *  Copyright (C) 2000 Niibe Yutaka (HP620 Keyb translation table)
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
-#include <linux/init.h>
+#include <linux/device.h>
 #include <linux/input.h>
-#include <linux/input-polldev.h>
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 
 #include <asm/delay.h>
 #include <asm/io.h>
@@ -66,7 +63,7 @@ static const unsigned short jornada_scancodes[] = {
 #define JORNADA_SCAN_SIZE	18
 
 struct jornadakbd {
-	struct input_polled_dev *poll_dev;
+	struct input_dev *input;
 	unsigned short keymap[ARRAY_SIZE(jornada_scancodes)];
 	unsigned char length;
 	unsigned char old_scan[JORNADA_SCAN_SIZE];
@@ -75,7 +72,7 @@ struct jornadakbd {
 
 static void jornada_parse_kbd(struct jornadakbd *jornadakbd)
 {
-	struct input_dev *input_dev = jornadakbd->poll_dev->input;
+	struct input_dev *input_dev = jornadakbd->input;
 	unsigned short *keymap = jornadakbd->keymap;
 	unsigned int sync_me = 0;
 	unsigned int i, j;
@@ -138,82 +135,75 @@ static void jornada_scan_keyb(unsigned char *s)
 	}, *y = matrix_PDE;
 
 	/* Save these control reg bits */
-	dc_static = (ctrl_inw(PDCR) & (~0xcc0c));
-	ec_static = (ctrl_inw(PECR) & (~0xf0cf));
+	dc_static = (__raw_readw(PDCR) & (~0xcc0c));
+	ec_static = (__raw_readw(PECR) & (~0xf0cf));
 
 	for (i = 0; i < 8; i++) {
 		/* disable output for all but the one we want to scan */
-		ctrl_outw((dc_static | *y++), PDCR);
-		ctrl_outw((ec_static | *y++), PECR);
+		__raw_writew((dc_static | *y++), PDCR);
+		__raw_writew((ec_static | *y++), PECR);
 		udelay(5);
 
 		/* Get scanline row */
-		ctrl_outb(*t++, PDDR);
-		ctrl_outb(*t++, PEDR);
+		__raw_writeb(*t++, PDDR);
+		__raw_writeb(*t++, PEDR);
 		udelay(50);
 
 		/* Read data */
-		*s++ = ctrl_inb(PCDR);
-		*s++ = ctrl_inb(PFDR);
+		*s++ = __raw_readb(PCDR);
+		*s++ = __raw_readb(PFDR);
 	}
 	/* Scan no lines */
-	ctrl_outb(0xff, PDDR);
-	ctrl_outb(0xff, PEDR);
+	__raw_writeb(0xff, PDDR);
+	__raw_writeb(0xff, PEDR);
 
 	/* Enable all scanlines */
-	ctrl_outw((dc_static | (0x5555 & 0xcc0c)),PDCR);
-	ctrl_outw((ec_static | (0x5555 & 0xf0cf)),PECR);
+	__raw_writew((dc_static | (0x5555 & 0xcc0c)),PDCR);
+	__raw_writew((ec_static | (0x5555 & 0xf0cf)),PECR);
 
 	/* Ignore extra keys and events */
-	*s++ = ctrl_inb(PGDR);
-	*s++ = ctrl_inb(PHDR);
+	*s++ = __raw_readb(PGDR);
+	*s++ = __raw_readb(PHDR);
 }
 
-static void jornadakbd680_poll(struct input_polled_dev *dev)
+static void jornadakbd680_poll(struct input_dev *input)
 {
-	struct jornadakbd *jornadakbd = dev->private;
+	struct jornadakbd *jornadakbd = input_get_drvdata(input);
 
 	jornada_scan_keyb(jornadakbd->new_scan);
 	jornada_parse_kbd(jornadakbd);
 	memcpy(jornadakbd->old_scan, jornadakbd->new_scan, JORNADA_SCAN_SIZE);
 }
 
-static int __devinit jornada680kbd_probe(struct platform_device *pdev)
+static int jornada680kbd_probe(struct platform_device *pdev)
 {
 	struct jornadakbd *jornadakbd;
-	struct input_polled_dev *poll_dev;
 	struct input_dev *input_dev;
 	int i, error;
 
-	jornadakbd = kzalloc(sizeof(struct jornadakbd), GFP_KERNEL);
+	jornadakbd = devm_kzalloc(&pdev->dev, sizeof(struct jornadakbd),
+				  GFP_KERNEL);
 	if (!jornadakbd)
 		return -ENOMEM;
 
-	poll_dev = input_allocate_polled_device();
-	if (!poll_dev) {
-		error = -ENOMEM;
-		goto failed;
+	input_dev = devm_input_allocate_device(&pdev->dev);
+	if (!input_dev) {
+		dev_err(&pdev->dev, "failed to allocate input device\n");
+		return -ENOMEM;
 	}
 
-	platform_set_drvdata(pdev, jornadakbd);
-
-	jornadakbd->poll_dev = poll_dev;
+	jornadakbd->input = input_dev;
 
 	memcpy(jornadakbd->keymap, jornada_scancodes,
 		sizeof(jornadakbd->keymap));
 
-	poll_dev->private = jornadakbd;
-	poll_dev->poll = jornadakbd680_poll;
-	poll_dev->poll_interval = 50; /* msec */
-
-	input_dev = poll_dev->input;
+	input_set_drvdata(input_dev, jornadakbd);
 	input_dev->evbit[0] = BIT(EV_KEY) | BIT(EV_REP);
 	input_dev->name = "HP Jornada 680 keyboard";
 	input_dev->phys = "jornadakbd/input0";
 	input_dev->keycode = jornadakbd->keymap;
 	input_dev->keycodesize = sizeof(unsigned short);
 	input_dev->keycodemax = ARRAY_SIZE(jornada_scancodes);
-	input_dev->dev.parent = &pdev->dev;
 	input_dev->id.bustype = BUS_HOST;
 
 	for (i = 0; i < 128; i++)
@@ -223,30 +213,19 @@ static int __devinit jornada680kbd_probe(struct platform_device *pdev)
 
 	input_set_capability(input_dev, EV_MSC, MSC_SCAN);
 
-	error = input_register_polled_device(jornadakbd->poll_dev);
-	if (error)
-		goto failed;
+	error = input_setup_polling(input_dev, jornadakbd680_poll);
+	if (error) {
+		dev_err(&pdev->dev, "failed to set up polling\n");
+		return error;
+	}
 
-	return 0;
+	input_set_poll_interval(input_dev, 50 /* msec */);
 
- failed:
-	printk(KERN_ERR "Jornadakbd: failed to register driver, error: %d\n",
-		error);
-	platform_set_drvdata(pdev, NULL);
-	input_free_polled_device(poll_dev);
-	kfree(jornadakbd);
-	return error;
-
-}
-
-static int __devexit jornada680kbd_remove(struct platform_device *pdev)
-{
-	struct jornadakbd *jornadakbd = platform_get_drvdata(pdev);
-
-	platform_set_drvdata(pdev, NULL);
-	input_unregister_polled_device(jornadakbd->poll_dev);
-	input_free_polled_device(jornadakbd->poll_dev);
-	kfree(jornadakbd);
+	error = input_register_device(input_dev);
+	if (error) {
+		dev_err(&pdev->dev, "failed to register input device\n");
+		return error;
+	}
 
 	return 0;
 }
@@ -254,24 +233,10 @@ static int __devexit jornada680kbd_remove(struct platform_device *pdev)
 static struct platform_driver jornada680kbd_driver = {
 	.driver	= {
 		.name	= "jornada680_kbd",
-		.owner	= THIS_MODULE,
 	},
 	.probe	= jornada680kbd_probe,
-	.remove	= __devexit_p(jornada680kbd_remove),
 };
-
-static int __init jornada680kbd_init(void)
-{
-	return platform_driver_register(&jornada680kbd_driver);
-}
-
-static void __exit jornada680kbd_exit(void)
-{
-	platform_driver_unregister(&jornada680kbd_driver);
-}
-
-module_init(jornada680kbd_init);
-module_exit(jornada680kbd_exit);
+module_platform_driver(jornada680kbd_driver);
 
 MODULE_AUTHOR("Kristoffer Ericson <kristoffer.ericson@gmail.com>");
 MODULE_DESCRIPTION("HP Jornada 620/660/680/690 Keyboard Driver");

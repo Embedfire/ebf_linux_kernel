@@ -1,24 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  specific defines for CCD's HFC 2BDS0 PCI chips
  *
  * Author     Werner Cornelius (werner@isdn4linux.de)
  *
  * Copyright 1999  by Werner Cornelius (werner@isdn4linux.de)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
 /*
@@ -26,7 +12,7 @@
  * change mask and threshold simultaneously
  */
 #define HFCPCI_BTRANS_THRESHOLD 128
-#define HFCPCI_BTRANS_MAX	256
+#define HFCPCI_FILLEMPTY	64
 #define HFCPCI_BTRANS_THRESMASK 0x00
 
 /* defines for PCI config */
@@ -58,7 +44,7 @@
 /* GCI/IOM bus configuration registers */
 #define HFCPCI_MST_EMOD		0xB4
 #define HFCPCI_MST_MODE		0xB8
-#define HFCPCI_CONNECT 		0xBC
+#define HFCPCI_CONNECT		0xBC
 
 
 /* Interrupt and status registers */
@@ -183,24 +169,24 @@
 #define D_FREG_MASK  0xF
 
 struct zt {
-	unsigned short z1;  /* Z1 pointer 16 Bit */
-	unsigned short z2;  /* Z2 pointer 16 Bit */
+	__le16 z1;  /* Z1 pointer 16 Bit */
+	__le16 z2;  /* Z2 pointer 16 Bit */
 };
 
 struct dfifo {
 	u_char data[D_FIFO_SIZE]; /* FIFO data space */
-	u_char fill1[0x20A0-D_FIFO_SIZE]; /* reserved, do not use */
+	u_char fill1[0x20A0 - D_FIFO_SIZE]; /* reserved, do not use */
 	u_char f1, f2; /* f pointers */
-	u_char fill2[0x20C0-0x20A2]; /* reserved, do not use */
+	u_char fill2[0x20C0 - 0x20A2]; /* reserved, do not use */
 	/* mask index with D_FREG_MASK for access */
-	struct zt za[MAX_D_FRAMES+1];
-	u_char fill3[0x4000-0x2100]; /* align 16K */
+	struct zt za[MAX_D_FRAMES + 1];
+	u_char fill3[0x4000 - 0x2100]; /* align 16K */
 };
 
 struct bzfifo {
-	struct zt	za[MAX_B_FRAMES+1]; /* only range 0x0..0x1F allowed */
+	struct zt	za[MAX_B_FRAMES + 1]; /* only range 0x0..0x1F allowed */
 	u_char		f1, f2; /* f pointers */
-	u_char		fill[0x2100-0x2082]; /* alignment */
+	u_char		fill[0x2100 - 0x2082]; /* alignment */
 };
 
 
@@ -224,5 +210,5 @@ union fifo_area {
 	u_char fill[32768];
 };
 
-#define Write_hfc(a, b, c) (writeb(c, (a->hw.pci_io)+b))
-#define Read_hfc(a, b) (readb((a->hw.pci_io)+b))
+#define Write_hfc(a, b, c) (writeb(c, (a->hw.pci_io) + b))
+#define Read_hfc(a, b) (readb((a->hw.pci_io) + b))

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_SH_ELF_H
 #define __ASM_SH_ELF_H
 
@@ -50,25 +51,14 @@
 #define	R_SH_GOTPC		167
 
 /* FDPIC relocs */
-#define R_SH_GOT20		70
-#define R_SH_GOTOFF20		71
-#define R_SH_GOTFUNCDESC	72
-#define R_SH_GOTFUNCDESC20	73
-#define R_SH_GOTOFFFUNCDESC	74
-#define R_SH_GOTOFFFUNCDESC20	75
-#define R_SH_FUNCDESC		76
-#define R_SH_FUNCDESC_VALUE	77
-
-#if 0 /* XXX - later .. */
-#define R_SH_GOT20		198
-#define R_SH_GOTOFF20		199
-#define R_SH_GOTFUNCDESC	200
-#define R_SH_GOTFUNCDESC20	201
-#define R_SH_GOTOFFFUNCDESC	202
-#define R_SH_GOTOFFFUNCDESC20	203
-#define R_SH_FUNCDESC		204
-#define R_SH_FUNCDESC_VALUE	205
-#endif
+#define R_SH_GOT20		201
+#define R_SH_GOTOFF20		202
+#define R_SH_GOTFUNCDESC	203
+#define R_SH_GOTFUNCDESC20	204
+#define R_SH_GOTOFFFUNCDESC	205
+#define R_SH_GOTOFFFUNCDESC20	206
+#define R_SH_FUNCDESC		207
+#define R_SH_FUNCDESC_VALUE	208
 
 /* SHmedia relocs */
 #define R_SH_IMM_LOW16		246
@@ -100,7 +90,6 @@ typedef struct user_fpu_struct elf_fpregset_t;
 #endif
 #define ELF_ARCH	EM_SH
 
-#ifdef __KERNEL__
 /*
  * This is used to ensure we don't load something for the wrong architecture.
  */
@@ -108,7 +97,12 @@ typedef struct user_fpu_struct elf_fpregset_t;
 #define elf_check_fdpic(x)		((x)->e_flags & EF_SH_FDPIC)
 #define elf_check_const_displacement(x)	((x)->e_flags & EF_SH_PIC)
 
-#define USE_ELF_CORE_DUMP
+/*
+ * Enable dump using regset.
+ * This covers all of general/DSP/FPU regs.
+ */
+#define CORE_DUMP_USE_REGSET
+
 #define ELF_FDPIC_CORE_EFLAGS	EF_SH_FDPIC
 #define ELF_EXEC_PAGESIZE	PAGE_SIZE
 
@@ -138,28 +132,6 @@ typedef struct user_fpu_struct elf_fpregset_t;
 
 #define ELF_PLATFORM	(utsname()->machine)
 
-#ifdef __SH5__
-#define ELF_PLAT_INIT(_r, load_addr) \
-  do { _r->regs[0]=0; _r->regs[1]=0; _r->regs[2]=0; _r->regs[3]=0; \
-       _r->regs[4]=0; _r->regs[5]=0; _r->regs[6]=0; _r->regs[7]=0; \
-       _r->regs[8]=0; _r->regs[9]=0; _r->regs[10]=0; _r->regs[11]=0; \
-       _r->regs[12]=0; _r->regs[13]=0; _r->regs[14]=0; _r->regs[15]=0; \
-       _r->regs[16]=0; _r->regs[17]=0; _r->regs[18]=0; _r->regs[19]=0; \
-       _r->regs[20]=0; _r->regs[21]=0; _r->regs[22]=0; _r->regs[23]=0; \
-       _r->regs[24]=0; _r->regs[25]=0; _r->regs[26]=0; _r->regs[27]=0; \
-       _r->regs[28]=0; _r->regs[29]=0; _r->regs[30]=0; _r->regs[31]=0; \
-       _r->regs[32]=0; _r->regs[33]=0; _r->regs[34]=0; _r->regs[35]=0; \
-       _r->regs[36]=0; _r->regs[37]=0; _r->regs[38]=0; _r->regs[39]=0; \
-       _r->regs[40]=0; _r->regs[41]=0; _r->regs[42]=0; _r->regs[43]=0; \
-       _r->regs[44]=0; _r->regs[45]=0; _r->regs[46]=0; _r->regs[47]=0; \
-       _r->regs[48]=0; _r->regs[49]=0; _r->regs[50]=0; _r->regs[51]=0; \
-       _r->regs[52]=0; _r->regs[53]=0; _r->regs[54]=0; _r->regs[55]=0; \
-       _r->regs[56]=0; _r->regs[57]=0; _r->regs[58]=0; _r->regs[59]=0; \
-       _r->regs[60]=0; _r->regs[61]=0; _r->regs[62]=0; \
-       _r->tregs[0]=0; _r->tregs[1]=0; _r->tregs[2]=0; _r->tregs[3]=0; \
-       _r->tregs[4]=0; _r->tregs[5]=0; _r->tregs[6]=0; _r->tregs[7]=0; \
-       _r->sr = SR_FD | SR_MMU; } while (0)
-#else
 #define ELF_PLAT_INIT(_r, load_addr) \
   do { _r->regs[0]=0; _r->regs[1]=0; _r->regs[2]=0; _r->regs[3]=0; \
        _r->regs[4]=0; _r->regs[5]=0; _r->regs[6]=0; _r->regs[7]=0; \
@@ -187,22 +159,16 @@ do {									\
 	_r->regs[14]	= 0;						\
 	_r->sr		= SR_FD;					\
 } while (0)
-#endif
 
-#define SET_PERSONALITY(ex, ibcs2) set_personality(PER_LINUX_32BIT)
-struct task_struct;
-extern int dump_task_regs (struct task_struct *, elf_gregset_t *);
-extern int dump_task_fpu (struct task_struct *, elf_fpregset_t *);
-
-#define ELF_CORE_COPY_TASK_REGS(tsk, elf_regs) dump_task_regs(tsk, elf_regs)
-#define ELF_CORE_COPY_FPREGS(tsk, elf_fpregs) dump_task_fpu(tsk, elf_fpregs)
+#define SET_PERSONALITY(ex) \
+	set_personality(PER_LINUX_32BIT | (current->personality & (~PER_MASK)))
 
 #ifdef CONFIG_VSYSCALL
 /* vDSO has arch_setup_additional_pages */
 #define ARCH_HAS_SETUP_ADDITIONAL_PAGES
 struct linux_binprm;
 extern int arch_setup_additional_pages(struct linux_binprm *bprm,
-				       int executable_stack);
+				       int uses_interp);
 
 extern unsigned int vdso_enabled;
 extern void __kernel_vsyscall;
@@ -212,15 +178,17 @@ extern void __kernel_vsyscall;
 
 #define VSYSCALL_AUX_ENT					\
 	if (vdso_enabled)					\
-		NEW_AUX_ENT(AT_SYSINFO_EHDR, VDSO_BASE);
+		NEW_AUX_ENT(AT_SYSINFO_EHDR, VDSO_BASE);	\
+	else							\
+		NEW_AUX_ENT(AT_IGNORE, 0)
 #else
-#define VSYSCALL_AUX_ENT
+#define VSYSCALL_AUX_ENT	NEW_AUX_ENT(AT_IGNORE, 0)
 #endif /* CONFIG_VSYSCALL */
 
 #ifdef CONFIG_SH_FPU
 #define FPU_AUX_ENT	NEW_AUX_ENT(AT_FPUCW, FPSCR_INIT)
 #else
-#define FPU_AUX_ENT
+#define FPU_AUX_ENT	NEW_AUX_ENT(AT_IGNORE, 0)
 #endif
 
 extern int l1i_cache_shape, l1d_cache_shape, l2_cache_shape;
@@ -240,5 +208,4 @@ do {								\
 	NEW_AUX_ENT(AT_L2_CACHESHAPE, l2_cache_shape);		\
 } while (0)
 
-#endif /* __KERNEL__ */
 #endif /* __ASM_SH_ELF_H */

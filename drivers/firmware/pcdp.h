@@ -1,16 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Definitions for PCDP-defined console devices
  *
- * v1.0a: http://www.dig64.org/specifications/DIG64_HCDPv10a_01.pdf
- * v2.0:  http://www.dig64.org/specifications/DIG64_PCDPv20.pdf
+ * For DIG64_HCDPv10a_01.pdf and DIG64_PCDPv20.pdf (v1.0a and v2.0 resp.),
+ * please see <http://www.dig64.org/specifications/>
  *
  * (c) Copyright 2002, 2004 Hewlett-Packard Development Company, L.P.
  *	Khalid Aziz <khalid.aziz@hp.com>
  *	Bjorn Helgaas <bjorn.helgaas@hp.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define PCDP_CONSOLE			0
@@ -106,6 +103,6 @@ struct pcdp {
 	u8			creator_id[4];
 	u32			creator_rev;
 	u32			num_uarts;
-	struct pcdp_uart	uart[0];	/* actual size is num_uarts */
+	struct pcdp_uart	uart[];	/* actual size is num_uarts */
 	/* remainder of table is pcdp_device structures */
 } __attribute__((packed));

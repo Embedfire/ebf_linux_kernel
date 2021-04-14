@@ -1,14 +1,13 @@
 /*
  * Nvidia AGPGART routines.
  * Based upon a 2.4 agpgart diff by the folks from NVIDIA, and hacked up
- * to work in 2.5 by Dave Jones <davej@codemonkey.org.uk>
+ * to work in 2.5 by Dave Jones.
  */
 
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/agp_backend.h>
-#include <linux/gfp.h>
 #include <linux/page-flags.h>
 #include <linux/mm.h>
 #include <linux/jiffies.h>
@@ -107,6 +106,7 @@ static int nvidia_configure(void)
 {
 	int i, rc, num_dirs;
 	u32 apbase, aplimit;
+	phys_addr_t apbase_phys;
 	struct aper_size_info_8 *current_size;
 	u32 temp;
 
@@ -116,9 +116,8 @@ static int nvidia_configure(void)
 	pci_write_config_byte(agp_bridge->dev, NVIDIA_0_APSIZE,
 		current_size->size_value);
 
-    /* address to map to */
-	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &apbase);
-	apbase &= PCI_BASE_ADDRESS_MEM_MASK;
+	/* address to map to */
+	apbase = pci_bus_address(agp_bridge->dev, AGP_APERTURE_BAR);
 	agp_bridge->gart_bus_addr = apbase;
 	aplimit = apbase + (current_size->size * 1024 * 1024) - 1;
 	pci_write_config_dword(nvidia_private.dev_2, NVIDIA_2_APBASE, apbase);
@@ -154,8 +153,9 @@ static int nvidia_configure(void)
 	pci_write_config_dword(agp_bridge->dev, NVIDIA_0_APSIZE, temp | 0x100);
 
 	/* map aperture */
+	apbase_phys = pci_resource_start(agp_bridge->dev, AGP_APERTURE_BAR);
 	nvidia_private.aperture =
-		(volatile u32 __iomem *) ioremap(apbase, 33 * PAGE_SIZE);
+		(volatile u32 __iomem *) ioremap(apbase_phys, 33 * PAGE_SIZE);
 
 	if (!nvidia_private.aperture)
 		return -ENOMEM;
@@ -201,9 +201,14 @@ extern int agp_memory_reserved;
 static int nvidia_insert_memory(struct agp_memory *mem, off_t pg_start, int type)
 {
 	int i, j;
+	int mask_type;
 
-	if ((type != 0) || (mem->type != 0))
+	mask_type = agp_generic_type_to_mask_type(mem->bridge, type);
+	if (mask_type != 0 || type != mem->type)
 		return -EINVAL;
+
+	if (mem->page_count == 0)
+		return 0;
 
 	if ((pg_start + mem->page_count) >
 		(nvidia_private.num_active_entries - agp_memory_reserved/PAGE_SIZE))
@@ -220,10 +225,13 @@ static int nvidia_insert_memory(struct agp_memory *mem, off_t pg_start, int type
 	}
 	for (i = 0, j = pg_start; i < mem->page_count; i++, j++) {
 		writel(agp_bridge->driver->mask_memory(agp_bridge,
-			mem->memory[i], mem->type),
+			       page_to_phys(mem->pages[i]), mask_type),
 			agp_bridge->gatt_table+nvidia_private.pg_offset+j);
-		readl(agp_bridge->gatt_table+nvidia_private.pg_offset+j);	/* PCI Posting. */
 	}
+
+	/* PCI Posting. */
+	readl(agp_bridge->gatt_table+nvidia_private.pg_offset+j - 1);
+
 	agp_bridge->driver->tlb_flush(mem);
 	return 0;
 }
@@ -233,8 +241,14 @@ static int nvidia_remove_memory(struct agp_memory *mem, off_t pg_start, int type
 {
 	int i;
 
-	if ((type != 0) || (mem->type != 0))
+	int mask_type;
+
+	mask_type = agp_generic_type_to_mask_type(mem->bridge, type);
+	if (mask_type != 0 || type != mem->type)
 		return -EINVAL;
+
+	if (mem->page_count == 0)
+		return 0;
 
 	for (i = pg_start; i < (mem->page_count + pg_start); i++)
 		writel(agp_bridge->scratch_page, agp_bridge->gatt_table+nvidia_private.pg_offset+i);
@@ -297,6 +311,7 @@ static const struct agp_bridge_driver nvidia_driver = {
 	.aperture_sizes		= nvidia_generic_sizes,
 	.size_type		= U8_APER_SIZE,
 	.num_aperture_sizes	= 5,
+	.needs_scratch_page	= true,
 	.configure		= nvidia_configure,
 	.fetch_size		= nvidia_fetch_size,
 	.cleanup		= nvidia_cleanup,
@@ -312,22 +327,30 @@ static const struct agp_bridge_driver nvidia_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages	= agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages	= agp_generic_destroy_pages,
 	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-static int __devinit agp_nvidia_probe(struct pci_dev *pdev,
-				      const struct pci_device_id *ent)
+static int agp_nvidia_probe(struct pci_dev *pdev,
+			    const struct pci_device_id *ent)
 {
 	struct agp_bridge_data *bridge;
 	u8 cap_ptr;
 
 	nvidia_private.dev_1 =
-		pci_get_bus_and_slot((unsigned int)pdev->bus->number, PCI_DEVFN(0, 1));
+		pci_get_domain_bus_and_slot(pci_domain_nr(pdev->bus),
+					    (unsigned int)pdev->bus->number,
+					    PCI_DEVFN(0, 1));
 	nvidia_private.dev_2 =
-		pci_get_bus_and_slot((unsigned int)pdev->bus->number, PCI_DEVFN(0, 2));
+		pci_get_domain_bus_and_slot(pci_domain_nr(pdev->bus),
+					    (unsigned int)pdev->bus->number,
+					    PCI_DEVFN(0, 2));
 	nvidia_private.dev_3 =
-		pci_get_bus_and_slot((unsigned int)pdev->bus->number, PCI_DEVFN(30, 0));
+		pci_get_domain_bus_and_slot(pci_domain_nr(pdev->bus),
+					    (unsigned int)pdev->bus->number,
+					    PCI_DEVFN(30, 0));
 
 	if (!nvidia_private.dev_1 || !nvidia_private.dev_2 || !nvidia_private.dev_3) {
 		printk(KERN_INFO PFX "Detected an NVIDIA nForce/nForce2 "
@@ -359,7 +382,7 @@ static int __devinit agp_nvidia_probe(struct pci_dev *pdev,
 		return -ENOMEM;
 
 	bridge->driver = &nvidia_driver;
-	bridge->dev_private_data = &nvidia_private,
+	bridge->dev_private_data = &nvidia_private;
 	bridge->dev = pdev;
 	bridge->capndx = cap_ptr;
 
@@ -372,7 +395,7 @@ static int __devinit agp_nvidia_probe(struct pci_dev *pdev,
 	return agp_add_bridge(bridge);
 }
 
-static void __devexit agp_nvidia_remove(struct pci_dev *pdev)
+static void agp_nvidia_remove(struct pci_dev *pdev)
 {
 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
 
@@ -383,8 +406,8 @@ static void __devexit agp_nvidia_remove(struct pci_dev *pdev)
 #ifdef CONFIG_PM
 static int agp_nvidia_suspend(struct pci_dev *pdev, pm_message_t state)
 {
-	pci_save_state (pdev);
-	pci_set_power_state (pdev, 3);
+	pci_save_state(pdev);
+	pci_set_power_state(pdev, PCI_D3hot);
 
 	return 0;
 }
@@ -392,7 +415,7 @@ static int agp_nvidia_suspend(struct pci_dev *pdev, pm_message_t state)
 static int agp_nvidia_resume(struct pci_dev *pdev)
 {
 	/* set power state 0 and restore PCI space */
-	pci_set_power_state (pdev, 0);
+	pci_set_power_state(pdev, PCI_D0);
 	pci_restore_state(pdev);
 
 	/* reconfigure AGP hardware again */
@@ -403,7 +426,7 @@ static int agp_nvidia_resume(struct pci_dev *pdev)
 #endif
 
 
-static struct pci_device_id agp_nvidia_pci_table[] = {
+static const struct pci_device_id agp_nvidia_pci_table[] = {
 	{
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * ISA bus.
  */
@@ -11,7 +12,7 @@
 #include <linux/isa.h>
 
 static struct device isa_bus = {
-	.bus_id		= "isa"
+	.init_name	= "isa"
 };
 
 struct isa_dev {
@@ -39,7 +40,7 @@ static int isa_bus_probe(struct device *dev)
 {
 	struct isa_driver *isa_driver = dev->platform_data;
 
-	if (isa_driver->probe)
+	if (isa_driver && isa_driver->probe)
 		return isa_driver->probe(dev, to_isa_dev(dev)->id);
 
 	return 0;
@@ -49,7 +50,7 @@ static int isa_bus_remove(struct device *dev)
 {
 	struct isa_driver *isa_driver = dev->platform_data;
 
-	if (isa_driver->remove)
+	if (isa_driver && isa_driver->remove)
 		return isa_driver->remove(dev, to_isa_dev(dev)->id);
 
 	return 0;
@@ -59,7 +60,7 @@ static void isa_bus_shutdown(struct device *dev)
 {
 	struct isa_driver *isa_driver = dev->platform_data;
 
-	if (isa_driver->shutdown)
+	if (isa_driver && isa_driver->shutdown)
 		isa_driver->shutdown(dev, to_isa_dev(dev)->id);
 }
 
@@ -67,7 +68,7 @@ static int isa_bus_suspend(struct device *dev, pm_message_t state)
 {
 	struct isa_driver *isa_driver = dev->platform_data;
 
-	if (isa_driver->suspend)
+	if (isa_driver && isa_driver->suspend)
 		return isa_driver->suspend(dev, to_isa_dev(dev)->id, state);
 
 	return 0;
@@ -77,7 +78,7 @@ static int isa_bus_resume(struct device *dev)
 {
 	struct isa_driver *isa_driver = dev->platform_data;
 
-	if (isa_driver->resume)
+	if (isa_driver && isa_driver->resume)
 		return isa_driver->resume(dev, to_isa_dev(dev)->id);
 
 	return 0;
@@ -135,14 +136,13 @@ int isa_register_driver(struct isa_driver *isa_driver, unsigned int ndev)
 		isa_dev->dev.parent	= &isa_bus;
 		isa_dev->dev.bus	= &isa_bus_type;
 
-		snprintf(isa_dev->dev.bus_id, BUS_ID_SIZE, "%s.%u",
-				isa_driver->driver.name, id);
-
+		dev_set_name(&isa_dev->dev, "%s.%u",
+			     isa_driver->driver.name, id);
 		isa_dev->dev.platform_data	= isa_driver;
 		isa_dev->dev.release		= isa_dev_release;
 		isa_dev->id			= id;
 
-		isa_dev->dev.coherent_dma_mask = DMA_24BIT_MASK;
+		isa_dev->dev.coherent_dma_mask = DMA_BIT_MASK(24);
 		isa_dev->dev.dma_mask = &isa_dev->dev.coherent_dma_mask;
 
 		error = device_register(&isa_dev->dev);
@@ -181,4 +181,4 @@ static int __init isa_bus_init(void)
 	return error;
 }
 
-device_initcall(isa_bus_init);
+postcore_initcall(isa_bus_init);

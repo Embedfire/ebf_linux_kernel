@@ -1,20 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * (C) 2003 David Woodhouse <dwmw2@infradead.org>
- *
  * Simple read-only (writable only for RAM) mtdblock driver
+ *
+ * Copyright © 2001-2010 David Woodhouse <dwmw2@infradead.org>
  */
 
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/blktrans.h>
+#include <linux/module.h>
+#include <linux/major.h>
 
 static int mtdblock_readsect(struct mtd_blktrans_dev *dev,
 			      unsigned long block, char *buf)
 {
 	size_t retlen;
 
-	if (dev->mtd->read(dev->mtd, (block * 512), 512, &retlen, buf))
+	if (mtd_read(dev->mtd, (block * 512), 512, &retlen, buf))
 		return 1;
 	return 0;
 }
@@ -24,7 +27,7 @@ static int mtdblock_writesect(struct mtd_blktrans_dev *dev,
 {
 	size_t retlen;
 
-	if (dev->mtd->write(dev->mtd, (block * 512), 512, &retlen, buf))
+	if (mtd_write(dev->mtd, (block * 512), 512, &retlen, buf))
 		return 1;
 	return 0;
 }
@@ -43,18 +46,18 @@ static void mtdblock_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 	dev->tr = tr;
 	dev->readonly = 1;
 
-	add_mtd_blktrans_dev(dev);
+	if (add_mtd_blktrans_dev(dev))
+		kfree(dev);
 }
 
 static void mtdblock_remove_dev(struct mtd_blktrans_dev *dev)
 {
 	del_mtd_blktrans_dev(dev);
-	kfree(dev);
 }
 
 static struct mtd_blktrans_ops mtdblock_tr = {
 	.name		= "mtdblock",
-	.major		= 31,
+	.major		= MTD_BLOCK_MAJOR,
 	.part_bits	= 0,
 	.blksize 	= 512,
 	.readsect	= mtdblock_readsect,

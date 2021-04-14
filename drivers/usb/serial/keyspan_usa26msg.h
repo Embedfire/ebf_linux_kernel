@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
 	usa26msg.h
 
@@ -62,7 +63,7 @@
 	or:
 
 		(b)	0x80 bit set
-			indiates that the bytes following alternate data and
+			indicates that the bytes following alternate data and
 			status bytes:
 
 				STAT DATA STAT DATA STAT DATA STAT DATA ...

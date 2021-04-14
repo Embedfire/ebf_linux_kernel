@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* -*- mode: c; c-basic-offset: 8; -*-
  * vim: noexpandtab sw=8 ts=8 sts=0:
  *
@@ -6,31 +7,13 @@
  * underlying calls for unlocking locks
  *
  * Copyright (C) 2004 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
- *
  */
 
 
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/highmem.h>
-#include <linux/utsname.h>
 #include <linux/init.h>
 #include <linux/sysctl.h>
 #include <linux/random.h>
@@ -40,15 +23,15 @@
 #include <linux/spinlock.h>
 #include <linux/delay.h>
 
-#include "cluster/heartbeat.h"
-#include "cluster/nodemanager.h"
-#include "cluster/tcp.h"
+#include "../cluster/heartbeat.h"
+#include "../cluster/nodemanager.h"
+#include "../cluster/tcp.h"
 
 #include "dlmapi.h"
 #include "dlmcommon.h"
 
 #define MLOG_MASK_PREFIX ML_DLM
-#include "cluster/masklog.h"
+#include "../cluster/masklog.h"
 
 #define DLM_UNLOCK_FREE_LOCK           0x00000001
 #define DLM_UNLOCK_CALL_AST            0x00000002
@@ -107,7 +90,8 @@ static enum dlm_status dlmunlock_common(struct dlm_ctxt *dlm,
 	enum dlm_status status;
 	int actions = 0;
 	int in_use;
-        u8 owner;
+	u8 owner;
+	int recovery_wait = 0;
 
 	mlog(0, "master_node = %d, valblk = %d\n", master_node,
 	     flags & LKM_VALBLK);
@@ -117,12 +101,12 @@ static enum dlm_status dlmunlock_common(struct dlm_ctxt *dlm,
 	else
 		BUG_ON(res->owner == dlm->node_num);
 
-	spin_lock(&dlm->spinlock);
+	spin_lock(&dlm->ast_lock);
 	/* We want to be sure that we're not freeing a lock
 	 * that still has AST's pending... */
 	in_use = !list_empty(&lock->ast_list);
-	spin_unlock(&dlm->spinlock);
-	if (in_use) {
+	spin_unlock(&dlm->ast_lock);
+	if (in_use && !(flags & LKM_CANCEL)) {
 	       mlog(ML_ERROR, "lockres %.*s: Someone is calling dlmunlock "
 		    "while waiting for an ast!", res->lockname.len,
 		    res->lockname.name);
@@ -131,7 +115,7 @@ static enum dlm_status dlmunlock_common(struct dlm_ctxt *dlm,
 
 	spin_lock(&res->spinlock);
 	if (res->state & DLM_LOCK_RES_IN_PROGRESS) {
-		if (master_node) {
+		if (master_node && !(flags & LKM_CANCEL)) {
 			mlog(ML_ERROR, "lockres in progress!\n");
 			spin_unlock(&res->spinlock);
 			return DLM_FORWARD;
@@ -191,9 +175,11 @@ static enum dlm_status dlmunlock_common(struct dlm_ctxt *dlm,
 			actions &= ~(DLM_UNLOCK_REMOVE_LOCK|
 				     DLM_UNLOCK_REGRANT_LOCK|
 				     DLM_UNLOCK_CLEAR_CONVERT_TYPE);
-		} else if (status == DLM_RECOVERING || 
-			   status == DLM_MIGRATING || 
-			   status == DLM_FORWARD) {
+		} else if (status == DLM_RECOVERING ||
+			   status == DLM_MIGRATING ||
+			   status == DLM_FORWARD ||
+			   status == DLM_NOLOCKMGR
+			   ) {
 			/* must clear the actions because this unlock
 			 * is about to be retried.  cannot free or do
 			 * any list manipulation. */
@@ -202,14 +188,18 @@ static enum dlm_status dlmunlock_common(struct dlm_ctxt *dlm,
 			     res->lockname.name,
 			     status==DLM_RECOVERING?"recovering":
 			     (status==DLM_MIGRATING?"migrating":
-			      "forward"));
+				(status == DLM_FORWARD ? "forward" :
+						"nolockmanager")));
 			actions = 0;
 		}
 		if (flags & LKM_CANCEL)
 			lock->cancel_pending = 0;
-		else
-			lock->unlock_pending = 0;
-
+		else {
+			if (!lock->unlock_pending)
+				recovery_wait = 1;
+			else
+				lock->unlock_pending = 0;
+		}
 	}
 
 	/* get an extra ref on lock.  if we are just switching
@@ -243,6 +233,17 @@ leave:
 	spin_unlock(&res->spinlock);
 	wake_up(&res->wq);
 
+	if (recovery_wait) {
+		spin_lock(&res->spinlock);
+		/* Unlock request will directly succeed after owner dies,
+		 * and the lock is already removed from grant list. We have to
+		 * wait for RECOVERING done or we miss the chance to purge it
+		 * since the removement is much faster than RECOVERING proc.
+		 */
+		__dlm_wait_on_lockres_flags(res, DLM_LOCK_RES_RECOVERING);
+		spin_unlock(&res->spinlock);
+	}
+
 	/* let the caller's final dlm_lock_put handle the actual kfree */
 	if (actions & DLM_UNLOCK_FREE_LOCK) {
 		/* this should always be coupled with list removal */
@@ -250,7 +251,7 @@ leave:
 		mlog(0, "lock %u:%llu should be gone now! refs=%d\n",
 		     dlm_get_lock_cookie_node(be64_to_cpu(lock->ml.cookie)),
 		     dlm_get_lock_cookie_seq(be64_to_cpu(lock->ml.cookie)),
-		     atomic_read(&lock->lock_refs.refcount)-1);
+		     kref_read(&lock->lock_refs)-1);
 		dlm_lock_put(lock);
 	}
 	if (actions & DLM_UNLOCK_CALL_AST)
@@ -319,7 +320,7 @@ static enum dlm_status dlm_send_remote_unlock_request(struct dlm_ctxt *dlm,
 	struct kvec vec[2];
 	size_t veclen = 1;
 
-	mlog_entry("%.*s\n", res->lockname.len, res->lockname.name);
+	mlog(0, "%.*s\n", res->lockname.len, res->lockname.name);
 
 	if (owner == dlm->node_num) {
 		/* ended up trying to contact ourself.  this means
@@ -356,7 +357,8 @@ static enum dlm_status dlm_send_remote_unlock_request(struct dlm_ctxt *dlm,
 			mlog(0, "master was in-progress.  retry\n");
 		ret = status;
 	} else {
-		mlog_errno(tmpret);
+		mlog(ML_ERROR, "Error %d when sending message %u (key 0x%x) to "
+		     "node %u\n", tmpret, DLM_UNLOCK_LOCK_MSG, dlm->key, owner);
 		if (dlm_is_host_down(tmpret)) {
 			/* NOTE: this seems strange, but it is what we want.
 			 * when the master goes down during a cancel or
@@ -365,7 +367,10 @@ static enum dlm_status dlm_send_remote_unlock_request(struct dlm_ctxt *dlm,
 			 * updated state to the recovery master.  this thread
 			 * just needs to finish out the operation and call
 			 * the unlockast. */
-			ret = DLM_NORMAL;
+			if (dlm_is_node_dead(dlm, owner))
+				ret = DLM_NORMAL;
+			else
+				ret = DLM_NOLOCKMGR;
 		} else {
 			/* something bad.  this will BUG in ocfs2 */
 			ret = dlm_err_to_dlm_status(tmpret);
@@ -389,7 +394,6 @@ int dlm_unlock_lock_handler(struct o2net_msg *msg, u32 len, void *data,
 	struct dlm_ctxt *dlm = data;
 	struct dlm_unlock_lock *unlock = (struct dlm_unlock_lock *)msg->buf;
 	struct dlm_lock_resource *res = NULL;
-	struct list_head *iter;
 	struct dlm_lock *lock = NULL;
 	enum dlm_status status = DLM_NORMAL;
 	int found = 0, i;
@@ -417,7 +421,7 @@ int dlm_unlock_lock_handler(struct o2net_msg *msg, u32 len, void *data,
 	}
 
 	if (!dlm_grab(dlm))
-		return DLM_REJECTED;
+		return DLM_FORWARD;
 
 	mlog_bug_on_msg(!dlm_domain_fully_joined(dlm),
 			"Domain %s not fully joined!\n", dlm->name);
@@ -459,8 +463,7 @@ int dlm_unlock_lock_handler(struct o2net_msg *msg, u32 len, void *data,
 	}
 
 	for (i=0; i<3; i++) {
-		list_for_each(iter, queue) {
-			lock = list_entry(iter, struct dlm_lock, list);
+		list_for_each_entry(lock, queue, list) {
 			if (lock->ml.cookie == unlock->cookie &&
 		    	    lock->ml.node == unlock->node_idx) {
 				dlm_lock_get(lock);
@@ -589,8 +592,6 @@ enum dlm_status dlmunlock(struct dlm_ctxt *dlm, struct dlm_lockstatus *lksb,
 	struct dlm_lock *lock = NULL;
 	int call_ast, is_master;
 
-	mlog_entry_void();
-
 	if (!lksb) {
 		dlm_error(DLM_BADARGS);
 		return DLM_BADARGS;
@@ -643,7 +644,9 @@ retry:
 
 	if (status == DLM_RECOVERING ||
 	    status == DLM_MIGRATING ||
-	    status == DLM_FORWARD) {
+	    status == DLM_FORWARD ||
+	    status == DLM_NOLOCKMGR) {
+
 		/* We want to go away for a tiny bit to allow recovery
 		 * / migration to complete on this resource. I don't
 		 * know of any wait queue we could sleep on as this
@@ -655,21 +658,21 @@ retry:
 		msleep(50);
 
 		mlog(0, "retrying unlock due to pending recovery/"
-		     "migration/in-progress\n");
+		     "migration/in-progress/reconnect\n");
 		goto retry;
 	}
 
 	if (call_ast) {
 		mlog(0, "calling unlockast(%p, %d)\n", data, status);
 		if (is_master) {
-			/* it is possible that there is one last bast 
+			/* it is possible that there is one last bast
 			 * pending.  make sure it is flushed, then
 			 * call the unlockast.
 			 * not an issue if this is a mastered remotely,
 			 * since this lock has been removed from the
 			 * lockres queues and cannot be found. */
 			dlm_kick_thread(dlm, NULL);
-			wait_event(dlm->ast_wq, 
+			wait_event(dlm->ast_wq,
 				   dlm_lock_basts_flushed(dlm, lock));
 		}
 		(*unlockast)(data, status);

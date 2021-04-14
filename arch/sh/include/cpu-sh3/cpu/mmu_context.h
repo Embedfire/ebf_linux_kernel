@@ -1,11 +1,8 @@
-/*
+/* SPDX-License-Identifier: GPL-2.0
+ *
  * include/asm-sh/cpu-sh3/mmu_context.h
  *
  * Copyright (C) 1999 Niibe Yutaka
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #ifndef __ASM_CPU_SH3_MMU_CONTEXT_H
 #define __ASM_CPU_SH3_MMU_CONTEXT_H
@@ -16,6 +13,7 @@
 #define MMU_TEA		0xFFFFFFFC	/* TLB Exception Address */
 
 #define MMUCR		0xFFFFFFE0	/* MMU Control Register */
+#define MMUCR_TI	(1 << 2)	/* TLB flush bit */
 
 #define MMU_TLB_ADDRESS_ARRAY	0xF2000000
 #define MMU_PAGE_ASSOC_BIT	0x80

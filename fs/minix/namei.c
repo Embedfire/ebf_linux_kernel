@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/minix/namei.c
  *
@@ -18,27 +19,21 @@ static int add_nondir(struct dentry *dentry, struct inode *inode)
 	return err;
 }
 
-static struct dentry *minix_lookup(struct inode * dir, struct dentry *dentry, struct nameidata *nd)
+static struct dentry *minix_lookup(struct inode * dir, struct dentry *dentry, unsigned int flags)
 {
 	struct inode * inode = NULL;
 	ino_t ino;
-
-	dentry->d_op = dir->i_sb->s_root->d_op;
 
 	if (dentry->d_name.len > minix_sb(dir->i_sb)->s_namelen)
 		return ERR_PTR(-ENAMETOOLONG);
 
 	ino = minix_inode_by_name(dentry);
-	if (ino) {
+	if (ino)
 		inode = minix_iget(dir->i_sb, ino);
-		if (IS_ERR(inode))
-			return ERR_CAST(inode);
-	}
-	d_add(dentry, inode);
-	return NULL;
+	return d_splice_alias(inode, dentry);
 }
 
-static int minix_mknod(struct inode * dir, struct dentry *dentry, int mode, dev_t rdev)
+static int minix_mknod(struct inode * dir, struct dentry *dentry, umode_t mode, dev_t rdev)
 {
 	int error;
 	struct inode *inode;
@@ -46,10 +41,9 @@ static int minix_mknod(struct inode * dir, struct dentry *dentry, int mode, dev_
 	if (!old_valid_dev(rdev))
 		return -EINVAL;
 
-	inode = minix_new_inode(dir, &error);
+	inode = minix_new_inode(dir, mode, &error);
 
 	if (inode) {
-		inode->i_mode = mode;
 		minix_set_inode(inode, rdev);
 		mark_inode_dirty(inode);
 		error = add_nondir(dentry, inode);
@@ -57,8 +51,20 @@ static int minix_mknod(struct inode * dir, struct dentry *dentry, int mode, dev_
 	return error;
 }
 
-static int minix_create(struct inode * dir, struct dentry *dentry, int mode,
-		struct nameidata *nd)
+static int minix_tmpfile(struct inode *dir, struct dentry *dentry, umode_t mode)
+{
+	int error;
+	struct inode *inode = minix_new_inode(dir, mode, &error);
+	if (inode) {
+		minix_set_inode(inode, 0);
+		mark_inode_dirty(inode);
+		d_tmpfile(dentry, inode);
+	}
+	return error;
+}
+
+static int minix_create(struct inode *dir, struct dentry *dentry, umode_t mode,
+		bool excl)
 {
 	return minix_mknod(dir, dentry, mode, 0);
 }
@@ -73,11 +79,10 @@ static int minix_symlink(struct inode * dir, struct dentry *dentry,
 	if (i > dir->i_sb->s_blocksize)
 		goto out;
 
-	inode = minix_new_inode(dir, &err);
+	inode = minix_new_inode(dir, S_IFLNK | 0777, &err);
 	if (!inode)
 		goto out;
 
-	inode->i_mode = S_IFLNK | 0777;
 	minix_set_inode(inode, 0);
 	err = page_symlink(inode, symname, i);
 	if (err)
@@ -96,34 +101,25 @@ out_fail:
 static int minix_link(struct dentry * old_dentry, struct inode * dir,
 	struct dentry *dentry)
 {
-	struct inode *inode = old_dentry->d_inode;
+	struct inode *inode = d_inode(old_dentry);
 
-	if (inode->i_nlink >= minix_sb(inode->i_sb)->s_link_max)
-		return -EMLINK;
-
-	inode->i_ctime = CURRENT_TIME_SEC;
+	inode->i_ctime = current_time(inode);
 	inode_inc_link_count(inode);
-	atomic_inc(&inode->i_count);
+	ihold(inode);
 	return add_nondir(dentry, inode);
 }
 
-static int minix_mkdir(struct inode * dir, struct dentry *dentry, int mode)
+static int minix_mkdir(struct inode * dir, struct dentry *dentry, umode_t mode)
 {
 	struct inode * inode;
-	int err = -EMLINK;
-
-	if (dir->i_nlink >= minix_sb(dir->i_sb)->s_link_max)
-		goto out;
+	int err;
 
 	inode_inc_link_count(dir);
 
-	inode = minix_new_inode(dir, &err);
+	inode = minix_new_inode(dir, S_IFDIR | mode, &err);
 	if (!inode)
 		goto out_dir;
 
-	inode->i_mode = S_IFDIR | mode;
-	if (dir->i_mode & S_ISGID)
-		inode->i_mode |= S_ISGID;
 	minix_set_inode(inode, 0);
 
 	inode_inc_link_count(inode);
@@ -152,7 +148,7 @@ out_dir:
 static int minix_unlink(struct inode * dir, struct dentry *dentry)
 {
 	int err = -ENOENT;
-	struct inode * inode = dentry->d_inode;
+	struct inode * inode = d_inode(dentry);
 	struct page * page;
 	struct minix_dir_entry * de;
 
@@ -172,7 +168,7 @@ end_unlink:
 
 static int minix_rmdir(struct inode * dir, struct dentry *dentry)
 {
-	struct inode * inode = dentry->d_inode;
+	struct inode * inode = d_inode(dentry);
 	int err = -ENOTEMPTY;
 
 	if (minix_empty_dir(inode)) {
@@ -186,16 +182,19 @@ static int minix_rmdir(struct inode * dir, struct dentry *dentry)
 }
 
 static int minix_rename(struct inode * old_dir, struct dentry *old_dentry,
-			   struct inode * new_dir, struct dentry *new_dentry)
+			struct inode * new_dir, struct dentry *new_dentry,
+			unsigned int flags)
 {
-	struct minix_sb_info * info = minix_sb(old_dir->i_sb);
-	struct inode * old_inode = old_dentry->d_inode;
-	struct inode * new_inode = new_dentry->d_inode;
+	struct inode * old_inode = d_inode(old_dentry);
+	struct inode * new_inode = d_inode(new_dentry);
 	struct page * dir_page = NULL;
 	struct minix_dir_entry * dir_de = NULL;
 	struct page * old_page;
 	struct minix_dir_entry * old_de;
 	int err = -ENOENT;
+
+	if (flags & ~RENAME_NOREPLACE)
+		return -EINVAL;
 
 	old_de = minix_find_entry(old_dentry, &old_page);
 	if (!old_de)
@@ -220,30 +219,21 @@ static int minix_rename(struct inode * old_dir, struct dentry *old_dentry,
 		new_de = minix_find_entry(new_dentry, &new_page);
 		if (!new_de)
 			goto out_dir;
-		inode_inc_link_count(old_inode);
 		minix_set_link(new_de, new_page, old_inode);
-		new_inode->i_ctime = CURRENT_TIME_SEC;
+		new_inode->i_ctime = current_time(new_inode);
 		if (dir_de)
 			drop_nlink(new_inode);
 		inode_dec_link_count(new_inode);
 	} else {
-		if (dir_de) {
-			err = -EMLINK;
-			if (new_dir->i_nlink >= info->s_link_max)
-				goto out_dir;
-		}
-		inode_inc_link_count(old_inode);
 		err = minix_add_link(new_dentry, old_inode);
-		if (err) {
-			inode_dec_link_count(old_inode);
+		if (err)
 			goto out_dir;
-		}
 		if (dir_de)
 			inode_inc_link_count(new_dir);
 	}
 
 	minix_delete_entry(old_de, old_page);
-	inode_dec_link_count(old_inode);
+	mark_inode_dirty(old_inode);
 
 	if (dir_de) {
 		minix_set_link(dir_de, dir_page, new_dir);
@@ -254,11 +244,11 @@ static int minix_rename(struct inode * old_dir, struct dentry *old_dentry,
 out_dir:
 	if (dir_de) {
 		kunmap(dir_page);
-		page_cache_release(dir_page);
+		put_page(dir_page);
 	}
 out_old:
 	kunmap(old_page);
-	page_cache_release(old_page);
+	put_page(old_page);
 out:
 	return err;
 }
@@ -277,4 +267,5 @@ const struct inode_operations minix_dir_inode_operations = {
 	.mknod		= minix_mknod,
 	.rename		= minix_rename,
 	.getattr	= minix_getattr,
+	.tmpfile	= minix_tmpfile,
 };

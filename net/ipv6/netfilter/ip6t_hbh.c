@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Kernel module to match Hop-by-Hop and Destination parameters. */
 
 /* (C) 2001-2002 Andras Kis-Szabo <kisza@sch.bme.hu>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
-
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/ipv6.h>
@@ -41,17 +38,16 @@ MODULE_ALIAS("ip6t_dst");
  *	5	-> RTALERT 2 x x
  */
 
+static struct xt_match hbh_mt6_reg[] __read_mostly;
+
 static bool
-hbh_mt6(const struct sk_buff *skb, const struct net_device *in,
-        const struct net_device *out, const struct xt_match *match,
-        const void *matchinfo, int offset, unsigned int protoff,
-        bool *hotdrop)
+hbh_mt6(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	struct ipv6_opt_hdr _optsh;
 	const struct ipv6_opt_hdr *oh;
-	const struct ip6t_opts *optinfo = matchinfo;
+	const struct ip6t_opts *optinfo = par->matchinfo;
 	unsigned int temp;
-	unsigned int ptr;
+	unsigned int ptr = 0;
 	unsigned int hdrlen = 0;
 	bool ret = false;
 	u8 _opttype;
@@ -61,16 +57,18 @@ hbh_mt6(const struct sk_buff *skb, const struct net_device *in,
 	unsigned int optlen;
 	int err;
 
-	err = ipv6_find_hdr(skb, &ptr, match->data, NULL);
+	err = ipv6_find_hdr(skb, &ptr,
+			    (par->match == &hbh_mt6_reg[0]) ?
+			    NEXTHDR_HOP : NEXTHDR_DEST, NULL, NULL);
 	if (err < 0) {
 		if (err != -ENOENT)
-			*hotdrop = true;
+			par->hotdrop = true;
 		return false;
 	}
 
 	oh = skb_header_pointer(skb, ptr, sizeof(_optsh), &_optsh);
 	if (oh == NULL) {
-		*hotdrop = true;
+		par->hotdrop = true;
 		return false;
 	}
 
@@ -88,8 +86,7 @@ hbh_mt6(const struct sk_buff *skb, const struct net_device *in,
 		  ((optinfo->hdrlen == hdrlen) ^
 		   !!(optinfo->invflags & IP6T_OPTS_INV_LEN))));
 
-	ret = (oh != NULL) &&
-	      (!(optinfo->flags & IP6T_OPTS_LEN) ||
+	ret = (!(optinfo->flags & IP6T_OPTS_LEN) ||
 	       ((optinfo->hdrlen == hdrlen) ^
 		!!(optinfo->invflags & IP6T_OPTS_INV_LEN)));
 
@@ -97,8 +94,6 @@ hbh_mt6(const struct sk_buff *skb, const struct net_device *in,
 	hdrlen -= 2;
 	if (!(optinfo->flags & IP6T_OPTS_OPTS)) {
 		return ret;
-	} else if (optinfo->flags & IP6T_OPTS_NSTRICT) {
-		pr_debug("Not strict - not implemented");
 	} else {
 		pr_debug("Strict ");
 		pr_debug("#%d ", optinfo->optsnr);
@@ -146,11 +141,11 @@ hbh_mt6(const struct sk_buff *skb, const struct net_device *in,
 			}
 
 			/* Step to the next */
-			pr_debug("len%04X \n", optlen);
+			pr_debug("len%04X\n", optlen);
 
 			if ((ptr > skb->len - optlen || hdrlen < optlen) &&
 			    temp < optinfo->optsnr - 1) {
-				pr_debug("new pointer is too large! \n");
+				pr_debug("new pointer is too large!\n");
 				break;
 			}
 			ptr += optlen;
@@ -165,39 +160,40 @@ hbh_mt6(const struct sk_buff *skb, const struct net_device *in,
 	return false;
 }
 
-/* Called when user tries to insert an entry of this type. */
-static bool
-hbh_mt6_check(const char *tablename, const void *entry,
-              const struct xt_match *match, void *matchinfo,
-              unsigned int hook_mask)
+static int hbh_mt6_check(const struct xt_mtchk_param *par)
 {
-	const struct ip6t_opts *optsinfo = matchinfo;
+	const struct ip6t_opts *optsinfo = par->matchinfo;
 
 	if (optsinfo->invflags & ~IP6T_OPTS_INV_MASK) {
-		pr_debug("ip6t_opts: unknown flags %X\n", optsinfo->invflags);
-		return false;
+		pr_debug("unknown flags %X\n", optsinfo->invflags);
+		return -EINVAL;
 	}
-	return true;
+
+	if (optsinfo->flags & IP6T_OPTS_NSTRICT) {
+		pr_debug("Not strict - not implemented");
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static struct xt_match hbh_mt6_reg[] __read_mostly = {
 	{
+		/* Note, hbh_mt6 relies on the order of hbh_mt6_reg */
 		.name		= "hbh",
-		.family		= AF_INET6,
+		.family		= NFPROTO_IPV6,
 		.match		= hbh_mt6,
 		.matchsize	= sizeof(struct ip6t_opts),
 		.checkentry	= hbh_mt6_check,
 		.me		= THIS_MODULE,
-		.data		= NEXTHDR_HOP,
 	},
 	{
 		.name		= "dst",
-		.family		= AF_INET6,
+		.family		= NFPROTO_IPV6,
 		.match		= hbh_mt6,
 		.matchsize	= sizeof(struct ip6t_opts),
 		.checkentry	= hbh_mt6_check,
 		.me		= THIS_MODULE,
-		.data		= NEXTHDR_DEST,
 	},
 };
 

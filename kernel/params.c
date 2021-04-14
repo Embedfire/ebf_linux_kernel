@@ -1,277 +1,404 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Helpers for initial module or kernel cmdline parsing
    Copyright (C) 2001 Rusty Russell.
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
-#include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/slab.h>
+#include <linux/ctype.h>
+#include <linux/security.h>
 
-#if 0
-#define DEBUGP printk
+#ifdef CONFIG_SYSFS
+/* Protects all built-in parameters, modules use their own param_lock */
+static DEFINE_MUTEX(param_lock);
+
+/* Use the module's mutex, or if built-in use the built-in mutex */
+#ifdef CONFIG_MODULES
+#define KPARAM_MUTEX(mod)	((mod) ? &(mod)->param_lock : &param_lock)
 #else
-#define DEBUGP(fmt, a...)
+#define KPARAM_MUTEX(mod)	(&param_lock)
 #endif
 
-static inline char dash2underscore(char c)
+static inline void check_kparam_locked(struct module *mod)
+{
+	BUG_ON(!mutex_is_locked(KPARAM_MUTEX(mod)));
+}
+#else
+static inline void check_kparam_locked(struct module *mod)
+{
+}
+#endif /* !CONFIG_SYSFS */
+
+/* This just allows us to keep track of which parameters are kmalloced. */
+struct kmalloced_param {
+	struct list_head list;
+	char val[];
+};
+static LIST_HEAD(kmalloced_params);
+static DEFINE_SPINLOCK(kmalloced_params_lock);
+
+static void *kmalloc_parameter(unsigned int size)
+{
+	struct kmalloced_param *p;
+
+	p = kmalloc(sizeof(*p) + size, GFP_KERNEL);
+	if (!p)
+		return NULL;
+
+	spin_lock(&kmalloced_params_lock);
+	list_add(&p->list, &kmalloced_params);
+	spin_unlock(&kmalloced_params_lock);
+
+	return p->val;
+}
+
+/* Does nothing if parameter wasn't kmalloced above. */
+static void maybe_kfree_parameter(void *param)
+{
+	struct kmalloced_param *p;
+
+	spin_lock(&kmalloced_params_lock);
+	list_for_each_entry(p, &kmalloced_params, list) {
+		if (p->val == param) {
+			list_del(&p->list);
+			kfree(p);
+			break;
+		}
+	}
+	spin_unlock(&kmalloced_params_lock);
+}
+
+static char dash2underscore(char c)
 {
 	if (c == '-')
 		return '_';
 	return c;
 }
 
-static inline int parameq(const char *input, const char *paramname)
+bool parameqn(const char *a, const char *b, size_t n)
 {
-	unsigned int i;
-	for (i = 0; dash2underscore(input[i]) == paramname[i]; i++)
-		if (input[i] == '\0')
-			return 1;
-	return 0;
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		if (dash2underscore(a[i]) != dash2underscore(b[i]))
+			return false;
+	}
+	return true;
+}
+
+bool parameq(const char *a, const char *b)
+{
+	return parameqn(a, b, strlen(a)+1);
+}
+
+static bool param_check_unsafe(const struct kernel_param *kp)
+{
+	if (kp->flags & KERNEL_PARAM_FL_HWPARAM &&
+	    security_locked_down(LOCKDOWN_MODULE_PARAMETERS))
+		return false;
+
+	if (kp->flags & KERNEL_PARAM_FL_UNSAFE) {
+		pr_notice("Setting dangerous option %s - tainting kernel\n",
+			  kp->name);
+		add_taint(TAINT_USER, LOCKDEP_STILL_OK);
+	}
+
+	return true;
 }
 
 static int parse_one(char *param,
 		     char *val,
-		     struct kernel_param *params, 
+		     const char *doing,
+		     const struct kernel_param *params,
 		     unsigned num_params,
-		     int (*handle_unknown)(char *param, char *val))
+		     s16 min_level,
+		     s16 max_level,
+		     void *arg,
+		     int (*handle_unknown)(char *param, char *val,
+				     const char *doing, void *arg))
 {
 	unsigned int i;
+	int err;
 
 	/* Find parameter */
 	for (i = 0; i < num_params; i++) {
 		if (parameq(param, params[i].name)) {
-			DEBUGP("They are equal!  Calling %p\n",
-			       params[i].set);
-			return params[i].set(val, &params[i]);
+			if (params[i].level < min_level
+			    || params[i].level > max_level)
+				return 0;
+			/* No one handled NULL, so do it here. */
+			if (!val &&
+			    !(params[i].ops->flags & KERNEL_PARAM_OPS_FL_NOARG))
+				return -EINVAL;
+			pr_debug("handling %s with %p\n", param,
+				params[i].ops->set);
+			kernel_param_lock(params[i].mod);
+			if (param_check_unsafe(&params[i]))
+				err = params[i].ops->set(val, &params[i]);
+			else
+				err = -EPERM;
+			kernel_param_unlock(params[i].mod);
+			return err;
 		}
 	}
 
 	if (handle_unknown) {
-		DEBUGP("Unknown argument: calling %p\n", handle_unknown);
-		return handle_unknown(param, val);
+		pr_debug("doing %s: %s='%s'\n", doing, param, val);
+		return handle_unknown(param, val, doing, arg);
 	}
 
-	DEBUGP("Unknown argument `%s'\n", param);
+	pr_debug("Unknown argument '%s'\n", param);
 	return -ENOENT;
 }
 
-/* You can use " around spaces, but can't escape ". */
-/* Hyphens and underscores equivalent in parameter names. */
-static char *next_arg(char *args, char **param, char **val)
-{
-	unsigned int i, equals = 0;
-	int in_quote = 0, quoted = 0;
-	char *next;
-
-	if (*args == '"') {
-		args++;
-		in_quote = 1;
-		quoted = 1;
-	}
-
-	for (i = 0; args[i]; i++) {
-		if (args[i] == ' ' && !in_quote)
-			break;
-		if (equals == 0) {
-			if (args[i] == '=')
-				equals = i;
-		}
-		if (args[i] == '"')
-			in_quote = !in_quote;
-	}
-
-	*param = args;
-	if (!equals)
-		*val = NULL;
-	else {
-		args[equals] = '\0';
-		*val = args + equals + 1;
-
-		/* Don't include quotes in value. */
-		if (**val == '"') {
-			(*val)++;
-			if (args[i-1] == '"')
-				args[i-1] = '\0';
-		}
-		if (quoted && args[i-1] == '"')
-			args[i-1] = '\0';
-	}
-
-	if (args[i]) {
-		args[i] = '\0';
-		next = args + i + 1;
-	} else
-		next = args + i;
-
-	/* Chew up trailing spaces. */
-	while (*next == ' ')
-		next++;
-	return next;
-}
-
 /* Args looks like "foo=bar,bar2 baz=fuz wiz". */
-int parse_args(const char *name,
-	       char *args,
-	       struct kernel_param *params,
-	       unsigned num,
-	       int (*unknown)(char *param, char *val))
+char *parse_args(const char *doing,
+		 char *args,
+		 const struct kernel_param *params,
+		 unsigned num,
+		 s16 min_level,
+		 s16 max_level,
+		 void *arg,
+		 int (*unknown)(char *param, char *val,
+				const char *doing, void *arg))
 {
-	char *param, *val;
-
-	DEBUGP("Parsing ARGS: %s\n", args);
+	char *param, *val, *err = NULL;
 
 	/* Chew leading spaces */
-	while (*args == ' ')
-		args++;
+	args = skip_spaces(args);
+
+	if (*args)
+		pr_debug("doing %s, parsing ARGS: '%s'\n", doing, args);
 
 	while (*args) {
 		int ret;
 		int irq_was_disabled;
 
 		args = next_arg(args, &param, &val);
+		/* Stop at -- */
+		if (!val && strcmp(param, "--") == 0)
+			return err ?: args;
 		irq_was_disabled = irqs_disabled();
-		ret = parse_one(param, val, params, num, unknown);
-		if (irq_was_disabled && !irqs_disabled()) {
-			printk(KERN_WARNING "parse_args(): option '%s' enabled "
-					"irq's!\n", param);
-		}
+		ret = parse_one(param, val, doing, params, num,
+				min_level, max_level, arg, unknown);
+		if (irq_was_disabled && !irqs_disabled())
+			pr_warn("%s: option '%s' enabled irq's!\n",
+				doing, param);
+
 		switch (ret) {
-		case -ENOENT:
-			printk(KERN_ERR "%s: Unknown parameter `%s'\n",
-			       name, param);
-			return ret;
-		case -ENOSPC:
-			printk(KERN_ERR
-			       "%s: `%s' too large for parameter `%s'\n",
-			       name, val ?: "", param);
-			return ret;
 		case 0:
+			continue;
+		case -ENOENT:
+			pr_err("%s: Unknown parameter `%s'\n", doing, param);
+			break;
+		case -ENOSPC:
+			pr_err("%s: `%s' too large for parameter `%s'\n",
+			       doing, val ?: "", param);
 			break;
 		default:
-			printk(KERN_ERR
-			       "%s: `%s' invalid for parameter `%s'\n",
-			       name, val ?: "", param);
-			return ret;
+			pr_err("%s: `%s' invalid for parameter `%s'\n",
+			       doing, val ?: "", param);
+			break;
 		}
+
+		err = ERR_PTR(ret);
 	}
 
-	/* All parsed OK. */
-	return 0;
+	return err;
 }
 
 /* Lazy bastard, eh? */
-#define STANDARD_PARAM_DEF(name, type, format, tmptype, strtolfn)      	\
-	int param_set_##name(const char *val, struct kernel_param *kp)	\
+#define STANDARD_PARAM_DEF(name, type, format, strtolfn)      		\
+	int param_set_##name(const char *val, const struct kernel_param *kp) \
 	{								\
-		tmptype l;						\
-		int ret;						\
-									\
-		if (!val) return -EINVAL;				\
-		ret = strtolfn(val, 0, &l);				\
-		if (ret == -EINVAL || ((type)l != l))			\
-			return -EINVAL;					\
-		*((type *)kp->arg) = l;					\
-		return 0;						\
+		return strtolfn(val, 0, (type *)kp->arg);		\
 	}								\
-	int param_get_##name(char *buffer, struct kernel_param *kp)	\
+	int param_get_##name(char *buffer, const struct kernel_param *kp) \
 	{								\
-		return sprintf(buffer, format, *((type *)kp->arg));	\
-	}
+		return scnprintf(buffer, PAGE_SIZE, format "\n",	\
+				*((type *)kp->arg));			\
+	}								\
+	const struct kernel_param_ops param_ops_##name = {			\
+		.set = param_set_##name,				\
+		.get = param_get_##name,				\
+	};								\
+	EXPORT_SYMBOL(param_set_##name);				\
+	EXPORT_SYMBOL(param_get_##name);				\
+	EXPORT_SYMBOL(param_ops_##name)
 
-STANDARD_PARAM_DEF(byte, unsigned char, "%c", unsigned long, strict_strtoul);
-STANDARD_PARAM_DEF(short, short, "%hi", long, strict_strtol);
-STANDARD_PARAM_DEF(ushort, unsigned short, "%hu", unsigned long, strict_strtoul);
-STANDARD_PARAM_DEF(int, int, "%i", long, strict_strtol);
-STANDARD_PARAM_DEF(uint, unsigned int, "%u", unsigned long, strict_strtoul);
-STANDARD_PARAM_DEF(long, long, "%li", long, strict_strtol);
-STANDARD_PARAM_DEF(ulong, unsigned long, "%lu", unsigned long, strict_strtoul);
 
-int param_set_charp(const char *val, struct kernel_param *kp)
+STANDARD_PARAM_DEF(byte,	unsigned char,		"%hhu",		kstrtou8);
+STANDARD_PARAM_DEF(short,	short,			"%hi",		kstrtos16);
+STANDARD_PARAM_DEF(ushort,	unsigned short,		"%hu",		kstrtou16);
+STANDARD_PARAM_DEF(int,		int,			"%i",		kstrtoint);
+STANDARD_PARAM_DEF(uint,	unsigned int,		"%u",		kstrtouint);
+STANDARD_PARAM_DEF(long,	long,			"%li",		kstrtol);
+STANDARD_PARAM_DEF(ulong,	unsigned long,		"%lu",		kstrtoul);
+STANDARD_PARAM_DEF(ullong,	unsigned long long,	"%llu",		kstrtoull);
+STANDARD_PARAM_DEF(hexint,	unsigned int,		"%#08x", 	kstrtouint);
+
+int param_set_charp(const char *val, const struct kernel_param *kp)
 {
-	if (!val) {
-		printk(KERN_ERR "%s: string parameter expected\n",
-		       kp->name);
-		return -EINVAL;
-	}
-
 	if (strlen(val) > 1024) {
-		printk(KERN_ERR "%s: string parameter too long\n",
-		       kp->name);
+		pr_err("%s: string parameter too long\n", kp->name);
 		return -ENOSPC;
 	}
 
-	*(char **)kp->arg = (char *)val;
+	maybe_kfree_parameter(*(char **)kp->arg);
+
+	/* This is a hack.  We can't kmalloc in early boot, and we
+	 * don't need to; this mangled commandline is preserved. */
+	if (slab_is_available()) {
+		*(char **)kp->arg = kmalloc_parameter(strlen(val)+1);
+		if (!*(char **)kp->arg)
+			return -ENOMEM;
+		strcpy(*(char **)kp->arg, val);
+	} else
+		*(const char **)kp->arg = val;
+
 	return 0;
 }
+EXPORT_SYMBOL(param_set_charp);
 
-int param_get_charp(char *buffer, struct kernel_param *kp)
+int param_get_charp(char *buffer, const struct kernel_param *kp)
 {
-	return sprintf(buffer, "%s", *((char **)kp->arg));
+	return scnprintf(buffer, PAGE_SIZE, "%s\n", *((char **)kp->arg));
 }
+EXPORT_SYMBOL(param_get_charp);
 
-int param_set_bool(const char *val, struct kernel_param *kp)
+void param_free_charp(void *arg)
+{
+	maybe_kfree_parameter(*((char **)arg));
+}
+EXPORT_SYMBOL(param_free_charp);
+
+const struct kernel_param_ops param_ops_charp = {
+	.set = param_set_charp,
+	.get = param_get_charp,
+	.free = param_free_charp,
+};
+EXPORT_SYMBOL(param_ops_charp);
+
+/* Actually could be a bool or an int, for historical reasons. */
+int param_set_bool(const char *val, const struct kernel_param *kp)
 {
 	/* No equals means "set"... */
 	if (!val) val = "1";
 
 	/* One of =[yYnN01] */
-	switch (val[0]) {
-	case 'y': case 'Y': case '1':
-		*(int *)kp->arg = 1;
-		return 0;
-	case 'n': case 'N': case '0':
-		*(int *)kp->arg = 0;
-		return 0;
-	}
-	return -EINVAL;
+	return strtobool(val, kp->arg);
 }
+EXPORT_SYMBOL(param_set_bool);
 
-int param_get_bool(char *buffer, struct kernel_param *kp)
+int param_get_bool(char *buffer, const struct kernel_param *kp)
 {
 	/* Y and N chosen as being relatively non-coder friendly */
-	return sprintf(buffer, "%c", (*(int *)kp->arg) ? 'Y' : 'N');
+	return sprintf(buffer, "%c\n", *(bool *)kp->arg ? 'Y' : 'N');
 }
+EXPORT_SYMBOL(param_get_bool);
 
-int param_set_invbool(const char *val, struct kernel_param *kp)
+const struct kernel_param_ops param_ops_bool = {
+	.flags = KERNEL_PARAM_OPS_FL_NOARG,
+	.set = param_set_bool,
+	.get = param_get_bool,
+};
+EXPORT_SYMBOL(param_ops_bool);
+
+int param_set_bool_enable_only(const char *val, const struct kernel_param *kp)
 {
-	int boolval, ret;
+	int err = 0;
+	bool new_value;
+	bool orig_value = *(bool *)kp->arg;
+	struct kernel_param dummy_kp = *kp;
+
+	dummy_kp.arg = &new_value;
+
+	err = param_set_bool(val, &dummy_kp);
+	if (err)
+		return err;
+
+	/* Don't let them unset it once it's set! */
+	if (!new_value && orig_value)
+		return -EROFS;
+
+	if (new_value)
+		err = param_set_bool(val, kp);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(param_set_bool_enable_only);
+
+const struct kernel_param_ops param_ops_bool_enable_only = {
+	.flags = KERNEL_PARAM_OPS_FL_NOARG,
+	.set = param_set_bool_enable_only,
+	.get = param_get_bool,
+};
+EXPORT_SYMBOL_GPL(param_ops_bool_enable_only);
+
+/* This one must be bool. */
+int param_set_invbool(const char *val, const struct kernel_param *kp)
+{
+	int ret;
+	bool boolval;
 	struct kernel_param dummy;
 
 	dummy.arg = &boolval;
 	ret = param_set_bool(val, &dummy);
 	if (ret == 0)
-		*(int *)kp->arg = !boolval;
+		*(bool *)kp->arg = !boolval;
 	return ret;
 }
+EXPORT_SYMBOL(param_set_invbool);
 
-int param_get_invbool(char *buffer, struct kernel_param *kp)
+int param_get_invbool(char *buffer, const struct kernel_param *kp)
 {
-	return sprintf(buffer, "%c", (*(int *)kp->arg) ? 'N' : 'Y');
+	return sprintf(buffer, "%c\n", (*(bool *)kp->arg) ? 'N' : 'Y');
 }
+EXPORT_SYMBOL(param_get_invbool);
+
+const struct kernel_param_ops param_ops_invbool = {
+	.set = param_set_invbool,
+	.get = param_get_invbool,
+};
+EXPORT_SYMBOL(param_ops_invbool);
+
+int param_set_bint(const char *val, const struct kernel_param *kp)
+{
+	/* Match bool exactly, by re-using it. */
+	struct kernel_param boolkp = *kp;
+	bool v;
+	int ret;
+
+	boolkp.arg = &v;
+
+	ret = param_set_bool(val, &boolkp);
+	if (ret == 0)
+		*(int *)kp->arg = v;
+	return ret;
+}
+EXPORT_SYMBOL(param_set_bint);
+
+const struct kernel_param_ops param_ops_bint = {
+	.flags = KERNEL_PARAM_OPS_FL_NOARG,
+	.set = param_set_bint,
+	.get = param_get_int,
+};
+EXPORT_SYMBOL(param_ops_bint);
 
 /* We break the rule and mangle the string. */
-static int param_array(const char *name,
+static int param_array(struct module *mod,
+		       const char *name,
 		       const char *val,
 		       unsigned int min, unsigned int max,
 		       void *elem, int elemsize,
-		       int (*set)(const char *, struct kernel_param *kp),
+		       int (*set)(const char *, const struct kernel_param *kp),
+		       s16 level,
 		       unsigned int *num)
 {
 	int ret;
@@ -281,12 +408,7 @@ static int param_array(const char *name,
 	/* Get the name right for errors. */
 	kp.name = name;
 	kp.arg = elem;
-
-	/* No equals sign? */
-	if (!val) {
-		printk(KERN_ERR "%s: expects arguments\n", name);
-		return -EINVAL;
-	}
+	kp.level = level;
 
 	*num = 0;
 	/* We expect a comma-separated list of values. */
@@ -294,8 +416,7 @@ static int param_array(const char *name,
 		int len;
 
 		if (*num == max) {
-			printk(KERN_ERR "%s: can only take %i arguments\n",
-			       name, max);
+			pr_err("%s: can only take %i arguments\n", name, max);
 			return -EINVAL;
 		}
 		len = strcspn(val, ",");
@@ -303,6 +424,7 @@ static int param_array(const char *name,
 		/* nul-terminate and parse */
 		save = val[len];
 		((char *)val)[len] = '\0';
+		check_kparam_locked(mod);
 		ret = set(val, &kp);
 
 		if (ret != 0)
@@ -313,34 +435,35 @@ static int param_array(const char *name,
 	} while (save == ',');
 
 	if (*num < min) {
-		printk(KERN_ERR "%s: needs at least %i arguments\n",
-		       name, min);
+		pr_err("%s: needs at least %i arguments\n", name, min);
 		return -EINVAL;
 	}
 	return 0;
 }
 
-int param_array_set(const char *val, struct kernel_param *kp)
+static int param_array_set(const char *val, const struct kernel_param *kp)
 {
 	const struct kparam_array *arr = kp->arr;
 	unsigned int temp_num;
 
-	return param_array(kp->name, val, 1, arr->max, arr->elem,
-			   arr->elemsize, arr->set, arr->num ?: &temp_num);
+	return param_array(kp->mod, kp->name, val, 1, arr->max, arr->elem,
+			   arr->elemsize, arr->ops->set, kp->level,
+			   arr->num ?: &temp_num);
 }
 
-int param_array_get(char *buffer, struct kernel_param *kp)
+static int param_array_get(char *buffer, const struct kernel_param *kp)
 {
 	int i, off, ret;
 	const struct kparam_array *arr = kp->arr;
-	struct kernel_param p;
+	struct kernel_param p = *kp;
 
-	p = *kp;
 	for (i = off = 0; i < (arr->num ? *arr->num : arr->max); i++) {
+		/* Replace \n with comma */
 		if (i)
-			buffer[off++] = ',';
+			buffer[off - 1] = ',';
 		p.arg = arr->elem + arr->elemsize * i;
-		ret = arr->get(buffer + off, &p);
+		check_kparam_locked(p.mod);
+		ret = arr->ops->get(buffer + off, &p);
 		if (ret < 0)
 			return ret;
 		off += ret;
@@ -349,77 +472,102 @@ int param_array_get(char *buffer, struct kernel_param *kp)
 	return off;
 }
 
-int param_set_copystring(const char *val, struct kernel_param *kp)
+static void param_array_free(void *arg)
+{
+	unsigned int i;
+	const struct kparam_array *arr = arg;
+
+	if (arr->ops->free)
+		for (i = 0; i < (arr->num ? *arr->num : arr->max); i++)
+			arr->ops->free(arr->elem + arr->elemsize * i);
+}
+
+const struct kernel_param_ops param_array_ops = {
+	.set = param_array_set,
+	.get = param_array_get,
+	.free = param_array_free,
+};
+EXPORT_SYMBOL(param_array_ops);
+
+int param_set_copystring(const char *val, const struct kernel_param *kp)
 {
 	const struct kparam_string *kps = kp->str;
 
-	if (!val) {
-		printk(KERN_ERR "%s: missing param set value\n", kp->name);
-		return -EINVAL;
-	}
 	if (strlen(val)+1 > kps->maxlen) {
-		printk(KERN_ERR "%s: string doesn't fit in %u chars.\n",
+		pr_err("%s: string doesn't fit in %u chars.\n",
 		       kp->name, kps->maxlen-1);
 		return -ENOSPC;
 	}
 	strcpy(kps->string, val);
 	return 0;
 }
+EXPORT_SYMBOL(param_set_copystring);
 
-int param_get_string(char *buffer, struct kernel_param *kp)
+int param_get_string(char *buffer, const struct kernel_param *kp)
 {
 	const struct kparam_string *kps = kp->str;
-	return strlcpy(buffer, kps->string, kps->maxlen);
+	return scnprintf(buffer, PAGE_SIZE, "%s\n", kps->string);
 }
+EXPORT_SYMBOL(param_get_string);
+
+const struct kernel_param_ops param_ops_string = {
+	.set = param_set_copystring,
+	.get = param_get_string,
+};
+EXPORT_SYMBOL(param_ops_string);
 
 /* sysfs output in /sys/modules/XYZ/parameters/ */
-
-extern struct kernel_param __start___param[], __stop___param[];
+#define to_module_attr(n) container_of(n, struct module_attribute, attr)
+#define to_module_kobject(n) container_of(n, struct module_kobject, kobj)
 
 struct param_attribute
 {
 	struct module_attribute mattr;
-	struct kernel_param *param;
+	const struct kernel_param *param;
 };
 
 struct module_param_attrs
 {
+	unsigned int num;
 	struct attribute_group grp;
-	struct param_attribute attrs[0];
+	struct param_attribute attrs[];
 };
 
 #ifdef CONFIG_SYSFS
-#define to_param_attr(n) container_of(n, struct param_attribute, mattr);
+#define to_param_attr(n) container_of(n, struct param_attribute, mattr)
 
 static ssize_t param_attr_show(struct module_attribute *mattr,
-			       struct module *mod, char *buf)
+			       struct module_kobject *mk, char *buf)
 {
 	int count;
 	struct param_attribute *attribute = to_param_attr(mattr);
 
-	if (!attribute->param->get)
+	if (!attribute->param->ops->get)
 		return -EPERM;
 
-	count = attribute->param->get(buf, attribute->param);
-	if (count > 0) {
-		strcat(buf, "\n");
-		++count;
-	}
+	kernel_param_lock(mk->mod);
+	count = attribute->param->ops->get(buf, attribute->param);
+	kernel_param_unlock(mk->mod);
 	return count;
 }
 
 /* sysfs always hands a nul-terminated string in buf.  We rely on that. */
 static ssize_t param_attr_store(struct module_attribute *mattr,
-				struct module *owner,
+				struct module_kobject *mk,
 				const char *buf, size_t len)
 {
  	int err;
 	struct param_attribute *attribute = to_param_attr(mattr);
 
-	if (!attribute->param->set)
+	if (!attribute->param->ops->set)
 		return -EPERM;
 
-	err = attribute->param->set(buf, attribute->param);
+	kernel_param_lock(mk->mod);
+	if (param_check_unsafe(attribute->param))
+		err = attribute->param->ops->set(buf, attribute->param);
+	else
+		err = -EPERM;
+	kernel_param_unlock(mk->mod);
 	if (!err)
 		return len;
 	return err;
@@ -433,94 +581,136 @@ static ssize_t param_attr_store(struct module_attribute *mattr,
 #endif
 
 #ifdef CONFIG_SYSFS
-/*
- * param_sysfs_setup - setup sysfs support for one module or KBUILD_MODNAME
- * @mk: struct module_kobject (contains parent kobject)
- * @kparam: array of struct kernel_param, the actual parameter definitions
- * @num_params: number of entries in array
- * @name_skip: offset where the parameter name start in kparam[].name. Needed for built-in "modules"
- *
- * Create a kobject for a (per-module) group of parameters, and create files
- * in sysfs. A pointer to the param_kobject is returned on success,
- * NULL if there's no parameter to export, or other ERR_PTR(err).
- */
-static __modinit struct module_param_attrs *
-param_sysfs_setup(struct module_kobject *mk,
-		  struct kernel_param *kparam,
-		  unsigned int num_params,
-		  unsigned int name_skip)
+void kernel_param_lock(struct module *mod)
 {
-	struct module_param_attrs *mp;
-	unsigned int valid_attrs = 0;
-	unsigned int i, size[2];
-	struct param_attribute *pattr;
-	struct attribute **gattr;
-	int err;
+	mutex_lock(KPARAM_MUTEX(mod));
+}
 
-	for (i=0; i<num_params; i++) {
-		if (kparam[i].perm)
-			valid_attrs++;
+void kernel_param_unlock(struct module *mod)
+{
+	mutex_unlock(KPARAM_MUTEX(mod));
+}
+
+EXPORT_SYMBOL(kernel_param_lock);
+EXPORT_SYMBOL(kernel_param_unlock);
+
+/*
+ * add_sysfs_param - add a parameter to sysfs
+ * @mk: struct module_kobject
+ * @kp: the actual parameter definition to add to sysfs
+ * @name: name of parameter
+ *
+ * Create a kobject if for a (per-module) parameter if mp NULL, and
+ * create file in sysfs.  Returns an error on out of memory.  Always cleans up
+ * if there's an error.
+ */
+static __modinit int add_sysfs_param(struct module_kobject *mk,
+				     const struct kernel_param *kp,
+				     const char *name)
+{
+	struct module_param_attrs *new_mp;
+	struct attribute **new_attrs;
+	unsigned int i;
+
+	/* We don't bother calling this with invisible parameters. */
+	BUG_ON(!kp->perm);
+
+	if (!mk->mp) {
+		/* First allocation. */
+		mk->mp = kzalloc(sizeof(*mk->mp), GFP_KERNEL);
+		if (!mk->mp)
+			return -ENOMEM;
+		mk->mp->grp.name = "parameters";
+		/* NULL-terminated attribute array. */
+		mk->mp->grp.attrs = kzalloc(sizeof(mk->mp->grp.attrs[0]),
+					    GFP_KERNEL);
+		/* Caller will cleanup via free_module_param_attrs */
+		if (!mk->mp->grp.attrs)
+			return -ENOMEM;
 	}
 
-	if (!valid_attrs)
-		return NULL;
+	/* Enlarge allocations. */
+	new_mp = krealloc(mk->mp,
+			  sizeof(*mk->mp) +
+			  sizeof(mk->mp->attrs[0]) * (mk->mp->num + 1),
+			  GFP_KERNEL);
+	if (!new_mp)
+		return -ENOMEM;
+	mk->mp = new_mp;
 
-	size[0] = ALIGN(sizeof(*mp) +
-			valid_attrs * sizeof(mp->attrs[0]),
-			sizeof(mp->grp.attrs[0]));
-	size[1] = (valid_attrs + 1) * sizeof(mp->grp.attrs[0]);
+	/* Extra pointer for NULL terminator */
+	new_attrs = krealloc(mk->mp->grp.attrs,
+			     sizeof(mk->mp->grp.attrs[0]) * (mk->mp->num + 2),
+			     GFP_KERNEL);
+	if (!new_attrs)
+		return -ENOMEM;
+	mk->mp->grp.attrs = new_attrs;
 
-	mp = kzalloc(size[0] + size[1], GFP_KERNEL);
-	if (!mp)
-		return ERR_PTR(-ENOMEM);
+	/* Tack new one on the end. */
+	memset(&mk->mp->attrs[mk->mp->num], 0, sizeof(mk->mp->attrs[0]));
+	sysfs_attr_init(&mk->mp->attrs[mk->mp->num].mattr.attr);
+	mk->mp->attrs[mk->mp->num].param = kp;
+	mk->mp->attrs[mk->mp->num].mattr.show = param_attr_show;
+	/* Do not allow runtime DAC changes to make param writable. */
+	if ((kp->perm & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0)
+		mk->mp->attrs[mk->mp->num].mattr.store = param_attr_store;
+	else
+		mk->mp->attrs[mk->mp->num].mattr.store = NULL;
+	mk->mp->attrs[mk->mp->num].mattr.attr.name = (char *)name;
+	mk->mp->attrs[mk->mp->num].mattr.attr.mode = kp->perm;
+	mk->mp->num++;
 
-	mp->grp.name = "parameters";
-	mp->grp.attrs = (void *)mp + size[0];
-
-	pattr = &mp->attrs[0];
-	gattr = &mp->grp.attrs[0];
-	for (i = 0; i < num_params; i++) {
-		struct kernel_param *kp = &kparam[i];
-		if (kp->perm) {
-			pattr->param = kp;
-			pattr->mattr.show = param_attr_show;
-			pattr->mattr.store = param_attr_store;
-			pattr->mattr.attr.name = (char *)&kp->name[name_skip];
-			pattr->mattr.attr.mode = kp->perm;
-			*(gattr++) = &(pattr++)->mattr.attr;
-		}
-	}
-	*gattr = NULL;
-
-	if ((err = sysfs_create_group(&mk->kobj, &mp->grp))) {
-		kfree(mp);
-		return ERR_PTR(err);
-	}
-	return mp;
+	/* Fix up all the pointers, since krealloc can move us */
+	for (i = 0; i < mk->mp->num; i++)
+		mk->mp->grp.attrs[i] = &mk->mp->attrs[i].mattr.attr;
+	mk->mp->grp.attrs[mk->mp->num] = NULL;
+	return 0;
 }
 
 #ifdef CONFIG_MODULES
+static void free_module_param_attrs(struct module_kobject *mk)
+{
+	if (mk->mp)
+		kfree(mk->mp->grp.attrs);
+	kfree(mk->mp);
+	mk->mp = NULL;
+}
+
 /*
  * module_param_sysfs_setup - setup sysfs support for one module
  * @mod: module
  * @kparam: module parameters (array)
  * @num_params: number of module parameters
  *
- * Adds sysfs entries for module parameters, and creates a link from
- * /sys/module/[mod->name]/parameters to /sys/parameters/[mod->name]/
+ * Adds sysfs entries for module parameters under
+ * /sys/module/[mod->name]/parameters/
  */
 int module_param_sysfs_setup(struct module *mod,
-			     struct kernel_param *kparam,
+			     const struct kernel_param *kparam,
 			     unsigned int num_params)
 {
-	struct module_param_attrs *mp;
+	int i, err;
+	bool params = false;
 
-	mp = param_sysfs_setup(&mod->mkobj, kparam, num_params, 0);
-	if (IS_ERR(mp))
-		return PTR_ERR(mp);
+	for (i = 0; i < num_params; i++) {
+		if (kparam[i].perm == 0)
+			continue;
+		err = add_sysfs_param(&mod->mkobj, &kparam[i], kparam[i].name);
+		if (err) {
+			free_module_param_attrs(&mod->mkobj);
+			return err;
+		}
+		params = true;
+	}
 
-	mod->param_attrs = mp;
-	return 0;
+	if (!params)
+		return 0;
+
+	/* Create the param group. */
+	err = sysfs_create_group(&mod->mkobj.kobj, &mod->mkobj.mp->grp);
+	if (err)
+		free_module_param_attrs(&mod->mkobj);
+	return err;
 }
 
 /*
@@ -532,106 +722,150 @@ int module_param_sysfs_setup(struct module *mod,
  */
 void module_param_sysfs_remove(struct module *mod)
 {
-	if (mod->param_attrs) {
-		sysfs_remove_group(&mod->mkobj.kobj,
-				   &mod->param_attrs->grp);
+	if (mod->mkobj.mp) {
+		sysfs_remove_group(&mod->mkobj.kobj, &mod->mkobj.mp->grp);
 		/* We are positive that no one is using any param
 		 * attrs at this point.  Deallocate immediately. */
-		kfree(mod->param_attrs);
-		mod->param_attrs = NULL;
+		free_module_param_attrs(&mod->mkobj);
 	}
 }
 #endif
 
-/*
- * kernel_param_sysfs_setup - wrapper for built-in params support
- */
-static void __init kernel_param_sysfs_setup(const char *name,
-					    struct kernel_param *kparam,
-					    unsigned int num_params,
-					    unsigned int name_skip)
+void destroy_params(const struct kernel_param *params, unsigned num)
+{
+	unsigned int i;
+
+	for (i = 0; i < num; i++)
+		if (params[i].ops->free)
+			params[i].ops->free(params[i].arg);
+}
+
+static struct module_kobject * __init locate_module_kobject(const char *name)
 {
 	struct module_kobject *mk;
-	int ret;
+	struct kobject *kobj;
+	int err;
 
-	mk = kzalloc(sizeof(struct module_kobject), GFP_KERNEL);
-	BUG_ON(!mk);
+	kobj = kset_find_obj(module_kset, name);
+	if (kobj) {
+		mk = to_module_kobject(kobj);
+	} else {
+		mk = kzalloc(sizeof(struct module_kobject), GFP_KERNEL);
+		BUG_ON(!mk);
 
-	mk->mod = THIS_MODULE;
-	mk->kobj.kset = module_kset;
-	ret = kobject_init_and_add(&mk->kobj, &module_ktype, NULL, "%s", name);
-	if (ret) {
-		kobject_put(&mk->kobj);
-		printk(KERN_ERR "Module '%s' failed to be added to sysfs, "
-		      "error number %d\n", name, ret);
-		printk(KERN_ERR	"The system will be unstable now.\n");
-		return;
+		mk->mod = THIS_MODULE;
+		mk->kobj.kset = module_kset;
+		err = kobject_init_and_add(&mk->kobj, &module_ktype, NULL,
+					   "%s", name);
+#ifdef CONFIG_MODULES
+		if (!err)
+			err = sysfs_create_file(&mk->kobj, &module_uevent.attr);
+#endif
+		if (err) {
+			kobject_put(&mk->kobj);
+			pr_crit("Adding module '%s' to sysfs failed (%d), the system may be unstable.\n",
+				name, err);
+			return NULL;
+		}
+
+		/* So that we hold reference in both cases. */
+		kobject_get(&mk->kobj);
 	}
-	param_sysfs_setup(mk, kparam, num_params, name_skip);
+
+	return mk;
+}
+
+static void __init kernel_add_sysfs_param(const char *name,
+					  const struct kernel_param *kparam,
+					  unsigned int name_skip)
+{
+	struct module_kobject *mk;
+	int err;
+
+	mk = locate_module_kobject(name);
+	if (!mk)
+		return;
+
+	/* We need to remove old parameters before adding more. */
+	if (mk->mp)
+		sysfs_remove_group(&mk->kobj, &mk->mp->grp);
+
+	/* These should not fail at boot. */
+	err = add_sysfs_param(mk, kparam, kparam->name + name_skip);
+	BUG_ON(err);
+	err = sysfs_create_group(&mk->kobj, &mk->mp->grp);
+	BUG_ON(err);
 	kobject_uevent(&mk->kobj, KOBJ_ADD);
+	kobject_put(&mk->kobj);
 }
 
 /*
- * param_sysfs_builtin - add contents in /sys/parameters for built-in modules
+ * param_sysfs_builtin - add sysfs parameters for built-in modules
  *
  * Add module_parameters to sysfs for "modules" built into the kernel.
  *
  * The "module" name (KBUILD_MODNAME) is stored before a dot, the
  * "parameter" name is stored behind a dot in kernel_param->name. So,
  * extract the "module" name for all built-in kernel_param-eters,
- * and for all who have the same, call kernel_param_sysfs_setup.
+ * and for all who have the same, call kernel_add_sysfs_param.
  */
 static void __init param_sysfs_builtin(void)
 {
-	struct kernel_param *kp, *kp_begin = NULL;
-	unsigned int i, name_len, count = 0;
-	char modname[MODULE_NAME_LEN + 1] = "";
+	const struct kernel_param *kp;
+	unsigned int name_len;
+	char modname[MODULE_NAME_LEN];
 
-	for (i=0; i < __stop___param - __start___param; i++) {
+	for (kp = __start___param; kp < __stop___param; kp++) {
 		char *dot;
-		size_t max_name_len;
 
-		kp = &__start___param[i];
-		max_name_len =
-			min_t(size_t, MODULE_NAME_LEN, strlen(kp->name));
-
-		dot = memchr(kp->name, '.', max_name_len);
-		if (!dot) {
-			DEBUGP("couldn't find period in first %d characters "
-			       "of %s\n", MODULE_NAME_LEN, kp->name);
+		if (kp->perm == 0)
 			continue;
-		}
-		name_len = dot - kp->name;
 
- 		/* new kbuild_modname? */
-		if (strlen(modname) != name_len
-		    || strncmp(modname, kp->name, name_len) != 0) {
-			/* add a new kobject for previous kernel_params. */
-			if (count)
-				kernel_param_sysfs_setup(modname,
-							 kp_begin,
-							 count,
-							 strlen(modname)+1);
-
-			strncpy(modname, kp->name, name_len);
-			modname[name_len] = '\0';
-			count = 0;
-			kp_begin = kp;
+		dot = strchr(kp->name, '.');
+		if (!dot) {
+			/* This happens for core_param() */
+			strcpy(modname, "kernel");
+			name_len = 0;
+		} else {
+			name_len = dot - kp->name + 1;
+			strlcpy(modname, kp->name, name_len);
 		}
-		count++;
+		kernel_add_sysfs_param(modname, kp, name_len);
 	}
-
-	/* last kernel_params need to be registered as well */
-	if (count)
-		kernel_param_sysfs_setup(modname, kp_begin, count,
-					 strlen(modname)+1);
 }
 
+ssize_t __modver_version_show(struct module_attribute *mattr,
+			      struct module_kobject *mk, char *buf)
+{
+	struct module_version_attribute *vattr =
+		container_of(mattr, struct module_version_attribute, mattr);
+
+	return scnprintf(buf, PAGE_SIZE, "%s\n", vattr->version);
+}
+
+extern const struct module_version_attribute *__start___modver[];
+extern const struct module_version_attribute *__stop___modver[];
+
+static void __init version_sysfs_builtin(void)
+{
+	const struct module_version_attribute **p;
+	struct module_kobject *mk;
+	int err;
+
+	for (p = __start___modver; p < __stop___modver; p++) {
+		const struct module_version_attribute *vattr = *p;
+
+		mk = locate_module_kobject(vattr->module_name);
+		if (mk) {
+			err = sysfs_create_file(&mk->kobj, &vattr->mattr.attr);
+			WARN_ON_ONCE(err);
+			kobject_uevent(&mk->kobj, KOBJ_ADD);
+			kobject_put(&mk->kobj);
+		}
+	}
+}
 
 /* module-related sysfs stuff */
-
-#define to_module_attr(n) container_of(n, struct module_attribute, attr);
-#define to_module_kobject(n) container_of(n, struct module_kobject, kobj);
 
 static ssize_t module_attr_show(struct kobject *kobj,
 				struct attribute *attr,
@@ -647,7 +881,7 @@ static ssize_t module_attr_show(struct kobject *kobj,
 	if (!attribute->show)
 		return -EIO;
 
-	ret = attribute->show(attribute, mk->mod, buf);
+	ret = attribute->show(attribute, mk, buf);
 
 	return ret;
 }
@@ -666,12 +900,12 @@ static ssize_t module_attr_store(struct kobject *kobj,
 	if (!attribute->store)
 		return -EIO;
 
-	ret = attribute->store(attribute, mk->mod, buf, len);
+	ret = attribute->store(attribute, mk, buf, len);
 
 	return ret;
 }
 
-static struct sysfs_ops module_sysfs_ops = {
+static const struct sysfs_ops module_sysfs_ops = {
 	.show = module_attr_show,
 	.store = module_attr_store,
 };
@@ -685,14 +919,21 @@ static int uevent_filter(struct kset *kset, struct kobject *kobj)
 	return 0;
 }
 
-static struct kset_uevent_ops module_uevent_ops = {
+static const struct kset_uevent_ops module_uevent_ops = {
 	.filter = uevent_filter,
 };
 
 struct kset *module_kset;
 int module_sysfs_initialized;
 
+static void module_kobj_release(struct kobject *kobj)
+{
+	struct module_kobject *mk = to_module_kobject(kobj);
+	complete(mk->kobj_completion);
+}
+
 struct kobj_type module_ktype = {
+	.release   =	module_kobj_release,
 	.sysfs_ops =	&module_sysfs_ops,
 };
 
@@ -709,6 +950,7 @@ static int __init param_sysfs_init(void)
 	}
 	module_sysfs_initialized = 1;
 
+	version_sysfs_builtin();
 	param_sysfs_builtin();
 
 	return 0;
@@ -716,28 +958,3 @@ static int __init param_sysfs_init(void)
 subsys_initcall(param_sysfs_init);
 
 #endif /* CONFIG_SYSFS */
-
-EXPORT_SYMBOL(param_set_byte);
-EXPORT_SYMBOL(param_get_byte);
-EXPORT_SYMBOL(param_set_short);
-EXPORT_SYMBOL(param_get_short);
-EXPORT_SYMBOL(param_set_ushort);
-EXPORT_SYMBOL(param_get_ushort);
-EXPORT_SYMBOL(param_set_int);
-EXPORT_SYMBOL(param_get_int);
-EXPORT_SYMBOL(param_set_uint);
-EXPORT_SYMBOL(param_get_uint);
-EXPORT_SYMBOL(param_set_long);
-EXPORT_SYMBOL(param_get_long);
-EXPORT_SYMBOL(param_set_ulong);
-EXPORT_SYMBOL(param_get_ulong);
-EXPORT_SYMBOL(param_set_charp);
-EXPORT_SYMBOL(param_get_charp);
-EXPORT_SYMBOL(param_set_bool);
-EXPORT_SYMBOL(param_get_bool);
-EXPORT_SYMBOL(param_set_invbool);
-EXPORT_SYMBOL(param_get_invbool);
-EXPORT_SYMBOL(param_array_set);
-EXPORT_SYMBOL(param_array_get);
-EXPORT_SYMBOL(param_set_copystring);
-EXPORT_SYMBOL(param_get_string);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/alpha/kernel/sys_wildfire.c
  *
@@ -15,12 +16,10 @@
 #include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/core_wildfire.h>
 #include <asm/hwrpb.h>
 #include <asm/tlbflush.h>
@@ -104,10 +103,12 @@ wildfire_init_irq_hw(void)
 }
 
 static void
-wildfire_enable_irq(unsigned int irq)
+wildfire_enable_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
+
 	if (irq < 16)
-		i8259a_enable_irq(irq);
+		i8259a_enable_irq(d);
 
 	spin_lock(&wildfire_irq_lock);
 	set_bit(irq, &cached_irq_mask);
@@ -116,10 +117,12 @@ wildfire_enable_irq(unsigned int irq)
 }
 
 static void
-wildfire_disable_irq(unsigned int irq)
+wildfire_disable_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
+
 	if (irq < 16)
-		i8259a_disable_irq(irq);
+		i8259a_disable_irq(d);
 
 	spin_lock(&wildfire_irq_lock);
 	clear_bit(irq, &cached_irq_mask);
@@ -128,10 +131,12 @@ wildfire_disable_irq(unsigned int irq)
 }
 
 static void
-wildfire_mask_and_ack_irq(unsigned int irq)
+wildfire_mask_and_ack_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
+
 	if (irq < 16)
-		i8259a_mask_and_ack_irq(irq);
+		i8259a_mask_and_ack_irq(d);
 
 	spin_lock(&wildfire_irq_lock);
 	clear_bit(irq, &cached_irq_mask);
@@ -139,51 +144,27 @@ wildfire_mask_and_ack_irq(unsigned int irq)
 	spin_unlock(&wildfire_irq_lock);
 }
 
-static unsigned int
-wildfire_startup_irq(unsigned int irq)
-{ 
-	wildfire_enable_irq(irq);
-	return 0; /* never anything pending */
-}
-
-static void
-wildfire_end_irq(unsigned int irq)
-{ 
-#if 0
-	if (!irq_desc[irq].action)
-		printk("got irq %d\n", irq);
-#endif
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		wildfire_enable_irq(irq);
-}
-
-static struct hw_interrupt_type wildfire_irq_type = {
-	.typename	= "WILDFIRE",
-	.startup	= wildfire_startup_irq,
-	.shutdown	= wildfire_disable_irq,
-	.enable		= wildfire_enable_irq,
-	.disable	= wildfire_disable_irq,
-	.ack		= wildfire_mask_and_ack_irq,
-	.end		= wildfire_end_irq,
+static struct irq_chip wildfire_irq_type = {
+	.name		= "WILDFIRE",
+	.irq_unmask	= wildfire_enable_irq,
+	.irq_mask	= wildfire_disable_irq,
+	.irq_mask_ack	= wildfire_mask_and_ack_irq,
 };
 
 static void __init
 wildfire_init_irq_per_pca(int qbbno, int pcano)
 {
 	int i, irq_bias;
-	unsigned long io_bias;
-	static struct irqaction isa_enable = {
-		.handler	= no_action,
-		.name		= "isa_enable",
-	};
 
 	irq_bias = qbbno * (WILDFIRE_PCA_PER_QBB * WILDFIRE_IRQ_PER_PCA)
 		 + pcano * WILDFIRE_IRQ_PER_PCA;
 
+#if 0
+	unsigned long io_bias;
+
 	/* Only need the following for first PCI bus per PCA. */
 	io_bias = WILDFIRE_IO(qbbno, pcano<<1) - WILDFIRE_IO_BIAS;
 
-#if 0
 	outb(0, DMA1_RESET_REG + io_bias);
 	outb(0, DMA2_RESET_REG + io_bias);
 	outb(DMA_MODE_CASCADE, DMA2_MODE_REG + io_bias);
@@ -198,18 +179,22 @@ wildfire_init_irq_per_pca(int qbbno, int pcano)
 	for (i = 0; i < 16; ++i) {
 		if (i == 2)
 			continue;
-		irq_desc[i+irq_bias].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[i+irq_bias].chip = &wildfire_irq_type;
+		irq_set_chip_and_handler(i + irq_bias, &wildfire_irq_type,
+					 handle_level_irq);
+		irq_set_status_flags(i + irq_bias, IRQ_LEVEL);
 	}
 
-	irq_desc[36+irq_bias].status = IRQ_DISABLED | IRQ_LEVEL;
-	irq_desc[36+irq_bias].chip = &wildfire_irq_type;
+	irq_set_chip_and_handler(36 + irq_bias, &wildfire_irq_type,
+				 handle_level_irq);
+	irq_set_status_flags(36 + irq_bias, IRQ_LEVEL);
 	for (i = 40; i < 64; ++i) {
-		irq_desc[i+irq_bias].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[i+irq_bias].chip = &wildfire_irq_type;
+		irq_set_chip_and_handler(i + irq_bias, &wildfire_irq_type,
+					 handle_level_irq);
+		irq_set_status_flags(i + irq_bias, IRQ_LEVEL);
 	}
 
-	setup_irq(32+irq_bias, &isa_enable);	
+	if (request_irq(32 + irq_bias, no_action, 0, "isa_enable", NULL))
+		pr_err("Failed to register isa_enable interrupt\n");
 }
 
 static void __init
@@ -300,10 +285,10 @@ wildfire_device_interrupt(unsigned long vector)
  *   7	 64 bit PCI 1 option slot 7
  */
 
-static int __init
-wildfire_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int
+wildfire_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[8][5] __initdata = {
+	static char irq_tab[8][5] = {
 		/*INT    INTA   INTB   INTC   INTD */
 		{ -1,    -1,    -1,    -1,    -1}, /* IdSel 0 ISA Bridge */
 		{ 36,    36,    36+1, 36+2, 36+3}, /* IdSel 1 SCSI builtin */

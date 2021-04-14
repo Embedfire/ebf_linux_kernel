@@ -1,19 +1,27 @@
-#
-# Makefile for Kernel-based Virtual Machine module
-#
+# SPDX-License-Identifier: GPL-2.0
 
-common-objs = $(addprefix ../../../virt/kvm/, kvm_main.o ioapic.o \
-                coalesced_mmio.o)
-ifeq ($(CONFIG_KVM_TRACE),y)
-common-objs += $(addprefix ../../../virt/kvm/, kvm_trace.o)
+ccflags-y += -Iarch/x86/kvm
+ccflags-$(CONFIG_KVM_WERROR) += -Werror
+
+ifeq ($(CONFIG_FRAME_POINTER),y)
+OBJECT_FILES_NON_STANDARD_vmenter.o := y
 endif
 
-EXTRA_CFLAGS += -Ivirt/kvm -Iarch/x86/kvm
+KVM := ../../../virt/kvm
 
-kvm-objs := $(common-objs) x86.o mmu.o x86_emulate.o i8259.o irq.o lapic.o \
-	i8254.o
-obj-$(CONFIG_KVM) += kvm.o
-kvm-intel-objs = vmx.o
-obj-$(CONFIG_KVM_INTEL) += kvm-intel.o
-kvm-amd-objs = svm.o
-obj-$(CONFIG_KVM_AMD) += kvm-amd.o
+kvm-y			+= $(KVM)/kvm_main.o $(KVM)/coalesced_mmio.o \
+				$(KVM)/eventfd.o $(KVM)/irqchip.o $(KVM)/vfio.o
+kvm-$(CONFIG_KVM_ASYNC_PF)	+= $(KVM)/async_pf.o
+
+kvm-y			+= x86.o emulate.o i8259.o irq.o lapic.o \
+			   i8254.o ioapic.o irq_comm.o cpuid.o pmu.o mtrr.o \
+			   hyperv.o debugfs.o mmu/mmu.o mmu/page_track.o \
+			   mmu/spte.o mmu/tdp_iter.o mmu/tdp_mmu.o
+
+kvm-intel-y		+= vmx/vmx.o vmx/vmenter.o vmx/pmu_intel.o vmx/vmcs12.o \
+			   vmx/evmcs.o vmx/nested.o vmx/posted_intr.o
+kvm-amd-y		+= svm/svm.o svm/vmenter.o svm/pmu.o svm/nested.o svm/avic.o svm/sev.o
+
+obj-$(CONFIG_KVM)	+= kvm.o
+obj-$(CONFIG_KVM_INTEL)	+= kvm-intel.o
+obj-$(CONFIG_KVM_AMD)	+= kvm-amd.o

@@ -3,17 +3,19 @@
  */
 
 #include <linux/time.h>
-#include <linux/reiserfs_fs.h>
+#include "reiserfs.h"
 
-// this contains item handlers for old item types: sd, direct,
-// indirect, directory
+/*
+ * this contains item handlers for old item types: sd, direct,
+ * indirect, directory
+ */
 
-/* and where are the comments? how about saying where we can find an
-   explanation of each item handler method? -Hans */
+/*
+ * and where are the comments? how about saying where we can find an
+ * explanation of each item handler method? -Hans
+ */
 
-//////////////////////////////////////////////////////////////////////////////
-// stat data functions
-//
+/* stat data functions */
 static int sd_bytes_number(struct item_head *ih, int block_size)
 {
 	return 0;
@@ -31,36 +33,28 @@ static int sd_is_left_mergeable(struct reiserfs_key *key, unsigned long bsize)
 	return 0;
 }
 
-static char *print_time(time_t t)
-{
-	static char timebuf[256];
-
-	sprintf(timebuf, "%ld", t);
-	return timebuf;
-}
-
 static void sd_print_item(struct item_head *ih, char *item)
 {
 	printk("\tmode | size | nlinks | first direct | mtime\n");
 	if (stat_data_v1(ih)) {
 		struct stat_data_v1 *sd = (struct stat_data_v1 *)item;
 
-		printk("\t0%-6o | %6u | %2u | %d | %s\n", sd_v1_mode(sd),
+		printk("\t0%-6o | %6u | %2u | %d | %u\n", sd_v1_mode(sd),
 		       sd_v1_size(sd), sd_v1_nlink(sd),
 		       sd_v1_first_direct_byte(sd),
-		       print_time(sd_v1_mtime(sd)));
+		       sd_v1_mtime(sd));
 	} else {
 		struct stat_data *sd = (struct stat_data *)item;
 
-		printk("\t0%-6o | %6Lu | %2u | %d | %s\n", sd_v2_mode(sd),
+		printk("\t0%-6o | %6llu | %2u | %d | %u\n", sd_v2_mode(sd),
 		       (unsigned long long)sd_v2_size(sd), sd_v2_nlink(sd),
-		       sd_v2_rdev(sd), print_time(sd_v2_mtime(sd)));
+		       sd_v2_rdev(sd), sd_v2_mtime(sd));
 	}
 }
 
 static void sd_check_item(struct item_head *ih, char *item)
 {
-	// FIXME: type something here!
+	/* unused */
 }
 
 static int sd_create_vi(struct virtual_node *vn,
@@ -68,7 +62,6 @@ static int sd_create_vi(struct virtual_node *vn,
 			int is_affected, int insert_size)
 {
 	vi->vi_index = TYPE_STAT_DATA;
-	//vi->vi_type |= VI_TYPE_STAT_DATA;// not needed?
 	return 0;
 }
 
@@ -97,7 +90,8 @@ static int sd_unit_num(struct virtual_item *vi)
 
 static void sd_print_vi(struct virtual_item *vi)
 {
-	reiserfs_warning(NULL, "STATDATA, index %d, type 0x%x, %h",
+	reiserfs_warning(NULL, "reiserfs-16100",
+			 "STATDATA, index %d, type 0x%x, %h",
 			 vi->vi_index, vi->vi_type, vi->vi_ih);
 }
 
@@ -116,15 +110,13 @@ static struct item_operations stat_data_ops = {
 	.print_vi = sd_print_vi
 };
 
-//////////////////////////////////////////////////////////////////////////////
-// direct item functions
-//
+/* direct item functions */
 static int direct_bytes_number(struct item_head *ih, int block_size)
 {
 	return ih_item_len(ih);
 }
 
-// FIXME: this should probably switch to indirect as well
+/* FIXME: this should probably switch to indirect as well */
 static void direct_decrement_key(struct cpu_key *key)
 {
 	cpu_key_k_offset_dec(key);
@@ -143,7 +135,7 @@ static void direct_print_item(struct item_head *ih, char *item)
 {
 	int j = 0;
 
-//    return;
+/*    return; */
 	printk("\"");
 	while (j < ih_item_len(ih))
 		printk("%c", item[j++]);
@@ -152,7 +144,7 @@ static void direct_print_item(struct item_head *ih, char *item)
 
 static void direct_check_item(struct item_head *ih, char *item)
 {
-	// FIXME: type something here!
+	/* unused */
 }
 
 static int direct_create_vi(struct virtual_node *vn,
@@ -160,7 +152,6 @@ static int direct_create_vi(struct virtual_node *vn,
 			    int is_affected, int insert_size)
 {
 	vi->vi_index = TYPE_DIRECT;
-	//vi->vi_type |= VI_TYPE_DIRECT;
 	return 0;
 }
 
@@ -190,7 +181,8 @@ static int direct_unit_num(struct virtual_item *vi)
 
 static void direct_print_vi(struct virtual_item *vi)
 {
-	reiserfs_warning(NULL, "DIRECT, index %d, type 0x%x, %h",
+	reiserfs_warning(NULL, "reiserfs-16101",
+			 "DIRECT, index %d, type 0x%x, %h",
 			 vi->vi_index, vi->vi_type, vi->vi_ih);
 }
 
@@ -209,16 +201,13 @@ static struct item_operations direct_ops = {
 	.print_vi = direct_print_vi
 };
 
-//////////////////////////////////////////////////////////////////////////////
-// indirect item functions
-//
-
+/* indirect item functions */
 static int indirect_bytes_number(struct item_head *ih, int block_size)
 {
-	return ih_item_len(ih) / UNFM_P_SIZE * block_size;	//- get_ih_free_space (ih);
+	return ih_item_len(ih) / UNFM_P_SIZE * block_size;
 }
 
-// decrease offset, if it becomes 0, change type to stat data
+/* decrease offset, if it becomes 0, change type to stat data */
 static void indirect_decrement_key(struct cpu_key *key)
 {
 	cpu_key_k_offset_dec(key);
@@ -226,7 +215,7 @@ static void indirect_decrement_key(struct cpu_key *key)
 		set_cpu_key_k_type(key, TYPE_STAT_DATA);
 }
 
-// if it is not first item of the body, then it is mergeable
+/* if it is not first item of the body, then it is mergeable */
 static int indirect_is_left_mergeable(struct reiserfs_key *key,
 				      unsigned long bsize)
 {
@@ -234,7 +223,7 @@ static int indirect_is_left_mergeable(struct reiserfs_key *key,
 	return (le_key_k_offset(version, key) != 1);
 }
 
-// printing of indirect item
+/* printing of indirect item */
 static void start_new_sequence(__u32 * start, int *len, __u32 new)
 {
 	*start = new;
@@ -278,7 +267,7 @@ static void indirect_print_item(struct item_head *ih, char *item)
 	unp = (__le32 *) item;
 
 	if (ih_item_len(ih) % UNFM_P_SIZE)
-		reiserfs_warning(NULL, "indirect_print_item: invalid item len");
+		reiserfs_warning(NULL, "reiserfs-16102", "invalid item len");
 
 	printk("%d pointers\n[ ", (int)I_UNFM_NUM(ih));
 	for (j = 0; j < I_UNFM_NUM(ih); j++) {
@@ -293,7 +282,7 @@ static void indirect_print_item(struct item_head *ih, char *item)
 
 static void indirect_check_item(struct item_head *ih, char *item)
 {
-	// FIXME: type something here!
+	/* unused */
 }
 
 static int indirect_create_vi(struct virtual_node *vn,
@@ -301,7 +290,6 @@ static int indirect_create_vi(struct virtual_node *vn,
 			      int is_affected, int insert_size)
 {
 	vi->vi_index = TYPE_INDIRECT;
-	//vi->vi_type |= VI_TYPE_INDIRECT;
 	return 0;
 }
 
@@ -319,22 +307,26 @@ static int indirect_check_right(struct virtual_item *vi, int free)
 	return indirect_check_left(vi, free, 0, 0);
 }
 
-// return size in bytes of 'units' units. If first == 0 - calculate from the head (left), otherwise - from tail (right)
+/*
+ * return size in bytes of 'units' units. If first == 0 - calculate
+ * from the head (left), otherwise - from tail (right)
+ */
 static int indirect_part_size(struct virtual_item *vi, int first, int units)
 {
-	// unit of indirect item is byte (yet)
+	/* unit of indirect item is byte (yet) */
 	return units;
 }
 
 static int indirect_unit_num(struct virtual_item *vi)
 {
-	// unit of indirect item is byte (yet)
+	/* unit of indirect item is byte (yet) */
 	return vi->vi_item_len - IH_SIZE;
 }
 
 static void indirect_print_vi(struct virtual_item *vi)
 {
-	reiserfs_warning(NULL, "INDIRECT, index %d, type 0x%x, %h",
+	reiserfs_warning(NULL, "reiserfs-16103",
+			 "INDIRECT, index %d, type 0x%x, %h",
 			 vi->vi_index, vi->vi_type, vi->vi_ih);
 }
 
@@ -353,13 +345,10 @@ static struct item_operations indirect_ops = {
 	.print_vi = indirect_print_vi
 };
 
-//////////////////////////////////////////////////////////////////////////////
-// direntry functions
-//
-
+/* direntry functions */
 static int direntry_bytes_number(struct item_head *ih, int block_size)
 {
-	reiserfs_warning(NULL, "vs-16090: direntry_bytes_number: "
+	reiserfs_warning(NULL, "vs-16090",
 			 "bytes number is asked for direntry");
 	return 0;
 }
@@ -393,7 +382,7 @@ static void direntry_print_item(struct item_head *ih, char *item)
 
 	deh = (struct reiserfs_de_head *)item;
 
-	for (i = 0; i < I_ENTRY_COUNT(ih); i++, deh++) {
+	for (i = 0; i < ih_entry_count(ih); i++, deh++) {
 		namelen =
 		    (i ? (deh_location(deh - 1)) : ih_item_len(ih)) -
 		    deh_location(deh);
@@ -411,7 +400,7 @@ static void direntry_print_item(struct item_head *ih, char *item)
 			namebuf[namelen + 2] = 0;
 		}
 
-		printk("%d:  %-15s%-15d%-15d%-15Ld%-15Ld(%s)\n",
+		printk("%d:  %-15s%-15d%-15d%-15lld%-15lld(%s)\n",
 		       i, namebuf,
 		       deh_dir_id(deh), deh_objectid(deh),
 		       GET_HASH_VALUE(deh_offset(deh)),
@@ -425,9 +414,9 @@ static void direntry_check_item(struct item_head *ih, char *item)
 	int i;
 	struct reiserfs_de_head *deh;
 
-	// FIXME: type something here!
+	/* unused */
 	deh = (struct reiserfs_de_head *)item;
-	for (i = 0; i < I_ENTRY_COUNT(ih); i++, deh++) {
+	for (i = 0; i < ih_entry_count(ih); i++, deh++) {
 		;
 	}
 }
@@ -436,7 +425,8 @@ static void direntry_check_item(struct item_head *ih, char *item)
 
 /*
  * function returns old entry number in directory item in real node
- * using new entry number in virtual item in virtual node */
+ * using new entry number in virtual item in virtual node
+ */
 static inline int old_entry_num(int is_affected, int virtual_entry_num,
 				int pos_in_item, int mode)
 {
@@ -460,9 +450,11 @@ static inline int old_entry_num(int is_affected, int virtual_entry_num,
 	return virtual_entry_num - 1;
 }
 
-/* Create an array of sizes of directory entries for virtual
-   item. Return space used by an item. FIXME: no control over
-   consuming of space used by this item handler */
+/*
+ * Create an array of sizes of directory entries for virtual
+ * item. Return space used by an item. FIXME: no control over
+ * consuming of space used by this item handler
+ */
 static int direntry_create_vi(struct virtual_node *vn,
 			      struct virtual_item *vi,
 			      int is_affected, int insert_size)
@@ -491,8 +483,8 @@ static int direntry_create_vi(struct virtual_node *vn,
 		j = old_entry_num(is_affected, i, vn->vn_pos_in_item,
 				  vn->vn_mode);
 		dir_u->entry_sizes[i] =
-		    (j ? deh_location(&(deh[j - 1])) : ih_item_len(vi->vi_ih)) -
-		    deh_location(&(deh[j])) + DEH_SIZE;
+		    (j ? deh_location(&deh[j - 1]) : ih_item_len(vi->vi_ih)) -
+		    deh_location(&deh[j]) + DEH_SIZE;
 	}
 
 	size += (dir_u->entry_count * sizeof(short));
@@ -514,8 +506,9 @@ static int direntry_create_vi(struct virtual_node *vn,
 		    ((is_affected
 		      && (vn->vn_mode == M_PASTE
 			  || vn->vn_mode == M_CUT)) ? insert_size : 0)) {
-			reiserfs_panic(NULL,
-				       "vs-8025: set_entry_sizes: (mode==%c, insert_size==%d), invalid length of directory item",
+			reiserfs_panic(NULL, "vs-8025", "(mode==%c, "
+				       "insert_size==%d), invalid length of "
+				       "directory item",
 				       vn->vn_mode, insert_size);
 		}
 	}
@@ -525,10 +518,10 @@ static int direntry_create_vi(struct virtual_node *vn,
 
 }
 
-//
-// return number of entries which may fit into specified amount of
-// free space, or -1 if free space is not enough even for 1 entry
-//
+/*
+ * return number of entries which may fit into specified amount of
+ * free space, or -1 if free space is not enough even for 1 entry
+ */
 static int direntry_check_left(struct virtual_item *vi, int free,
 			       int start_skip, int end_skip)
 {
@@ -537,8 +530,8 @@ static int direntry_check_left(struct virtual_item *vi, int free,
 	struct direntry_uarea *dir_u = vi->vi_uarea;
 
 	for (i = start_skip; i < dir_u->entry_count - end_skip; i++) {
+		/* i-th entry doesn't fit into the remaining free space */
 		if (dir_u->entry_sizes[i] > free)
-			/* i-th entry doesn't fit into the remaining free space */
 			break;
 
 		free -= dir_u->entry_sizes[i];
@@ -546,7 +539,8 @@ static int direntry_check_left(struct virtual_item *vi, int free,
 	}
 
 	if (entries == dir_u->entry_count) {
-		reiserfs_panic(NULL, "free space %d, entry_count %d\n", free,
+		reiserfs_panic(NULL, "item_ops-1",
+			       "free space %d, entry_count %d", free,
 			       dir_u->entry_count);
 	}
 
@@ -565,8 +559,8 @@ static int direntry_check_right(struct virtual_item *vi, int free)
 	struct direntry_uarea *dir_u = vi->vi_uarea;
 
 	for (i = dir_u->entry_count - 1; i >= 0; i--) {
+		/* i-th entry doesn't fit into the remaining free space */
 		if (dir_u->entry_sizes[i] > free)
-			/* i-th entry doesn't fit into the remaining free space */
 			break;
 
 		free -= dir_u->entry_sizes[i];
@@ -614,7 +608,8 @@ static void direntry_print_vi(struct virtual_item *vi)
 	int i;
 	struct direntry_uarea *dir_u = vi->vi_uarea;
 
-	reiserfs_warning(NULL, "DIRENTRY, index %d, type 0x%x, %h, flags 0x%x",
+	reiserfs_warning(NULL, "reiserfs-16104",
+			 "DIRENTRY, index %d, type 0x%x, %h, flags 0x%x",
 			 vi->vi_index, vi->vi_type, vi->vi_ih, dir_u->flags);
 	printk("%d entries: ", dir_u->entry_count);
 	for (i = 0; i < dir_u->entry_count; i++)
@@ -637,105 +632,104 @@ static struct item_operations direntry_ops = {
 	.print_vi = direntry_print_vi
 };
 
-//////////////////////////////////////////////////////////////////////////////
-// Error catching functions to catch errors caused by incorrect item types.
-//
+/* Error catching functions to catch errors caused by incorrect item types. */
 static int errcatch_bytes_number(struct item_head *ih, int block_size)
 {
-	reiserfs_warning(NULL,
-			 "green-16001: Invalid item type observed, run fsck ASAP");
+	reiserfs_warning(NULL, "green-16001",
+			 "Invalid item type observed, run fsck ASAP");
 	return 0;
 }
 
 static void errcatch_decrement_key(struct cpu_key *key)
 {
-	reiserfs_warning(NULL,
-			 "green-16002: Invalid item type observed, run fsck ASAP");
+	reiserfs_warning(NULL, "green-16002",
+			 "Invalid item type observed, run fsck ASAP");
 }
 
 static int errcatch_is_left_mergeable(struct reiserfs_key *key,
 				      unsigned long bsize)
 {
-	reiserfs_warning(NULL,
-			 "green-16003: Invalid item type observed, run fsck ASAP");
+	reiserfs_warning(NULL, "green-16003",
+			 "Invalid item type observed, run fsck ASAP");
 	return 0;
 }
 
 static void errcatch_print_item(struct item_head *ih, char *item)
 {
-	reiserfs_warning(NULL,
-			 "green-16004: Invalid item type observed, run fsck ASAP");
+	reiserfs_warning(NULL, "green-16004",
+			 "Invalid item type observed, run fsck ASAP");
 }
 
 static void errcatch_check_item(struct item_head *ih, char *item)
 {
-	reiserfs_warning(NULL,
-			 "green-16005: Invalid item type observed, run fsck ASAP");
+	reiserfs_warning(NULL, "green-16005",
+			 "Invalid item type observed, run fsck ASAP");
 }
 
 static int errcatch_create_vi(struct virtual_node *vn,
 			      struct virtual_item *vi,
 			      int is_affected, int insert_size)
 {
-	reiserfs_warning(NULL,
-			 "green-16006: Invalid item type observed, run fsck ASAP");
-	return 0;		// We might return -1 here as well, but it won't help as create_virtual_node() from where
-	// this operation is called from is of return type void.
+	reiserfs_warning(NULL, "green-16006",
+			 "Invalid item type observed, run fsck ASAP");
+	/*
+	 * We might return -1 here as well, but it won't help as
+	 * create_virtual_node() from where this operation is called
+	 * from is of return type void.
+	 */
+	return 0;
 }
 
 static int errcatch_check_left(struct virtual_item *vi, int free,
 			       int start_skip, int end_skip)
 {
-	reiserfs_warning(NULL,
-			 "green-16007: Invalid item type observed, run fsck ASAP");
+	reiserfs_warning(NULL, "green-16007",
+			 "Invalid item type observed, run fsck ASAP");
 	return -1;
 }
 
 static int errcatch_check_right(struct virtual_item *vi, int free)
 {
-	reiserfs_warning(NULL,
-			 "green-16008: Invalid item type observed, run fsck ASAP");
+	reiserfs_warning(NULL, "green-16008",
+			 "Invalid item type observed, run fsck ASAP");
 	return -1;
 }
 
 static int errcatch_part_size(struct virtual_item *vi, int first, int count)
 {
-	reiserfs_warning(NULL,
-			 "green-16009: Invalid item type observed, run fsck ASAP");
+	reiserfs_warning(NULL, "green-16009",
+			 "Invalid item type observed, run fsck ASAP");
 	return 0;
 }
 
 static int errcatch_unit_num(struct virtual_item *vi)
 {
-	reiserfs_warning(NULL,
-			 "green-16010: Invalid item type observed, run fsck ASAP");
+	reiserfs_warning(NULL, "green-16010",
+			 "Invalid item type observed, run fsck ASAP");
 	return 0;
 }
 
 static void errcatch_print_vi(struct virtual_item *vi)
 {
-	reiserfs_warning(NULL,
-			 "green-16011: Invalid item type observed, run fsck ASAP");
+	reiserfs_warning(NULL, "green-16011",
+			 "Invalid item type observed, run fsck ASAP");
 }
 
 static struct item_operations errcatch_ops = {
-	errcatch_bytes_number,
-	errcatch_decrement_key,
-	errcatch_is_left_mergeable,
-	errcatch_print_item,
-	errcatch_check_item,
+	.bytes_number = errcatch_bytes_number,
+	.decrement_key = errcatch_decrement_key,
+	.is_left_mergeable = errcatch_is_left_mergeable,
+	.print_item = errcatch_print_item,
+	.check_item = errcatch_check_item,
 
-	errcatch_create_vi,
-	errcatch_check_left,
-	errcatch_check_right,
-	errcatch_part_size,
-	errcatch_unit_num,
-	errcatch_print_vi
+	.create_vi = errcatch_create_vi,
+	.check_left = errcatch_check_left,
+	.check_right = errcatch_check_right,
+	.part_size = errcatch_part_size,
+	.unit_num = errcatch_unit_num,
+	.print_vi = errcatch_print_vi
 };
 
-//////////////////////////////////////////////////////////////////////////////
-//
-//
 #if ! (TYPE_STAT_DATA == 0 && TYPE_INDIRECT == 1 && TYPE_DIRECT == 2 && TYPE_DIRENTRY == 3)
 #error Item types must use disk-format assigned values.
 #endif

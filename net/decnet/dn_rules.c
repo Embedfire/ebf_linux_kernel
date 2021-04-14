@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 
 /*
  * DECnet       An implementation of the DECnet protocol suite for the LINUX
@@ -23,6 +24,7 @@
 #include <linux/spinlock.h>
 #include <linux/list.h>
 #include <linux/rcupdate.h>
+#include <linux/export.h>
 #include <net/neighbour.h>
 #include <net/dst.h>
 #include <net/flow.h>
@@ -33,7 +35,7 @@
 #include <net/dn_dev.h>
 #include <net/dn_route.h>
 
-static struct fib_rules_ops dn_fib_rules_ops;
+static struct fib_rules_ops *dn_fib_rules_ops;
 
 struct dn_fib_rule
 {
@@ -49,14 +51,15 @@ struct dn_fib_rule
 };
 
 
-int dn_fib_lookup(struct flowi *flp, struct dn_fib_res *res)
+int dn_fib_lookup(struct flowidn *flp, struct dn_fib_res *res)
 {
 	struct fib_lookup_arg arg = {
 		.result = res,
 	};
 	int err;
 
-	err = fib_rules_lookup(&dn_fib_rules_ops, flp, 0, &arg);
+	err = fib_rules_lookup(dn_fib_rules_ops,
+			       flowidn_to_flowi(flp), 0, &arg);
 	res->r = arg.rule;
 
 	return err;
@@ -65,6 +68,7 @@ int dn_fib_lookup(struct flowi *flp, struct dn_fib_res *res)
 static int dn_fib_rule_action(struct fib_rule *rule, struct flowi *flp,
 			      int flags, struct fib_lookup_arg *arg)
 {
+	struct flowidn *fld = &flp->u.dn;
 	int err = -EAGAIN;
 	struct dn_fib_table *tbl;
 
@@ -90,7 +94,7 @@ static int dn_fib_rule_action(struct fib_rule *rule, struct flowi *flp,
 	if (tbl == NULL)
 		goto errout;
 
-	err = tbl->lookup(tbl, flp, (struct dn_fib_res *)arg->result);
+	err = tbl->lookup(tbl, fld, (struct dn_fib_res *)arg->result);
 	if (err > 0)
 		err = -EAGAIN;
 errout:
@@ -104,8 +108,9 @@ static const struct nla_policy dn_fib_rule_policy[FRA_MAX+1] = {
 static int dn_fib_rule_match(struct fib_rule *rule, struct flowi *fl, int flags)
 {
 	struct dn_fib_rule *r = (struct dn_fib_rule *)rule;
-	__le16 daddr = fl->fld_dst;
-	__le16 saddr = fl->fld_src;
+	struct flowidn *fld = &fl->u.dn;
+	__le16 daddr = fld->daddr;
+	__le16 saddr = fld->saddr;
 
 	if (((saddr ^ r->src) & r->srcmask) ||
 	    ((daddr ^ r->dst) & r->dstmask))
@@ -115,14 +120,17 @@ static int dn_fib_rule_match(struct fib_rule *rule, struct flowi *fl, int flags)
 }
 
 static int dn_fib_rule_configure(struct fib_rule *rule, struct sk_buff *skb,
-				 struct nlmsghdr *nlh, struct fib_rule_hdr *frh,
-				 struct nlattr **tb)
+				 struct fib_rule_hdr *frh,
+				 struct nlattr **tb,
+				 struct netlink_ext_ack *extack)
 {
 	int err = -EINVAL;
 	struct dn_fib_rule *r = (struct dn_fib_rule *)rule;
 
-	if (frh->tos)
+	if (frh->tos) {
+		NL_SET_ERR_MSG(extack, "Invalid tos value");
 		goto  errout;
+	}
 
 	if (rule->table == RT_TABLE_UNSPEC) {
 		if (rule->action == FR_ACT_TO_TBL) {
@@ -173,17 +181,17 @@ static int dn_fib_rule_compare(struct fib_rule *rule, struct fib_rule_hdr *frh,
 	return 1;
 }
 
-unsigned dnet_addr_type(__le16 addr)
+unsigned int dnet_addr_type(__le16 addr)
 {
-	struct flowi fl = { .nl_u = { .dn_u = { .daddr = addr } } };
+	struct flowidn fld = { .daddr = addr };
 	struct dn_fib_res res;
-	unsigned ret = RTN_UNICAST;
+	unsigned int ret = RTN_UNICAST;
 	struct dn_fib_table *tb = dn_fib_get_table(RT_TABLE_LOCAL, 0);
 
 	res.r = NULL;
 
 	if (tb) {
-		if (!tb->lookup(tb, &fl, &res)) {
+		if (!tb->lookup(tb, &fld, &res)) {
 			ret = res.type;
 			dn_fib_res_put(&res);
 		}
@@ -192,41 +200,23 @@ unsigned dnet_addr_type(__le16 addr)
 }
 
 static int dn_fib_rule_fill(struct fib_rule *rule, struct sk_buff *skb,
-			    struct nlmsghdr *nlh, struct fib_rule_hdr *frh)
+			    struct fib_rule_hdr *frh)
 {
 	struct dn_fib_rule *r = (struct dn_fib_rule *)rule;
 
-	frh->family = AF_DECnet;
 	frh->dst_len = r->dst_len;
 	frh->src_len = r->src_len;
 	frh->tos = 0;
 
-	if (r->dst_len)
-		NLA_PUT_LE16(skb, FRA_DST, r->dst);
-	if (r->src_len)
-		NLA_PUT_LE16(skb, FRA_SRC, r->src);
-
+	if ((r->dst_len &&
+	     nla_put_le16(skb, FRA_DST, r->dst)) ||
+	    (r->src_len &&
+	     nla_put_le16(skb, FRA_SRC, r->src)))
+		goto nla_put_failure;
 	return 0;
 
 nla_put_failure:
 	return -ENOBUFS;
-}
-
-static u32 dn_fib_rule_default_pref(struct fib_rules_ops *ops)
-{
-	struct list_head *pos;
-	struct fib_rule *rule;
-
-	if (!list_empty(&dn_fib_rules_ops.rules_list)) {
-		pos = dn_fib_rules_ops.rules_list.next;
-		if (pos->next != &dn_fib_rules_ops.rules_list) {
-			rule = list_entry(pos->next, struct fib_rule, list);
-			if (rule->pref)
-				return rule->pref - 1;
-		}
-	}
-
-	return 0;
 }
 
 static void dn_fib_rule_flush_cache(struct fib_rules_ops *ops)
@@ -234,7 +224,7 @@ static void dn_fib_rule_flush_cache(struct fib_rules_ops *ops)
 	dn_rt_cache_flush(-1);
 }
 
-static struct fib_rules_ops dn_fib_rules_ops = {
+static const struct fib_rules_ops __net_initconst dn_fib_rules_ops_template = {
 	.family		= AF_DECnet,
 	.rule_size	= sizeof(struct dn_fib_rule),
 	.addr_size	= sizeof(u16),
@@ -243,25 +233,26 @@ static struct fib_rules_ops dn_fib_rules_ops = {
 	.configure	= dn_fib_rule_configure,
 	.compare	= dn_fib_rule_compare,
 	.fill		= dn_fib_rule_fill,
-	.default_pref	= dn_fib_rule_default_pref,
 	.flush_cache	= dn_fib_rule_flush_cache,
 	.nlgroup	= RTNLGRP_DECnet_RULE,
 	.policy		= dn_fib_rule_policy,
-	.rules_list	= LIST_HEAD_INIT(dn_fib_rules_ops.rules_list),
 	.owner		= THIS_MODULE,
 	.fro_net	= &init_net,
 };
 
 void __init dn_fib_rules_init(void)
 {
-	BUG_ON(fib_default_rule_add(&dn_fib_rules_ops, 0x7fff,
+	dn_fib_rules_ops =
+		fib_rules_register(&dn_fib_rules_ops_template, &init_net);
+	BUG_ON(IS_ERR(dn_fib_rules_ops));
+	BUG_ON(fib_default_rule_add(dn_fib_rules_ops, 0x7fff,
 			            RT_TABLE_MAIN, 0));
-	fib_rules_register(&dn_fib_rules_ops);
 }
 
 void __exit dn_fib_rules_cleanup(void)
 {
-	fib_rules_unregister(&dn_fib_rules_ops);
+	rtnl_lock();
+	fib_rules_unregister(dn_fib_rules_ops);
+	rtnl_unlock();
+	rcu_barrier();
 }
-
-

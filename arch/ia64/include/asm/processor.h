@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_IA64_PROCESSOR_H
 #define _ASM_IA64_PROCESSOR_H
 
@@ -31,8 +32,7 @@
  * each (assuming 8KB page size), for a total of 8TB of user virtual
  * address space.
  */
-#define TASK_SIZE_OF(tsk)	((tsk)->thread.task_size)
-#define TASK_SIZE       	TASK_SIZE_OF(current)
+#define TASK_SIZE       	DEFAULT_TASK_SIZE
 
 /*
  * This decides where the kernel will search for a free chunk of vm
@@ -69,13 +69,14 @@
 #include <linux/compiler.h>
 #include <linux/threads.h>
 #include <linux/types.h>
+#include <linux/bitops.h>
 
 #include <asm/fpu.h>
 #include <asm/page.h>
 #include <asm/percpu.h>
 #include <asm/rse.h>
 #include <asm/unwind.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #ifdef CONFIG_NUMA
 #include <asm/nodedata.h>
 #endif
@@ -187,40 +188,40 @@ union  ia64_rr {
  * state comes earlier:
  */
 struct cpuinfo_ia64 {
-	__u32 softirq_pending;
-	__u64 itm_delta;	/* # of clock cycles between clock ticks */
-	__u64 itm_next;		/* interval timer mask value to use for next clock tick */
-	__u64 nsec_per_cyc;	/* (1000000000<<IA64_NSEC_PER_CYC_SHIFT)/itc_freq */
-	__u64 unimpl_va_mask;	/* mask of unimplemented virtual address bits (from PAL) */
-	__u64 unimpl_pa_mask;	/* mask of unimplemented physical address bits (from PAL) */
-	__u64 itc_freq;		/* frequency of ITC counter */
-	__u64 proc_freq;	/* frequency of processor */
-	__u64 cyc_per_usec;	/* itc_freq/1000000 */
-	__u64 ptce_base;
-	__u32 ptce_count[2];
-	__u32 ptce_stride[2];
+	unsigned int softirq_pending;
+	unsigned long itm_delta;	/* # of clock cycles between clock ticks */
+	unsigned long itm_next;		/* interval timer mask value to use for next clock tick */
+	unsigned long nsec_per_cyc;	/* (1000000000<<IA64_NSEC_PER_CYC_SHIFT)/itc_freq */
+	unsigned long unimpl_va_mask;	/* mask of unimplemented virtual address bits (from PAL) */
+	unsigned long unimpl_pa_mask;	/* mask of unimplemented physical address bits (from PAL) */
+	unsigned long itc_freq;		/* frequency of ITC counter */
+	unsigned long proc_freq;	/* frequency of processor */
+	unsigned long cyc_per_usec;	/* itc_freq/1000000 */
+	unsigned long ptce_base;
+	unsigned int ptce_count[2];
+	unsigned int ptce_stride[2];
 	struct task_struct *ksoftirqd;	/* kernel softirq daemon for this CPU */
 
 #ifdef CONFIG_SMP
-	__u64 loops_per_jiffy;
+	unsigned long loops_per_jiffy;
 	int cpu;
-	__u32 socket_id;	/* physical processor socket id */
-	__u16 core_id;		/* core id */
-	__u16 thread_id;	/* thread id */
-	__u16 num_log;		/* Total number of logical processors on
+	unsigned int socket_id;	/* physical processor socket id */
+	unsigned short core_id;	/* core id */
+	unsigned short thread_id; /* thread id */
+	unsigned short num_log;	/* Total number of logical processors on
 				 * this socket that were successfully booted */
-	__u8  cores_per_socket;	/* Cores per processor socket */
-	__u8  threads_per_core;	/* Threads per core */
+	unsigned char cores_per_socket;	/* Cores per processor socket */
+	unsigned char threads_per_core;	/* Threads per core */
 #endif
 
 	/* CPUID-derived information: */
-	__u64 ppn;
-	__u64 features;
-	__u8 number;
-	__u8 revision;
-	__u8 model;
-	__u8 family;
-	__u8 archrev;
+	unsigned long ppn;
+	unsigned long features;
+	unsigned char number;
+	unsigned char revision;
+	unsigned char model;
+	unsigned char family;
+	unsigned char archrev;
 	char vendor[16];
 	char *model_name;
 
@@ -229,7 +230,7 @@ struct cpuinfo_ia64 {
 #endif
 };
 
-DECLARE_PER_CPU(struct cpuinfo_ia64, cpu_info);
+DECLARE_PER_CPU(struct cpuinfo_ia64, ia64_cpu_info);
 
 /*
  * The "local" data variable.  It refers to the per-CPU data of the currently executing
@@ -237,8 +238,8 @@ DECLARE_PER_CPU(struct cpuinfo_ia64, cpu_info);
  * Do not use the address of local_cpu_data, since it will be different from
  * cpu_data(smp_processor_id())!
  */
-#define local_cpu_data		(&__ia64_per_cpu_var(cpu_info))
-#define cpu_data(cpu)		(&per_cpu(cpu_info, cpu))
+#define local_cpu_data		(&__ia64_per_cpu_var(ia64_cpu_info))
+#define cpu_data(cpu)		(&per_cpu(ia64_cpu_info, cpu))
 
 extern void print_cpu_info (struct cpuinfo_ia64 *);
 
@@ -270,23 +271,6 @@ typedef struct {
 		 (int __user *) (addr));							\
 })
 
-#ifdef CONFIG_IA32_SUPPORT
-struct desc_struct {
-	unsigned int a, b;
-};
-
-#define desc_empty(desc)		(!((desc)->a | (desc)->b))
-#define desc_equal(desc1, desc2)	(((desc1)->a == (desc2)->a) && ((desc1)->b == (desc2)->b))
-
-#define GDT_ENTRY_TLS_ENTRIES	3
-#define GDT_ENTRY_TLS_MIN	6
-#define GDT_ENTRY_TLS_MAX 	(GDT_ENTRY_TLS_MIN + GDT_ENTRY_TLS_ENTRIES - 1)
-
-#define TLS_SIZE (GDT_ENTRY_TLS_ENTRIES * 8)
-
-struct ia64_partial_page_list;
-#endif
-
 struct thread_struct {
 	__u32 flags;			/* various thread flags (see IA64_THREAD_*) */
 	/* writing on_ustack is performance-critical, so it's worth spending 8 bits on it... */
@@ -294,43 +278,10 @@ struct thread_struct {
 	__u8 pad[3];
 	__u64 ksp;			/* kernel stack pointer */
 	__u64 map_base;			/* base address for get_unmapped_area() */
-	__u64 task_size;		/* limit for task size */
 	__u64 rbs_bot;			/* the base address for the RBS */
 	int last_fph_cpu;		/* CPU that may hold the contents of f32-f127 */
-
-#ifdef CONFIG_IA32_SUPPORT
-	__u64 eflag;			/* IA32 EFLAGS reg */
-	__u64 fsr;			/* IA32 floating pt status reg */
-	__u64 fcr;			/* IA32 floating pt control reg */
-	__u64 fir;			/* IA32 fp except. instr. reg */
-	__u64 fdr;			/* IA32 fp except. data reg */
-	__u64 old_k1;			/* old value of ar.k1 */
-	__u64 old_iob;			/* old IOBase value */
-	struct ia64_partial_page_list *ppl; /* partial page list for 4K page size issue */
-        /* cached TLS descriptors. */
-	struct desc_struct tls_array[GDT_ENTRY_TLS_ENTRIES];
-
-# define INIT_THREAD_IA32	.eflag =	0,			\
-				.fsr =		0,			\
-				.fcr =		0x17800000037fULL,	\
-				.fir =		0,			\
-				.fdr =		0,			\
-				.old_k1 =	0,			\
-				.old_iob =	0,			\
-				.ppl =		NULL,
-#else
-# define INIT_THREAD_IA32
-#endif /* CONFIG_IA32_SUPPORT */
-#ifdef CONFIG_PERFMON
-	void *pfm_context;		     /* pointer to detailed PMU context */
-	unsigned long pfm_needs_checking;    /* when >0, pending perfmon work on kernel exit */
-# define INIT_THREAD_PM		.pfm_context =		NULL,     \
-				.pfm_needs_checking =	0UL,
-#else
-# define INIT_THREAD_PM
-#endif
-	__u64 dbr[IA64_NUM_DBG_REGS];
-	__u64 ibr[IA64_NUM_DBG_REGS];
+	unsigned long dbr[IA64_NUM_DBG_REGS];
+	unsigned long ibr[IA64_NUM_DBG_REGS];
 	struct ia64_fpreg fph[96];	/* saved/loaded on demand */
 };
 
@@ -340,17 +291,13 @@ struct thread_struct {
 	.ksp =		0,					\
 	.map_base =	DEFAULT_MAP_BASE,			\
 	.rbs_bot =	STACK_TOP - DEFAULT_USER_STACK_SIZE,	\
-	.task_size =	DEFAULT_TASK_SIZE,			\
 	.last_fph_cpu =  -1,					\
-	INIT_THREAD_IA32					\
-	INIT_THREAD_PM						\
 	.dbr =		{0, },					\
 	.ibr =		{0, },					\
 	.fph =		{{{{0}}}, }				\
 }
 
 #define start_thread(regs,new_ip,new_sp) do {							\
-	set_fs(USER_DS);									\
 	regs->cr_ipsr = ((regs->cr_ipsr | (IA64_PSR_BITS_TO_SET | IA64_PSR_CPL))		\
 			 & ~(IA64_PSR_BITS_TO_CLEAR | IA64_PSR_RI | IA64_PSR_IS));		\
 	regs->cr_iip = new_ip;									\
@@ -361,7 +308,7 @@ struct thread_struct {
 	regs->loadrs = 0;									\
 	regs->r8 = get_dumpable(current->mm);	/* set "don't zap registers" flag */		\
 	regs->r12 = new_sp - 16;	/* allocate 16 byte scratch area */			\
-	if (unlikely(!get_dumpable(current->mm))) {							\
+	if (unlikely(get_dumpable(current->mm) != SUID_DUMP_USER)) {	\
 		/*										\
 		 * Zap scratch regs to avoid leaking bits between processes with different	\
 		 * uid/privileges.								\
@@ -381,25 +328,6 @@ struct task_struct;
  * wait().
  */
 #define release_thread(dead_task)
-
-/* Prepare to copy thread state - unlazy all lazy status */
-#define prepare_to_copy(tsk)	do { } while (0)
-
-/*
- * This is the mechanism for creating a new kernel thread.
- *
- * NOTE 1: Only a kernel-only process (ie the swapper or direct
- * descendants who haven't done an "execve()") should use this: it
- * will work within a system call from a "real" process, but the
- * process memory space will not be free'd until both the parent and
- * the child have exited.
- *
- * NOTE 2: This MUST NOT be an inlined function.  Otherwise, we get
- * into trouble in init/main.c when the child thread returns to
- * do_basic_setup() and the timing is such that free_initmem() has
- * been called already.
- */
-extern pid_t kernel_thread (int (*fn)(void *), void *arg, unsigned long flags);
 
 /* Get wait channel for task P.  */
 extern unsigned long get_wchan (struct task_struct *p);
@@ -484,11 +412,6 @@ extern void __ia64_save_fpu (struct ia64_fpreg *fph);
 extern void __ia64_load_fpu (struct ia64_fpreg *fph);
 extern void ia64_save_debug_regs (unsigned long *save_area);
 extern void ia64_load_debug_regs (unsigned long *save_area);
-
-#ifdef CONFIG_IA32_SUPPORT
-extern void ia32_save_state (struct task_struct *task);
-extern void ia32_load_state (struct task_struct *task);
-#endif
 
 #define ia64_fph_enable()	do { ia64_rsm(IA64_PSR_DFH); ia64_srlz_d(); } while (0)
 #define ia64_fph_disable()	do { ia64_ssm(IA64_PSR_DFH); ia64_srlz_d(); } while (0)
@@ -669,29 +592,6 @@ ia64_set_unat (__u64 *unat, void *spill_addr, unsigned long nat)
 	*unat = (*unat & ~mask) | (nat << bit);
 }
 
-/*
- * Return saved PC of a blocked thread.
- * Note that the only way T can block is through a call to schedule() -> switch_to().
- */
-static inline unsigned long
-thread_saved_pc (struct task_struct *t)
-{
-	struct unw_frame_info info;
-	unsigned long ip;
-
-	unw_init_from_blocked_task(&info, t);
-	if (unw_unwind(&info) < 0)
-		return 0;
-	unw_get_ip(&info, &ip);
-	return ip;
-}
-
-/*
- * Get the current instruction/program counter value.
- */
-#define current_text_addr() \
-	({ void *_pc; _pc = (void *)ia64_getreg(_IA64_REG_IP); _pc; })
-
 static inline __u64
 ia64_get_ivr (void)
 {
@@ -763,8 +663,11 @@ prefetchw (const void *x)
 #define spin_lock_prefetch(x)	prefetchw(x)
 
 extern unsigned long boot_option_idle_override;
-extern unsigned long idle_halt;
-extern unsigned long idle_nomwait;
+
+enum idle_boot_override {IDLE_NO_OVERRIDE=0, IDLE_HALT, IDLE_FORCE_MWAIT,
+			 IDLE_NOMWAIT, IDLE_POLL};
+
+void default_idle(void);
 
 #endif /* !__ASSEMBLY__ */
 

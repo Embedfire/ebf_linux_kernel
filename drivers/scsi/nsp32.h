@@ -1,16 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Workbit NinjaSCSI-32Bi/UDE PCI/CardBus SCSI Host Bus Adapter driver
  * Basic data header
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
 */
 
 #ifndef _NSP32_H
@@ -507,7 +498,7 @@ typedef struct _nsp32_lunt {
 /*
  * SCSI TARGET/LUN definition
  */
-#define NSP32_HOST_SCSIID    7  /* SCSI initiator is everytime defined as 7 */
+#define NSP32_HOST_SCSIID    7  /* SCSI initiator is every time defined as 7 */
 #define MAX_TARGET	     8
 #define MAX_LUN		     8	/* XXX: In SPI3, max number of LUN is 64. */
 

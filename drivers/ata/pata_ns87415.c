@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- *    pata_ns87415.c - NS87415 (non PARISC) PATA
+ *    pata_ns87415.c - NS87415 (and PARISC SUPERIO 87560) PATA
  *
- *	(C) 2005 Red Hat <alan@redhat.com>
+ *	(C) 2005 Red Hat <alan@lxorguk.ukuu.org.uk>
  *
  *    This is a fairly generic MWDMA controller. It has some limitations
  *    as it requires timing reloads on PIO/DMA transitions but it is otherwise
@@ -15,7 +16,6 @@
  *    systems. This has its own special mountain of errata.
  *
  *    TODO:
- *	Test PARISC SuperIO
  *	Get someone to test on SPARC
  *	Implement lazy pio/dma switching for better performance
  *	8bit shared timing.
@@ -25,7 +25,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -126,7 +125,7 @@ static void ns87415_bmdma_setup(struct ata_queued_cmd *qc)
 
 	/* load PRD table addr. */
 	mb();	/* make sure PRD table writes are visible to controller */
-	iowrite32(ap->prd_dma, ap->ioaddr.bmdma_addr + ATA_DMA_TABLE_OFS);
+	iowrite32(ap->bmdma_prd_dma, ap->ioaddr.bmdma_addr + ATA_DMA_TABLE_OFS);
 
 	/* specify data direction, triple-check start bit is clear */
 	dmactl = ioread8(ap->ioaddr.bmdma_addr + ATA_DMA_CMD);
@@ -325,6 +324,13 @@ static struct scsi_host_template ns87415_sht = {
 	ATA_BMDMA_SHT(DRV_NAME),
 };
 
+static void ns87415_fixup(struct pci_dev *pdev)
+{
+	/* Select 512 byte sectors */
+	pci_write_config_byte(pdev, 0x55, 0xEE);
+	/* Select PIO0 8bit clocking */
+	pci_write_config_byte(pdev, 0x54, 0xB7);
+}
 
 /**
  *	ns87415_init_one - Register 87415 ATA PCI device with kernel services
@@ -343,11 +349,10 @@ static struct scsi_host_template ns87415_sht = {
 
 static int ns87415_init_one (struct pci_dev *pdev, const struct pci_device_id *ent)
 {
-	static int printed_version;
 	static const struct ata_port_info info = {
 		.flags		= ATA_FLAG_SLAVE_POSS,
-		.pio_mask	= 0x1f,	/* pio0-4 */
-		.mwdma_mask	= 0x07, /* mwdma0-2 */
+		.pio_mask	= ATA_PIO4,
+		.mwdma_mask	= ATA_MWDMA2,
 		.port_ops	= &ns87415_pata_ops,
 	};
 	const struct ata_port_info *ppi[] = { &info, NULL };
@@ -355,27 +360,23 @@ static int ns87415_init_one (struct pci_dev *pdev, const struct pci_device_id *e
 #if defined(CONFIG_SUPERIO)
 	static const struct ata_port_info info87560 = {
 		.flags		= ATA_FLAG_SLAVE_POSS,
-		.pio_mask	= 0x1f,	/* pio0-4 */
-		.mwdma_mask	= 0x07, /* mwdma0-2 */
+		.pio_mask	= ATA_PIO4,
+		.mwdma_mask	= ATA_MWDMA2,
 		.port_ops	= &ns87560_pata_ops,
 	};
 
 	if (PCI_SLOT(pdev->devfn) == 0x0E)
 		ppi[0] = &info87560;
 #endif
-	if (!printed_version++)
-		dev_printk(KERN_DEBUG, &pdev->dev,
-			   "version " DRV_VERSION "\n");
+	ata_print_version_once(&pdev->dev, DRV_VERSION);
 
 	rc = pcim_enable_device(pdev);
 	if (rc)
 		return rc;
 
-	/* Select 512 byte sectors */
-	pci_write_config_byte(pdev, 0x55, 0xEE);
-	/* Select PIO0 8bit clocking */
-	pci_write_config_byte(pdev, 0x54, 0xB7);
-	return ata_pci_sff_init_one(pdev, ppi, &ns87415_sht, NULL);
+	ns87415_fixup(pdev);
+
+	return ata_pci_bmdma_init_one(pdev, ppi, &ns87415_sht, NULL, 0);
 }
 
 static const struct pci_device_id ns87415_pci_tbl[] = {
@@ -384,29 +385,35 @@ static const struct pci_device_id ns87415_pci_tbl[] = {
 	{ }	/* terminate list */
 };
 
+#ifdef CONFIG_PM_SLEEP
+static int ns87415_reinit_one(struct pci_dev *pdev)
+{
+	struct ata_host *host = pci_get_drvdata(pdev);
+	int rc;
+
+	rc = ata_pci_device_do_resume(pdev);
+	if (rc)
+		return rc;
+
+	ns87415_fixup(pdev);
+
+	ata_host_resume(host);
+	return 0;
+}
+#endif
+
 static struct pci_driver ns87415_pci_driver = {
 	.name			= DRV_NAME,
 	.id_table		= ns87415_pci_tbl,
 	.probe			= ns87415_init_one,
 	.remove			= ata_pci_remove_one,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	.suspend		= ata_pci_device_suspend,
-	.resume			= ata_pci_device_resume,
+	.resume			= ns87415_reinit_one,
 #endif
 };
 
-static int __init ns87415_init(void)
-{
-	return pci_register_driver(&ns87415_pci_driver);
-}
-
-static void __exit ns87415_exit(void)
-{
-	pci_unregister_driver(&ns87415_pci_driver);
-}
-
-module_init(ns87415_init);
-module_exit(ns87415_exit);
+module_pci_driver(ns87415_pci_driver);
 
 MODULE_AUTHOR("Alan Cox");
 MODULE_DESCRIPTION("ATA low-level driver for NS87415 controllers");

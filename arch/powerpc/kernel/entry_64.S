@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  PowerPC version 
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
@@ -11,19 +12,17 @@
  *
  *  This file contains the system call entry code, context switch
  *  code, and exception/interrupt return code for PowerPC.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
  */
 
 #include <linux/errno.h>
+#include <linux/err.h>
+#include <asm/cache.h>
 #include <asm/unistd.h>
 #include <asm/processor.h>
 #include <asm/page.h>
 #include <asm/mmu.h>
 #include <asm/thread_info.h>
+#include <asm/code-patching-asm.h>
 #include <asm/ppc_asm.h>
 #include <asm/asm-offsets.h>
 #include <asm/cputable.h>
@@ -31,14 +30,32 @@
 #include <asm/bug.h>
 #include <asm/ptrace.h>
 #include <asm/irqflags.h>
-#include <asm/ftrace.h>
+#include <asm/hw_irq.h>
+#include <asm/context_tracking.h>
+#include <asm/tm.h>
+#include <asm/ppc-opcode.h>
+#include <asm/barrier.h>
+#include <asm/export.h>
+#include <asm/asm-compat.h>
+#ifdef CONFIG_PPC_BOOK3S
+#include <asm/exception-64s.h>
+#else
+#include <asm/exception-64e.h>
+#endif
+#include <asm/feature-fixups.h>
+#include <asm/kup.h>
 
 /*
  * System calls.
  */
 	.section	".toc","aw"
-.SYS_CALL_TABLE:
-	.tc .sys_call_table[TC],.sys_call_table
+SYS_CALL_TABLE:
+	.tc sys_call_table[TC],sys_call_table
+
+#ifdef CONFIG_COMPAT
+COMPAT_SYS_CALL_TABLE:
+	.tc compat_sys_call_table[TC],compat_sys_call_table
+#endif
 
 /* This value is used to mark exception frames on the stack. */
 exception_marker:
@@ -47,238 +64,356 @@ exception_marker:
 	.section	".text"
 	.align 7
 
-#undef SHOW_SYSCALLS
-
-	.globl system_call_common
-system_call_common:
-	andi.	r10,r12,MSR_PR
+#ifdef CONFIG_PPC_BOOK3S
+.macro system_call_vectored name trapnr
+	.globl system_call_vectored_\name
+system_call_vectored_\name:
+_ASM_NOKPROBE_SYMBOL(system_call_vectored_\name)
+#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
+BEGIN_FTR_SECTION
+	extrdi.	r10, r12, 1, (63-MSR_TS_T_LG) /* transaction active? */
+	bne	.Ltabort_syscall
+END_FTR_SECTION_IFSET(CPU_FTR_TM)
+#endif
+	SCV_INTERRUPT_TO_KERNEL
 	mr	r10,r1
-	addi	r1,r1,-INT_FRAME_SIZE
-	beq-	1f
 	ld	r1,PACAKSAVE(r13)
-1:	std	r10,0(r1)
-	crclr	so
+	std	r10,0(r1)
 	std	r11,_NIP(r1)
 	std	r12,_MSR(r1)
 	std	r0,GPR0(r1)
 	std	r10,GPR1(r1)
-	ACCOUNT_CPU_USER_ENTRY(r10, r11)
 	std	r2,GPR2(r1)
+	ld	r2,PACATOC(r13)
+	mfcr	r12
+	li	r11,0
+	/* Can we avoid saving r3-r8 in common case? */
 	std	r3,GPR3(r1)
 	std	r4,GPR4(r1)
 	std	r5,GPR5(r1)
 	std	r6,GPR6(r1)
 	std	r7,GPR7(r1)
 	std	r8,GPR8(r1)
-	li	r11,0
+	/* Zero r9-r12, this should only be required when restoring all GPRs */
 	std	r11,GPR9(r1)
 	std	r11,GPR10(r1)
 	std	r11,GPR11(r1)
 	std	r11,GPR12(r1)
 	std	r9,GPR13(r1)
-	mfcr	r9
-	mflr	r10
-	li	r11,0xc01
-	std	r9,_CCR(r1)
-	std	r10,_LINK(r1)
+	SAVE_NVGPRS(r1)
+	std	r11,_XER(r1)
+	std	r11,_LINK(r1)
+	std	r11,_CTR(r1)
+
+	li	r11,\trapnr
 	std	r11,_TRAP(r1)
-	mfxer	r9
-	mfctr	r10
-	std	r9,_XER(r1)
-	std	r10,_CTR(r1)
+	std	r12,_CCR(r1)
 	std	r3,ORIG_GPR3(r1)
-	ld	r2,PACATOC(r13)
-	addi	r9,r1,STACK_FRAME_OVERHEAD
+	addi	r10,r1,STACK_FRAME_OVERHEAD
 	ld	r11,exception_marker@toc(r2)
-	std	r11,-16(r9)		/* "regshere" marker */
-#ifdef CONFIG_TRACE_IRQFLAGS
-	bl	.trace_hardirqs_on
-	REST_GPR(0,r1)
-	REST_4GPRS(3,r1)
-	REST_2GPRS(7,r1)
-	addi	r9,r1,STACK_FRAME_OVERHEAD
-	ld	r12,_MSR(r1)
-#endif /* CONFIG_TRACE_IRQFLAGS */
-	li	r10,1
-	stb	r10,PACASOFTIRQEN(r13)
-	stb	r10,PACAHARDIRQEN(r13)
-	std	r10,SOFTE(r1)
-#ifdef CONFIG_PPC_ISERIES
-BEGIN_FW_FTR_SECTION
-	/* Hack for handling interrupts when soft-enabling on iSeries */
-	cmpdi	cr1,r0,0x5555		/* syscall 0x5555 */
-	andi.	r10,r12,MSR_PR		/* from kernel */
-	crand	4*cr0+eq,4*cr1+eq,4*cr0+eq
-	bne	2f
-	b	hardware_interrupt_entry
-2:
-END_FW_FTR_SECTION_IFSET(FW_FEATURE_ISERIES)
-#endif /* CONFIG_PPC_ISERIES */
-	mfmsr	r11
-	ori	r11,r11,MSR_EE
-	mtmsrd	r11,1
+	std	r11,-16(r10)		/* "regshere" marker */
 
-#ifdef SHOW_SYSCALLS
-	bl	.do_show_syscall
-	REST_GPR(0,r1)
-	REST_4GPRS(3,r1)
-	REST_2GPRS(7,r1)
-	addi	r9,r1,STACK_FRAME_OVERHEAD
-#endif
-	clrrdi	r11,r1,THREAD_SHIFT
-	ld	r10,TI_FLAGS(r11)
-	andi.	r11,r10,_TIF_SYSCALL_T_OR_A
-	bne-	syscall_dotrace
-syscall_dotrace_cont:
-	cmpldi	0,r0,NR_syscalls
-	bge-	syscall_enosys
+BEGIN_FTR_SECTION
+	HMT_MEDIUM
+END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
 
-system_call:			/* label this so stack traces look sane */
-/*
- * Need to vector to 32 Bit or default sys_call_table here,
- * based on caller's run-mode / personality.
- */
-	ld	r11,.SYS_CALL_TABLE@toc(2)
-	andi.	r10,r10,_TIF_32BIT
-	beq	15f
-	addi	r11,r11,8	/* use 32-bit syscall entries */
-	clrldi	r3,r3,32
-	clrldi	r4,r4,32
-	clrldi	r5,r5,32
-	clrldi	r6,r6,32
-	clrldi	r7,r7,32
-	clrldi	r8,r8,32
-15:
-	slwi	r0,r0,4
-	ldx	r10,r11,r0	/* Fetch system call handler [ptr] */
-	mtctr   r10
-	bctrl			/* Call handler */
+	/*
+	 * RECONCILE_IRQ_STATE without calling trace_hardirqs_off(), which
+	 * would clobber syscall parameters. Also we always enter with IRQs
+	 * enabled and nothing pending. system_call_exception() will call
+	 * trace_hardirqs_off().
+	 *
+	 * scv enters with MSR[EE]=1, so don't set PACA_IRQ_HARD_DIS. The
+	 * entry vector already sets PACAIRQSOFTMASK to IRQS_ALL_DISABLED.
+	 */
 
-syscall_exit:
-	std	r3,RESULT(r1)
-#ifdef SHOW_SYSCALLS
-	bl	.do_show_syscall_exit
-	ld	r3,RESULT(r1)
-#endif
-	clrrdi	r12,r1,THREAD_SHIFT
+	/* Calling convention has r9 = orig r0, r10 = regs */
+	mr	r9,r0
+	bl	system_call_exception
 
-	/* disable interrupts so current_thread_info()->flags can't change,
-	   and so that we don't get interrupted after loading SRR0/1. */
-	ld	r8,_MSR(r1)
-	andi.	r10,r8,MSR_RI
-	beq-	unrecov_restore
-	mfmsr	r10
-	rldicl	r10,r10,48,1
-	rotldi	r10,r10,16
-	mtmsrd	r10,1
-	ld	r9,TI_FLAGS(r12)
-	li	r11,-_LAST_ERRNO
-	andi.	r0,r9,(_TIF_SYSCALL_T_OR_A|_TIF_SINGLESTEP|_TIF_USER_WORK_MASK|_TIF_PERSYSCALL_MASK)
-	bne-	syscall_exit_work
-	cmpld	r3,r11
-	ld	r5,_CCR(r1)
-	bge-	syscall_error
-syscall_error_cont:
-	ld	r7,_NIP(r1)
+.Lsyscall_vectored_\name\()_exit:
+	addi    r4,r1,STACK_FRAME_OVERHEAD
+	li	r5,1 /* scv */
+	bl	syscall_exit_prepare
+
+	ld	r2,_CCR(r1)
+	ld	r4,_NIP(r1)
+	ld	r5,_MSR(r1)
+
+BEGIN_FTR_SECTION
 	stdcx.	r0,0,r1			/* to clear the reservation */
-	andi.	r6,r8,MSR_PR
-	ld	r4,_LINK(r1)
-	/*
-	 * Clear RI before restoring r13.  If we are returning to
-	 * userspace and we take an exception after restoring r13,
-	 * we end up corrupting the userspace r13 value.
-	 */
-	li	r12,MSR_RI
-	andc	r11,r10,r12
-	mtmsrd	r11,1			/* clear MSR.RI */
-	beq-	1f
-	ACCOUNT_CPU_USER_EXIT(r11, r12)
-	ld	r13,GPR13(r1)	/* only restore r13 if returning to usermode */
-1:	ld	r2,GPR2(r1)
-	ld	r1,GPR1(r1)
-	mtlr	r4
-	mtcr	r5
-	mtspr	SPRN_SRR0,r7
-	mtspr	SPRN_SRR1,r8
-	rfid
-	b	.	/* prevent speculative execution */
+END_FTR_SECTION_IFCLR(CPU_FTR_STCX_CHECKS_ADDRESS)
 
-syscall_error:	
-	oris	r5,r5,0x1000	/* Set SO bit in CR */
-	neg	r3,r3
-	std	r5,_CCR(r1)
-	b	syscall_error_cont
-	
-/* Traced system call support */
-syscall_dotrace:
-	bl	.save_nvgprs
-	addi	r3,r1,STACK_FRAME_OVERHEAD
-	bl	.do_syscall_trace_enter
-	/*
-	 * Restore argument registers possibly just changed.
-	 * We use the return value of do_syscall_trace_enter
-	 * for the call number to look up in the table (r0).
-	 */
-	mr	r0,r3
-	ld	r3,GPR3(r1)
+BEGIN_FTR_SECTION
+	HMT_MEDIUM_LOW
+END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
+
+	cmpdi	r3,0
+	bne	.Lsyscall_vectored_\name\()_restore_regs
+
+	/* rfscv returns with LR->NIA and CTR->MSR */
+	mtlr	r4
+	mtctr	r5
+
+	/* Could zero these as per ABI, but we may consider a stricter ABI
+	 * which preserves these if libc implementations can benefit, so
+	 * restore them for now until further measurement is done. */
+	ld	r0,GPR0(r1)
 	ld	r4,GPR4(r1)
 	ld	r5,GPR5(r1)
 	ld	r6,GPR6(r1)
 	ld	r7,GPR7(r1)
 	ld	r8,GPR8(r1)
-	addi	r9,r1,STACK_FRAME_OVERHEAD
-	clrrdi	r10,r1,THREAD_SHIFT
-	ld	r10,TI_FLAGS(r10)
-	b	syscall_dotrace_cont
+	/* Zero volatile regs that may contain sensitive kernel data */
+	li	r9,0
+	li	r10,0
+	li	r11,0
+	li	r12,0
+	mtspr	SPRN_XER,r0
 
-syscall_enosys:
-	li	r3,-ENOSYS
-	b	syscall_exit
-	
-syscall_exit_work:
-	/* If TIF_RESTOREALL is set, don't scribble on either r3 or ccr.
-	 If TIF_NOERROR is set, just save r3 as it is. */
+	/*
+	 * We don't need to restore AMR on the way back to userspace for KUAP.
+	 * The value of AMR only matters while we're in the kernel.
+	 */
+	mtcr	r2
+	ld	r2,GPR2(r1)
+	ld	r3,GPR3(r1)
+	ld	r13,GPR13(r1)
+	ld	r1,GPR1(r1)
+	RFSCV_TO_USER
+	b	.	/* prevent speculative execution */
 
-	andi.	r0,r9,_TIF_RESTOREALL
-	beq+	0f
+.Lsyscall_vectored_\name\()_restore_regs:
+	li	r3,0
+	mtmsrd	r3,1
+	mtspr	SPRN_SRR0,r4
+	mtspr	SPRN_SRR1,r5
+
+	ld	r3,_CTR(r1)
+	ld	r4,_LINK(r1)
+	ld	r5,_XER(r1)
+
 	REST_NVGPRS(r1)
-	b	2f
-0:	cmpld	r3,r11		/* r10 is -LAST_ERRNO */
-	blt+	1f
-	andi.	r0,r9,_TIF_NOERROR
-	bne-	1f
-	ld	r5,_CCR(r1)
-	neg	r3,r3
-	oris	r5,r5,0x1000	/* Set SO bit in CR */
-	std	r5,_CCR(r1)
-1:	std	r3,GPR3(r1)
-2:	andi.	r0,r9,(_TIF_PERSYSCALL_MASK)
-	beq	4f
+	ld	r0,GPR0(r1)
+	mtcr	r2
+	mtctr	r3
+	mtlr	r4
+	mtspr	SPRN_XER,r5
+	REST_10GPRS(2, r1)
+	REST_2GPRS(12, r1)
+	ld	r1,GPR1(r1)
+	RFI_TO_USER
+.endm
 
-	/* Clear per-syscall TIF flags if any are set.  */
+system_call_vectored common 0x3000
+/*
+ * We instantiate another entry copy for the SIGILL variant, with TRAP=0x7ff0
+ * which is tested by system_call_exception when r0 is -1 (as set by vector
+ * entry code).
+ */
+system_call_vectored sigill 0x7ff0
 
-	li	r11,_TIF_PERSYSCALL_MASK
-	addi	r12,r12,TI_FLAGS
-3:	ldarx	r10,0,r12
-	andc	r10,r10,r11
-	stdcx.	r10,0,r12
-	bne-	3b
-	subi	r12,r12,TI_FLAGS
 
-4:	/* Anything else left to do? */
-	andi.	r0,r9,(_TIF_SYSCALL_T_OR_A|_TIF_SINGLESTEP)
-	beq	.ret_from_except_lite
+/*
+ * Entered via kernel return set up by kernel/sstep.c, must match entry regs
+ */
+	.globl system_call_vectored_emulate
+system_call_vectored_emulate:
+_ASM_NOKPROBE_SYMBOL(system_call_vectored_emulate)
+	li	r10,IRQS_ALL_DISABLED
+	stb	r10,PACAIRQSOFTMASK(r13)
+	b	system_call_vectored_common
+#endif
 
-	/* Re-enable interrupts */
+	.balign IFETCH_ALIGN_BYTES
+	.globl system_call_common
+system_call_common:
+_ASM_NOKPROBE_SYMBOL(system_call_common)
+#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
+BEGIN_FTR_SECTION
+	extrdi.	r10, r12, 1, (63-MSR_TS_T_LG) /* transaction active? */
+	bne	.Ltabort_syscall
+END_FTR_SECTION_IFSET(CPU_FTR_TM)
+#endif
+	mr	r10,r1
+	ld	r1,PACAKSAVE(r13)
+	std	r10,0(r1)
+	std	r11,_NIP(r1)
+	std	r12,_MSR(r1)
+	std	r0,GPR0(r1)
+	std	r10,GPR1(r1)
+	std	r2,GPR2(r1)
+#ifdef CONFIG_PPC_FSL_BOOK3E
+START_BTB_FLUSH_SECTION
+	BTB_FLUSH(r10)
+END_BTB_FLUSH_SECTION
+#endif
+	ld	r2,PACATOC(r13)
+	mfcr	r12
+	li	r11,0
+	/* Can we avoid saving r3-r8 in common case? */
+	std	r3,GPR3(r1)
+	std	r4,GPR4(r1)
+	std	r5,GPR5(r1)
+	std	r6,GPR6(r1)
+	std	r7,GPR7(r1)
+	std	r8,GPR8(r1)
+	/* Zero r9-r12, this should only be required when restoring all GPRs */
+	std	r11,GPR9(r1)
+	std	r11,GPR10(r1)
+	std	r11,GPR11(r1)
+	std	r11,GPR12(r1)
+	std	r9,GPR13(r1)
+	SAVE_NVGPRS(r1)
+	std	r11,_XER(r1)
+	std	r11,_CTR(r1)
+	mflr	r10
+
+	/*
+	 * This clears CR0.SO (bit 28), which is the error indication on
+	 * return from this system call.
+	 */
+	rldimi	r12,r11,28,(63-28)
+	li	r11,0xc00
+	std	r10,_LINK(r1)
+	std	r11,_TRAP(r1)
+	std	r12,_CCR(r1)
+	std	r3,ORIG_GPR3(r1)
+	addi	r10,r1,STACK_FRAME_OVERHEAD
+	ld	r11,exception_marker@toc(r2)
+	std	r11,-16(r10)		/* "regshere" marker */
+
+	/*
+	 * RECONCILE_IRQ_STATE without calling trace_hardirqs_off(), which
+	 * would clobber syscall parameters. Also we always enter with IRQs
+	 * enabled and nothing pending. system_call_exception() will call
+	 * trace_hardirqs_off().
+	 */
+	li	r11,IRQS_ALL_DISABLED
+	li	r12,PACA_IRQ_HARD_DIS
+	stb	r11,PACAIRQSOFTMASK(r13)
+	stb	r12,PACAIRQHAPPENED(r13)
+
+	/* Calling convention has r9 = orig r0, r10 = regs */
+	mr	r9,r0
+	bl	system_call_exception
+
+.Lsyscall_exit:
+	addi    r4,r1,STACK_FRAME_OVERHEAD
+	li	r5,0 /* !scv */
+	bl	syscall_exit_prepare
+
+	ld	r2,_CCR(r1)
+	ld	r4,_NIP(r1)
+	ld	r5,_MSR(r1)
+	ld	r6,_LINK(r1)
+
+BEGIN_FTR_SECTION
+	stdcx.	r0,0,r1			/* to clear the reservation */
+END_FTR_SECTION_IFCLR(CPU_FTR_STCX_CHECKS_ADDRESS)
+
+	mtspr	SPRN_SRR0,r4
+	mtspr	SPRN_SRR1,r5
+	mtlr	r6
+
+	cmpdi	r3,0
+	bne	.Lsyscall_restore_regs
+	/* Zero volatile regs that may contain sensitive kernel data */
+	li	r0,0
+	li	r4,0
+	li	r5,0
+	li	r6,0
+	li	r7,0
+	li	r8,0
+	li	r9,0
+	li	r10,0
+	li	r11,0
+	li	r12,0
+	mtctr	r0
+	mtspr	SPRN_XER,r0
+.Lsyscall_restore_regs_cont:
+
+BEGIN_FTR_SECTION
+	HMT_MEDIUM_LOW
+END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
+
+	/*
+	 * We don't need to restore AMR on the way back to userspace for KUAP.
+	 * The value of AMR only matters while we're in the kernel.
+	 */
+	mtcr	r2
+	ld	r2,GPR2(r1)
+	ld	r3,GPR3(r1)
+	ld	r13,GPR13(r1)
+	ld	r1,GPR1(r1)
+	RFI_TO_USER
+	b	.	/* prevent speculative execution */
+
+.Lsyscall_restore_regs:
+	ld	r3,_CTR(r1)
+	ld	r4,_XER(r1)
+	REST_NVGPRS(r1)
+	mtctr	r3
+	mtspr	SPRN_XER,r4
+	ld	r0,GPR0(r1)
+	REST_8GPRS(4, r1)
+	ld	r12,GPR12(r1)
+	b	.Lsyscall_restore_regs_cont
+
+#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
+.Ltabort_syscall:
+	/* Firstly we need to enable TM in the kernel */
 	mfmsr	r10
-	ori	r10,r10,MSR_EE
-	mtmsrd	r10,1
+	li	r9, 1
+	rldimi	r10, r9, MSR_TM_LG, 63-MSR_TM_LG
+	mtmsrd	r10, 0
 
-	bl	.save_nvgprs
-	addi	r3,r1,STACK_FRAME_OVERHEAD
-	bl	.do_syscall_trace_leave
-	b	.ret_from_except
+	/* tabort, this dooms the transaction, nothing else */
+	li	r9, (TM_CAUSE_SYSCALL|TM_CAUSE_PERSISTENT)
+	TABORT(R9)
 
+	/*
+	 * Return directly to userspace. We have corrupted user register state,
+	 * but userspace will never see that register state. Execution will
+	 * resume after the tbegin of the aborted transaction with the
+	 * checkpointed register state.
+	 */
+	li	r9, MSR_RI
+	andc	r10, r10, r9
+	mtmsrd	r10, 1
+	mtspr	SPRN_SRR0, r11
+	mtspr	SPRN_SRR1, r12
+	RFI_TO_USER
+	b	.	/* prevent speculative execution */
+#endif
+
+#ifdef CONFIG_PPC_BOOK3S
+_GLOBAL(ret_from_fork_scv)
+	bl	schedule_tail
+	REST_NVGPRS(r1)
+	li	r3,0	/* fork() return value */
+	b	.Lsyscall_vectored_common_exit
+#endif
+
+_GLOBAL(ret_from_fork)
+	bl	schedule_tail
+	REST_NVGPRS(r1)
+	li	r3,0	/* fork() return value */
+	b	.Lsyscall_exit
+
+_GLOBAL(ret_from_kernel_thread)
+	bl	schedule_tail
+	REST_NVGPRS(r1)
+	mtctr	r14
+	mr	r3,r15
+#ifdef PPC64_ELF_ABI_v2
+	mr	r12,r14
+#endif
+	bctrl
+	li	r3,0
+	b	.Lsyscall_exit
+
+#ifdef CONFIG_PPC_BOOK3E
 /* Save non-volatile GPRs, if not already saved. */
 _GLOBAL(save_nvgprs)
 	ld	r11,_TRAP(r1)
@@ -288,54 +423,73 @@ _GLOBAL(save_nvgprs)
 	clrrdi	r0,r11,1
 	std	r0,_TRAP(r1)
 	blr
+_ASM_NOKPROBE_SYMBOL(save_nvgprs);
+#endif
 
-	
-/*
- * The sigsuspend and rt_sigsuspend system calls can call do_signal
- * and thus put the process into the stopped state where we might
- * want to examine its user state with ptrace.  Therefore we need
- * to save all the nonvolatile registers (r14 - r31) before calling
- * the C code.  Similarly, fork, vfork and clone need the full
- * register state on the stack so that it can be copied to the child.
- */
+#ifdef CONFIG_PPC_BOOK3S_64
 
-_GLOBAL(ppc_fork)
-	bl	.save_nvgprs
-	bl	.sys_fork
-	b	syscall_exit
+#define FLUSH_COUNT_CACHE	\
+1:	nop;			\
+	patch_site 1b, patch__call_flush_branch_caches1; \
+1:	nop;			\
+	patch_site 1b, patch__call_flush_branch_caches2; \
+1:	nop;			\
+	patch_site 1b, patch__call_flush_branch_caches3
 
-_GLOBAL(ppc_vfork)
-	bl	.save_nvgprs
-	bl	.sys_vfork
-	b	syscall_exit
+.macro nops number
+	.rept \number
+	nop
+	.endr
+.endm
 
-_GLOBAL(ppc_clone)
-	bl	.save_nvgprs
-	bl	.sys_clone
-	b	syscall_exit
+.balign 32
+.global flush_branch_caches
+flush_branch_caches:
+	/* Save LR into r9 */
+	mflr	r9
 
-_GLOBAL(ppc32_swapcontext)
-	bl	.save_nvgprs
-	bl	.compat_sys_swapcontext
-	b	syscall_exit
+	// Flush the link stack
+	.rept 64
+	bl	.+4
+	.endr
+	b	1f
+	nops	6
 
-_GLOBAL(ppc64_swapcontext)
-	bl	.save_nvgprs
-	bl	.sys_swapcontext
-	b	syscall_exit
+	.balign 32
+	/* Restore LR */
+1:	mtlr	r9
 
-_GLOBAL(ret_from_fork)
-	bl	.schedule_tail
-	REST_NVGPRS(r1)
-	li	r3,0
-	b	syscall_exit
+	// If we're just flushing the link stack, return here
+3:	nop
+	patch_site 3b patch__flush_link_stack_return
+
+	li	r9,0x7fff
+	mtctr	r9
+
+	PPC_BCCTR_FLUSH
+
+2:	nop
+	patch_site 2b patch__flush_count_cache_return
+
+	nops	3
+
+	.rept 278
+	.balign 32
+	PPC_BCCTR_FLUSH
+	nops	7
+	.endr
+
+	blr
+#else
+#define FLUSH_COUNT_CACHE
+#endif /* CONFIG_PPC_BOOK3S_64 */
 
 /*
  * This routine switches between two different tasks.  The process
  * state of one is saved on its kernel stack.  Then the state
  * of the other is restored from its kernel stack.  The memory
  * management hardware is updated to the second process's state.
- * Finally, we can return to the second process, via ret_from_except.
+ * Finally, we can return to the second process, via interrupt_return.
  * On entry, r3 points to the THREAD for the current task, r4
  * points to the THREAD for the new task.
  *
@@ -354,56 +508,66 @@ _GLOBAL(_switch)
 	std	r0,16(r1)
 	stdu	r1,-SWITCH_FRAME_SIZE(r1)
 	/* r3-r13 are caller saved -- Cort */
-	SAVE_8GPRS(14, r1)
-	SAVE_10GPRS(22, r1)
-	mflr	r20		/* Return to switch caller */
-	mfmsr	r22
-	li	r0, MSR_FP
-#ifdef CONFIG_VSX
-BEGIN_FTR_SECTION
-	oris	r0,r0,MSR_VSX@h	/* Disable VSX */
-END_FTR_SECTION_IFSET(CPU_FTR_VSX)
-#endif /* CONFIG_VSX */
-#ifdef CONFIG_ALTIVEC
-BEGIN_FTR_SECTION
-	oris	r0,r0,MSR_VEC@h	/* Disable altivec */
-	mfspr	r24,SPRN_VRSAVE	/* save vrsave register value */
-	std	r24,THREAD_VRSAVE(r3)
-END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
-#endif /* CONFIG_ALTIVEC */
-	and.	r0,r0,r22
-	beq+	1f
-	andc	r22,r22,r0
-	mtmsrd	r22
-	isync
-1:	std	r20,_NIP(r1)
+	SAVE_NVGPRS(r1)
+	std	r0,_NIP(r1)	/* Return to switch caller */
 	mfcr	r23
 	std	r23,_CCR(r1)
 	std	r1,KSP(r3)	/* Set old stack pointer */
 
-#ifdef CONFIG_SMP
-	/* We need a sync somewhere here to make sure that if the
-	 * previous task gets rescheduled on another CPU, it sees all
-	 * stores it has performed on this one.
+	kuap_check_amr r9, r10
+
+	FLUSH_COUNT_CACHE	/* Clobbers r9, ctr */
+
+	/*
+	 * On SMP kernels, care must be taken because a task may be
+	 * scheduled off CPUx and on to CPUy. Memory ordering must be
+	 * considered.
+	 *
+	 * Cacheable stores on CPUx will be visible when the task is
+	 * scheduled on CPUy by virtue of the core scheduler barriers
+	 * (see "Notes on Program-Order guarantees on SMP systems." in
+	 * kernel/sched/core.c).
+	 *
+	 * Uncacheable stores in the case of involuntary preemption must
+	 * be taken care of. The smp_mb__after_spinlock() in __schedule()
+	 * is implemented as hwsync on powerpc, which orders MMIO too. So
+	 * long as there is an hwsync in the context switch path, it will
+	 * be executed on the source CPU after the task has performed
+	 * all MMIO ops on that CPU, and on the destination CPU before the
+	 * task performs any MMIO ops there.
 	 */
-	sync
-#endif /* CONFIG_SMP */
+
+	/*
+	 * The kernel context switch path must contain a spin_lock,
+	 * which contains larx/stcx, which will clear any reservation
+	 * of the task being switched.
+	 */
+#ifdef CONFIG_PPC_BOOK3S
+/* Cancel all explict user streams as they will have no use after context
+ * switch and will stop the HW from creating streams itself
+ */
+	DCBT_BOOK3S_STOP_ALL_STREAM_IDS(r6)
+#endif
 
 	addi	r6,r4,-THREAD	/* Convert THREAD to 'current' */
 	std	r6,PACACURRENT(r13)	/* Set new 'current' */
+#if defined(CONFIG_STACKPROTECTOR)
+	ld	r6, TASK_CANARY(r6)
+	std	r6, PACA_CANARY(r13)
+#endif
 
 	ld	r8,KSP(r4)	/* new stack pointer */
+#ifdef CONFIG_PPC_BOOK3S_64
+BEGIN_MMU_FTR_SECTION
+	b	2f
+END_MMU_FTR_SECTION_IFSET(MMU_FTR_TYPE_RADIX)
 BEGIN_FTR_SECTION
-  BEGIN_FTR_SECTION_NESTED(95)
 	clrrdi	r6,r8,28	/* get its ESID */
 	clrrdi	r9,r1,28	/* get current sp ESID */
-  FTR_SECTION_ELSE_NESTED(95)
+FTR_SECTION_ELSE
 	clrrdi	r6,r8,40	/* get its 1T ESID */
 	clrrdi	r9,r1,40	/* get current sp 1T ESID */
-  ALT_FTR_SECTION_END_NESTED_IFCLR(CPU_FTR_1T_SEGMENT, 95)
-FTR_SECTION_ELSE
-	b	2f
-ALT_FTR_SECTION_END_IFSET(CPU_FTR_SLB)
+ALT_MMU_FTR_SECTION_END_IFCLR(MMU_FTR_1T_SEGMENT)
 	clrldi.	r0,r6,2		/* is new ESID c00000000? */
 	cmpd	cr1,r6,r9	/* or is new ESID the same as current ESID? */
 	cror	eq,4*cr1+eq,eq
@@ -417,7 +581,7 @@ BEGIN_FTR_SECTION
 	li	r9,MMU_SEGSIZE_1T	/* insert B field */
 	oris	r6,r6,(MMU_SEGSIZE_1T << SLBIE_SSIZE_SHIFT)@h
 	rldimi	r7,r9,SLB_VSID_SSIZE_SHIFT,0
-END_FTR_SECTION_IFSET(CPU_FTR_1T_SEGMENT)
+END_MMU_FTR_SECTION_IFSET(MMU_FTR_1T_SEGMENT)
 
 	/* Update the last bolted SLB.  No write barriers are needed
 	 * here, provided we only update the current CPU's SLB shadow
@@ -425,44 +589,50 @@ END_FTR_SECTION_IFSET(CPU_FTR_1T_SEGMENT)
 	 */
 	ld	r9,PACA_SLBSHADOWPTR(r13)
 	li	r12,0
-	std	r12,SLBSHADOW_STACKESID(r9) /* Clear ESID */
-	std	r7,SLBSHADOW_STACKVSID(r9)  /* Save VSID */
-	std	r0,SLBSHADOW_STACKESID(r9)  /* Save ESID */
+	std	r12,SLBSHADOW_STACKESID(r9)	/* Clear ESID */
+	li	r12,SLBSHADOW_STACKVSID
+	STDX_BE	r7,r12,r9			/* Save VSID */
+	li	r12,SLBSHADOW_STACKESID
+	STDX_BE	r0,r12,r9			/* Save ESID */
 
-	/* No need to check for CPU_FTR_NO_SLBIE_B here, since when
+	/* No need to check for MMU_FTR_NO_SLBIE_B here, since when
 	 * we have 1TB segments, the only CPUs known to have the errata
 	 * only support less than 1TB of system memory and we'll never
 	 * actually hit this code path.
 	 */
 
+	isync
 	slbie	r6
+BEGIN_FTR_SECTION
 	slbie	r6		/* Workaround POWER5 < DD2.1 issue */
+END_FTR_SECTION_IFCLR(CPU_FTR_ARCH_207S)
 	slbmte	r7,r0
 	isync
-
 2:
-	clrrdi	r7,r8,THREAD_SHIFT	/* base of new stack */
+#endif /* CONFIG_PPC_BOOK3S_64 */
+
+	clrrdi	r7, r8, THREAD_SHIFT	/* base of new stack */
 	/* Note: this uses SWITCH_FRAME_SIZE rather than INT_FRAME_SIZE
 	   because we don't need to leave the 288-byte ABI gap at the
 	   top of the kernel stack. */
 	addi	r7,r7,THREAD_SIZE-SWITCH_FRAME_SIZE
 
+	/*
+	 * PMU interrupts in radix may come in here. They will use r1, not
+	 * PACAKSAVE, so this stack switch will not cause a problem. They
+	 * will store to the process stack, which may then be migrated to
+	 * another CPU. However the rq lock release on this CPU paired with
+	 * the rq lock acquire on the new CPU before the stack becomes
+	 * active on the new CPU, will order those stores.
+	 */
 	mr	r1,r8		/* start using new stack pointer */
 	std	r7,PACAKSAVE(r13)
 
 	ld	r6,_CCR(r1)
 	mtcrf	0xFF,r6
 
-#ifdef CONFIG_ALTIVEC
-BEGIN_FTR_SECTION
-	ld	r0,THREAD_VRSAVE(r4)
-	mtspr	SPRN_VRSAVE,r0		/* if G4, restore VRSAVE reg */
-END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
-#endif /* CONFIG_ALTIVEC */
-
 	/* r3-r13 are destroyed -- Cort */
-	REST_8GPRS(14, r1)
-	REST_10GPRS(22, r1)
+	REST_NVGPRS(r1)
 
 	/* convert old thread to its task_struct for return value */
 	addi	r3,r3,-THREAD
@@ -471,186 +641,148 @@ END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 	addi	r1,r1,SWITCH_FRAME_SIZE
 	blr
 
-	.align	7
-_GLOBAL(ret_from_except)
-	ld	r11,_TRAP(r1)
-	andi.	r0,r11,1
-	bne	.ret_from_except_lite
-	REST_NVGPRS(r1)
-
-_GLOBAL(ret_from_except_lite)
+#ifdef CONFIG_PPC_BOOK3S
 	/*
-	 * Disable interrupts so that current_thread_info()->flags
-	 * can't change between when we test it and when we return
-	 * from the interrupt.
+	 * If MSR EE/RI was never enabled, IRQs not reconciled, NVGPRs not
+	 * touched, no exit work created, then this can be used.
 	 */
-	mfmsr	r10		/* Get current interrupt state */
-	rldicl	r9,r10,48,1	/* clear MSR_EE */
-	rotldi	r9,r9,16
-	mtmsrd	r9,1		/* Update machine state */
-
-#ifdef CONFIG_PREEMPT
-	clrrdi	r9,r1,THREAD_SHIFT	/* current_thread_info() */
-	li	r0,_TIF_NEED_RESCHED	/* bits to check */
-	ld	r3,_MSR(r1)
-	ld	r4,TI_FLAGS(r9)
-	/* Move MSR_PR bit in r3 to _TIF_SIGPENDING position in r0 */
-	rlwimi	r0,r3,32+TIF_SIGPENDING-MSR_PR_LG,_TIF_SIGPENDING
-	and.	r0,r4,r0	/* check NEED_RESCHED and maybe SIGPENDING */
-	bne	do_work
-
-#else /* !CONFIG_PREEMPT */
-	ld	r3,_MSR(r1)	/* Returning to user mode? */
-	andi.	r3,r3,MSR_PR
-	beq	restore		/* if not, just restore regs and return */
-
-	/* Check current_thread_info()->flags */
-	clrrdi	r9,r1,THREAD_SHIFT
-	ld	r4,TI_FLAGS(r9)
-	andi.	r0,r4,_TIF_USER_WORK_MASK
-	bne	do_work
-#endif
-
-restore:
-	ld	r5,SOFTE(r1)
-#ifdef CONFIG_PPC_ISERIES
-BEGIN_FW_FTR_SECTION
-	cmpdi	0,r5,0
-	beq	4f
-	/* Check for pending interrupts (iSeries) */
-	ld	r3,PACALPPACAPTR(r13)
-	ld	r3,LPPACAANYINT(r3)
-	cmpdi	r3,0
-	beq+	4f			/* skip do_IRQ if no interrupts */
-
-	li	r3,0
-	stb	r3,PACASOFTIRQEN(r13)	/* ensure we are soft-disabled */
-#ifdef CONFIG_TRACE_IRQFLAGS
-	bl	.trace_hardirqs_off
-	mfmsr	r10
-#endif
-	ori	r10,r10,MSR_EE
-	mtmsrd	r10			/* hard-enable again */
+	.balign IFETCH_ALIGN_BYTES
+	.globl fast_interrupt_return
+fast_interrupt_return:
+_ASM_NOKPROBE_SYMBOL(fast_interrupt_return)
+	kuap_check_amr r3, r4
+	ld	r5,_MSR(r1)
+	andi.	r0,r5,MSR_PR
+	bne	.Lfast_user_interrupt_return
+	kuap_restore_amr r3, r4
+	andi.	r0,r5,MSR_RI
+	li	r3,0 /* 0 return value, no EMULATE_STACK_STORE */
+	bne+	.Lfast_kernel_interrupt_return
 	addi	r3,r1,STACK_FRAME_OVERHEAD
-	bl	.do_IRQ
-	b	.ret_from_except_lite		/* loop back and handle more */
-4:
-END_FW_FTR_SECTION_IFSET(FW_FEATURE_ISERIES)
-#endif
-	TRACE_AND_RESTORE_IRQ(r5);
+	bl	unrecoverable_exception
+	b	. /* should not get here */
 
-	/* extract EE bit and use it to restore paca->hard_enabled */
-	ld	r3,_MSR(r1)
-	rldicl	r4,r3,49,63		/* r0 = (r3 >> 15) & 1 */
-	stb	r4,PACAHARDIRQEN(r13)
+	.balign IFETCH_ALIGN_BYTES
+	.globl interrupt_return
+interrupt_return:
+_ASM_NOKPROBE_SYMBOL(interrupt_return)
+	ld	r4,_MSR(r1)
+	andi.	r0,r4,MSR_PR
+	beq	.Lkernel_interrupt_return
+	addi	r3,r1,STACK_FRAME_OVERHEAD
+	bl	interrupt_exit_user_prepare
+	cmpdi	r3,0
+	bne-	.Lrestore_nvgprs
 
-	ld	r4,_CTR(r1)
-	ld	r0,_LINK(r1)
-	mtctr	r4
-	mtlr	r0
-	ld	r4,_XER(r1)
-	mtspr	SPRN_XER,r4
+.Lfast_user_interrupt_return:
+	ld	r11,_NIP(r1)
+	ld	r12,_MSR(r1)
+BEGIN_FTR_SECTION
+	ld	r10,_PPR(r1)
+	mtspr	SPRN_PPR,r10
+END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
+	mtspr	SPRN_SRR0,r11
+	mtspr	SPRN_SRR1,r12
 
-	REST_8GPRS(5, r1)
-
-	andi.	r0,r3,MSR_RI
-	beq-	unrecov_restore
-
+BEGIN_FTR_SECTION
 	stdcx.	r0,0,r1		/* to clear the reservation */
+FTR_SECTION_ELSE
+	ldarx	r0,0,r1
+ALT_FTR_SECTION_END_IFCLR(CPU_FTR_STCX_CHECKS_ADDRESS)
 
-	/*
-	 * Clear RI before restoring r13.  If we are returning to
-	 * userspace and we take an exception after restoring r13,
-	 * we end up corrupting the userspace r13 value.
-	 */
-	mfmsr	r4
-	andc	r4,r4,r0	/* r0 contains MSR_RI here */
-	mtmsrd	r4,1
+	ld	r3,_CCR(r1)
+	ld	r4,_LINK(r1)
+	ld	r5,_CTR(r1)
+	ld	r6,_XER(r1)
+	li	r0,0
 
-	/*
-	 * r13 is our per cpu area, only restore it if we are returning to
-	 * userspace
-	 */
-	andi.	r0,r3,MSR_PR
-	beq	1f
-	ACCOUNT_CPU_USER_EXIT(r2, r4)
+	REST_4GPRS(7, r1)
+	REST_2GPRS(11, r1)
 	REST_GPR(13, r1)
-1:
-	mtspr	SPRN_SRR1,r3
 
-	ld	r2,_CCR(r1)
-	mtcrf	0xFF,r2
-	ld	r2,_NIP(r1)
-	mtspr	SPRN_SRR0,r2
+	mtcr	r3
+	mtlr	r4
+	mtctr	r5
+	mtspr	SPRN_XER,r6
 
-	ld	r0,GPR0(r1)
-	ld	r2,GPR2(r1)
-	ld	r3,GPR3(r1)
-	ld	r4,GPR4(r1)
-	ld	r1,GPR1(r1)
-
-	rfid
+	REST_4GPRS(2, r1)
+	REST_GPR(6, r1)
+	REST_GPR(0, r1)
+	REST_GPR(1, r1)
+	RFI_TO_USER
 	b	.	/* prevent speculative execution */
 
-do_work:
-#ifdef CONFIG_PREEMPT
-	andi.	r0,r3,MSR_PR	/* Returning to user mode? */
-	bne	user_work
-	/* Check that preempt_count() == 0 and interrupts are enabled */
-	lwz	r8,TI_PREEMPT(r9)
-	cmpwi	cr1,r8,0
-	ld	r0,SOFTE(r1)
-	cmpdi	r0,0
-	crandc	eq,cr1*4+eq,eq
-	bne	restore
-	/* here we are preempting the current task */
-1:
-#ifdef CONFIG_TRACE_IRQFLAGS
-	bl	.trace_hardirqs_on
-	/* Note: we just clobbered r10 which used to contain the previous
-	 * MSR before the hard-disabling done by the caller of do_work.
-	 * We don't have that value anymore, but it doesn't matter as
-	 * we will hard-enable unconditionally, we can just reload the
-	 * current MSR into r10
+.Lrestore_nvgprs:
+	REST_NVGPRS(r1)
+	b	.Lfast_user_interrupt_return
+
+	.balign IFETCH_ALIGN_BYTES
+.Lkernel_interrupt_return:
+	addi	r3,r1,STACK_FRAME_OVERHEAD
+	bl	interrupt_exit_kernel_prepare
+
+.Lfast_kernel_interrupt_return:
+	cmpdi	cr1,r3,0
+	ld	r11,_NIP(r1)
+	ld	r12,_MSR(r1)
+	mtspr	SPRN_SRR0,r11
+	mtspr	SPRN_SRR1,r12
+
+BEGIN_FTR_SECTION
+	stdcx.	r0,0,r1		/* to clear the reservation */
+FTR_SECTION_ELSE
+	ldarx	r0,0,r1
+ALT_FTR_SECTION_END_IFCLR(CPU_FTR_STCX_CHECKS_ADDRESS)
+
+	ld	r3,_LINK(r1)
+	ld	r4,_CTR(r1)
+	ld	r5,_XER(r1)
+	ld	r6,_CCR(r1)
+	li	r0,0
+
+	REST_4GPRS(7, r1)
+	REST_2GPRS(11, r1)
+
+	mtlr	r3
+	mtctr	r4
+	mtspr	SPRN_XER,r5
+
+	/*
+	 * Leaving a stale exception_marker on the stack can confuse
+	 * the reliable stack unwinder later on. Clear it.
 	 */
-	mfmsr	r10
-#endif /* CONFIG_TRACE_IRQFLAGS */
-	li	r0,1
-	stb	r0,PACASOFTIRQEN(r13)
-	stb	r0,PACAHARDIRQEN(r13)
-	ori	r10,r10,MSR_EE
-	mtmsrd	r10,1		/* reenable interrupts */
-	bl	.preempt_schedule
-	mfmsr	r10
-	clrrdi	r9,r1,THREAD_SHIFT
-	rldicl	r10,r10,48,1	/* disable interrupts again */
-	rotldi	r10,r10,16
-	mtmsrd	r10,1
-	ld	r4,TI_FLAGS(r9)
-	andi.	r0,r4,_TIF_NEED_RESCHED
-	bne	1b
-	b	restore
+	std	r0,STACK_FRAME_OVERHEAD-16(r1)
 
-user_work:
-#endif
-	/* Enable interrupts */
-	ori	r10,r10,MSR_EE
-	mtmsrd	r10,1
+	REST_4GPRS(2, r1)
 
-	andi.	r0,r4,_TIF_NEED_RESCHED
-	beq	1f
-	bl	.schedule
-	b	.ret_from_except_lite
+	bne-	cr1,1f /* emulate stack store */
+	mtcr	r6
+	REST_GPR(6, r1)
+	REST_GPR(0, r1)
+	REST_GPR(1, r1)
+	RFI_TO_KERNEL
+	b	.	/* prevent speculative execution */
 
-1:	bl	.save_nvgprs
-	addi	r3,r1,STACK_FRAME_OVERHEAD
-	bl	.do_signal
-	b	.ret_from_except
+1:	/*
+	 * Emulate stack store with update. New r1 value was already calculated
+	 * and updated in our interrupt regs by emulate_loadstore, but we can't
+	 * store the previous value of r1 to the stack before re-loading our
+	 * registers from it, otherwise they could be clobbered.  Use
+	 * PACA_EXGEN as temporary storage to hold the store data, as
+	 * interrupts are disabled here so it won't be clobbered.
+	 */
+	mtcr	r6
+	std	r9,PACA_EXGEN+0(r13)
+	addi	r9,r1,INT_FRAME_SIZE /* get original r1 */
+	REST_GPR(6, r1)
+	REST_GPR(0, r1)
+	REST_GPR(1, r1)
+	std	r9,0(r1) /* perform store component of stdu */
+	ld	r9,PACA_EXGEN+0(r13)
 
-unrecov_restore:
-	addi	r3,r1,STACK_FRAME_OVERHEAD
-	bl	.unrecoverable_exception
-	b	unrecov_restore
+	RFI_TO_KERNEL
+	b	.	/* prevent speculative execution */
+#endif /* CONFIG_PPC_BOOK3S */
 
 #ifdef CONFIG_PPC_RTAS
 /*
@@ -664,7 +796,7 @@ unrecov_restore:
 _GLOBAL(enter_rtas)
 	mflr	r0
 	std	r0,16(r1)
-        stdu	r1,-RTAS_FRAME_SIZE(r1)	/* Save SP and create stack space. */
+        stdu	r1,-SWITCH_FRAME_SIZE(r1) /* Save SP and create stack space. */
 
 	/* Because RTAS is running in 32b mode, it clobbers the high order half
 	 * of all registers that it saves.  We therefore save those registers
@@ -672,8 +804,7 @@ _GLOBAL(enter_rtas)
    	 */
 	SAVE_GPR(2, r1)			/* Save the TOC */
 	SAVE_GPR(13, r1)		/* Save paca */
-	SAVE_8GPRS(14, r1)		/* Save the non-volatiles */
-	SAVE_10GPRS(22, r1)		/* ditto */
+	SAVE_NVGPRS(r1)			/* Save the non-volatiles */
 
 	mfcr	r4
 	std	r4,_CCR(r1)
@@ -685,10 +816,6 @@ _GLOBAL(enter_rtas)
 	std	r7,_DAR(r1)
 	mfdsisr	r8
 	std	r8,_DSISR(r1)
-	mfsrr0	r9
-	std	r9,_SRR0(r1)
-	mfsrr1	r10
-	std	r10,_SRR1(r1)
 
 	/* Temporary workaround to clear CR until RTAS can be modified to
 	 * ignore all bits.
@@ -696,15 +823,15 @@ _GLOBAL(enter_rtas)
 	li	r0,0
 	mtcr	r0
 
-#ifdef CONFIG_BUG	
+#ifdef CONFIG_BUG
 	/* There is no way it is acceptable to get here with interrupts enabled,
 	 * check it with the asm equivalent of WARN_ON
 	 */
-	lbz	r0,PACASOFTIRQEN(r13)
-1:	tdnei	r0,0
+	lbz	r0,PACAIRQSOFTMASK(r13)
+1:	tdeqi	r0,IRQS_ENABLED
 	EMIT_BUG_ENTRY 1b,__FILE__,__LINE__,BUGFLAG_WARNING
 #endif
-	
+
 	/* Hard-disable interrupts */
 	mfmsr	r6
 	rldicl	r7,r6,48,1
@@ -719,7 +846,7 @@ _GLOBAL(enter_rtas)
         std	r6,PACASAVEDMSR(r13)
 
 	/* Setup our real return addr */	
-	LOAD_REG_ADDR(r4,.rtas_return_loc)
+	LOAD_REG_ADDR(r4,rtas_return_loc)
 	clrldi	r4,r4,2			/* convert to realmode address */
        	mtlr	r4
 
@@ -729,9 +856,10 @@ _GLOBAL(enter_rtas)
 	
         li      r9,1
         rldicr  r9,r9,MSR_SF_LG,(63-MSR_SF_LG)
-	ori	r9,r9,MSR_IR|MSR_DR|MSR_FE0|MSR_FE1|MSR_FP
+	ori	r9,r9,MSR_IR|MSR_DR|MSR_FE0|MSR_FE1|MSR_FP|MSR_RI|MSR_LE
 	andc	r6,r0,r9
-	ori	r6,r6,MSR_RI
+
+__enter_rtas:
 	sync				/* disable interrupts so SRR0/1 */
 	mtmsrd	r0			/* don't get trashed */
 
@@ -741,37 +869,51 @@ _GLOBAL(enter_rtas)
 	
 	mtspr	SPRN_SRR0,r5
 	mtspr	SPRN_SRR1,r6
-	rfid
+	RFI_TO_KERNEL
 	b	.	/* prevent speculative execution */
 
-_STATIC(rtas_return_loc)
-	/* relocation is off at this point */
-	mfspr	r4,SPRN_SPRG3	        /* Get PACA */
-	clrldi	r4,r4,2			/* convert to realmode address */
+rtas_return_loc:
+	FIXUP_ENDIAN
 
+	/*
+	 * Clear RI and set SF before anything.
+	 */
 	mfmsr   r6
 	li	r0,MSR_RI
 	andc	r6,r6,r0
-	sync	
+	sldi	r0,r0,(MSR_SF_LG - MSR_RI_LG)
+	or	r6,r6,r0
+	sync
 	mtmsrd  r6
-        
+
+	/* relocation is off at this point */
+	GET_PACA(r4)
+	clrldi	r4,r4,2			/* convert to realmode address */
+
+	bcl	20,31,$+4
+0:	mflr	r3
+	ld	r3,(1f-0b)(r3)		/* get &rtas_restore_regs */
+
         ld	r1,PACAR1(r4)           /* Restore our SP */
-	LOAD_REG_IMMEDIATE(r3,.rtas_restore_regs)
         ld	r4,PACASAVEDMSR(r4)     /* Restore our MSR */
 
 	mtspr	SPRN_SRR0,r3
 	mtspr	SPRN_SRR1,r4
-	rfid
+	RFI_TO_KERNEL
 	b	.	/* prevent speculative execution */
+_ASM_NOKPROBE_SYMBOL(__enter_rtas)
+_ASM_NOKPROBE_SYMBOL(rtas_return_loc)
 
-_STATIC(rtas_restore_regs)
+	.align	3
+1:	.8byte	rtas_restore_regs
+
+rtas_restore_regs:
 	/* relocation is on at this point */
 	REST_GPR(2, r1)			/* Restore the TOC */
 	REST_GPR(13, r1)		/* Restore paca */
-	REST_8GPRS(14, r1)		/* Restore the non-volatiles */
-	REST_10GPRS(22, r1)		/* ditto */
+	REST_NVGPRS(r1)			/* Restore the non-volatiles */
 
-	mfspr	r13,SPRN_SPRG3
+	GET_PACA(r13)
 
 	ld	r4,_CCR(r1)
 	mtcr	r4
@@ -783,12 +925,8 @@ _STATIC(rtas_restore_regs)
 	mtdar	r7
 	ld	r8,_DSISR(r1)
 	mtdsisr	r8
-	ld	r9,_SRR0(r1)
-	mtsrr0	r9
-	ld	r10,_SRR1(r1)
-	mtsrr1	r10
 
-        addi	r1,r1,RTAS_FRAME_SIZE	/* Unstack our frame */
+        addi	r1,r1,SWITCH_FRAME_SIZE	/* Unstack our frame */
 	ld	r0,16(r1)		/* get return address */
 
 	mtlr    r0
@@ -799,52 +937,44 @@ _STATIC(rtas_restore_regs)
 _GLOBAL(enter_prom)
 	mflr	r0
 	std	r0,16(r1)
-        stdu	r1,-PROM_FRAME_SIZE(r1)	/* Save SP and create stack space */
+        stdu	r1,-SWITCH_FRAME_SIZE(r1) /* Save SP and create stack space */
 
 	/* Because PROM is running in 32b mode, it clobbers the high order half
 	 * of all registers that it saves.  We therefore save those registers
 	 * PROM might touch to the stack.  (r0, r3-r13 are caller saved)
    	 */
-	SAVE_8GPRS(2, r1)
+	SAVE_GPR(2, r1)
 	SAVE_GPR(13, r1)
-	SAVE_8GPRS(14, r1)
-	SAVE_10GPRS(22, r1)
-	mfcr	r4
-	std	r4,_CCR(r1)
-	mfctr	r5
-	std	r5,_CTR(r1)
-	mfspr	r6,SPRN_XER
-	std	r6,_XER(r1)
-	mfdar	r7
-	std	r7,_DAR(r1)
-	mfdsisr	r8
-	std	r8,_DSISR(r1)
-	mfsrr0	r9
-	std	r9,_SRR0(r1)
-	mfsrr1	r10
-	std	r10,_SRR1(r1)
+	SAVE_NVGPRS(r1)
+	mfcr	r10
 	mfmsr	r11
+	std	r10,_CCR(r1)
 	std	r11,_MSR(r1)
 
-	/* Get the PROM entrypoint */
-	ld	r0,GPR4(r1)
-	mtlr	r0
+	/* Put PROM address in SRR0 */
+	mtsrr0	r4
 
-	/* Switch MSR to 32 bits mode
+	/* Setup our trampoline return addr in LR */
+	bcl	20,31,$+4
+0:	mflr	r4
+	addi	r4,r4,(1f - 0b)
+       	mtlr	r4
+
+	/* Prepare a 32-bit mode big endian MSR
 	 */
-        mfmsr   r11
-        li      r12,1
-        rldicr  r12,r12,MSR_SF_LG,(63-MSR_SF_LG)
-        andc    r11,r11,r12
-        li      r12,1
-        rldicr  r12,r12,MSR_ISF_LG,(63-MSR_ISF_LG)
-        andc    r11,r11,r12
-        mtmsrd  r11
-        isync
+#ifdef CONFIG_PPC_BOOK3E
+	rlwinm	r11,r11,0,1,31
+	mtsrr1	r11
+	rfi
+#else /* CONFIG_PPC_BOOK3E */
+	LOAD_REG_IMMEDIATE(r12, MSR_SF | MSR_ISF | MSR_LE)
+	andc	r11,r11,r12
+	mtsrr1	r11
+	RFI_TO_KERNEL
+#endif /* CONFIG_PPC_BOOK3E */
 
-	/* Restore arguments & enter PROM here... */
-	ld	r3,GPR3(r1)
-	blrl
+1:	/* Return from OF */
+	FIXUP_ENDIAN
 
 	/* Just make sure that r1 top 32 bits didn't get
 	 * corrupt by OF
@@ -853,94 +983,17 @@ _GLOBAL(enter_prom)
 
 	/* Restore the MSR (back to 64 bits) */
 	ld	r0,_MSR(r1)
-	mtmsrd	r0
+	MTMSRD(r0)
         isync
 
 	/* Restore other registers */
 	REST_GPR(2, r1)
 	REST_GPR(13, r1)
-	REST_8GPRS(14, r1)
-	REST_10GPRS(22, r1)
+	REST_NVGPRS(r1)
 	ld	r4,_CCR(r1)
 	mtcr	r4
-	ld	r5,_CTR(r1)
-	mtctr	r5
-	ld	r6,_XER(r1)
-	mtspr	SPRN_XER,r6
-	ld	r7,_DAR(r1)
-	mtdar	r7
-	ld	r8,_DSISR(r1)
-	mtdsisr	r8
-	ld	r9,_SRR0(r1)
-	mtsrr0	r9
-	ld	r10,_SRR1(r1)
-	mtsrr1	r10
-	
-        addi	r1,r1,PROM_FRAME_SIZE
+
+        addi	r1,r1,SWITCH_FRAME_SIZE
 	ld	r0,16(r1)
 	mtlr    r0
         blr
-
-#ifdef CONFIG_FTRACE
-#ifdef CONFIG_DYNAMIC_FTRACE
-_GLOBAL(mcount)
-_GLOBAL(_mcount)
-	/* Taken from output of objdump from lib64/glibc */
-	mflr	r3
-	stdu	r1, -112(r1)
-	std	r3, 128(r1)
-	subi	r3, r3, MCOUNT_INSN_SIZE
-	.globl mcount_call
-mcount_call:
-	bl	ftrace_stub
-	nop
-	ld	r0, 128(r1)
-	mtlr	r0
-	addi	r1, r1, 112
-	blr
-
-_GLOBAL(ftrace_caller)
-	/* Taken from output of objdump from lib64/glibc */
-	mflr	r3
-	ld	r11, 0(r1)
-	stdu	r1, -112(r1)
-	std	r3, 128(r1)
-	ld	r4, 16(r11)
-	subi	r3, r3, MCOUNT_INSN_SIZE
-.globl ftrace_call
-ftrace_call:
-	bl	ftrace_stub
-	nop
-	ld	r0, 128(r1)
-	mtlr	r0
-	addi	r1, r1, 112
-_GLOBAL(ftrace_stub)
-	blr
-#else
-_GLOBAL(mcount)
-	blr
-
-_GLOBAL(_mcount)
-	/* Taken from output of objdump from lib64/glibc */
-	mflr	r3
-	ld	r11, 0(r1)
-	stdu	r1, -112(r1)
-	std	r3, 128(r1)
-	ld	r4, 16(r11)
-
-	subi	r3, r3, MCOUNT_INSN_SIZE
-	LOAD_REG_ADDR(r5,ftrace_trace_function)
-	ld	r5,0(r5)
-	ld	r5,0(r5)
-	mtctr	r5
-	bctrl
-
-	nop
-	ld	r0, 128(r1)
-	mtlr	r0
-	addi	r1, r1, 112
-_GLOBAL(ftrace_stub)
-	blr
-
-#endif
-#endif

@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * omap_cf.c -- OMAP 16xx CompactFlash controller driver
  *
  * Copyright (c) 2005 David Brownell
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/module.h>
@@ -16,12 +12,13 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/slab.h>
 
 #include <pcmcia/ss.h>
 
 #include <mach/hardware.h>
 #include <asm/io.h>
-#include <asm/sizes.h>
+#include <linux/sizes.h>
 
 #include <mach/mux.h>
 #include <mach/tc.h>
@@ -71,8 +68,6 @@ struct omap_cf_socket {
 
 #define	POLL_INTERVAL		(2 * HZ)
 
-#define	SZ_2K			(2 * SZ_1K)
-
 /*--------------------------------------------------------------------------*/
 
 static int omap_cf_ss_init(struct pcmcia_socket *s)
@@ -81,9 +76,9 @@ static int omap_cf_ss_init(struct pcmcia_socket *s)
 }
 
 /* the timer is primarily to kick this socket's pccardd */
-static void omap_cf_timer(unsigned long _cf)
+static void omap_cf_timer(struct timer_list *t)
 {
-	struct omap_cf_socket	*cf = (void *) _cf;
+	struct omap_cf_socket	*cf = from_timer(cf, t, timer);
 	unsigned		present = omap_cf_present();
 
 	if (present != cf->present) {
@@ -103,7 +98,9 @@ static void omap_cf_timer(unsigned long _cf)
  */
 static irqreturn_t omap_cf_irq(int irq, void *_cf)
 {
-	omap_cf_timer((unsigned long)_cf);
+	struct omap_cf_socket *cf = (struct omap_cf_socket *)_cf;
+
+	omap_cf_timer(&cf->timer);
 	return IRQ_HANDLED;
 }
 
@@ -118,7 +115,7 @@ static int omap_cf_get_status(struct pcmcia_socket *s, u_int *sp)
 
 		*sp = SS_READY | SS_DETECT | SS_POWERON | SS_3VCARD;
 		cf = container_of(s, struct omap_cf_socket, socket);
-		s->irq.AssignedIRQ = 0;
+		s->pcmcia_irq = 0;
 		s->pci_irq = cf->irq;
 	} else
 		*sp = 0;
@@ -221,9 +218,7 @@ static int __init omap_cf_probe(struct platform_device *pdev)
 	cf = kzalloc(sizeof *cf, GFP_KERNEL);
 	if (!cf)
 		return -ENOMEM;
-	init_timer(&cf->timer);
-	cf->timer.function = omap_cf_timer;
-	cf->timer.data = (unsigned long) cf;
+	timer_setup(&cf->timer, omap_cf_timer, 0);
 
 	cf->pdev = pdev;
 	platform_set_drvdata(pdev, cf);
@@ -332,24 +327,11 @@ static int __exit omap_cf_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static int omap_cf_suspend(struct platform_device *pdev, pm_message_t mesg)
-{
-	return pcmcia_socket_dev_suspend(&pdev->dev, mesg);
-}
-
-static int omap_cf_resume(struct platform_device *pdev)
-{
-	return pcmcia_socket_dev_resume(&pdev->dev);
-}
-
 static struct platform_driver omap_cf_driver = {
 	.driver = {
-		.name	= (char *) driver_name,
-		.owner	= THIS_MODULE,
+		.name	= driver_name,
 	},
 	.remove		= __exit_p(omap_cf_remove),
-	.suspend	= omap_cf_suspend,
-	.resume		= omap_cf_resume,
 };
 
 static int __init omap_cf_init(void)

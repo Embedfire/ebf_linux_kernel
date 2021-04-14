@@ -1,30 +1,29 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Cryptographic API
  *
  * Michael MIC (IEEE 802.11i/TKIP) keyed digest
  *
  * Copyright (c) 2004 Jouni Malinen <j@w1.fi>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
-
-#include <asm/byteorder.h>
+#include <crypto/internal/hash.h>
+#include <asm/unaligned.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/string.h>
-#include <linux/crypto.h>
 #include <linux/types.h>
 
 
 struct michael_mic_ctx {
-	u8 pending[4];
+	u32 l, r;
+};
+
+struct michael_mic_desc_ctx {
+	__le32 pending;
 	size_t pending_len;
 
 	u32 l, r;
 };
-
 
 static inline u32 xswap(u32 val)
 {
@@ -45,57 +44,60 @@ do {				\
 } while (0)
 
 
-static void michael_init(struct crypto_tfm *tfm)
+static int michael_init(struct shash_desc *desc)
 {
-	struct michael_mic_ctx *mctx = crypto_tfm_ctx(tfm);
+	struct michael_mic_desc_ctx *mctx = shash_desc_ctx(desc);
+	struct michael_mic_ctx *ctx = crypto_shash_ctx(desc->tfm);
 	mctx->pending_len = 0;
+	mctx->l = ctx->l;
+	mctx->r = ctx->r;
+
+	return 0;
 }
 
 
-static void michael_update(struct crypto_tfm *tfm, const u8 *data,
+static int michael_update(struct shash_desc *desc, const u8 *data,
 			   unsigned int len)
 {
-	struct michael_mic_ctx *mctx = crypto_tfm_ctx(tfm);
-	const __le32 *src;
+	struct michael_mic_desc_ctx *mctx = shash_desc_ctx(desc);
 
 	if (mctx->pending_len) {
 		int flen = 4 - mctx->pending_len;
 		if (flen > len)
 			flen = len;
-		memcpy(&mctx->pending[mctx->pending_len], data, flen);
+		memcpy((u8 *)&mctx->pending + mctx->pending_len, data, flen);
 		mctx->pending_len += flen;
 		data += flen;
 		len -= flen;
 
 		if (mctx->pending_len < 4)
-			return;
+			return 0;
 
-		src = (const __le32 *)mctx->pending;
-		mctx->l ^= le32_to_cpup(src);
+		mctx->l ^= le32_to_cpu(mctx->pending);
 		michael_block(mctx->l, mctx->r);
 		mctx->pending_len = 0;
 	}
 
-	src = (const __le32 *)data;
-
 	while (len >= 4) {
-		mctx->l ^= le32_to_cpup(src++);
+		mctx->l ^= get_unaligned_le32(data);
 		michael_block(mctx->l, mctx->r);
+		data += 4;
 		len -= 4;
 	}
 
 	if (len > 0) {
 		mctx->pending_len = len;
-		memcpy(mctx->pending, src, len);
+		memcpy(&mctx->pending, data, len);
 	}
+
+	return 0;
 }
 
 
-static void michael_final(struct crypto_tfm *tfm, u8 *out)
+static int michael_final(struct shash_desc *desc, u8 *out)
 {
-	struct michael_mic_ctx *mctx = crypto_tfm_ctx(tfm);
-	u8 *data = mctx->pending;
-	__le32 *dst = (__le32 *)out;
+	struct michael_mic_desc_ctx *mctx = shash_desc_ctx(desc);
+	u8 *data = (u8 *)&mctx->pending;
 
 	/* Last block and padding (0x5a, 4..7 x 0) */
 	switch (mctx->pending_len) {
@@ -117,60 +119,58 @@ static void michael_final(struct crypto_tfm *tfm, u8 *out)
 	/* l ^= 0; */
 	michael_block(mctx->l, mctx->r);
 
-	dst[0] = cpu_to_le32(mctx->l);
-	dst[1] = cpu_to_le32(mctx->r);
-}
+	put_unaligned_le32(mctx->l, out);
+	put_unaligned_le32(mctx->r, out + 4);
 
-
-static int michael_setkey(struct crypto_tfm *tfm, const u8 *key,
-			  unsigned int keylen)
-{
-	struct michael_mic_ctx *mctx = crypto_tfm_ctx(tfm);
-	const __le32 *data = (const __le32 *)key;
-
-	if (keylen != 8) {
-		tfm->crt_flags |= CRYPTO_TFM_RES_BAD_KEY_LEN;
-		return -EINVAL;
-	}
-
-	mctx->l = le32_to_cpu(data[0]);
-	mctx->r = le32_to_cpu(data[1]);
 	return 0;
 }
 
 
-static struct crypto_alg michael_mic_alg = {
-	.cra_name	= "michael_mic",
-	.cra_flags	= CRYPTO_ALG_TYPE_DIGEST,
-	.cra_blocksize	= 8,
-	.cra_ctxsize	= sizeof(struct michael_mic_ctx),
-	.cra_module	= THIS_MODULE,
-	.cra_alignmask	= 3,
-	.cra_list	= LIST_HEAD_INIT(michael_mic_alg.cra_list),
-	.cra_u		= { .digest = {
-	.dia_digestsize	= 8,
-	.dia_init	= michael_init,
-	.dia_update	= michael_update,
-	.dia_final	= michael_final,
-	.dia_setkey	= michael_setkey } }
-};
+static int michael_setkey(struct crypto_shash *tfm, const u8 *key,
+			  unsigned int keylen)
+{
+	struct michael_mic_ctx *mctx = crypto_shash_ctx(tfm);
 
+	if (keylen != 8)
+		return -EINVAL;
+
+	mctx->l = get_unaligned_le32(key);
+	mctx->r = get_unaligned_le32(key + 4);
+	return 0;
+}
+
+static struct shash_alg alg = {
+	.digestsize		=	8,
+	.setkey			=	michael_setkey,
+	.init			=	michael_init,
+	.update			=	michael_update,
+	.final			=	michael_final,
+	.descsize		=	sizeof(struct michael_mic_desc_ctx),
+	.base			=	{
+		.cra_name		=	"michael_mic",
+		.cra_driver_name	=	"michael_mic-generic",
+		.cra_blocksize		=	8,
+		.cra_ctxsize		=	sizeof(struct michael_mic_ctx),
+		.cra_module		=	THIS_MODULE,
+	}
+};
 
 static int __init michael_mic_init(void)
 {
-	return crypto_register_alg(&michael_mic_alg);
+	return crypto_register_shash(&alg);
 }
 
 
 static void __exit michael_mic_exit(void)
 {
-	crypto_unregister_alg(&michael_mic_alg);
+	crypto_unregister_shash(&alg);
 }
 
 
-module_init(michael_mic_init);
+subsys_initcall(michael_mic_init);
 module_exit(michael_mic_exit);
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("Michael MIC");
 MODULE_AUTHOR("Jouni Malinen <j@w1.fi>");
+MODULE_ALIAS_CRYPTO("michael_mic");

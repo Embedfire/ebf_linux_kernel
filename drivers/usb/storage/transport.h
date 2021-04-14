@@ -1,4 +1,6 @@
-/* Driver for USB Mass Storage compliant devices
+/* SPDX-License-Identifier: GPL-2.0+ */
+/*
+ * Driver for USB Mass Storage compliant devices
  * Transport Functions Header File
  *
  * Current development and maintenance by:
@@ -17,68 +19,12 @@
  *
  * Also, for certain devices, the interrupt endpoint is used to convey
  * status of a command.
- *
- * Please see http://www.one-eyed-alien.net/~mdharm/linux-usb for more
- * information about this driver.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #ifndef _TRANSPORT_H_
 #define _TRANSPORT_H_
 
 #include <linux/blkdev.h>
-
-/*
- * Bulk only data structures
- */
-
-/* command block wrapper */
-struct bulk_cb_wrap {
-	__le32	Signature;		/* contains 'USBC' */
-	__u32	Tag;			/* unique per command id */
-	__le32	DataTransferLength;	/* size of data */
-	__u8	Flags;			/* direction in bit 0 */
-	__u8	Lun;			/* LUN normally 0 */
-	__u8	Length;			/* of of the CDB */
-	__u8	CDB[16];		/* max command */
-};
-
-#define US_BULK_CB_WRAP_LEN	31
-#define US_BULK_CB_SIGN		0x43425355	/*spells out USBC */
-#define US_BULK_FLAG_IN		1
-#define US_BULK_FLAG_OUT	0
-
-/* command status wrapper */
-struct bulk_cs_wrap {
-	__le32	Signature;		/* should = 'USBS' */
-	__u32	Tag;			/* same as original command */
-	__le32	Residue;		/* amount not transferred */
-	__u8	Status;			/* see below */
-	__u8	Filler[18];
-};
-
-#define US_BULK_CS_WRAP_LEN	13
-#define US_BULK_CS_SIGN		0x53425355	/* spells out 'USBS' */
-#define US_BULK_STAT_OK		0
-#define US_BULK_STAT_FAIL	1
-#define US_BULK_STAT_PHASE	2
-
-/* bulk-only class specific requests */
-#define US_BULK_RESET_REQUEST	0xff
-#define US_BULK_GET_MAX_LUN	0xfe
 
 /*
  * usb_stor_bulk_transfer_xxx() return codes, in order of severity
@@ -112,8 +58,6 @@ struct bulk_cs_wrap {
  */
 
 #define US_CBI_ADSC		0
-
-extern int usb_stor_CBI_transport(struct scsi_cmnd *, struct us_data*);
 
 extern int usb_stor_CB_transport(struct scsi_cmnd *, struct us_data*);
 extern int usb_stor_CB_reset(struct us_data*);

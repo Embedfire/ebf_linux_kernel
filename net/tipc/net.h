@@ -1,8 +1,8 @@
 /*
  * net/tipc/net.h: Include file for TIPC network routing code
  *
- * Copyright (c) 1995-2006, Ericsson AB
- * Copyright (c) 2005, Wind River Systems
+ * Copyright (c) 1995-2006, 2014, Ericsson AB
+ * Copyright (c) 2005, 2010-2011, Wind River Systems
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -37,28 +37,17 @@
 #ifndef _TIPC_NET_H
 #define _TIPC_NET_H
 
-struct _zone;
+#include <net/genetlink.h>
 
-/**
- * struct network - TIPC network structure
- * @zones: array of pointers to all zones within network
- */
+extern const struct nla_policy tipc_nl_net_policy[];
 
-struct network {
-	struct _zone **zones;
-};
-
-
-extern struct network tipc_net;
-extern rwlock_t tipc_net_lock;
-
-void tipc_net_remove_as_router(u32 router);
-void tipc_net_send_external_routes(u32 dest);
-void tipc_net_route_msg(struct sk_buff *buf);
-struct tipc_node *tipc_net_select_remote_node(u32 addr, u32 ref);
-u32 tipc_net_select_router(u32 addr, u32 ref);
-
-int tipc_net_start(u32 addr);
-void tipc_net_stop(void);
+int tipc_net_init(struct net *net, u8 *node_id, u32 addr);
+void tipc_net_finalize_work(struct work_struct *work);
+void tipc_sched_net_finalize(struct net *net, u32 addr);
+void tipc_net_stop(struct net *net);
+int tipc_nl_net_dump(struct sk_buff *skb, struct netlink_callback *cb);
+int tipc_nl_net_set(struct sk_buff *skb, struct genl_info *info);
+int __tipc_nl_net_set(struct sk_buff *skb, struct genl_info *info);
+int tipc_nl_net_addr_legacy_get(struct sk_buff *skb, struct genl_info *info);
 
 #endif

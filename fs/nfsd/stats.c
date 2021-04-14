@@ -1,6 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- * linux/fs/nfsd/stats.c
- *
  * procfs-based user access to knfsd statistics
  *
  * /proc/net/rpc/nfsd
@@ -10,7 +9,7 @@
  *			Statistsics for the reply cache
  *	fh <stale> <total-lookups> <anonlookups> <dir-not-in-dcache> <nondir-not-in-dcache>
  *			statistics for filehandle lookup
- *	io <bytes-read> <bytes-writtten>
+ *	io <bytes-read> <bytes-written>
  *			statistics for IO throughput
  *	th <threads> <fullcnt> <10%-20%> <20%-30%> ... <90%-100%> <100%> 
  *			time (seconds) when nfsd thread usage above thresholds
@@ -23,17 +22,12 @@
  * Copyright (C) 1995, 1996, 1997 Olaf Kirch <okir@monad.swb.de>
  */
 
-#include <linux/kernel.h>
-#include <linux/time.h>
-#include <linux/proc_fs.h>
 #include <linux/seq_file.h>
-#include <linux/stat.h>
 #include <linux/module.h>
-
-#include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/stats.h>
-#include <linux/nfsd/nfsd.h>
-#include <linux/nfsd/stats.h>
+#include <net/net_namespace.h>
+
+#include "nfsd.h"
 
 struct nfsd_stats	nfsdstats;
 struct svc_stat		nfsd_svcstats = {
@@ -90,22 +84,21 @@ static int nfsd_proc_open(struct inode *inode, struct file *file)
 	return single_open(file, nfsd_proc_show, NULL);
 }
 
-static const struct file_operations nfsd_proc_fops = {
-	.owner = THIS_MODULE,
-	.open = nfsd_proc_open,
-	.read  = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
+static const struct proc_ops nfsd_proc_ops = {
+	.proc_open	= nfsd_proc_open,
+	.proc_read	= seq_read,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
 };
 
 void
 nfsd_stat_init(void)
 {
-	svc_proc_register(&nfsd_svcstats, &nfsd_proc_fops);
+	svc_proc_register(&init_net, &nfsd_svcstats, &nfsd_proc_ops);
 }
 
 void
 nfsd_stat_shutdown(void)
 {
-	svc_proc_unregister("nfsd");
+	svc_proc_unregister(&init_net, "nfsd");
 }

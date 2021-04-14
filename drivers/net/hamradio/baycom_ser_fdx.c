@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*****************************************************************************/
 
 /*
@@ -5,24 +6,9 @@
  *
  *	Copyright (C) 1996-2000  Thomas Sailer (sailer@ife.ee.ethz.ch)
  *
- *	This program is free software; you can redistribute it and/or modify
- *	it under the terms of the GNU General Public License as published by
- *	the Free Software Foundation; either version 2 of the License, or
- *	(at your option) any later version.
- *
- *	This program is distributed in the hope that it will be useful,
- *	but WITHOUT ANY WARRANTY; without even the implied warranty of
- *	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *	GNU General Public License for more details.
- *
- *	You should have received a copy of the GNU General Public License
- *	along with this program; if not, write to the Free Software
- *	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  *  Please note that the GPL allows you to use the driver, NOT the radio.
  *  In order to use the radio, you need a license from the communications
  *  authority of your country.
- *
  *
  *  Supported modems
  *
@@ -35,7 +21,7 @@
  *          driver only supports standard serial hardware (8250, 16450, 16550A)
  *
  *          This modem usually draws its supply current out of the otherwise unused
- *          TXD pin of the serial port. Thus a contignuous stream of 0x00-bytes
+ *          TXD pin of the serial port. Thus a contiguous stream of 0x00-bytes
  *          is transmitted to achieve a positive supply voltage.
  *
  *  hsk:    This is a 4800 baud FSK modem, designed for TNC use. It works fine
@@ -52,7 +38,6 @@
  *  iobase   base address of the port; common values are 0x3f8, 0x2f8, 0x3e8, 0x2e8
  *  baud     baud rate (between 300 and 4800)
  *  irq      interrupt line of the port; common values are 4,3
- *
  *
  *  History:
  *   0.1  26.06.1996  Adapted from baycom.c and made network driver interface
@@ -71,15 +56,18 @@
 
 /*****************************************************************************/
 
+#include <linux/capability.h>
 #include <linux/module.h>
 #include <linux/ioport.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/hdlcdrv.h>
 #include <linux/baycom.h>
 #include <linux/jiffies.h>
+#include <linux/time64.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 
@@ -91,7 +79,7 @@
 
 static const char bc_drvname[] = "baycom_ser_fdx";
 static const char bc_drvinfo[] = KERN_INFO "baycom_ser_fdx: (C) 1996-2000 Thomas Sailer, HB9JNX/AE4WA\n"
-KERN_INFO "baycom_ser_fdx: version 0.10 compiled " __TIME__ " " __DATE__ "\n";
+"baycom_ser_fdx: version 0.10\n";
 
 /* --------------------------------------------------------------------- */
 
@@ -200,40 +188,15 @@ static inline void ser12_set_divisor(struct net_device *dev,
          */
 }
 
-/* --------------------------------------------------------------------- */
-
-#if 0
-static inline unsigned int hweight16(unsigned int w)
-        __attribute__ ((unused));
-static inline unsigned int hweight8(unsigned int w)
-        __attribute__ ((unused));
-
-static inline unsigned int hweight16(unsigned int w)
-{
-        unsigned short res = (w & 0x5555) + ((w >> 1) & 0x5555);
-        res = (res & 0x3333) + ((res >> 2) & 0x3333);
-        res = (res & 0x0F0F) + ((res >> 4) & 0x0F0F);
-        return (res & 0x00FF) + ((res >> 8) & 0x00FF);
-}
-
-static inline unsigned int hweight8(unsigned int w)
-{
-        unsigned short res = (w & 0x55) + ((w >> 1) & 0x55);
-        res = (res & 0x33) + ((res >> 2) & 0x33);
-        return (res & 0x0F) + ((res >> 4) & 0x0F);
-}
-#endif
-
-/* --------------------------------------------------------------------- */
-
-static __inline__ void ser12_rx(struct net_device *dev, struct baycom_state *bc, struct timeval *tv, unsigned char curs)
+static __inline__ void ser12_rx(struct net_device *dev, struct baycom_state *bc, struct timespec64 *ts, unsigned char curs)
 {
 	int timediff;
 	int bdus8 = bc->baud_us >> 3;
 	int bdus4 = bc->baud_us >> 2;
 	int bdus2 = bc->baud_us >> 1;
 
-	timediff = 1000000 + tv->tv_usec - bc->modem.ser12.pll_time;
+	timediff = 1000000 + ts->tv_nsec / NSEC_PER_USEC -
+					bc->modem.ser12.pll_time;
 	while (timediff >= 500000)
 		timediff -= 1000000;
 	while (timediff >= bdus2) {
@@ -285,7 +248,7 @@ static irqreturn_t ser12_interrupt(int irq, void *dev_id)
 {
 	struct net_device *dev = (struct net_device *)dev_id;
 	struct baycom_state *bc = netdev_priv(dev);
-	struct timeval tv;
+	struct timespec64 ts;
 	unsigned char iir, msr;
 	unsigned int txcount = 0;
 
@@ -295,7 +258,7 @@ static irqreturn_t ser12_interrupt(int irq, void *dev_id)
 	if ((iir = inb(IIR(dev->base_addr))) & 1) 	
 		return IRQ_NONE;
 	/* get current time */
-	do_gettimeofday(&tv);
+	ktime_get_ts64(&ts);
 	msr = inb(MSR(dev->base_addr));
 	/* delta DCD */
 	if ((msr & 8) && bc->opt_dcd)
@@ -338,7 +301,7 @@ static irqreturn_t ser12_interrupt(int irq, void *dev_id)
 		}
 		iir = inb(IIR(dev->base_addr));
 	} while (!(iir & 1));
-	ser12_rx(dev, bc, &tv, msr & 0x10); /* CTS */
+	ser12_rx(dev, bc, &ts, msr & 0x10); /* CTS */
 	if (bc->modem.ptt && txcount) {
 		if (bc->modem.ser12.txshreg <= 1) {
 			bc->modem.ser12.txshreg = 0x10000 | hdlcdrv_getbits(&bc->hdrv);
@@ -416,10 +379,10 @@ static int ser12_open(struct net_device *dev)
 	if (!dev || !bc)
 		return -ENXIO;
 	if (!dev->base_addr || dev->base_addr > 0xffff-SER12_EXTENT ||
-	    dev->irq < 2 || dev->irq > NR_IRQS) {
+	    dev->irq < 2 || dev->irq > nr_irqs) {
 		printk(KERN_INFO "baycom_ser_fdx: invalid portnumber (max %u) "
 				"or irq (2 <= irq <= %d)\n",
-				0xffff-SER12_EXTENT, NR_IRQS);
+				0xffff-SER12_EXTENT, nr_irqs);
 		return -ENXIO;
 	}
 	if (bc->baud < 300 || bc->baud > 4800) {
@@ -428,7 +391,7 @@ static int ser12_open(struct net_device *dev)
 		return -EINVAL;
 	}
 	if (!request_region(dev->base_addr, SER12_EXTENT, "baycom_ser_fdx")) {
-		printk(KERN_WARNING "BAYCOM_SER_FSX: I/O port 0x%04lx busy \n", 
+		printk(KERN_WARNING "BAYCOM_SER_FSX: I/O port 0x%04lx busy\n",
 		       dev->base_addr);
 		return -EACCES;
 	}
@@ -443,7 +406,7 @@ static int ser12_open(struct net_device *dev)
 	outb(0, FCR(dev->base_addr));  /* disable FIFOs */
 	outb(0x0d, MCR(dev->base_addr));
 	outb(0, IER(dev->base_addr));
-	if (request_irq(dev->irq, ser12_interrupt, IRQF_DISABLED | IRQF_SHARED,
+	if (request_irq(dev->irq, ser12_interrupt, IRQF_SHARED,
 			"baycom_ser_fdx", dev)) {
 		release_region(dev->base_addr, SER12_EXTENT);
 		return -EBUSY;
@@ -504,7 +467,7 @@ static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr,
 
 /* --------------------------------------------------------------------- */
 
-static struct hdlcdrv_ops ser12_ops = {
+static const struct hdlcdrv_ops ser12_ops = {
 	.drvname = bc_drvname,
 	.drvinfo = bc_drvinfo,
 	.open    = ser12_open,
@@ -610,9 +573,9 @@ static int baud[NR_PORTS] = { [0 ... NR_PORTS-1] = 1200 };
 
 module_param_array(mode, charp, NULL, 0);
 MODULE_PARM_DESC(mode, "baycom operating mode; * for software DCD");
-module_param_array(iobase, int, NULL, 0);
+module_param_hw_array(iobase, int, ioport, NULL, 0);
 MODULE_PARM_DESC(iobase, "baycom io base address");
-module_param_array(irq, int, NULL, 0);
+module_param_hw_array(irq, int, irq, NULL, 0);
 MODULE_PARM_DESC(irq, "baycom irq number");
 module_param_array(baud, int, NULL, 0);
 MODULE_PARM_DESC(baud, "baycom baud rate (300 to 4800)");

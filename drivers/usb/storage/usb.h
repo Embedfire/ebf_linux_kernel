@@ -1,4 +1,6 @@
-/* Driver for USB Mass Storage compliant devices
+/* SPDX-License-Identifier: GPL-2.0+ */
+/*
+ * Driver for USB Mass Storage compliant devices
  * Main Header File
  *
  * Current development and maintenance by:
@@ -20,23 +22,6 @@
  *
  * Also, for certain devices, the interrupt endpoint is used to convey
  * status of a command.
- *
- * Please see http://www.one-eyed-alien.net/~mdharm/linux-usb for more
- * information about this driver.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #ifndef _USB_H_
@@ -47,6 +32,7 @@
 #include <linux/blkdev.h>
 #include <linux/completion.h>
 #include <linux/mutex.h>
+#include <linux/workqueue.h>
 #include <scsi/scsi_host.h>
 
 struct us_data;
@@ -72,7 +58,9 @@ struct us_unusual_dev {
 #define US_FLIDX_DISCONNECTING	3	/* disconnect in progress   */
 #define US_FLIDX_RESETTING	4	/* device reset in progress */
 #define US_FLIDX_TIMED_OUT	5	/* SCSI midlayer timed out  */
-#define US_FLIDX_DONT_SCAN	6	/* don't scan (disconnect)  */
+#define US_FLIDX_SCAN_PENDING	6	/* scanning not yet done    */
+#define US_FLIDX_REDO_READ10	7	/* redo READ(10) command    */
+#define US_FLIDX_READ10_WORKED	8	/* previous READ(10) succeeded */
 
 #define USB_STOR_STRING_LEN 32
 
@@ -97,14 +85,16 @@ typedef void (*pm_hook)(struct us_data *, int);	/* power management hook */
 
 /* we allocate one of these for every device that we remember */
 struct us_data {
-	/* The device we're working with
+	/*
+	 * The device we're working with
 	 * It's important to note:
 	 *    (o) you must hold dev_mutex to change pusb_dev
 	 */
 	struct mutex		dev_mutex;	 /* protect pusb_dev */
 	struct usb_device	*pusb_dev;	 /* this usb_device */
 	struct usb_interface	*pusb_intf;	 /* this interface */
-	struct us_unusual_dev   *unusual_dev;	 /* device-filter entry     */
+	const struct us_unusual_dev   *unusual_dev;
+						/* device-filter entry     */
 	unsigned long		fflags;		 /* fixed flags from filter */
 	unsigned long		dflags;		 /* dynamic atomic bitflags */
 	unsigned int		send_bulk_pipe;	 /* cached pipe values */
@@ -122,7 +112,7 @@ struct us_data {
 	u8			max_lun;
 
 	u8			ifnum;		 /* interface number   */
-	u8			ep_bInterval;	 /* interrupt interval */ 
+	u8			ep_bInterval;	 /* interrupt interval */
 
 	/* function pointers for this device */
 	trans_cmnd		transport;	 /* transport function	   */
@@ -132,22 +122,21 @@ struct us_data {
 	/* SCSI interfaces */
 	struct scsi_cmnd	*srb;		 /* current srb		*/
 	unsigned int		tag;		 /* current dCBWTag	*/
+	char			scsi_name[32];	 /* scsi_host name	*/
 
 	/* control and bulk communications data */
 	struct urb		*current_urb;	 /* USB requests	 */
 	struct usb_ctrlrequest	*cr;		 /* control requests	 */
 	struct usb_sg_request	current_sg;	 /* scatter-gather req.  */
 	unsigned char		*iobuf;		 /* I/O buffer		 */
-	unsigned char		*sensebuf;	 /* sense data buffer	 */
-	dma_addr_t		cr_dma;		 /* buffer DMA addresses */
-	dma_addr_t		iobuf_dma;
+	dma_addr_t		iobuf_dma;	 /* buffer DMA addresses */
 	struct task_struct	*ctl_thread;	 /* the control thread   */
 
 	/* mutual exclusion and synchronization structures */
 	struct completion	cmnd_ready;	 /* to sleep thread on	    */
 	struct completion	notify;		 /* thread begin/end	    */
-	wait_queue_head_t	delay_wait;	 /* wait during scan, reset */
-	struct completion	scanning_done;	 /* wait for scan thread    */
+	wait_queue_head_t	delay_wait;	 /* wait during reset	    */
+	struct delayed_work	scan_dwork;	 /* for async scanning      */
 
 	/* subdriver information */
 	void			*extra;		 /* Any extra data          */
@@ -155,6 +144,10 @@ struct us_data {
 #ifdef CONFIG_PM
 	pm_hook			suspend_resume_hook;
 #endif
+
+	/* hacks for READ CAPACITY bug handling */
+	int			use_last_sector_hacks;
+	int			last_sector_retries;
 };
 
 /* Convert between us_data and the corresponding Scsi_Host */
@@ -169,9 +162,49 @@ static inline struct us_data *host_to_us(struct Scsi_Host *host) {
 extern void fill_inquiry_response(struct us_data *us,
 	unsigned char *data, unsigned int data_len);
 
-/* The scsi_lock() and scsi_unlock() macros protect the sm_state and the
- * single queue element srb for write access */
+/*
+ * The scsi_lock() and scsi_unlock() macros protect the sm_state and the
+ * single queue element srb for write access
+ */
 #define scsi_unlock(host)	spin_unlock_irq(host->host_lock)
 #define scsi_lock(host)		spin_lock_irq(host->host_lock)
+
+/* General routines provided by the usb-storage standard core */
+#ifdef CONFIG_PM
+extern int usb_stor_suspend(struct usb_interface *iface, pm_message_t message);
+extern int usb_stor_resume(struct usb_interface *iface);
+extern int usb_stor_reset_resume(struct usb_interface *iface);
+#else
+#define usb_stor_suspend	NULL
+#define usb_stor_resume		NULL
+#define usb_stor_reset_resume	NULL
+#endif
+
+extern int usb_stor_pre_reset(struct usb_interface *iface);
+extern int usb_stor_post_reset(struct usb_interface *iface);
+
+extern int usb_stor_probe1(struct us_data **pus,
+		struct usb_interface *intf,
+		const struct usb_device_id *id,
+		const struct us_unusual_dev *unusual_dev,
+		struct scsi_host_template *sht);
+extern int usb_stor_probe2(struct us_data *us);
+extern void usb_stor_disconnect(struct usb_interface *intf);
+
+extern void usb_stor_adjust_quirks(struct usb_device *dev,
+		unsigned long *fflags);
+
+#define module_usb_stor_driver(__driver, __sht, __name) \
+static int __init __driver##_init(void) \
+{ \
+	usb_stor_host_template_init(&(__sht), __name, THIS_MODULE); \
+	return usb_register(&(__driver)); \
+} \
+module_init(__driver##_init); \
+static void __exit __driver##_exit(void) \
+{ \
+	usb_deregister(&(__driver)); \
+} \
+module_exit(__driver##_exit)
 
 #endif

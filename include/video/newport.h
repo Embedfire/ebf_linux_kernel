@@ -1,11 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* $Id: newport.h,v 1.5 1999/08/04 06:01:51 ulfc Exp $
  *
  * newport.h: Defines and register layout for NEWPORT graphics
  *            hardware.
  *
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  * 
- * Ulf Carlsson - Compability with the IRIX structures added
+ * Ulf Carlsson - Compatibility with the IRIX structures added
  */
 
 #ifndef _SGI_NEWPORT_H
@@ -453,7 +454,7 @@ static __inline__ int newport_wait(struct newport_regs *regs)
 {
 	int t = BUSY_TIMEOUT;
 
-	while (t--)
+	while (--t)
 		if (!(regs->cset.status & NPORT_STAT_GBUSY))
 			break;
 	return !t;
@@ -463,7 +464,7 @@ static __inline__ int newport_bfwait(struct newport_regs *regs)
 {
 	int t = BUSY_TIMEOUT;
 
-	while (t--)
+	while (--t)
 		if(!(regs->cset.status & NPORT_STAT_BBUSY))
 			break;
 	return !t;

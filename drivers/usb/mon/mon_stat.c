@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * The USB Monitor, inspired by Dave Harding's USBMon.
  *
@@ -8,9 +9,11 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/export.h>
 #include <linux/usb.h>
 #include <linux/fs.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "usb_mon.h"
 
@@ -26,7 +29,8 @@ static int mon_stat_open(struct inode *inode, struct file *file)
 	struct mon_bus *mbus;
 	struct snap *sp;
 
-	if ((sp = kmalloc(sizeof(struct snap), GFP_KERNEL)) == NULL)
+	sp = kmalloc(sizeof(struct snap), GFP_KERNEL);
+	if (sp == NULL)
 		return -ENOMEM;
 
 	mbus = inode->i_private;
@@ -62,6 +66,6 @@ const struct file_operations mon_fops_stat = {
 	.read =		mon_stat_read,
 	/* .write =	mon_stat_write, */
 	/* .poll =		mon_stat_poll, */
-	/* .ioctl =	mon_stat_ioctl, */
+	/* .unlocked_ioctl =	mon_stat_ioctl, */
 	.release =	mon_stat_release,
 };

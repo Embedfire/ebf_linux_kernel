@@ -15,14 +15,18 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/init.h>
 #include <linux/kgdb.h>
 #include <linux/smp.h>
 #include <linux/signal.h>
 #include <linux/ptrace.h>
+#include <linux/kdebug.h>
 #include <asm/current.h>
 #include <asm/processor.h>
 #include <asm/machdep.h>
+#include <asm/debug.h>
+#include <asm/code-patching.h>
+#include <linux/slab.h>
+#include <asm/inst.h>
 
 /*
  * This table contains the mapping between PowerPC hardware trap types, and
@@ -52,7 +56,7 @@ static struct hard_trap_info
 	{ 0x2030, 0x08 /* SIGFPE */  },		/* spe fp data */
 	{ 0x2040, 0x08 /* SIGFPE */  },		/* spe fp data */
 	{ 0x2050, 0x08 /* SIGFPE */  },		/* spe fp round */
-	{ 0x2060, 0x0e /* SIGILL */  },		/* performace monitor */
+	{ 0x2060, 0x0e /* SIGILL */  },		/* performance monitor */
 	{ 0x2900, 0x08 /* SIGFPE */  },		/* apu unavailable */
 	{ 0x3100, 0x0e /* SIGALRM */ },		/* fixed interval timer */
 	{ 0x3200, 0x02 /* SIGINT */  }, 	/* watchdog */
@@ -65,9 +69,9 @@ static struct hard_trap_info
 #endif
 #else /* ! (defined(CONFIG_40x) || defined(CONFIG_BOOKE)) */
 	{ 0x0d00, 0x05 /* SIGTRAP */ },		/* single-step */
-#if defined(CONFIG_8xx)
+#if defined(CONFIG_PPC_8xx)
 	{ 0x1000, 0x04 /* SIGILL */  },		/* software emulation */
-#else /* ! CONFIG_8xx */
+#else /* ! CONFIG_PPC_8xx */
 	{ 0x0f00, 0x04 /* SIGILL */  },		/* performance monitor */
 	{ 0x0f20, 0x08 /* SIGFPE */  },		/* altivec unavailable */
 	{ 0x1300, 0x05 /* SIGTRAP */ }, 	/* instruction address break */
@@ -99,23 +103,39 @@ static int computeSignal(unsigned int tt)
 	return SIGHUP;		/* default for things we don't know about */
 }
 
-static int kgdb_call_nmi_hook(struct pt_regs *regs)
+/**
+ *
+ *	kgdb_skipexception - Bail out of KGDB when we've been triggered.
+ *	@exception: Exception vector number
+ *	@regs: Current &struct pt_regs.
+ *
+ *	On some architectures we need to skip a breakpoint exception when
+ *	it occurs after a breakpoint has been removed.
+ *
+ */
+int kgdb_skipexception(int exception, struct pt_regs *regs)
+{
+	return kgdb_isremovedbreak(regs->nip);
+}
+
+static int kgdb_debugger_ipi(struct pt_regs *regs)
 {
 	kgdb_nmicallback(raw_smp_processor_id(), regs);
 	return 0;
 }
 
 #ifdef CONFIG_SMP
-void kgdb_roundup_cpus(unsigned long flags)
+void kgdb_roundup_cpus(void)
 {
-	smp_send_debugger_break(MSG_ALL_BUT_SELF);
+	smp_send_debugger_break();
 }
 #endif
 
 /* KGDB functions to use existing PowerPC64 hooks. */
 static int kgdb_debugger(struct pt_regs *regs)
 {
-	return kgdb_handle_exception(0, computeSignal(TRAP(regs)), 0, regs);
+	return !kgdb_handle_exception(1, computeSignal(TRAP(regs)),
+				      DIE_OOPS, regs);
 }
 
 static int kgdb_handle_breakpoint(struct pt_regs *regs)
@@ -123,42 +143,21 @@ static int kgdb_handle_breakpoint(struct pt_regs *regs)
 	if (user_mode(regs))
 		return 0;
 
-	if (kgdb_handle_exception(0, SIGTRAP, 0, regs) != 0)
+	if (kgdb_handle_exception(1, SIGTRAP, 0, regs) != 0)
 		return 0;
 
-	if (*(u32 *) (regs->nip) == *(u32 *) (&arch_kgdb_ops.gdb_bpt_instr))
-		regs->nip += 4;
+	if (*(u32 *)regs->nip == BREAK_INSTR)
+		regs->nip += BREAK_INSTR_SIZE;
 
 	return 1;
 }
 
 static int kgdb_singlestep(struct pt_regs *regs)
 {
-	struct thread_info *thread_info, *exception_thread_info;
-
 	if (user_mode(regs))
 		return 0;
 
-	/*
-	 * On Book E and perhaps other processsors, singlestep is handled on
-	 * the critical exception stack.  This causes current_thread_info()
-	 * to fail, since it it locates the thread_info by masking off
-	 * the low bits of the current stack pointer.  We work around
-	 * this issue by copying the thread_info from the kernel stack
-	 * before calling kgdb_handle_exception, and copying it back
-	 * afterwards.  On most processors the copy is avoided since
-	 * exception_thread_info == thread_info.
-	 */
-	thread_info = (struct thread_info *)(regs->gpr[1] & ~(THREAD_SIZE-1));
-	exception_thread_info = current_thread_info();
-
-	if (thread_info != exception_thread_info)
-		memcpy(exception_thread_info, thread_info, sizeof *thread_info);
-
 	kgdb_handle_exception(0, SIGTRAP, 0, regs);
-
-	if (thread_info != exception_thread_info)
-		memcpy(thread_info, exception_thread_info, sizeof *thread_info);
 
 	return 1;
 }
@@ -173,7 +172,7 @@ static int kgdb_iabr_match(struct pt_regs *regs)
 	return 1;
 }
 
-static int kgdb_dabr_match(struct pt_regs *regs)
+static int kgdb_break_match(struct pt_regs *regs)
 {
 	if (user_mode(regs))
 		return 0;
@@ -191,40 +190,6 @@ static int kgdb_dabr_match(struct pt_regs *regs)
 	*(ptr32++) = (src);           \
 	ptr = (unsigned long *)ptr32; \
 	} while (0)
-
-
-void pt_regs_to_gdb_regs(unsigned long *gdb_regs, struct pt_regs *regs)
-{
-	unsigned long *ptr = gdb_regs;
-	int reg;
-
-	memset(gdb_regs, 0, NUMREGBYTES);
-
-	for (reg = 0; reg < 32; reg++)
-		PACK64(ptr, regs->gpr[reg]);
-
-#ifdef CONFIG_FSL_BOOKE
-#ifdef CONFIG_SPE
-	for (reg = 0; reg < 32; reg++)
-		PACK64(ptr, current->thread.evr[reg]);
-#else
-	ptr += 32;
-#endif
-#else
-	/* fp registers not used by kernel, leave zero */
-	ptr += 32 * 8 / sizeof(long);
-#endif
-
-	PACK64(ptr, regs->nip);
-	PACK64(ptr, regs->msr);
-	PACK32(ptr, regs->ccr);
-	PACK64(ptr, regs->link);
-	PACK64(ptr, regs->ctr);
-	PACK32(ptr, regs->xer);
-
-	BUG_ON((unsigned long)ptr >
-	       (unsigned long)(((void *)gdb_regs) + NUMREGBYTES));
-}
 
 void sleeping_thread_to_gdb_regs(unsigned long *gdb_regs, struct task_struct *p)
 {
@@ -269,50 +234,145 @@ void sleeping_thread_to_gdb_regs(unsigned long *gdb_regs, struct task_struct *p)
 	       (unsigned long)(((void *)gdb_regs) + NUMREGBYTES));
 }
 
-#define UNPACK64(dest, ptr) do { dest = *(ptr++); } while (0)
-
-#define UNPACK32(dest, ptr) do {       \
-	u32 *ptr32;                   \
-	ptr32 = (u32 *)ptr;           \
-	dest = *(ptr32++);            \
-	ptr = (unsigned long *)ptr32; \
-	} while (0)
-
-void gdb_regs_to_pt_regs(unsigned long *gdb_regs, struct pt_regs *regs)
-{
-	unsigned long *ptr = gdb_regs;
-	int reg;
-#ifdef CONFIG_SPE
-	union {
-		u32 v32[2];
-		u64 v64;
-	} acc;
-#endif
-
-	for (reg = 0; reg < 32; reg++)
-		UNPACK64(regs->gpr[reg], ptr);
+#define GDB_SIZEOF_REG sizeof(unsigned long)
+#define GDB_SIZEOF_REG_U32 sizeof(u32)
 
 #ifdef CONFIG_FSL_BOOKE
-#ifdef CONFIG_SPE
-	for (reg = 0; reg < 32; reg++)
-		UNPACK64(current->thread.evr[reg], ptr);
+#define GDB_SIZEOF_FLOAT_REG sizeof(unsigned long)
 #else
-	ptr += 32;
-#endif
-#else
-	/* fp registers not used by kernel, leave zero */
-	ptr += 32 * 8 / sizeof(int);
+#define GDB_SIZEOF_FLOAT_REG sizeof(u64)
 #endif
 
-	UNPACK64(regs->nip, ptr);
-	UNPACK64(regs->msr, ptr);
-	UNPACK32(regs->ccr, ptr);
-	UNPACK64(regs->link, ptr);
-	UNPACK64(regs->ctr, ptr);
-	UNPACK32(regs->xer, ptr);
+struct dbg_reg_def_t dbg_reg_def[DBG_MAX_REG_NUM] =
+{
+	{ "r0", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[0]) },
+	{ "r1", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[1]) },
+	{ "r2", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[2]) },
+	{ "r3", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[3]) },
+	{ "r4", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[4]) },
+	{ "r5", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[5]) },
+	{ "r6", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[6]) },
+	{ "r7", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[7]) },
+	{ "r8", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[8]) },
+	{ "r9", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[9]) },
+	{ "r10", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[10]) },
+	{ "r11", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[11]) },
+	{ "r12", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[12]) },
+	{ "r13", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[13]) },
+	{ "r14", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[14]) },
+	{ "r15", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[15]) },
+	{ "r16", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[16]) },
+	{ "r17", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[17]) },
+	{ "r18", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[18]) },
+	{ "r19", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[19]) },
+	{ "r20", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[20]) },
+	{ "r21", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[21]) },
+	{ "r22", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[22]) },
+	{ "r23", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[23]) },
+	{ "r24", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[24]) },
+	{ "r25", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[25]) },
+	{ "r26", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[26]) },
+	{ "r27", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[27]) },
+	{ "r28", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[28]) },
+	{ "r29", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[29]) },
+	{ "r30", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[30]) },
+	{ "r31", GDB_SIZEOF_REG, offsetof(struct pt_regs, gpr[31]) },
 
-	BUG_ON((unsigned long)ptr >
-	       (unsigned long)(((void *)gdb_regs) + NUMREGBYTES));
+	{ "f0", GDB_SIZEOF_FLOAT_REG, 0 },
+	{ "f1", GDB_SIZEOF_FLOAT_REG, 1 },
+	{ "f2", GDB_SIZEOF_FLOAT_REG, 2 },
+	{ "f3", GDB_SIZEOF_FLOAT_REG, 3 },
+	{ "f4", GDB_SIZEOF_FLOAT_REG, 4 },
+	{ "f5", GDB_SIZEOF_FLOAT_REG, 5 },
+	{ "f6", GDB_SIZEOF_FLOAT_REG, 6 },
+	{ "f7", GDB_SIZEOF_FLOAT_REG, 7 },
+	{ "f8", GDB_SIZEOF_FLOAT_REG, 8 },
+	{ "f9", GDB_SIZEOF_FLOAT_REG, 9 },
+	{ "f10", GDB_SIZEOF_FLOAT_REG, 10 },
+	{ "f11", GDB_SIZEOF_FLOAT_REG, 11 },
+	{ "f12", GDB_SIZEOF_FLOAT_REG, 12 },
+	{ "f13", GDB_SIZEOF_FLOAT_REG, 13 },
+	{ "f14", GDB_SIZEOF_FLOAT_REG, 14 },
+	{ "f15", GDB_SIZEOF_FLOAT_REG, 15 },
+	{ "f16", GDB_SIZEOF_FLOAT_REG, 16 },
+	{ "f17", GDB_SIZEOF_FLOAT_REG, 17 },
+	{ "f18", GDB_SIZEOF_FLOAT_REG, 18 },
+	{ "f19", GDB_SIZEOF_FLOAT_REG, 19 },
+	{ "f20", GDB_SIZEOF_FLOAT_REG, 20 },
+	{ "f21", GDB_SIZEOF_FLOAT_REG, 21 },
+	{ "f22", GDB_SIZEOF_FLOAT_REG, 22 },
+	{ "f23", GDB_SIZEOF_FLOAT_REG, 23 },
+	{ "f24", GDB_SIZEOF_FLOAT_REG, 24 },
+	{ "f25", GDB_SIZEOF_FLOAT_REG, 25 },
+	{ "f26", GDB_SIZEOF_FLOAT_REG, 26 },
+	{ "f27", GDB_SIZEOF_FLOAT_REG, 27 },
+	{ "f28", GDB_SIZEOF_FLOAT_REG, 28 },
+	{ "f29", GDB_SIZEOF_FLOAT_REG, 29 },
+	{ "f30", GDB_SIZEOF_FLOAT_REG, 30 },
+	{ "f31", GDB_SIZEOF_FLOAT_REG, 31 },
+
+	{ "pc", GDB_SIZEOF_REG, offsetof(struct pt_regs, nip) },
+	{ "msr", GDB_SIZEOF_REG, offsetof(struct pt_regs, msr) },
+	{ "cr", GDB_SIZEOF_REG_U32, offsetof(struct pt_regs, ccr) },
+	{ "lr", GDB_SIZEOF_REG, offsetof(struct pt_regs, link) },
+	{ "ctr", GDB_SIZEOF_REG_U32, offsetof(struct pt_regs, ctr) },
+	{ "xer", GDB_SIZEOF_REG, offsetof(struct pt_regs, xer) },
+};
+
+char *dbg_get_reg(int regno, void *mem, struct pt_regs *regs)
+{
+	if (regno >= DBG_MAX_REG_NUM || regno < 0)
+		return NULL;
+
+	if (regno < 32 || regno >= 64)
+		/* First 0 -> 31 gpr registers*/
+		/* pc, msr, ls... registers 64 -> 69 */
+		memcpy(mem, (void *)regs + dbg_reg_def[regno].offset,
+				dbg_reg_def[regno].size);
+
+	if (regno >= 32 && regno < 64) {
+		/* FP registers 32 -> 63 */
+#if defined(CONFIG_FSL_BOOKE) && defined(CONFIG_SPE)
+		if (current)
+			memcpy(mem, &current->thread.evr[regno-32],
+					dbg_reg_def[regno].size);
+#else
+		/* fp registers not used by kernel, leave zero */
+		memset(mem, 0, dbg_reg_def[regno].size);
+#endif
+	}
+
+	return dbg_reg_def[regno].name;
+}
+
+int dbg_set_reg(int regno, void *mem, struct pt_regs *regs)
+{
+	if (regno >= DBG_MAX_REG_NUM || regno < 0)
+		return -EINVAL;
+
+	if (regno < 32 || regno >= 64)
+		/* First 0 -> 31 gpr registers*/
+		/* pc, msr, ls... registers 64 -> 69 */
+		memcpy((void *)regs + dbg_reg_def[regno].offset, mem,
+				dbg_reg_def[regno].size);
+
+	if (regno >= 32 && regno < 64) {
+		/* FP registers 32 -> 63 */
+#if defined(CONFIG_FSL_BOOKE) && defined(CONFIG_SPE)
+		memcpy(&current->thread.evr[regno-32], mem,
+				dbg_reg_def[regno].size);
+#else
+		/* fp registers not used by kernel, leave zero */
+		return 0;
+#endif
+	}
+
+	return 0;
+}
+
+void kgdb_arch_set_pc(struct pt_regs *regs, unsigned long pc)
+{
+	regs->nip = pc;
 }
 
 /*
@@ -339,17 +399,15 @@ int kgdb_arch_handle_exception(int vector, int signo, int err_code,
 		atomic_set(&kgdb_cpu_doing_single_step, -1);
 		/* set the trace bit if we're stepping */
 		if (remcom_in_buffer[0] == 's') {
-#if defined(CONFIG_40x) || defined(CONFIG_BOOKE)
+#ifdef CONFIG_PPC_ADV_DEBUG_REGS
 			mtspr(SPRN_DBCR0,
 			      mfspr(SPRN_DBCR0) | DBCR0_IC | DBCR0_IDM);
 			linux_regs->msr |= MSR_DE;
 #else
 			linux_regs->msr |= MSR_SE;
 #endif
-			kgdb_single_step = 1;
-			if (kgdb_contthread)
-				atomic_set(&kgdb_cpu_doing_single_step,
-					   raw_smp_processor_id());
+			atomic_set(&kgdb_cpu_doing_single_step,
+				   raw_smp_processor_id());
 		}
 		return 0;
 	}
@@ -357,12 +415,42 @@ int kgdb_arch_handle_exception(int vector, int signo, int err_code,
 	return -1;
 }
 
+int kgdb_arch_set_breakpoint(struct kgdb_bkpt *bpt)
+{
+	int err;
+	unsigned int instr;
+	struct ppc_inst *addr = (struct ppc_inst *)bpt->bpt_addr;
+
+	err = get_kernel_nofault(instr, (unsigned *) addr);
+	if (err)
+		return err;
+
+	err = patch_instruction(addr, ppc_inst(BREAK_INSTR));
+	if (err)
+		return -EFAULT;
+
+	*(unsigned int *)bpt->saved_instr = instr;
+
+	return 0;
+}
+
+int kgdb_arch_remove_breakpoint(struct kgdb_bkpt *bpt)
+{
+	int err;
+	unsigned int instr = *(unsigned int *)bpt->saved_instr;
+	struct ppc_inst *addr = (struct ppc_inst *)bpt->bpt_addr;
+
+	err = patch_instruction(addr, ppc_inst(instr));
+	if (err)
+		return -EFAULT;
+
+	return 0;
+}
+
 /*
  * Global data
  */
-struct kgdb_arch arch_kgdb_ops = {
-	.gdb_bpt_instr = {0x7d, 0x82, 0x10, 0x08},
-};
+const struct kgdb_arch arch_kgdb_ops;
 
 static int kgdb_not_implemented(struct pt_regs *regs)
 {
@@ -374,7 +462,7 @@ static void *old__debugger;
 static void *old__debugger_bpt;
 static void *old__debugger_sstep;
 static void *old__debugger_iabr_match;
-static void *old__debugger_dabr_match;
+static void *old__debugger_break_match;
 static void *old__debugger_fault_handler;
 
 int kgdb_arch_init(void)
@@ -384,15 +472,15 @@ int kgdb_arch_init(void)
 	old__debugger_bpt = __debugger_bpt;
 	old__debugger_sstep = __debugger_sstep;
 	old__debugger_iabr_match = __debugger_iabr_match;
-	old__debugger_dabr_match = __debugger_dabr_match;
+	old__debugger_break_match = __debugger_break_match;
 	old__debugger_fault_handler = __debugger_fault_handler;
 
-	__debugger_ipi = kgdb_call_nmi_hook;
+	__debugger_ipi = kgdb_debugger_ipi;
 	__debugger = kgdb_debugger;
 	__debugger_bpt = kgdb_handle_breakpoint;
 	__debugger_sstep = kgdb_singlestep;
 	__debugger_iabr_match = kgdb_iabr_match;
-	__debugger_dabr_match = kgdb_dabr_match;
+	__debugger_break_match = kgdb_break_match;
 	__debugger_fault_handler = kgdb_not_implemented;
 
 	return 0;
@@ -405,6 +493,6 @@ void kgdb_arch_exit(void)
 	__debugger_bpt = old__debugger_bpt;
 	__debugger_sstep = old__debugger_sstep;
 	__debugger_iabr_match = old__debugger_iabr_match;
-	__debugger_dabr_match = old__debugger_dabr_match;
+	__debugger_break_match = old__debugger_break_match;
 	__debugger_fault_handler = old__debugger_fault_handler;
 }

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Communication Processor Module v2.
  *
@@ -13,10 +14,6 @@
 #include <asm/immap_cpm2.h>
 #include <asm/cpm.h>
 #include <sysdev/fsl_soc.h>
-
-#ifdef CONFIG_PPC_85xx
-#define CPM_MAP_ADDR (get_immrbase() + 0x80000)
-#endif
 
 /* CPM Command register.
 */
@@ -127,14 +124,6 @@ static inline void cpm2_fastbrg(uint brg, uint rate, int div16)
 {
 	__cpm2_setbrg(brg, rate, CPM2_BRG_INT_CLK, div16, CPM_BRG_EXTC_INT);
 }
-
-/* Function code bits, usually generic to devices.
-*/
-#define CPMFCR_GBL	((u_char)0x20)	/* Set memory snooping */
-#define CPMFCR_EB	((u_char)0x10)	/* Set big endian byte order */
-#define CPMFCR_TC2	((u_char)0x04)	/* Transfer code 2 value */
-#define CPMFCR_DTB	((u_char)0x02)	/* Use local bus for data when set */
-#define CPMFCR_BDB	((u_char)0x01)	/* Use local bus for BD when set */
 
 /* Parameter RAM offsets from the base.
 */
@@ -501,7 +490,6 @@ typedef struct scc_trans {
 #define FCC_GFMR_TCI		((uint)0x20000000)
 #define FCC_GFMR_TRX		((uint)0x10000000)
 #define FCC_GFMR_TTX		((uint)0x08000000)
-#define FCC_GFMR_TTX		((uint)0x08000000)
 #define FCC_GFMR_CDP		((uint)0x04000000)
 #define FCC_GFMR_CTSP		((uint)0x02000000)
 #define FCC_GFMR_CDS		((uint)0x01000000)
@@ -657,45 +645,6 @@ typedef struct iic {
 	ushort	iic_tbc;	/* Internal */
 	uint	iic_txtmp;	/* Internal */
 } iic_t;
-
-/* SPI parameter RAM.
-*/
-typedef struct spi {
-	ushort	spi_rbase;	/* Rx Buffer descriptor base address */
-	ushort	spi_tbase;	/* Tx Buffer descriptor base address */
-	u_char	spi_rfcr;	/* Rx function code */
-	u_char	spi_tfcr;	/* Tx function code */
-	ushort	spi_mrblr;	/* Max receive buffer length */
-	uint	spi_rstate;	/* Internal */
-	uint	spi_rdp;	/* Internal */
-	ushort	spi_rbptr;	/* Internal */
-	ushort	spi_rbc;	/* Internal */
-	uint	spi_rxtmp;	/* Internal */
-	uint	spi_tstate;	/* Internal */
-	uint	spi_tdp;	/* Internal */
-	ushort	spi_tbptr;	/* Internal */
-	ushort	spi_tbc;	/* Internal */
-	uint	spi_txtmp;	/* Internal */
-	uint	spi_res;	/* Tx temp. */
-	uint	spi_res1[4];	/* SDMA temp. */
-} spi_t;
-
-/* SPI Mode register.
-*/
-#define SPMODE_LOOP	((ushort)0x4000)	/* Loopback */
-#define SPMODE_CI	((ushort)0x2000)	/* Clock Invert */
-#define SPMODE_CP	((ushort)0x1000)	/* Clock Phase */
-#define SPMODE_DIV16	((ushort)0x0800)	/* BRG/16 mode */
-#define SPMODE_REV	((ushort)0x0400)	/* Reversed Data */
-#define SPMODE_MSTR	((ushort)0x0200)	/* SPI Master */
-#define SPMODE_EN	((ushort)0x0100)	/* Enable */
-#define SPMODE_LENMSK	((ushort)0x00f0)	/* character length */
-#define SPMODE_PMMSK	((ushort)0x000f)	/* prescale modulus */
-
-#define SPMODE_LEN(x)	((((x)-1)&0xF)<<4)
-#define SPMODE_PM(x)	((x) &0xF)
-
-#define SPI_EB		((u_char)0x10)		/* big endian byte order */
 
 /* IDMA parameter RAM
 */

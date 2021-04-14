@@ -1,21 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (C) 2001,2002,2003 Broadcom Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
-#include <linux/init.h>
 
 #include <asm/asm.h>
 #include <asm/regdef.h>
@@ -24,9 +10,9 @@
 #include <asm/cacheops.h>
 #include <asm/sibyte/board.h>
 
-#define C0_ERRCTL     $26             /* CP0: Error info */
-#define C0_CERR_I     $27             /* CP0: Icache error */
-#define C0_CERR_D     $27,1           /* CP0: Dcache error */
+#define C0_ERRCTL     $26	      /* CP0: Error info */
+#define C0_CERR_I     $27	      /* CP0: Icache error */
+#define C0_CERR_D     $27,1	      /* CP0: Dcache error */
 
 	/*
 	 * Based on SiByte sample software cache-err/cerr.S
@@ -48,8 +34,6 @@
 	 * since the final 16 bytes of the exception vector memory
 	 * (0x170-0x17f) are used to preserve k0, k1, and ra.
 	 */
-
-	__CPUINIT
 
 LEAF(except_vec2_sb1)
 	/*
@@ -79,7 +63,7 @@ LEAF(except_vec2_sb1)
 recovered_dcache:
 	/*
 	 * Unlock CacheErr-D (which in turn unlocks CacheErr-DPA).
-	 * Ought to log the occurence of this recovered dcache error.
+	 * Ought to log the occurrence of this recovered dcache error.
 	 */
 	b	recovered
 	 mtc0	$0,C0_CERR_D
@@ -88,7 +72,7 @@ attempt_recovery:
 	/*
 	 * k0 has C0_ERRCTL << 1, which puts 'DC' at bit 31.  Any
 	 * Dcache errors we can recover from will take more extensive
-	 * processing.  For now, they are considered "unrecoverable".
+	 * processing.	For now, they are considered "unrecoverable".
 	 * Note that 'DC' becoming set (outside of ERL mode) will
 	 * cause 'IC' to clear; so if there's an Icache error, we'll
 	 * only find out about it if we recover from this error and
@@ -141,8 +125,6 @@ unrecoverable:
 #endif
 
 END(except_vec2_sb1)
-
-	__FINIT
 
 	LEAF(handle_vec2_sb1)
 	mfc0	k0,CP0_CONFIG

@@ -42,15 +42,9 @@
  * $FreeBSD$
  */
 
-#ifdef __linux__
 #include "aic7xxx_osm.h"
 #include "aic7xxx_inline.h"
 #include "aic7xxx_93cx6.h"
-#else
-#include <dev/aic7xxx/aic7xxx_osm.h>
-#include <dev/aic7xxx/aic7xxx_inline.h>
-#include <dev/aic7xxx/aic7xxx_93cx6.h>
-#endif
 
 #define ID_AIC7770	0x04907770
 #define ID_AHA_274x	0x04907771
@@ -170,7 +164,7 @@ aic7770_config(struct ahc_softc *ahc, struct aic7770_identity *entry, u_int io)
 	case 15:
 		break;
 	default:
-		printf("aic7770_config: invalid irq setting %d\n", intdef);
+		printk("aic7770_config: invalid irq setting %d\n", intdef);
 		return (ENXIO);
 	}
 
@@ -221,7 +215,7 @@ aic7770_config(struct ahc_softc *ahc, struct aic7770_identity *entry, u_int io)
 		break;
 	}
 	if (have_seeprom == 0) {
-		free(ahc->seep_config, M_DEVBUF);
+		kfree(ahc->seep_config);
 		ahc->seep_config = NULL;
 	}
 
@@ -293,7 +287,7 @@ aha2840_load_seeprom(struct ahc_softc *ahc)
 	sc = ahc->seep_config;
 
 	if (bootverbose)
-		printf("%s: Reading SEEPROM...", ahc_name(ahc));
+		printk("%s: Reading SEEPROM...", ahc_name(ahc));
 	have_seeprom = ahc_read_seeprom(&sd, (uint16_t *)sc,
 					/*start_addr*/0, sizeof(*sc)/2);
 
@@ -301,16 +295,16 @@ aha2840_load_seeprom(struct ahc_softc *ahc)
 
 		if (ahc_verify_cksum(sc) == 0) {
 			if(bootverbose)
-				printf ("checksum error\n");
+				printk ("checksum error\n");
 			have_seeprom = 0;
 		} else if (bootverbose) {
-			printf("done.\n");
+			printk("done.\n");
 		}
 	}
 
 	if (!have_seeprom) {
 		if (bootverbose)
-			printf("%s: No SEEPROM available\n", ahc_name(ahc));
+			printk("%s: No SEEPROM available\n", ahc_name(ahc));
 		ahc->flags |= AHC_USEDEFAULTS;
 	} else {
 		/*

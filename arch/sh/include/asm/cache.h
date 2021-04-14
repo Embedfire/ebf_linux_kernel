@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* $Id: cache.h,v 1.6 2004/03/11 18:08:05 lethal Exp $
  *
  * include/asm-sh/cache.h
@@ -7,14 +8,13 @@
  */
 #ifndef __ASM_SH_CACHE_H
 #define __ASM_SH_CACHE_H
-#ifdef __KERNEL__
 
 #include <linux/init.h>
 #include <cpu/cache.h>
 
 #define L1_CACHE_BYTES		(1 << L1_CACHE_SHIFT)
 
-#define __read_mostly __attribute__((__section__(".data.read_mostly")))
+#define __read_mostly __section(".data..read_mostly")
 
 #ifndef __ASSEMBLY__
 struct cache_info {
@@ -38,14 +38,9 @@ struct cache_info {
 	 * 2. those in the physical page number.
 	 */
 	unsigned int alias_mask;
-
 	unsigned int n_aliases;		/* Number of aliases */
 
 	unsigned long flags;
 };
-
-int __init detect_cpu_and_cache_system(void);
-
 #endif /* __ASSEMBLY__ */
-#endif /* __KERNEL__ */
 #endif /* __ASM_SH_CACHE_H */

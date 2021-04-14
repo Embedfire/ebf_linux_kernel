@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  arch/arm/mach-ebsa110/include/mach/memory.h
  *
  *  Copyright (C) 1996-1999 Russell King.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  Changelog:
  *   20-Oct-1996 RMK	Created
@@ -15,18 +12,6 @@
  */
 #ifndef __ASM_ARCH_MEMORY_H
 #define __ASM_ARCH_MEMORY_H
-
-/*
- * Physical DRAM offset.
- */
-#define PHYS_OFFSET	UL(0x00000000)
-
-/*
- * We keep this 1:1 so that we don't interfere
- * with the PCMCIA memory regions
- */
-#define __virt_to_bus(x)	(x)
-#define __bus_to_virt(x)	(x)
 
 /*
  * Cache flushing area - SRAM

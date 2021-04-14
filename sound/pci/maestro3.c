@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for ESS Maestro3/Allegro (ES1988) soundcards.
  * Copyright (c) 2000 by Zach Brown <zab@zabbo.net>
@@ -6,32 +7,16 @@
  * Most of the hardware init stuffs are based on maestro3 driver for
  * OSS/Free by Zach Brown.  Many thanks to Zach!
  *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
- *
  * ChangeLog:
  * Aug. 27, 2001
  *     - Fixed deadlock on capture
  *     - Added Canyon3D-2 support by Rob Riggs <rob@pangalactic.org>
- *
  */
  
 #define CARD_NAME "ESS Maestro3/Allegro/Canyon3D-2"
 #define DRIVER_NAME "Maestro3"
 
-#include <asm/io.h>
+#include <linux/io.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
@@ -39,8 +24,9 @@
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <linux/firmware.h>
+#include <linux/input.h>
 #include <sound/core.h>
 #include <sound/info.h>
 #include <sound/control.h>
@@ -63,8 +49,8 @@ MODULE_FIRMWARE("ess/maestro3_assp_minisrc.fw");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP; /* all enabled */
-static int external_amp[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 1};
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP; /* all enabled */
+static bool external_amp[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 1};
 static int amp_gpio[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = -1};
 
 module_param_array(index, int, NULL, 0444);
@@ -359,74 +345,6 @@ MODULE_PARM_DESC(amp_gpio, "GPIO pin number for external amp. (default = -1)");
 #define DSP2HOST_REQ_PIORECORD  0x01
 #define DSP2HOST_REQ_I2SRATE    0x02
 #define DSP2HOST_REQ_TIMER      0x04
-
-/* AC97 registers */
-/* XXX fix this crap up */
-/*#define AC97_RESET              0x00*/
-
-#define AC97_VOL_MUTE_B         0x8000
-#define AC97_VOL_M              0x1F
-#define AC97_LEFT_VOL_S         8
-
-#define AC97_MASTER_VOL         0x02
-#define AC97_LINE_LEVEL_VOL     0x04
-#define AC97_MASTER_MONO_VOL    0x06
-#define AC97_PC_BEEP_VOL        0x0A
-#define AC97_PC_BEEP_VOL_M      0x0F
-#define AC97_SROUND_MASTER_VOL  0x38
-#define AC97_PC_BEEP_VOL_S      1
-
-/*#define AC97_PHONE_VOL          0x0C
-#define AC97_MIC_VOL            0x0E*/
-#define AC97_MIC_20DB_ENABLE    0x40
-
-/*#define AC97_LINEIN_VOL         0x10
-#define AC97_CD_VOL             0x12
-#define AC97_VIDEO_VOL          0x14
-#define AC97_AUX_VOL            0x16*/
-#define AC97_PCM_OUT_VOL        0x18
-/*#define AC97_RECORD_SELECT      0x1A*/
-#define AC97_RECORD_MIC         0x00
-#define AC97_RECORD_CD          0x01
-#define AC97_RECORD_VIDEO       0x02
-#define AC97_RECORD_AUX         0x03
-#define AC97_RECORD_MONO_MUX    0x02
-#define AC97_RECORD_DIGITAL     0x03
-#define AC97_RECORD_LINE        0x04
-#define AC97_RECORD_STEREO      0x05
-#define AC97_RECORD_MONO        0x06
-#define AC97_RECORD_PHONE       0x07
-
-/*#define AC97_RECORD_GAIN        0x1C*/
-#define AC97_RECORD_VOL_M       0x0F
-
-/*#define AC97_GENERAL_PURPOSE    0x20*/
-#define AC97_POWER_DOWN_CTRL    0x26
-#define AC97_ADC_READY          0x0001
-#define AC97_DAC_READY          0x0002
-#define AC97_ANALOG_READY       0x0004
-#define AC97_VREF_ON            0x0008
-#define AC97_PR0                0x0100
-#define AC97_PR1                0x0200
-#define AC97_PR2                0x0400
-#define AC97_PR3                0x0800
-#define AC97_PR4                0x1000
-
-#define AC97_RESERVED1          0x28
-
-#define AC97_VENDOR_TEST        0x5A
-
-#define AC97_CLOCK_DELAY        0x5C
-#define AC97_LINEOUT_MUX_SEL    0x0001
-#define AC97_MONO_MUX_SEL       0x0002
-#define AC97_CLOCK_DELAY_SEL    0x1F
-#define AC97_DAC_CDS_SHIFT      6
-#define AC97_ADC_CDS_SHIFT      11
-
-#define AC97_MULTI_CHANNEL_SEL  0x74
-
-/*#define AC97_VENDOR_ID1         0x7C
-#define AC97_VENDOR_ID2         0x7E*/
 
 /*
  * ASSP control regs
@@ -844,13 +762,19 @@ struct snd_m3 {
 	struct m3_dma *substreams;
 
 	spinlock_t reg_lock;
-	spinlock_t ac97_lock;
 
+#ifdef CONFIG_SND_MAESTRO3_INPUT
+	struct input_dev *input_dev;
+	char phys[64];			/* physical device path */
+#else
 	struct snd_kcontrol *master_switch;
 	struct snd_kcontrol *master_volume;
-	struct tasklet_struct hwvol_tq;
+#endif
+	struct work_struct hwvol_work;
 
-#ifdef CONFIG_PM
+	unsigned int in_suspend;
+
+#ifdef CONFIG_PM_SLEEP
 	u16 *suspend_mem;
 #endif
 
@@ -861,7 +785,7 @@ struct snd_m3 {
 /*
  * pci ids
  */
-static struct pci_device_id snd_m3_ids[] = {
+static const struct pci_device_id snd_m3_ids[] = {
 	{PCI_VENDOR_ID_ESS, PCI_DEVICE_ID_ESS_ALLEGRO_1, PCI_ANY_ID, PCI_ANY_ID,
 	 PCI_CLASS_MULTIMEDIA_AUDIO << 8, 0xffff00, 0},
 	{PCI_VENDOR_ID_ESS, PCI_DEVICE_ID_ESS_ALLEGRO, PCI_ANY_ID, PCI_ANY_ID,
@@ -883,7 +807,8 @@ static struct pci_device_id snd_m3_ids[] = {
 
 MODULE_DEVICE_TABLE(pci, snd_m3_ids);
 
-static struct snd_pci_quirk m3_amp_quirk_list[] __devinitdata = {
+static const struct snd_pci_quirk m3_amp_quirk_list[] = {
+	SND_PCI_QUIRK(0x0E11, 0x0094, "Compaq Evo N600c", 0x0c),
 	SND_PCI_QUIRK(0x10f7, 0x833e, "Panasonic CF-28", 0x0d),
 	SND_PCI_QUIRK(0x10f7, 0x833d, "Panasonic CF-72", 0x0d),
 	SND_PCI_QUIRK(0x1033, 0x80f1, "NEC LM800J/7", 0x03),
@@ -891,7 +816,7 @@ static struct snd_pci_quirk m3_amp_quirk_list[] __devinitdata = {
 	{ } /* END */
 };
 
-static struct snd_pci_quirk m3_irda_quirk_list[] __devinitdata = {
+static const struct snd_pci_quirk m3_irda_quirk_list[] = {
 	SND_PCI_QUIRK(0x1028, 0x00b0, "Dell Inspiron 4000", 1),
 	SND_PCI_QUIRK(0x1028, 0x00a4, "Dell Inspiron 8000", 1),
 	SND_PCI_QUIRK(0x1028, 0x00e6, "Dell Inspiron 8100", 1),
@@ -899,7 +824,7 @@ static struct snd_pci_quirk m3_irda_quirk_list[] __devinitdata = {
 };
 
 /* hardware volume quirks */
-static struct snd_pci_quirk m3_hv_quirk_list[] __devinitdata = {
+static const struct snd_pci_quirk m3_hv_quirk_list[] = {
 	/* Allegro chips */
 	SND_PCI_QUIRK(0x0E11, 0x002E, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
 	SND_PCI_QUIRK(0x0E11, 0x0094, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
@@ -977,7 +902,7 @@ static struct snd_pci_quirk m3_hv_quirk_list[] __devinitdata = {
 };
 
 /* HP Omnibook quirks */
-static struct snd_pci_quirk m3_omnibook_quirk_list[] __devinitdata = {
+static const struct snd_pci_quirk m3_omnibook_quirk_list[] = {
 	SND_PCI_QUIRK_ID(0x103c, 0x0010), /* HP OmniBook 6000 */
 	SND_PCI_QUIRK_ID(0x103c, 0x0011), /* HP OmniBook 500 */
 	{ } /* END */
@@ -1175,7 +1100,8 @@ snd_m3_pcm_trigger(struct snd_pcm_substream *subs, int cmd)
 	struct m3_dma *s = subs->runtime->private_data;
 	int err = -EINVAL;
 
-	snd_assert(s != NULL, return -ENXIO);
+	if (snd_BUG_ON(!s))
+		return -ENXIO;
 
 	spin_lock(&chip->reg_lock);
 	switch (cmd) {
@@ -1455,14 +1381,11 @@ static int snd_m3_pcm_hw_params(struct snd_pcm_substream *substream,
 				struct snd_pcm_hw_params *hw_params)
 {
 	struct m3_dma *s = substream->runtime->private_data;
-	int err;
 
-	if ((err = snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(hw_params))) < 0)
-		return err;
 	/* set buffer address */
 	s->buffer_addr = substream->runtime->dma_addr;
 	if (s->buffer_addr & 0x3) {
-		snd_printk(KERN_ERR "oh my, not aligned\n");
+		dev_err(substream->pcm->card->dev, "oh my, not aligned\n");
 		s->buffer_addr = s->buffer_addr & ~0x3;
 	}
 	return 0;
@@ -1475,7 +1398,6 @@ static int snd_m3_pcm_hw_free(struct snd_pcm_substream *substream)
 	if (substream->runtime->private_data == NULL)
 		return 0;
 	s = substream->runtime->private_data;
-	snd_pcm_lib_free_pages(substream);
 	s->buffer_addr = 0;
 	return 0;
 }
@@ -1487,7 +1409,8 @@ snd_m3_pcm_prepare(struct snd_pcm_substream *subs)
 	struct snd_pcm_runtime *runtime = subs->runtime;
 	struct m3_dma *s = runtime->private_data;
 
-	snd_assert(s != NULL, return -ENXIO);
+	if (snd_BUG_ON(!s))
+		return -ENXIO;
 
 	if (runtime->format != SNDRV_PCM_FORMAT_U8 &&
 	    runtime->format != SNDRV_PCM_FORMAT_S16_LE)
@@ -1546,7 +1469,9 @@ snd_m3_pcm_pointer(struct snd_pcm_substream *subs)
 	struct snd_m3 *chip = snd_pcm_substream_chip(subs);
 	unsigned int ptr;
 	struct m3_dma *s = subs->runtime->private_data;
-	snd_assert(s != NULL, return 0);
+
+	if (snd_BUG_ON(!s))
+		return 0;
 
 	spin_lock(&chip->reg_lock);
 	ptr = snd_m3_get_pointer(chip, s, subs);
@@ -1592,66 +1517,98 @@ static void snd_m3_update_ptr(struct snd_m3 *chip, struct m3_dma *s)
 	}
 }
 
-static void snd_m3_update_hw_volume(unsigned long private_data)
+/* The m3's hardware volume works by incrementing / decrementing 2 counters
+   (without wrap around) in response to volume button presses and then
+   generating an interrupt. The pair of counters is stored in bits 1-3 and 5-7
+   of a byte wide register. The meaning of bits 0 and 4 is unknown. */
+static void snd_m3_update_hw_volume(struct work_struct *work)
 {
-	struct snd_m3 *chip = (struct snd_m3 *) private_data;
+	struct snd_m3 *chip = container_of(work, struct snd_m3, hwvol_work);
 	int x, val;
-	unsigned long flags;
 
 	/* Figure out which volume control button was pushed,
 	   based on differences from the default register
 	   values. */
 	x = inb(chip->iobase + SHADOW_MIX_REG_VOICE) & 0xee;
 
-	/* Reset the volume control registers. */
+	/* Reset the volume counters to 4. Tests on the allegro integrated
+	   into a Compaq N600C laptop, have revealed that:
+	   1) Writing any value will result in the 2 counters being reset to
+	      4 so writing 0x88 is not strictly necessary
+	   2) Writing to any of the 4 involved registers will reset all 4
+	      of them (and reading them always returns the same value for all
+	      of them)
+	   It could be that a maestro deviates from this, so leave the code
+	   as is. */
 	outb(0x88, chip->iobase + SHADOW_MIX_REG_VOICE);
 	outb(0x88, chip->iobase + HW_VOL_COUNTER_VOICE);
 	outb(0x88, chip->iobase + SHADOW_MIX_REG_MASTER);
 	outb(0x88, chip->iobase + HW_VOL_COUNTER_MASTER);
 
+	/* Ignore spurious HV interrupts during suspend / resume, this avoids
+	   mistaking them for a mute button press. */
+	if (chip->in_suspend)
+		return;
+
+#ifndef CONFIG_SND_MAESTRO3_INPUT
 	if (!chip->master_switch || !chip->master_volume)
 		return;
 
-	/* FIXME: we can't call snd_ac97_* functions since here is in tasklet. */
-	spin_lock_irqsave(&chip->ac97_lock, flags);
-
-	val = chip->ac97->regs[AC97_MASTER_VOL];
+	val = snd_ac97_read(chip->ac97, AC97_MASTER);
 	switch (x) {
 	case 0x88:
-		/* mute */
+		/* The counters have not changed, yet we've received a HV
+		   interrupt. According to tests run by various people this
+		   happens when pressing the mute button. */
 		val ^= 0x8000;
-		chip->ac97->regs[AC97_MASTER_VOL] = val;
-		outw(val, chip->iobase + CODEC_DATA);
-		outb(AC97_MASTER_VOL, chip->iobase + CODEC_COMMAND);
-		snd_ctl_notify(chip->card, SNDRV_CTL_EVENT_MASK_VALUE,
-			       &chip->master_switch->id);
 		break;
 	case 0xaa:
-		/* volume up */
+		/* counters increased by 1 -> volume up */
 		if ((val & 0x7f) > 0)
 			val--;
 		if ((val & 0x7f00) > 0)
 			val -= 0x0100;
-		chip->ac97->regs[AC97_MASTER_VOL] = val;
-		outw(val, chip->iobase + CODEC_DATA);
-		outb(AC97_MASTER_VOL, chip->iobase + CODEC_COMMAND);
-		snd_ctl_notify(chip->card, SNDRV_CTL_EVENT_MASK_VALUE,
-			       &chip->master_volume->id);
 		break;
 	case 0x66:
-		/* volume down */
+		/* counters decreased by 1 -> volume down */
 		if ((val & 0x7f) < 0x1f)
 			val++;
 		if ((val & 0x7f00) < 0x1f00)
 			val += 0x0100;
-		chip->ac97->regs[AC97_MASTER_VOL] = val;
-		outw(val, chip->iobase + CODEC_DATA);
-		outb(AC97_MASTER_VOL, chip->iobase + CODEC_COMMAND);
-		snd_ctl_notify(chip->card, SNDRV_CTL_EVENT_MASK_VALUE,
-			       &chip->master_volume->id);
 		break;
 	}
-	spin_unlock_irqrestore(&chip->ac97_lock, flags);
+	if (snd_ac97_update(chip->ac97, AC97_MASTER, val))
+		snd_ctl_notify(chip->card, SNDRV_CTL_EVENT_MASK_VALUE,
+			       &chip->master_switch->id);
+#else
+	if (!chip->input_dev)
+		return;
+
+	val = 0;
+	switch (x) {
+	case 0x88:
+		/* The counters have not changed, yet we've received a HV
+		   interrupt. According to tests run by various people this
+		   happens when pressing the mute button. */
+		val = KEY_MUTE;
+		break;
+	case 0xaa:
+		/* counters increased by 1 -> volume up */
+		val = KEY_VOLUMEUP;
+		break;
+	case 0x66:
+		/* counters decreased by 1 -> volume down */
+		val = KEY_VOLUMEDOWN;
+		break;
+	}
+
+	if (val) {
+		input_report_key(chip->input_dev, val, 1);
+		input_sync(chip->input_dev);
+		input_report_key(chip->input_dev, val, 0);
+		input_sync(chip->input_dev);
+	}
+#endif
 }
 
 static irqreturn_t snd_m3_interrupt(int irq, void *dev_id)
@@ -1666,7 +1623,7 @@ static irqreturn_t snd_m3_interrupt(int irq, void *dev_id)
 		return IRQ_NONE;
 
 	if (status & HV_INT_PENDING)
-		tasklet_hi_schedule(&chip->hwvol_tq);
+		schedule_work(&chip->hwvol_work);
 
 	/*
 	 * ack an assp int if its running
@@ -1705,7 +1662,7 @@ static irqreturn_t snd_m3_interrupt(int irq, void *dev_id)
 /*
  */
 
-static struct snd_pcm_hardware snd_m3_playback =
+static const struct snd_pcm_hardware snd_m3_playback =
 {
 	.info =			(SNDRV_PCM_INFO_MMAP |
 				 SNDRV_PCM_INFO_INTERLEAVED |
@@ -1726,7 +1683,7 @@ static struct snd_pcm_hardware snd_m3_playback =
 	.periods_max =		1024,
 };
 
-static struct snd_pcm_hardware snd_m3_capture =
+static const struct snd_pcm_hardware snd_m3_capture =
 {
 	.info =			(SNDRV_PCM_INFO_MMAP |
 				 SNDRV_PCM_INFO_INTERLEAVED |
@@ -1858,10 +1815,9 @@ snd_m3_capture_close(struct snd_pcm_substream *subs)
  * create pcm instance
  */
 
-static struct snd_pcm_ops snd_m3_playback_ops = {
+static const struct snd_pcm_ops snd_m3_playback_ops = {
 	.open =		snd_m3_playback_open,
 	.close =	snd_m3_playback_close,
-	.ioctl =	snd_pcm_lib_ioctl,
 	.hw_params =	snd_m3_pcm_hw_params,
 	.hw_free =	snd_m3_pcm_hw_free,
 	.prepare =	snd_m3_pcm_prepare,
@@ -1869,10 +1825,9 @@ static struct snd_pcm_ops snd_m3_playback_ops = {
 	.pointer =	snd_m3_pcm_pointer,
 };
 
-static struct snd_pcm_ops snd_m3_capture_ops = {
+static const struct snd_pcm_ops snd_m3_capture_ops = {
 	.open =		snd_m3_capture_open,
 	.close =	snd_m3_capture_close,
-	.ioctl =	snd_pcm_lib_ioctl,
 	.hw_params =	snd_m3_pcm_hw_params,
 	.hw_free =	snd_m3_pcm_hw_free,
 	.prepare =	snd_m3_pcm_prepare,
@@ -1880,7 +1835,7 @@ static struct snd_pcm_ops snd_m3_capture_ops = {
 	.pointer =	snd_m3_pcm_pointer,
 };
 
-static int __devinit
+static int
 snd_m3_pcm(struct snd_m3 * chip, int device)
 {
 	struct snd_pcm *pcm;
@@ -1899,8 +1854,8 @@ snd_m3_pcm(struct snd_m3 * chip, int device)
 	strcpy(pcm->name, chip->card->driver);
 	chip->pcm = pcm;
 	
-	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
-					      snd_dma_pci_data(chip->pci), 64*1024, 64*1024);
+	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV,
+				       &chip->pci->dev, 64*1024, 64*1024);
 
 	return 0;
 }
@@ -1924,7 +1879,7 @@ static int snd_m3_ac97_wait(struct snd_m3 *chip)
 		cpu_relax();
 	} while (i-- > 0);
 
-	snd_printk(KERN_ERR "ac97 serial bus busy\n");
+	dev_err(chip->card->dev, "ac97 serial bus busy\n");
 	return 1;
 }
 
@@ -1932,18 +1887,14 @@ static unsigned short
 snd_m3_ac97_read(struct snd_ac97 *ac97, unsigned short reg)
 {
 	struct snd_m3 *chip = ac97->private_data;
-	unsigned long flags;
 	unsigned short data = 0xffff;
 
 	if (snd_m3_ac97_wait(chip))
 		goto fail;
-	spin_lock_irqsave(&chip->ac97_lock, flags);
 	snd_m3_outb(chip, 0x80 | (reg & 0x7f), CODEC_COMMAND);
 	if (snd_m3_ac97_wait(chip))
-		goto fail_unlock;
+		goto fail;
 	data = snd_m3_inw(chip, CODEC_DATA);
-fail_unlock:
-	spin_unlock_irqrestore(&chip->ac97_lock, flags);
 fail:
 	return data;
 }
@@ -1952,23 +1903,37 @@ static void
 snd_m3_ac97_write(struct snd_ac97 *ac97, unsigned short reg, unsigned short val)
 {
 	struct snd_m3 *chip = ac97->private_data;
-	unsigned long flags;
 
 	if (snd_m3_ac97_wait(chip))
 		return;
-	spin_lock_irqsave(&chip->ac97_lock, flags);
 	snd_m3_outw(chip, val, CODEC_DATA);
 	snd_m3_outb(chip, reg & 0x7f, CODEC_COMMAND);
-	spin_unlock_irqrestore(&chip->ac97_lock, flags);
+	/*
+	 * Workaround for buggy ES1988 integrated AC'97 codec. It remains silent
+	 * until the MASTER volume or mute is touched (alsactl restore does not
+	 * work).
+	 */
+	if (ac97->id == 0x45838308 && reg == AC97_MASTER) {
+		snd_m3_ac97_wait(chip);
+		snd_m3_outw(chip, val, CODEC_DATA);
+		snd_m3_outb(chip, reg & 0x7f, CODEC_COMMAND);
+	}
 }
 
 
-static void snd_m3_remote_codec_config(int io, int isremote)
+static void snd_m3_remote_codec_config(struct snd_m3 *chip, int isremote)
 {
+	int io = chip->iobase;
+	u16 tmp;
+
 	isremote = isremote ? 1 : 0;
 
-	outw((inw(io + RING_BUS_CTRL_B) & ~SECOND_CODEC_ID_MASK) | isremote,
-	     io + RING_BUS_CTRL_B);
+	tmp = inw(io + RING_BUS_CTRL_B) & ~SECOND_CODEC_ID_MASK;
+	/* enable dock on Dell Latitude C810 */
+	if (chip->pci->subsystem_vendor == 0x1028 &&
+	    chip->pci->subsystem_device == 0x00e5)
+		tmp |= M3I_DOCK_ENABLE;
+	outw(tmp | isremote, io + RING_BUS_CTRL_B);
 	outw((inw(io + SDO_OUT_DEST_CTRL) & ~COMMAND_ADDR_OUT) | isremote,
 	     io + SDO_OUT_DEST_CTRL);
 	outw((inw(io + SDO_IN_DEST_CTRL) & ~STATUS_ADDR_IN) | isremote,
@@ -2020,7 +1985,7 @@ static void snd_m3_ac97_reset(struct snd_m3 *chip)
 		if (!chip->irda_workaround)
 			dir |= 0x10; /* assuming pci bus master? */
 
-		snd_m3_remote_codec_config(io, 0);
+		snd_m3_remote_codec_config(chip, 0);
 
 		outw(IO_SRAM_ENABLE, io + RING_BUS_CTRL_A);
 		udelay(20);
@@ -2046,7 +2011,8 @@ static void snd_m3_ac97_reset(struct snd_m3 *chip)
 		delay1 += 10;
 		delay2 += 100;
 
-		snd_printd("maestro3: retrying codec reset with delays of %d and %d ms\n",
+		dev_dbg(chip->card->dev,
+			"retrying codec reset with delays of %d and %d ms\n",
 			   delay1, delay2);
 	}
 
@@ -2062,13 +2028,15 @@ static void snd_m3_ac97_reset(struct snd_m3 *chip)
 #endif
 }
 
-static int __devinit snd_m3_mixer(struct snd_m3 *chip)
+static int snd_m3_mixer(struct snd_m3 *chip)
 {
 	struct snd_ac97_bus *pbus;
 	struct snd_ac97_template ac97;
+#ifndef CONFIG_SND_MAESTRO3_INPUT
 	struct snd_ctl_elem_id elem_id;
+#endif
 	int err;
-	static struct snd_ac97_bus_ops ops = {
+	static const struct snd_ac97_bus_ops ops = {
 		.write = snd_m3_ac97_write,
 		.read = snd_m3_ac97_read,
 	};
@@ -2086,6 +2054,7 @@ static int __devinit snd_m3_mixer(struct snd_m3 *chip)
 	schedule_timeout_uninterruptible(msecs_to_jiffies(100));
 	snd_ac97_write(chip->ac97, AC97_PCM, 0);
 
+#ifndef CONFIG_SND_MAESTRO3_INPUT
 	memset(&elem_id, 0, sizeof(elem_id));
 	elem_id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strcpy(elem_id.name, "Master Playback Switch");
@@ -2094,6 +2063,7 @@ static int __devinit snd_m3_mixer(struct snd_m3 *chip)
 	elem_id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strcpy(elem_id.name, "Master Playback Volume");
 	chip->master_volume = snd_ctl_find_id(chip->card, &elem_id);
+#endif
 
 	return 0;
 }
@@ -2112,7 +2082,7 @@ static const u16 minisrc_lpf[MINISRC_LPF_LEN] = {
 static void snd_m3_assp_init(struct snd_m3 *chip)
 {
 	unsigned int i;
-	const u16 *data;
+	const __le16 *data;
 
 	/* zero kernel data */
 	for (i = 0; i < (REV_B_DATA_MEMORY_UNIT_LENGTH * NUM_UNITS_KERNEL_DATA) / 2; i++)
@@ -2130,7 +2100,7 @@ static void snd_m3_assp_init(struct snd_m3 *chip)
 			  KDATA_DMA_XFER0);
 
 	/* write kernel into code memory.. */
-	data = (const u16 *)chip->assp_kernel_image->data;
+	data = (const __le16 *)chip->assp_kernel_image->data;
 	for (i = 0 ; i * 2 < chip->assp_kernel_image->size; i++) {
 		snd_m3_assp_write(chip, MEMTYPE_INTERNAL_CODE, 
 				  REV_B_CODE_MEMORY_BEGIN + i,
@@ -2143,7 +2113,7 @@ static void snd_m3_assp_init(struct snd_m3 *chip)
 	 * drop it there.  It seems that the minisrc doesn't
 	 * need vectors, so we won't bother with them..
 	 */
-	data = (const u16 *)chip->assp_minisrc_image->data;
+	data = (const __le16 *)chip->assp_minisrc_image->data;
 	for (i = 0; i * 2 < chip->assp_minisrc_image->size; i++) {
 		snd_m3_assp_write(chip, MEMTYPE_INTERNAL_CODE, 
 				  0x400 + i, le16_to_cpu(data[i]));
@@ -2200,7 +2170,7 @@ static void snd_m3_assp_init(struct snd_m3 *chip)
 }
 
 
-static int __devinit snd_m3_assp_client_init(struct snd_m3 *chip, struct m3_dma *s, int index)
+static int snd_m3_assp_client_init(struct snd_m3 *chip, struct m3_dma *s, int index)
 {
 	int data_bytes = 2 * ( MINISRC_TMP_BUFFER_SIZE / 2 + 
 			       MINISRC_IN_BUFFER_SIZE / 2 +
@@ -2221,7 +2191,8 @@ static int __devinit snd_m3_assp_client_init(struct snd_m3 *chip, struct m3_dma 
 	address = 0x1100 + ((data_bytes/2) * index);
 
 	if ((address + (data_bytes/2)) >= 0x1c00) {
-		snd_printk(KERN_ERR "no memory for %d bytes at ind %d (addr 0x%x)\n",
+		dev_err(chip->card->dev,
+			"no memory for %d bytes at ind %d (addr 0x%x)\n",
 			   data_bytes, index, address);
 		return -ENOMEM;
 	}
@@ -2359,6 +2330,7 @@ snd_m3_enable_ints(struct snd_m3 *chip)
 	val = ASSP_INT_ENABLE /*| MPU401_INT_ENABLE*/;
 	if (chip->hv_config & HV_CTRL_ENABLE)
 		val |= HV_INT_ENABLE;
+	outb(val, chip->iobase + HOST_INT_STATUS);
 	outw(val, io + HOST_INT_CTRL);
 	outb(inb(io + ASSP_CONTROL_C) | ASSP_HOST_INT_ENABLE,
 	     io + ASSP_CONTROL_C);
@@ -2372,6 +2344,12 @@ static int snd_m3_free(struct snd_m3 *chip)
 {
 	struct m3_dma *s;
 	int i;
+
+	cancel_work_sync(&chip->hwvol_work);
+#ifdef CONFIG_SND_MAESTRO3_INPUT
+	if (chip->input_dev)
+		input_unregister_device(chip->input_dev);
+#endif
 
 	if (chip->substreams) {
 		spin_lock_irq(&chip->reg_lock);
@@ -2388,7 +2366,7 @@ static int snd_m3_free(struct snd_m3 *chip)
 		outw(0, chip->iobase + HOST_INT_CTRL); /* disable ints */
 	}
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	vfree(chip->suspend_mem);
 #endif
 
@@ -2410,18 +2388,19 @@ static int snd_m3_free(struct snd_m3 *chip)
 /*
  * APM support
  */
-#ifdef CONFIG_PM
-static int m3_suspend(struct pci_dev *pci, pm_message_t state)
+#ifdef CONFIG_PM_SLEEP
+static int m3_suspend(struct device *dev)
 {
-	struct snd_card *card = pci_get_drvdata(pci);
+	struct snd_card *card = dev_get_drvdata(dev);
 	struct snd_m3 *chip = card->private_data;
 	int i, dsp_index;
 
 	if (chip->suspend_mem == NULL)
 		return 0;
 
+	chip->in_suspend = 1;
+	cancel_work_sync(&chip->hwvol_work);
 	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
-	snd_pcm_suspend_all(chip->pcm);
 	snd_ac97_suspend(chip->ac97);
 
 	msleep(10); /* give the assp a chance to idle.. */
@@ -2436,31 +2415,17 @@ static int m3_suspend(struct pci_dev *pci, pm_message_t state)
 	for (i = REV_B_DATA_MEMORY_BEGIN ; i <= REV_B_DATA_MEMORY_END; i++)
 		chip->suspend_mem[dsp_index++] =
 			snd_m3_assp_read(chip, MEMTYPE_INTERNAL_DATA, i);
-
-	pci_disable_device(pci);
-	pci_save_state(pci);
-	pci_set_power_state(pci, pci_choose_state(pci, state));
 	return 0;
 }
 
-static int m3_resume(struct pci_dev *pci)
+static int m3_resume(struct device *dev)
 {
-	struct snd_card *card = pci_get_drvdata(pci);
+	struct snd_card *card = dev_get_drvdata(dev);
 	struct snd_m3 *chip = card->private_data;
 	int i, dsp_index;
 
 	if (chip->suspend_mem == NULL)
 		return 0;
-
-	pci_set_power_state(pci, PCI_D0);
-	pci_restore_state(pci);
-	if (pci_enable_device(pci) < 0) {
-		printk(KERN_ERR "maestor3: pci_enable_device failed, "
-		       "disabling device\n");
-		snd_card_disconnect(card);
-		return -EIO;
-	}
-	pci_set_master(pci);
 
 	/* first lets just bring everything back. .*/
 	snd_m3_outw(chip, 0, 0x54);
@@ -2493,10 +2458,51 @@ static int m3_resume(struct pci_dev *pci)
 	snd_m3_hv_init(chip);
 
 	snd_power_change_state(card, SNDRV_CTL_POWER_D0);
+	chip->in_suspend = 0;
 	return 0;
 }
-#endif /* CONFIG_PM */
 
+static SIMPLE_DEV_PM_OPS(m3_pm, m3_suspend, m3_resume);
+#define M3_PM_OPS	&m3_pm
+#else
+#define M3_PM_OPS	NULL
+#endif /* CONFIG_PM_SLEEP */
+
+#ifdef CONFIG_SND_MAESTRO3_INPUT
+static int snd_m3_input_register(struct snd_m3 *chip)
+{
+	struct input_dev *input_dev;
+	int err;
+
+	input_dev = input_allocate_device();
+	if (!input_dev)
+		return -ENOMEM;
+
+	snprintf(chip->phys, sizeof(chip->phys), "pci-%s/input0",
+		 pci_name(chip->pci));
+
+	input_dev->name = chip->card->driver;
+	input_dev->phys = chip->phys;
+	input_dev->id.bustype = BUS_PCI;
+	input_dev->id.vendor  = chip->pci->vendor;
+	input_dev->id.product = chip->pci->device;
+	input_dev->dev.parent = &chip->pci->dev;
+
+	__set_bit(EV_KEY, input_dev->evbit);
+	__set_bit(KEY_MUTE, input_dev->keybit);
+	__set_bit(KEY_VOLUMEDOWN, input_dev->keybit);
+	__set_bit(KEY_VOLUMEUP, input_dev->keybit);
+
+	err = input_register_device(input_dev);
+	if (err) {
+		input_free_device(input_dev);
+		return err;
+	}
+
+	chip->input_dev = input_dev;
+	return 0;
+}
+#endif /* CONFIG_INPUT */
 
 /*
  */
@@ -2507,7 +2513,7 @@ static int snd_m3_dev_free(struct snd_device *device)
 	return snd_m3_free(chip);
 }
 
-static int __devinit
+static int
 snd_m3_create(struct snd_card *card, struct pci_dev *pci,
 	      int enable_amp,
 	      int amp_gpio,
@@ -2516,7 +2522,7 @@ snd_m3_create(struct snd_card *card, struct pci_dev *pci,
 	struct snd_m3 *chip;
 	int i, err;
 	const struct snd_pci_quirk *quirk;
-	static struct snd_device_ops ops = {
+	static const struct snd_device_ops ops = {
 		.dev_free =	snd_m3_dev_free,
 	};
 
@@ -2526,9 +2532,10 @@ snd_m3_create(struct snd_card *card, struct pci_dev *pci,
 		return -EIO;
 
 	/* check, if we can restrict PCI DMA transfers to 28 bits */
-	if (pci_set_dma_mask(pci, DMA_28BIT_MASK) < 0 ||
-	    pci_set_consistent_dma_mask(pci, DMA_28BIT_MASK) < 0) {
-		snd_printk(KERN_ERR "architecture does not support 28bit PCI busmaster DMA\n");
+	if (dma_set_mask(&pci->dev, DMA_BIT_MASK(28)) < 0 ||
+	    dma_set_coherent_mask(&pci->dev, DMA_BIT_MASK(28)) < 0) {
+		dev_err(card->dev,
+			"architecture does not support 28bit PCI busmaster DMA\n");
 		pci_disable_device(pci);
 		return -ENXIO;
 	}
@@ -2540,7 +2547,6 @@ snd_m3_create(struct snd_card *card, struct pci_dev *pci,
 	}
 
 	spin_lock_init(&chip->reg_lock);
-	spin_lock_init(&chip->ac97_lock);
 
 	switch (pci->device) {
 	case PCI_DEVICE_ID_ESS_ALLEGRO:
@@ -2554,6 +2560,7 @@ snd_m3_create(struct snd_card *card, struct pci_dev *pci,
 	chip->card = card;
 	chip->pci = pci;
 	chip->irq = -1;
+	INIT_WORK(&chip->hwvol_work, snd_m3_update_hw_volume);
 
 	chip->external_amp = enable_amp;
 	if (amp_gpio >= 0 && amp_gpio <= 0x0f)
@@ -2561,8 +2568,8 @@ snd_m3_create(struct snd_card *card, struct pci_dev *pci,
 	else {
 		quirk = snd_pci_quirk_lookup(pci, m3_amp_quirk_list);
 		if (quirk) {
-			snd_printdd(KERN_INFO "maestro3: set amp-gpio "
-				    "for '%s'\n", quirk->name);
+			dev_info(card->dev, "set amp-gpio for '%s'\n",
+				 snd_pci_quirk_name(quirk));
 			chip->amp_gpio = quirk->value;
 		} else if (chip->allegro_flag)
 			chip->amp_gpio = GPO_EXT_AMP_ALLEGRO;
@@ -2572,8 +2579,8 @@ snd_m3_create(struct snd_card *card, struct pci_dev *pci,
 
 	quirk = snd_pci_quirk_lookup(pci, m3_irda_quirk_list);
 	if (quirk) {
-		snd_printdd(KERN_INFO "maestro3: enabled irda workaround "
-			    "for '%s'\n", quirk->name);
+		dev_info(card->dev, "enabled irda workaround for '%s'\n",
+			 snd_pci_quirk_name(quirk));
 		chip->irda_workaround = 1;
 	}
 	quirk = snd_pci_quirk_lookup(pci, m3_hv_quirk_list);
@@ -2593,22 +2600,18 @@ snd_m3_create(struct snd_card *card, struct pci_dev *pci,
 
 	err = request_firmware(&chip->assp_kernel_image,
 			       "ess/maestro3_assp_kernel.fw", &pci->dev);
-	if (err < 0) {
-		snd_m3_free(chip);
-		return err;
-	}
+	if (err < 0)
+		goto free_chip;
 
 	err = request_firmware(&chip->assp_minisrc_image,
 			       "ess/maestro3_assp_minisrc.fw", &pci->dev);
-	if (err < 0) {
-		snd_m3_free(chip);
-		return err;
-	}
+	if (err < 0)
+		goto free_chip;
 
-	if ((err = pci_request_regions(pci, card->driver)) < 0) {
-		snd_m3_free(chip);
-		return err;
-	}
+	err = pci_request_regions(pci, card->driver);
+	if (err < 0)
+		goto free_chip;
+
 	chip->iobase = pci_resource_start(pci, 0);
 	
 	/* just to be sure */
@@ -2623,26 +2626,27 @@ snd_m3_create(struct snd_card *card, struct pci_dev *pci,
 
 	snd_m3_hv_init(chip);
 
-	tasklet_init(&chip->hwvol_tq, snd_m3_update_hw_volume, (unsigned long)chip);
-
 	if (request_irq(pci->irq, snd_m3_interrupt, IRQF_SHARED,
-			card->driver, chip)) {
-		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
-		snd_m3_free(chip);
-		return -ENOMEM;
+			KBUILD_MODNAME, chip)) {
+		dev_err(card->dev, "unable to grab IRQ %d\n", pci->irq);
+		err = -ENOMEM;
+		goto free_chip;
 	}
 	chip->irq = pci->irq;
+	card->sync_irq = chip->irq;
 
-#ifdef CONFIG_PM
-	chip->suspend_mem = vmalloc(sizeof(u16) * (REV_B_CODE_MEMORY_LENGTH + REV_B_DATA_MEMORY_LENGTH));
+#ifdef CONFIG_PM_SLEEP
+	chip->suspend_mem =
+		vmalloc(array_size(sizeof(u16),
+				   REV_B_CODE_MEMORY_LENGTH +
+					REV_B_DATA_MEMORY_LENGTH));
 	if (chip->suspend_mem == NULL)
-		snd_printk(KERN_WARNING "can't allocate apm buffer\n");
+		dev_warn(card->dev, "can't allocate apm buffer\n");
 #endif
 
-	if ((err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops)) < 0) {
-		snd_m3_free(chip);
-		return err;
-	}
+	err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops);
+	if (err < 0)
+		goto free_chip;
 
 	if ((err = snd_m3_mixer(chip)) < 0)
 		return err;
@@ -2655,20 +2659,32 @@ snd_m3_create(struct snd_card *card, struct pci_dev *pci,
 
 	if ((err = snd_m3_pcm(chip, 0)) < 0)
 		return err;
-    
+
+#ifdef CONFIG_SND_MAESTRO3_INPUT
+	if (chip->hv_config & HV_CTRL_ENABLE) {
+		err = snd_m3_input_register(chip);
+		if (err)
+			dev_warn(card->dev,
+				 "Input device registration failed with error %i",
+				 err);
+	}
+#endif
+
 	snd_m3_enable_ints(chip);
 	snd_m3_assp_continue(chip);
-
-	snd_card_set_dev(card, &pci->dev);
 
 	*chip_ret = chip;
 
 	return 0; 
+
+free_chip:
+	snd_m3_free(chip);
+	return err;
 }
 
 /*
  */
-static int __devinit
+static int
 snd_m3_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 {
 	static int dev;
@@ -2687,9 +2703,10 @@ snd_m3_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_new(&pci->dev, index[dev], id[dev], THIS_MODULE,
+			   0, &card);
+	if (err < 0)
+		return err;
 
 	switch (pci->device) {
 	case PCI_DEVICE_ID_ESS_ALLEGRO:
@@ -2705,65 +2722,52 @@ snd_m3_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 		break;
 	}
 
-	if ((err = snd_m3_create(card, pci,
-				 external_amp[dev],
-				 amp_gpio[dev],
-				 &chip)) < 0) {
-		snd_card_free(card);
-		return err;
-	}
+	err = snd_m3_create(card, pci, external_amp[dev], amp_gpio[dev], &chip);
+	if (err < 0)
+		goto free_card;
+
 	card->private_data = chip;
 
 	sprintf(card->shortname, "ESS %s PCI", card->driver);
 	sprintf(card->longname, "%s at 0x%lx, irq %d",
 		card->shortname, chip->iobase, chip->irq);
 
-	if ((err = snd_card_register(card)) < 0) {
-		snd_card_free(card);
-		return err;
-	}
+	err = snd_card_register(card);
+	if (err < 0)
+		goto free_card;
 
 #if 0 /* TODO: not supported yet */
 	/* TODO enable MIDI IRQ and I/O */
 	err = snd_mpu401_uart_new(chip->card, 0, MPU401_HW_MPU401,
 				  chip->iobase + MPU401_DATA_PORT,
-				  MPU401_INFO_INTEGRATED,
-				  chip->irq, 0, &chip->rmidi);
+				  MPU401_INFO_INTEGRATED | MPU401_INFO_IRQ_HOOK,
+				  -1, &chip->rmidi);
 	if (err < 0)
-		printk(KERN_WARNING "maestro3: no MIDI support.\n");
+		dev_warn(card->dev, "no MIDI support.\n");
 #endif
 
 	pci_set_drvdata(pci, card);
 	dev++;
 	return 0;
+
+free_card:
+	snd_card_free(card);
+	return err;
 }
 
-static void __devexit snd_m3_remove(struct pci_dev *pci)
+static void snd_m3_remove(struct pci_dev *pci)
 {
 	snd_card_free(pci_get_drvdata(pci));
-	pci_set_drvdata(pci, NULL);
 }
 
-static struct pci_driver driver = {
-	.name = "Maestro3",
+static struct pci_driver m3_driver = {
+	.name = KBUILD_MODNAME,
 	.id_table = snd_m3_ids,
 	.probe = snd_m3_probe,
-	.remove = __devexit_p(snd_m3_remove),
-#ifdef CONFIG_PM
-	.suspend = m3_suspend,
-	.resume = m3_resume,
-#endif
+	.remove = snd_m3_remove,
+	.driver = {
+		.pm = M3_PM_OPS,
+	},
 };
 	
-static int __init alsa_card_m3_init(void)
-{
-	return pci_register_driver(&driver);
-}
-
-static void __exit alsa_card_m3_exit(void)
-{
-	pci_unregister_driver(&driver);
-}
-
-module_init(alsa_card_m3_init)
-module_exit(alsa_card_m3_exit)
+module_pci_driver(m3_driver);

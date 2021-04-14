@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* 
  *  Copyright 10/16/2005 Tilman Kranz <tilde@tk-sls.de>
  *  Creative Audio MIDI, for the CA0106 Driver
@@ -8,22 +9,6 @@
  *    tested with ca0106.
  *    mpu401: Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *    emu10k1x: Copyright (c) by Francisco Moraes <fmoraes@nc.rr.com>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
- *
  */
 
 #include <linux/spinlock.h>
@@ -46,7 +31,7 @@ static void ca_midi_clear_rx(struct snd_ca_midi *midi)
 		ca_midi_read_data(midi);
 #ifdef CONFIG_SND_DEBUG
 	if (timeout <= 0)
-		snd_printk(KERN_ERR "ca_midi_clear_rx: timeout (status = 0x%x)\n",
+		pr_err("ca_midi_clear_rx: timeout (status = 0x%x)\n",
 			   ca_midi_read_stat(midi));
 #endif
 }
@@ -113,7 +98,7 @@ static void ca_midi_cmd(struct snd_ca_midi *midi, unsigned char cmd, int ack)
 	}
 	spin_unlock_irqrestore(&midi->input_lock, flags);
 	if (!ok)
-		snd_printk(KERN_ERR "ca_midi_cmd: 0x%x failed at 0x%x (status = 0x%x, data = 0x%x)!!!\n",
+		pr_err("ca_midi_cmd: 0x%x failed at 0x%x (status = 0x%x, data = 0x%x)!!!\n",
 			   cmd,
 			   midi->get_dev_id_port(midi->dev_id),
 			   ca_midi_read_stat(midi),
@@ -125,7 +110,8 @@ static int ca_midi_input_open(struct snd_rawmidi_substream *substream)
 	struct snd_ca_midi *midi = substream->rmidi->private_data;
 	unsigned long flags;
 	
-	snd_assert(midi->dev_id, return -ENXIO);
+	if (snd_BUG_ON(!midi->dev_id))
+		return -ENXIO;
 	spin_lock_irqsave(&midi->open_lock, flags);
 	midi->midi_mode |= CA_MIDI_MODE_INPUT;
 	midi->substream_input = substream;
@@ -144,7 +130,8 @@ static int ca_midi_output_open(struct snd_rawmidi_substream *substream)
 	struct snd_ca_midi *midi = substream->rmidi->private_data;
 	unsigned long flags;
 
-	snd_assert(midi->dev_id, return -ENXIO);
+	if (snd_BUG_ON(!midi->dev_id))
+		return -ENXIO;
 	spin_lock_irqsave(&midi->open_lock, flags);
 	midi->midi_mode |= CA_MIDI_MODE_OUTPUT;
 	midi->substream_output = substream;
@@ -163,7 +150,8 @@ static int ca_midi_input_close(struct snd_rawmidi_substream *substream)
 	struct snd_ca_midi *midi = substream->rmidi->private_data;
 	unsigned long flags;
 
-	snd_assert(midi->dev_id, return -ENXIO);
+	if (snd_BUG_ON(!midi->dev_id))
+		return -ENXIO;
 	spin_lock_irqsave(&midi->open_lock, flags);
 	midi->interrupt_disable(midi,midi->rx_enable);
 	midi->midi_mode &= ~CA_MIDI_MODE_INPUT;
@@ -181,7 +169,9 @@ static int ca_midi_output_close(struct snd_rawmidi_substream *substream)
 {
 	struct snd_ca_midi *midi = substream->rmidi->private_data;
 	unsigned long flags;
-	snd_assert(midi->dev_id, return -ENXIO);
+
+	if (snd_BUG_ON(!midi->dev_id))
+		return -ENXIO;
 	
 	spin_lock_irqsave(&midi->open_lock, flags);
 
@@ -201,7 +191,9 @@ static int ca_midi_output_close(struct snd_rawmidi_substream *substream)
 static void ca_midi_input_trigger(struct snd_rawmidi_substream *substream, int up)
 {
 	struct snd_ca_midi *midi = substream->rmidi->private_data;
-	snd_assert(midi->dev_id, return);
+
+	if (snd_BUG_ON(!midi->dev_id))
+		return;
 
 	if (up) {
 		midi->interrupt_enable(midi,midi->rx_enable);
@@ -215,7 +207,8 @@ static void ca_midi_output_trigger(struct snd_rawmidi_substream *substream, int 
 	struct snd_ca_midi *midi = substream->rmidi->private_data;
 	unsigned long flags;
 
-	snd_assert(midi->dev_id, return);
+	if (snd_BUG_ON(!midi->dev_id))
+		return;
 
 	if (up) {
 		int max = 4;
@@ -247,14 +240,14 @@ static void ca_midi_output_trigger(struct snd_rawmidi_substream *substream, int 
 	}
 }
 
-static struct snd_rawmidi_ops ca_midi_output =
+static const struct snd_rawmidi_ops ca_midi_output =
 {
 	.open =		ca_midi_output_open,
 	.close =	ca_midi_output_close,
 	.trigger =	ca_midi_output_trigger,
 };
 
-static struct snd_rawmidi_ops ca_midi_input =
+static const struct snd_rawmidi_ops ca_midi_input =
 {
 	.open =		ca_midi_input_open,
 	.close =	ca_midi_input_close,
@@ -278,7 +271,7 @@ static void ca_rmidi_free(struct snd_rawmidi *rmidi)
 	ca_midi_free(rmidi->private_data);
 }
 
-int __devinit ca_midi_init(void *dev_id, struct snd_ca_midi *midi, int device, char *name)
+int ca_midi_init(void *dev_id, struct snd_ca_midi *midi, int device, char *name)
 {
 	struct snd_rawmidi *rmidi;
 	int err;

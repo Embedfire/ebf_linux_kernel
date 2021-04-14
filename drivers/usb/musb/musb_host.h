@@ -1,49 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * MUSB OTG driver host defines
  *
  * Copyright 2005 Mentor Graphics Corporation
  * Copyright (C) 2005-2006 by Texas Instruments
  * Copyright (C) 2006-2007 Nokia Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
- * THIS SOFTWARE IS PROVIDED "AS IS" AND ANY EXPRESS OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN
- * NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
- * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
- * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
  */
 
 #ifndef _MUSB_HOST_H
 #define _MUSB_HOST_H
 
-static inline struct usb_hcd *musb_to_hcd(struct musb *musb)
-{
-	return container_of((void *) musb, struct usb_hcd, hcd_priv);
-}
-
-static inline struct musb *hcd_to_musb(struct usb_hcd *hcd)
-{
-	return (struct musb *) (hcd->hcd_priv);
-}
+#include <linux/scatterlist.h>
 
 /* stored in "usb_host_endpoint.hcpriv" for scheduled endpoints */
 struct musb_qh {
@@ -53,6 +20,7 @@ struct musb_qh {
 
 	struct list_head	ring;		/* of musb_qh */
 	/* struct musb_qh		*next; */	/* for periodic tree */
+	u8			mux;		/* qh multiplexed to hw_ep */
 
 	unsigned		offset;		/* in urb->transfer_buffer */
 	unsigned		segsize;	/* current xfer fragment */
@@ -66,9 +34,12 @@ struct musb_qh {
 	u8			is_ready;	/* safe to modify hw_ep */
 	u8			type;		/* XFERTYPE_* */
 	u8			epnum;
+	u8			hb_mult;	/* high bandwidth pkts per uf */
 	u16			maxpacket;
 	u16			frame;		/* for periodic schedule */
 	unsigned		iso_idx;	/* in urb->iso_frame_desc[] */
+	struct sg_mapping_iter sg_miter;	/* for highmem in PIO mode */
+	bool			use_sg;		/* to track urb using sglist */
 };
 
 /* map from control or bulk queue head to the first qh on that ring */
@@ -80,7 +51,60 @@ static inline struct musb_qh *first_qh(struct list_head *q)
 }
 
 
+#if IS_ENABLED(CONFIG_USB_MUSB_HOST) || IS_ENABLED(CONFIG_USB_MUSB_DUAL_ROLE)
+extern struct musb *hcd_to_musb(struct usb_hcd *);
+extern irqreturn_t musb_h_ep0_irq(struct musb *);
+extern int musb_host_alloc(struct musb *);
+extern int musb_host_setup(struct musb *, int);
+extern void musb_host_cleanup(struct musb *);
+extern void musb_host_tx(struct musb *, u8);
+extern void musb_host_rx(struct musb *, u8);
 extern void musb_root_disconnect(struct musb *musb);
+extern void musb_host_free(struct musb *);
+extern void musb_host_cleanup(struct musb *);
+extern void musb_host_tx(struct musb *, u8);
+extern void musb_host_rx(struct musb *, u8);
+extern void musb_root_disconnect(struct musb *musb);
+extern void musb_host_resume_root_hub(struct musb *musb);
+extern void musb_host_poke_root_hub(struct musb *musb);
+extern int musb_port_suspend(struct musb *musb, bool do_suspend);
+extern void musb_port_reset(struct musb *musb, bool do_reset);
+extern void musb_host_finish_resume(struct work_struct *work);
+#else
+static inline struct musb *hcd_to_musb(struct usb_hcd *hcd)
+{
+	return NULL;
+}
+
+static inline irqreturn_t musb_h_ep0_irq(struct musb *musb)
+{
+	return 0;
+}
+
+static inline int musb_host_alloc(struct musb *musb)
+{
+	return 0;
+}
+
+static inline int musb_host_setup(struct musb *musb, int power_budget)
+{
+	return 0;
+}
+
+static inline void musb_host_cleanup(struct musb *musb)		{}
+static inline void musb_host_free(struct musb *musb)		{}
+static inline void musb_host_tx(struct musb *musb, u8 epnum)	{}
+static inline void musb_host_rx(struct musb *musb, u8 epnum)	{}
+static inline void musb_root_disconnect(struct musb *musb)	{}
+static inline void musb_host_resume_root_hub(struct musb *musb)	{}
+static inline void musb_host_poke_root_hub(struct musb *musb)	{}
+static inline int musb_port_suspend(struct musb *musb, bool do_suspend)
+{
+	return 0;
+}
+static inline void musb_port_reset(struct musb *musb, bool do_reset) {}
+static inline void musb_host_finish_resume(struct work_struct *work) {}
+#endif
 
 struct usb_hcd;
 
@@ -89,11 +113,8 @@ extern int musb_hub_control(struct usb_hcd *hcd,
 			u16 typeReq, u16 wValue, u16 wIndex,
 			char *buf, u16 wLength);
 
-extern const struct hc_driver musb_hc_driver;
-
 static inline struct urb *next_urb(struct musb_qh *qh)
 {
-#ifdef CONFIG_USB_MUSB_HDRC_HCD
 	struct list_head	*queue;
 
 	if (!qh)
@@ -102,9 +123,6 @@ static inline struct urb *next_urb(struct musb_qh *qh)
 	if (list_empty(queue))
 		return NULL;
 	return list_entry(queue->next, struct urb, urb_list);
-#else
-	return NULL;
-#endif
 }
 
 #endif				/* _MUSB_HOST_H */

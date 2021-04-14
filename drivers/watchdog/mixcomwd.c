@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * MixCom Watchdog: A Simple Hardware Watchdog Device
  * Based on Softdog driver by Alan Cox and PC Watchdog driver by Ken Hollis
@@ -5,11 +6,6 @@
  * Author: Gergely Madarasz <gorgo@itc.hu>
  *
  * Copyright (c) 1999 ITConsult-Pro Co. <info@itc.hu>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  *
  * Version 0.1 (99/04/15):
  *		- first version
@@ -36,12 +32,12 @@
  *		- make mixcomwd_opened unsigned,
  *		  removed lock_kernel/unlock_kernel from mixcomwd_release,
  *		  modified ioctl a bit to conform to API
- *
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #define VERSION "0.6"
 #define WATCHDOG_NAME "mixcomwd"
-#define PFX WATCHDOG_NAME ": "
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -72,7 +68,7 @@
 static struct {
 	int ioport;
 	int id;
-} mixcomwd_io_info[] __devinitdata = {
+} mixcomwd_io_info[] = {
 	/* The Mixcom cards */
 	{0x0d90, MIXCOM_ID},
 	{0x0e90, MIXCOM_ID},
@@ -98,17 +94,17 @@ static struct {
 	{0x0000, 0},
 };
 
-static void mixcomwd_timerfun(unsigned long d);
+static void mixcomwd_timerfun(struct timer_list *unused);
 
 static unsigned long mixcomwd_opened; /* long req'd for setbit --RR */
 
 static int watchdog_port;
 static int mixcomwd_timer_alive;
-static DEFINE_TIMER(mixcomwd_timer, mixcomwd_timerfun, 0, 0);
+static DEFINE_TIMER(mixcomwd_timer, mixcomwd_timerfun);
 static char expect_close;
 
-static int nowayout = WATCHDOG_NOWAYOUT;
-module_param(nowayout, int, 0);
+static bool nowayout = WATCHDOG_NOWAYOUT;
+module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 		"Watchdog cannot be stopped once started (default="
 				__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
@@ -119,7 +115,7 @@ static void mixcomwd_ping(void)
 	return;
 }
 
-static void mixcomwd_timerfun(unsigned long d)
+static void mixcomwd_timerfun(struct timer_list *unused)
 {
 	mixcomwd_ping();
 	mod_timer(&mixcomwd_timer, jiffies + 5 * HZ);
@@ -149,22 +145,20 @@ static int mixcomwd_open(struct inode *inode, struct file *file)
 			mixcomwd_timer_alive = 0;
 		}
 	}
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int mixcomwd_release(struct inode *inode, struct file *file)
 {
 	if (expect_close == 42) {
 		if (mixcomwd_timer_alive) {
-			printk(KERN_ERR PFX
-				"release called while internal timer alive");
+			pr_err("release called while internal timer alive\n");
 			return -EBUSY;
 		}
 		mixcomwd_timer_alive = 1;
 		mod_timer(&mixcomwd_timer, jiffies + 5 * HZ);
 	} else
-		printk(KERN_CRIT PFX
-		    "WDT device closed unexpectedly.  WDT will not stop!\n");
+		pr_crit("WDT device closed unexpectedly.  WDT will not stop!\n");
 
 	clear_bit(0, &mixcomwd_opened);
 	expect_close = 0;
@@ -201,7 +195,7 @@ static long mixcomwd_ioctl(struct file *file,
 	void __user *argp = (void __user *)arg;
 	int __user *p = argp;
 	int status;
-	static struct watchdog_info ident = {
+	static const struct watchdog_info ident = {
 		.options = WDIOF_KEEPALIVEPING | WDIOF_MAGICCLOSE,
 		.firmware_version = 1,
 		.identity = "MixCOM watchdog",
@@ -233,6 +227,7 @@ static const struct file_operations mixcomwd_fops = {
 	.llseek		= no_llseek,
 	.write		= mixcomwd_write,
 	.unlocked_ioctl	= mixcomwd_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= mixcomwd_open,
 	.release	= mixcomwd_release,
 };
@@ -274,22 +269,19 @@ static int __init mixcomwd_init(void)
 	}
 
 	if (!found) {
-		printk(KERN_ERR PFX
-			"No card detected, or port not available.\n");
+		pr_err("No card detected, or port not available\n");
 		return -ENODEV;
 	}
 
 	ret = misc_register(&mixcomwd_miscdev);
 	if (ret) {
-		printk(KERN_ERR PFX
-			"cannot register miscdev on minor=%d (err=%d)\n",
-					WATCHDOG_MINOR, ret);
+		pr_err("cannot register miscdev on minor=%d (err=%d)\n",
+		       WATCHDOG_MINOR, ret);
 		goto error_misc_register_watchdog;
 	}
 
-	printk(KERN_INFO
-		"MixCOM watchdog driver v%s, watchdog port at 0x%3x\n",
-					VERSION, watchdog_port);
+	pr_info("MixCOM watchdog driver v%s, watchdog port at 0x%3x\n",
+		VERSION, watchdog_port);
 
 	return 0;
 
@@ -303,8 +295,7 @@ static void __exit mixcomwd_exit(void)
 {
 	if (!nowayout) {
 		if (mixcomwd_timer_alive) {
-			printk(KERN_WARNING PFX "I quit now, hardware will"
-			       " probably reboot!\n");
+			pr_warn("I quit now, hardware will probably reboot!\n");
 			del_timer_sync(&mixcomwd_timer);
 			mixcomwd_timer_alive = 0;
 		}
@@ -320,4 +311,3 @@ MODULE_AUTHOR("Gergely Madarasz <gorgo@itc.hu>");
 MODULE_DESCRIPTION("MixCom Watchdog driver");
 MODULE_VERSION(VERSION);
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);

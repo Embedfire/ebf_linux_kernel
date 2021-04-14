@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * PC-Speaker driver for Linux
  *
@@ -6,14 +7,15 @@
  */
 
 #include <linux/init.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <linux/platform_device.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
 #include <linux/input.h>
 #include <linux/delay.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
+#include <linux/mm.h>
 #include "pcsp_input.h"
 #include "pcsp.h"
 
@@ -25,7 +27,8 @@ MODULE_ALIAS("platform:pcspkr");
 
 static int index = SNDRV_DEFAULT_IDX1;	/* Index 0-MAX */
 static char *id = SNDRV_DEFAULT_STR1;	/* ID for this card */
-static int enable = SNDRV_DEFAULT_ENABLE1;	/* Enable this card */
+static bool enable = SNDRV_DEFAULT_ENABLE1;	/* Enable this card */
+static bool nopcm;	/* Disable PCM capability of the driver */
 
 module_param(index, int, 0444);
 MODULE_PARM_DESC(index, "Index value for pcsp soundcard.");
@@ -33,32 +36,35 @@ module_param(id, charp, 0444);
 MODULE_PARM_DESC(id, "ID string for pcsp soundcard.");
 module_param(enable, bool, 0444);
 MODULE_PARM_DESC(enable, "Enable PC-Speaker sound.");
+module_param(nopcm, bool, 0444);
+MODULE_PARM_DESC(nopcm, "Disable PC-Speaker PCM sound. Only beeps remain.");
 
 struct snd_pcsp pcsp_chip;
 
-static int __devinit snd_pcsp_create(struct snd_card *card)
+static int snd_pcsp_create(struct snd_card *card)
 {
-	static struct snd_device_ops ops = { };
-	struct timespec tp;
-	int err;
-	int div, min_div, order;
+	static const struct snd_device_ops ops = { };
+	unsigned int resolution = hrtimer_resolution;
+	int err, div, min_div, order;
 
-	hrtimer_get_res(CLOCK_MONOTONIC, &tp);
-	if (tp.tv_sec || tp.tv_nsec > PCSP_MAX_PERIOD_NS) {
-		printk(KERN_ERR "PCSP: Timer resolution is not sufficient "
-		       "(%linS)\n", tp.tv_nsec);
-		printk(KERN_ERR "PCSP: Make sure you have HPET and ACPI "
-		       "enabled.\n");
-		return -EIO;
+	if (!nopcm) {
+		if (resolution > PCSP_MAX_PERIOD_NS) {
+			printk(KERN_ERR "PCSP: Timer resolution is not sufficient "
+				"(%unS)\n", resolution);
+			printk(KERN_ERR "PCSP: Make sure you have HPET and ACPI "
+				"enabled.\n");
+			printk(KERN_ERR "PCSP: Turned into nopcm mode.\n");
+			nopcm = 1;
+		}
 	}
 
-	if (loops_per_jiffy >= PCSP_MIN_LPJ && tp.tv_nsec <= PCSP_MIN_PERIOD_NS)
+	if (loops_per_jiffy >= PCSP_MIN_LPJ && resolution <= PCSP_MIN_PERIOD_NS)
 		min_div = MIN_DIV;
 	else
 		min_div = MAX_DIV;
 #if PCSP_DEBUG
-	printk("PCSP: lpj=%li, min_div=%i, res=%li\n",
-	       loops_per_jiffy, min_div, tp.tv_nsec);
+	printk(KERN_DEBUG "PCSP: lpj=%li, min_div=%i, res=%u\n",
+	       loops_per_jiffy, min_div, resolution);
 #endif
 
 	div = MAX_DIV / min_div;
@@ -87,7 +93,7 @@ static int __devinit snd_pcsp_create(struct snd_card *card)
 	return 0;
 }
 
-static int __devinit snd_card_pcsp_probe(int devnum, struct device *dev)
+static int snd_card_pcsp_probe(int devnum, struct device *dev)
 {
 	struct snd_card *card;
 	int err;
@@ -96,30 +102,24 @@ static int __devinit snd_card_pcsp_probe(int devnum, struct device *dev)
 		return -EINVAL;
 
 	hrtimer_init(&pcsp_chip.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	pcsp_chip.timer.cb_mode = HRTIMER_CB_SOFTIRQ;
 	pcsp_chip.timer.function = pcsp_do_timer;
 
-	card = snd_card_new(index, id, THIS_MODULE, 0);
-	if (!card)
-		return -ENOMEM;
+	err = snd_card_new(dev, index, id, THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	err = snd_pcsp_create(card);
-	if (err < 0) {
-		snd_card_free(card);
-		return err;
-	}
-	err = snd_pcsp_new_pcm(&pcsp_chip);
-	if (err < 0) {
-		snd_card_free(card);
-		return err;
-	}
-	err = snd_pcsp_new_mixer(&pcsp_chip);
-	if (err < 0) {
-		snd_card_free(card);
-		return err;
-	}
+	if (err < 0)
+		goto free_card;
 
-	snd_card_set_dev(pcsp_chip.card, dev);
+	if (!nopcm) {
+		err = snd_pcsp_new_pcm(&pcsp_chip);
+		if (err < 0)
+			goto free_card;
+	}
+	err = snd_pcsp_new_mixer(&pcsp_chip, nopcm);
+	if (err < 0)
+		goto free_card;
 
 	strcpy(card->driver, "PC-Speaker");
 	strcpy(card->shortname, "pcsp");
@@ -127,15 +127,17 @@ static int __devinit snd_card_pcsp_probe(int devnum, struct device *dev)
 		pcsp_chip.port);
 
 	err = snd_card_register(card);
-	if (err < 0) {
-		snd_card_free(card);
-		return err;
-	}
+	if (err < 0)
+		goto free_card;
 
 	return 0;
+
+free_card:
+	snd_card_free(card);
+	return err;
 }
 
-static int __devinit alsa_card_pcsp_init(struct device *dev)
+static int alsa_card_pcsp_init(struct device *dev)
 {
 	int err;
 
@@ -145,21 +147,21 @@ static int __devinit alsa_card_pcsp_init(struct device *dev)
 		return err;
 	}
 
-#ifdef CONFIG_DEBUG_PAGEALLOC
 	/* Well, CONFIG_DEBUG_PAGEALLOC makes the sound horrible. Lets alert */
-	printk(KERN_WARNING "PCSP: CONFIG_DEBUG_PAGEALLOC is enabled, "
-	       "which may make the sound noisy.\n");
-#endif
+	if (debug_pagealloc_enabled()) {
+		printk(KERN_WARNING "PCSP: CONFIG_DEBUG_PAGEALLOC is enabled, "
+		       "which may make the sound noisy.\n");
+	}
 
 	return 0;
 }
 
-static void __devexit alsa_card_pcsp_exit(struct snd_pcsp *chip)
+static void alsa_card_pcsp_exit(struct snd_pcsp *chip)
 {
 	snd_card_free(chip->card);
 }
 
-static int __devinit pcsp_probe(struct platform_device *dev)
+static int pcsp_probe(struct platform_device *dev)
 {
 	int err;
 
@@ -177,34 +179,33 @@ static int __devinit pcsp_probe(struct platform_device *dev)
 	return 0;
 }
 
-static int __devexit pcsp_remove(struct platform_device *dev)
+static int pcsp_remove(struct platform_device *dev)
 {
 	struct snd_pcsp *chip = platform_get_drvdata(dev);
-	alsa_card_pcsp_exit(chip);
 	pcspkr_input_remove(chip->input_dev);
-	platform_set_drvdata(dev, NULL);
+	alsa_card_pcsp_exit(chip);
 	return 0;
 }
 
 static void pcsp_stop_beep(struct snd_pcsp *chip)
 {
-	spin_lock_irq(&chip->substream_lock);
-	if (!chip->playback_substream)
-		pcspkr_stop_sound();
-	spin_unlock_irq(&chip->substream_lock);
+	pcsp_sync_stop(chip);
+	pcspkr_stop_sound();
 }
 
-#ifdef CONFIG_PM
-static int pcsp_suspend(struct platform_device *dev, pm_message_t state)
+#ifdef CONFIG_PM_SLEEP
+static int pcsp_suspend(struct device *dev)
 {
-	struct snd_pcsp *chip = platform_get_drvdata(dev);
+	struct snd_pcsp *chip = dev_get_drvdata(dev);
 	pcsp_stop_beep(chip);
-	snd_pcm_suspend_all(chip->pcm);
 	return 0;
 }
+
+static SIMPLE_DEV_PM_OPS(pcsp_pm, pcsp_suspend, NULL);
+#define PCSP_PM_OPS	&pcsp_pm
 #else
-#define pcsp_suspend NULL
-#endif	/* CONFIG_PM */
+#define PCSP_PM_OPS	NULL
+#endif	/* CONFIG_PM_SLEEP */
 
 static void pcsp_shutdown(struct platform_device *dev)
 {
@@ -215,11 +216,10 @@ static void pcsp_shutdown(struct platform_device *dev)
 static struct platform_driver pcsp_platform_driver = {
 	.driver		= {
 		.name	= "pcspkr",
-		.owner	= THIS_MODULE,
+		.pm	= PCSP_PM_OPS,
 	},
 	.probe		= pcsp_probe,
-	.remove		= __devexit_p(pcsp_remove),
-	.suspend	= pcsp_suspend,
+	.remove		= pcsp_remove,
 	.shutdown	= pcsp_shutdown,
 };
 

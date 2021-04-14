@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/alpha/kernel/process.c
  *
@@ -11,15 +12,16 @@
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/utsname.h>
 #include <linux/time.h>
 #include <linux/major.h>
 #include <linux/stat.h>
@@ -29,12 +31,12 @@
 #include <linux/reboot.h>
 #include <linux/tty.h>
 #include <linux/console.h>
+#include <linux/slab.h>
+#include <linux/rcupdate.h>
 
 #include <asm/reg.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
+#include <linux/uaccess.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/hwrpb.h>
 #include <asm/fpu.h>
 
@@ -47,21 +49,22 @@
 void (*pm_power_off)(void) = machine_power_off;
 EXPORT_SYMBOL(pm_power_off);
 
-void
-cpu_idle(void)
+#ifdef CONFIG_ALPHA_WTINT
+/*
+ * Sleep the CPU.
+ * EV6, LCA45 and QEMU know how to power down, skipping N timer interrupts.
+ */
+void arch_cpu_idle(void)
 {
-	set_thread_flag(TIF_POLLING_NRFLAG);
-
-	while (1) {
-		/* FIXME -- EV6 and LCA45 know how to power down
-		   the CPU.  */
-
-		while (!need_resched())
-			cpu_relax();
-		schedule();
-	}
+	wtint(0);
+	raw_local_irq_enable();
 }
 
+void arch_cpu_idle_dead(void)
+{
+	wtint(INT_MAX);
+}
+#endif /* ALPHA_WTINT */
 
 struct halt_info {
 	int mode;
@@ -93,7 +96,8 @@ common_shutdown_1(void *generic_ptr)
 	if (cpuid != boot_cpuid) {
 		flags |= 0x00040000UL; /* "remain halted" */
 		*pflags = flags;
-		cpu_clear(cpuid, cpu_present_map);
+		set_cpu_present(cpuid, false);
+		set_cpu_possible(cpuid, false);
 		halt();
 	}
 #endif
@@ -119,8 +123,9 @@ common_shutdown_1(void *generic_ptr)
 
 #ifdef CONFIG_SMP
 	/* Wait for the secondaries to halt. */
-	cpu_clear(boot_cpuid, cpu_present_map);
-	while (cpus_weight(cpu_present_map))
+	set_cpu_present(boot_cpuid, false);
+	set_cpu_possible(boot_cpuid, false);
+	while (cpumask_weight(cpu_present_mask))
 		barrier();
 #endif
 
@@ -132,7 +137,9 @@ common_shutdown_1(void *generic_ptr)
 		if (in_interrupt())
 			irq_exit();
 		/* This has the effect of resetting the VGA video origin.  */
-		take_over_console(&dummy_con, 0, MAX_NR_CONSOLES-1, 1);
+		console_lock();
+		do_take_over_console(&dummy_con, 0, MAX_NR_CONSOLES-1, 1);
+		console_unlock();
 #endif
 		pci_restore_srm_config();
 		set_hae(srm_hae);
@@ -190,6 +197,7 @@ machine_power_off(void)
 void
 show_regs(struct pt_regs *regs)
 {
+	show_regs_print_info(KERN_DEFAULT);
 	dik_show_regs(regs, NULL);
 }
 
@@ -199,20 +207,11 @@ show_regs(struct pt_regs *regs)
 void
 start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
 {
-	set_fs(USER_DS);
 	regs->pc = pc;
 	regs->ps = 8;
 	wrusp(sp);
 }
 EXPORT_SYMBOL(start_thread);
-
-/*
- * Free current thread data structures etc..
- */
-void
-exit_thread(void)
-{
-}
 
 void
 flush_thread(void)
@@ -232,87 +231,52 @@ release_thread(struct task_struct *dead_task)
 }
 
 /*
- * "alpha_clone()".. By the time we get here, the
- * non-volatile registers have also been saved on the
- * stack. We do some ugly pointer stuff here.. (see
- * also copy_thread)
- *
- * Notice that "fork()" is implemented in terms of clone,
- * with parameters (SIGCHLD, 0).
+ * Copy architecture-specific thread state
  */
-int
-alpha_clone(unsigned long clone_flags, unsigned long usp,
-	    int __user *parent_tid, int __user *child_tid,
-	    unsigned long tls_value, struct pt_regs *regs)
-{
-	if (!usp)
-		usp = rdusp();
-
-	return do_fork(clone_flags, usp, regs, 0, parent_tid, child_tid);
-}
-
-int
-alpha_vfork(struct pt_regs *regs)
-{
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(),
-		       regs, 0, NULL, NULL);
-}
-
-/*
- * Copy an alpha thread..
- *
- * Note the "stack_offset" stuff: when returning to kernel mode, we need
- * to have some extra stack-space for the kernel stack that still exists
- * after the "ret_from_fork".  When returning to user mode, we only want
- * the space needed by the syscall stack frame (ie "struct pt_regs").
- * Use the passed "regs" pointer to determine how much space we need
- * for a kernel fork().
- */
-
-int
-copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
-	    unsigned long unused,
-	    struct task_struct * p, struct pt_regs * regs)
+int copy_thread(unsigned long clone_flags, unsigned long usp,
+		unsigned long kthread_arg, struct task_struct *p,
+		unsigned long tls)
 {
 	extern void ret_from_fork(void);
+	extern void ret_from_kernel_thread(void);
 
 	struct thread_info *childti = task_thread_info(p);
-	struct pt_regs * childregs;
-	struct switch_stack * childstack, *stack;
-	unsigned long stack_offset, settls;
+	struct pt_regs *childregs = task_pt_regs(p);
+	struct pt_regs *regs = current_pt_regs();
+	struct switch_stack *childstack, *stack;
 
-	stack_offset = PAGE_SIZE - sizeof(struct pt_regs);
-	if (!(regs->ps & 8))
-		stack_offset = (PAGE_SIZE-1) & (unsigned long) regs;
-	childregs = (struct pt_regs *)
-	  (stack_offset + PAGE_SIZE + task_stack_page(p));
-		
-	*childregs = *regs;
-	settls = regs->r20;
-	childregs->r0 = 0;
-	childregs->r19 = 0;
-	childregs->r20 = 1;	/* OSF/1 has some strange fork() semantics.  */
-	regs->r20 = 0;
-	stack = ((struct switch_stack *) regs) - 1;
 	childstack = ((struct switch_stack *) childregs) - 1;
-	*childstack = *stack;
-	childstack->r26 = (unsigned long) ret_from_fork;
-	childti->pcb.usp = usp;
 	childti->pcb.ksp = (unsigned long) childstack;
 	childti->pcb.flags = 1;	/* set FEN, clear everything else */
 
-	/* Set a new TLS for the child thread?  Peek back into the
-	   syscall arguments that we saved on syscall entry.  Oops,
-	   except we'd have clobbered it with the parent/child set
-	   of r20.  Read the saved copy.  */
+	if (unlikely(p->flags & PF_KTHREAD)) {
+		/* kernel thread */
+		memset(childstack, 0,
+			sizeof(struct switch_stack) + sizeof(struct pt_regs));
+		childstack->r26 = (unsigned long) ret_from_kernel_thread;
+		childstack->r9 = usp;	/* function */
+		childstack->r10 = kthread_arg;
+		childregs->hae = alpha_mv.hae_cache,
+		childti->pcb.usp = 0;
+		return 0;
+	}
 	/* Note: if CLONE_SETTLS is not set, then we must inherit the
 	   value from the parent, which will have been set by the block
 	   copy in dup_task_struct.  This is non-intuitive, but is
 	   required for proper operation in the case of a threaded
 	   application calling fork.  */
 	if (clone_flags & CLONE_SETTLS)
-		childti->pcb.unique = settls;
-
+		childti->pcb.unique = tls;
+	else
+		regs->r20 = 0;	/* OSF/1 has some strange fork() semantics.  */
+	childti->pcb.usp = usp ?: rdusp();
+	*childregs = *regs;
+	childregs->r0 = 0;
+	childregs->r19 = 0;
+	childregs->r20 = 1;	/* OSF/1 has some strange fork() semantics.  */
+	stack = ((struct switch_stack *) regs) - 1;
+	*childstack = *stack;
+	childstack->r26 = (unsigned long) ret_from_fork;
 	return 0;
 }
 
@@ -355,7 +319,7 @@ dump_elf_thread(elf_greg_t *dest, struct pt_regs *pt, struct thread_info *ti)
 	dest[27] = pt->r27;
 	dest[28] = pt->r28;
 	dest[29] = pt->gp;
-	dest[30] = rdusp();
+	dest[30] = ti == current_thread_info() ? rdusp() : ti->pcb.usp;
 	dest[31] = pt->pc;
 
 	/* Once upon a time this was the PS value.  Which is stupid
@@ -383,26 +347,6 @@ dump_elf_task_fp(elf_fpreg_t *dest, struct task_struct *task)
 EXPORT_SYMBOL(dump_elf_task_fp);
 
 /*
- * sys_execve() executes a new program.
- */
-asmlinkage int
-do_sys_execve(char __user *ufilename, char __user * __user *argv,
-	      char __user * __user *envp, struct pt_regs *regs)
-{
-	int error;
-	char *filename;
-
-	filename = getname(ufilename);
-	error = PTR_ERR(filename);
-	if (IS_ERR(filename))
-		goto out;
-	error = do_execve(filename, argv, envp, regs);
-	putname(filename);
-out:
-	return error;
-}
-
-/*
  * Return saved PC of a blocked thread.  This assumes the frame
  * pointer is the 6th saved long on the kernel stack and that the
  * saved return address is the first long in the frame.  This all
@@ -416,7 +360,7 @@ out:
  * all.  -- r~
  */
 
-unsigned long
+static unsigned long
 thread_saved_pc(struct task_struct *t)
 {
 	unsigned long base = (unsigned long)task_stack_page(t);

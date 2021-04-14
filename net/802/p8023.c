@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	NET3:	802.3 data link hooks used for IPX 802.3
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  *
  *	802.3 isn't really a protocol data link layer. Some old IPX stuff
  *	uses it however. Note that there is only one 802.3 protocol layer
@@ -18,6 +14,7 @@
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 
 #include <net/datalink.h>
 #include <net/p8022.h>

@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  PS3 OHCI Host Controller driver
  *
  *  Copyright (C) 2006 Sony Computer Entertainment Inc.
  *  Copyright 2006 Sony Corp.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <asm/firmware.h>
@@ -30,7 +18,7 @@ static int ps3_ohci_hc_reset(struct usb_hcd *hcd)
 	return ohci_init(ohci);
 }
 
-static int __devinit ps3_ohci_hc_start(struct usb_hcd *hcd)
+static int ps3_ohci_hc_start(struct usb_hcd *hcd)
 {
 	int result;
 	struct ohci_hcd *ohci = hcd_to_ohci(hcd);
@@ -45,7 +33,8 @@ static int __devinit ps3_ohci_hc_start(struct usb_hcd *hcd)
 	result = ohci_run(ohci);
 
 	if (result < 0) {
-		err("can't start %s", hcd->self.bus_name);
+		dev_err(hcd->self.controller, "can't start %s\n",
+			hcd->self.bus_name);
 		ohci_stop(hcd);
 	}
 
@@ -57,7 +46,7 @@ static const struct hc_driver ps3_ohci_hc_driver = {
 	.product_desc		= "PS3 OHCI Host Controller",
 	.hcd_priv_size		= sizeof(struct ohci_hcd),
 	.irq			= ohci_irq,
-	.flags			= HCD_MEMORY | HCD_USB11,
+	.flags			= HCD_MEMORY | HCD_DMA | HCD_USB11,
 	.reset			= ps3_ohci_hc_reset,
 	.start			= ps3_ohci_hc_start,
 	.stop			= ohci_stop,
@@ -80,7 +69,7 @@ static int ps3_ohci_probe(struct ps3_system_bus_device *dev)
 	int result;
 	struct usb_hcd *hcd;
 	unsigned int virq;
-	static u64 dummy_mask = DMA_32BIT_MASK;
+	static u64 dummy_mask;
 
 	if (usb_disabled()) {
 		result = -ENODEV;
@@ -126,7 +115,9 @@ static int ps3_ohci_probe(struct ps3_system_bus_device *dev)
 		goto fail_irq;
 	}
 
-	dev->core.dma_mask = &dummy_mask; /* FIXME: for improper usb code */
+	dummy_mask = DMA_BIT_MASK(32);
+	dev->core.dma_mask = &dummy_mask;
+	dma_set_coherent_mask(&dev->core, dummy_mask);
 
 	hcd = usb_create_hcd(&ps3_ohci_hc_driver, &dev->core, dev_name(&dev->core));
 
@@ -162,9 +153,9 @@ static int ps3_ohci_probe(struct ps3_system_bus_device *dev)
 	dev_dbg(&dev->core, "%s:%d: virq            %lu\n", __func__, __LINE__,
 		(unsigned long)virq);
 
-	ps3_system_bus_set_driver_data(dev, hcd);
+	ps3_system_bus_set_drvdata(dev, hcd);
 
-	result = usb_add_hcd(hcd, virq, IRQF_DISABLED);
+	result = usb_add_hcd(hcd, virq, 0);
 
 	if (result) {
 		dev_dbg(&dev->core, "%s:%d: usb_add_hcd failed (%d)\n",
@@ -172,6 +163,7 @@ static int ps3_ohci_probe(struct ps3_system_bus_device *dev)
 		goto fail_add_hcd;
 	}
 
+	device_wakeup_enable(hcd->self.controller);
 	return result;
 
 fail_add_hcd:
@@ -192,11 +184,10 @@ fail_start:
 	return result;
 }
 
-static int ps3_ohci_remove (struct ps3_system_bus_device *dev)
+static int ps3_ohci_remove(struct ps3_system_bus_device *dev)
 {
 	unsigned int tmp;
-	struct usb_hcd *hcd =
-		(struct usb_hcd *)ps3_system_bus_get_driver_data(dev);
+	struct usb_hcd *hcd = ps3_system_bus_get_drvdata(dev);
 
 	BUG_ON(!hcd);
 
@@ -205,9 +196,10 @@ static int ps3_ohci_remove (struct ps3_system_bus_device *dev)
 
 	tmp = hcd->irq;
 
+	ohci_shutdown(hcd);
 	usb_remove_hcd(hcd);
 
-	ps3_system_bus_set_driver_data(dev, NULL);
+	ps3_system_bus_set_drvdata(dev, NULL);
 
 	BUG_ON(!hcd->regs);
 	iounmap(hcd->regs);
@@ -224,7 +216,7 @@ static int ps3_ohci_remove (struct ps3_system_bus_device *dev)
 	return 0;
 }
 
-static int ps3_ohci_driver_register(struct ps3_system_bus_driver *drv)
+static int __init ps3_ohci_driver_register(struct ps3_system_bus_driver *drv)
 {
 	return firmware_has_feature(FW_FEATURE_PS3_LV1)
 		? ps3_system_bus_driver_register(drv)

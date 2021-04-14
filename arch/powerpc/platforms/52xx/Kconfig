@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0
 config PPC_MPC52xx
 	bool "52xx-based boards"
-	depends on PPC_MULTIPLATFORM && PPC32
-	select PPC_CLOCK
-	select PPC_PCI_CHOICE
+	depends on PPC_BOOK3S_32
+	select COMMON_CLK
+	select HAVE_PCI
 
 config PPC_MPC5200_SIMPLE
 	bool "Generic support for simple MPC5200 based boards"
@@ -21,17 +22,27 @@ config PPC_MPC5200_SIMPLE
 	    and if there is a PCI bus node defined in the device tree.
 
 	  Boards that are compatible with this generic platform support
-	  are: 'tqc,tqm5200', 'promess,motionpro', 'schindler,cm5200'.
+	  are:
+	     intercontrol,digsy-mtc
+	     phytec,pcm030
+	     phytec,pcm032
+	     promess,motionpro
+	     schindler,cm5200
+	     tqc,tqm5200
 
 config PPC_EFIKA
 	bool "bPlan Efika 5k2. MPC5200B based computer"
 	depends on PPC_MPC52xx
 	select PPC_RTAS
-	select RTAS_PROC
 	select PPC_NATIVE
 
 config PPC_LITE5200
 	bool "Freescale Lite5200 Eval Board"
+	depends on PPC_MPC52xx
+	select DEFAULT_UIMAGE
+
+config PPC_MEDIA5200
+	bool "Freescale Media5200 Eval Board"
 	depends on PPC_MPC52xx
 	select DEFAULT_UIMAGE
 
@@ -44,10 +55,7 @@ config PPC_MPC5200_BUGFIX
 
 	  It is safe to say 'Y' here
 
-config PPC_MPC5200_GPIO
-	bool "MPC5200 GPIO support"
-	depends on PPC_MPC52xx
-	select ARCH_REQUIRE_GPIOLIB
-	select GENERIC_GPIO
-	help
-	  Enable gpiolib support for mpc5200 based boards
+config PPC_MPC5200_LPBFIFO
+	tristate "MPC5200 LocalPlus bus FIFO driver"
+	depends on PPC_MPC52xx && PPC_BESTCOMM
+	select PPC_BESTCOMM_GEN_BD

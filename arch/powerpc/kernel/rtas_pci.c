@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2001 Dave Engebretsen, IBM Corporation
  * Copyright (C) 2003 Anton Blanchard <anton@au.ibm.com>, IBM
@@ -5,20 +6,6 @@
  * RTAS specific routines for PCI.
  *
  * Based on code from pci.c, chrp_pci.c and pSeries_pci.c
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/kernel.h>
@@ -26,10 +13,9 @@
 #include <linux/pci.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <linux/bootmem.h>
+#include <linux/pgtable.h>
 
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/irq.h>
 #include <asm/prom.h>
 #include <asm/machdep.h>
@@ -66,6 +52,11 @@ int rtas_read_config(struct pci_dn *pdn, int where, int size, u32 *val)
 		return PCIBIOS_DEVICE_NOT_FOUND;
 	if (!config_access_valid(pdn, where))
 		return PCIBIOS_BAD_REGISTER_NUMBER;
+#ifdef CONFIG_EEH
+	if (pdn->edev && pdn->edev->pe &&
+	    (pdn->edev->pe->state & EEH_PE_CFG_BLOCKED))
+		return PCIBIOS_SET_FAILED;
+#endif
 
 	addr = rtas_config_addr(pdn->busno, pdn->devfn, where);
 	buid = pdn->phb->buid;
@@ -80,10 +71,6 @@ int rtas_read_config(struct pci_dn *pdn, int where, int size, u32 *val)
 	if (ret)
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	if (returnval == EEH_IO_ERROR_VALUE(size) &&
-	    eeh_dn_check_failure (pdn->node, NULL))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
 	return PCIBIOS_SUCCESSFUL;
 }
 
@@ -91,22 +78,20 @@ static int rtas_pci_read_config(struct pci_bus *bus,
 				unsigned int devfn,
 				int where, int size, u32 *val)
 {
-	struct device_node *busdn, *dn;
+	struct pci_dn *pdn;
+	int ret;
 
-	if (bus->self)
-		busdn = pci_device_to_OF_node(bus->self);
-	else
-		busdn = bus->sysdata;	/* must be a phb */
+	*val = 0xFFFFFFFF;
 
-	/* Search only direct children of the bus */
-	for (dn = busdn->child; dn; dn = dn->sibling) {
-		struct pci_dn *pdn = PCI_DN(dn);
-		if (pdn && pdn->devfn == devfn
-		    && of_device_is_available(dn))
-			return rtas_read_config(pdn, where, size, val);
-	}
+	pdn = pci_get_pdn_by_devfn(bus, devfn);
 
-	return PCIBIOS_DEVICE_NOT_FOUND;
+	/* Validity of pdn is checked in here */
+	ret = rtas_read_config(pdn, where, size, val);
+	if (*val == EEH_IO_ERROR_VALUE(size) &&
+	    eeh_dev_check_failure(pdn_to_eeh_dev(pdn)))
+		return PCIBIOS_DEVICE_NOT_FOUND;
+
+	return ret;
 }
 
 int rtas_write_config(struct pci_dn *pdn, int where, int size, u32 val)
@@ -118,6 +103,11 @@ int rtas_write_config(struct pci_dn *pdn, int where, int size, u32 val)
 		return PCIBIOS_DEVICE_NOT_FOUND;
 	if (!config_access_valid(pdn, where))
 		return PCIBIOS_BAD_REGISTER_NUMBER;
+#ifdef CONFIG_EEH
+	if (pdn->edev && pdn->edev->pe &&
+	    (pdn->edev->pe->state & EEH_PE_CFG_BLOCKED))
+		return PCIBIOS_SET_FAILED;
+#endif
 
 	addr = rtas_config_addr(pdn->busno, pdn->devfn, where);
 	buid = pdn->phb->buid;
@@ -138,21 +128,12 @@ static int rtas_pci_write_config(struct pci_bus *bus,
 				 unsigned int devfn,
 				 int where, int size, u32 val)
 {
-	struct device_node *busdn, *dn;
+	struct pci_dn *pdn;
 
-	if (bus->self)
-		busdn = pci_device_to_OF_node(bus->self);
-	else
-		busdn = bus->sysdata;	/* must be a phb */
+	pdn = pci_get_pdn_by_devfn(bus, devfn);
 
-	/* Search only direct children of the bus */
-	for (dn = busdn->child; dn; dn = dn->sibling) {
-		struct pci_dn *pdn = PCI_DN(dn);
-		if (pdn && pdn->devfn == devfn
-		    && of_device_is_available(dn))
-			return rtas_write_config(pdn, where, size, val);
-	}
-	return PCIBIOS_DEVICE_NOT_FOUND;
+	/* Validity of pdn is checked in here. */
+	return rtas_write_config(pdn, where, size, val);
 }
 
 static struct pci_ops rtas_pci_ops = {
@@ -207,7 +188,7 @@ static void python_countermeasures(struct device_node *dev)
 	iounmap(chip_regs);
 }
 
-void __init init_pci_config_tokens (void)
+void __init init_pci_config_tokens(void)
 {
 	read_pci_config = rtas_token("read-pci-config");
 	write_pci_config = rtas_token("write-pci-config");
@@ -215,7 +196,7 @@ void __init init_pci_config_tokens (void)
 	ibm_write_pci_config = rtas_token("ibm,write-pci-config");
 }
 
-unsigned long __devinit get_phb_buid (struct device_node *phb)
+unsigned long get_phb_buid(struct device_node *phb)
 {
 	struct resource r;
 
@@ -229,7 +210,7 @@ unsigned long __devinit get_phb_buid (struct device_node *phb)
 static int phb_set_bus_ranges(struct device_node *dev,
 			      struct pci_controller *phb)
 {
-	const int *bus_range;
+	const __be32 *bus_range;
 	unsigned int len;
 
 	bus_range = of_get_property(dev, "bus-range", &len);
@@ -237,13 +218,13 @@ static int phb_set_bus_ranges(struct device_node *dev,
 		return 1;
  	}
 
-	phb->first_busno =  bus_range[0];
-	phb->last_busno  =  bus_range[1];
+	phb->first_busno = be32_to_cpu(bus_range[0]);
+	phb->last_busno  = be32_to_cpu(bus_range[1]);
 
 	return 0;
 }
 
-int __devinit rtas_setup_phb(struct pci_controller *phb)
+int rtas_setup_phb(struct pci_controller *phb)
 {
 	struct device_node *dev = phb->dn;
 
@@ -258,94 +239,3 @@ int __devinit rtas_setup_phb(struct pci_controller *phb)
 
 	return 0;
 }
-
-void __init find_and_init_phbs(void)
-{
-	struct device_node *node;
-	struct pci_controller *phb;
-	struct device_node *root = of_find_node_by_path("/");
-
-	for_each_child_of_node(root, node) {
-		if (node->type == NULL || (strcmp(node->type, "pci") != 0 &&
-					   strcmp(node->type, "pciex") != 0))
-			continue;
-
-		phb = pcibios_alloc_controller(node);
-		if (!phb)
-			continue;
-		rtas_setup_phb(phb);
-		pci_process_bridge_OF_ranges(phb, node, 0);
-		isa_bridge_find_early(phb);
-	}
-
-	of_node_put(root);
-	pci_devs_phb_init();
-
-	/*
-	 * pci_probe_only and pci_assign_all_buses can be set via properties
-	 * in chosen.
-	 */
-	if (of_chosen) {
-		const int *prop;
-
-		prop = of_get_property(of_chosen,
-				"linux,pci-probe-only", NULL);
-		if (prop)
-			pci_probe_only = *prop;
-
-#ifdef CONFIG_PPC32 /* Will be made generic soon */
-		prop = of_get_property(of_chosen,
-				"linux,pci-assign-all-buses", NULL);
-		if (prop && *prop)
-			ppc_pci_flags |= PPC_PCI_REASSIGN_ALL_BUS;
-#endif /* CONFIG_PPC32 */
-	}
-}
-
-/* RPA-specific bits for removing PHBs */
-int pcibios_remove_root_bus(struct pci_controller *phb)
-{
-	struct pci_bus *b = phb->bus;
-	struct resource *res;
-	int rc, i;
-
-	res = b->resource[0];
-	if (!res->flags) {
-		printk(KERN_ERR "%s: no IO resource for PHB %s\n", __func__,
-				b->name);
-		return 1;
-	}
-
-	rc = pcibios_unmap_io_space(b);
-	if (rc) {
-		printk(KERN_ERR "%s: failed to unmap IO on bus %s\n",
-			__func__, b->name);
-		return 1;
-	}
-
-	if (release_resource(res)) {
-		printk(KERN_ERR "%s: failed to release IO on bus %s\n",
-				__func__, b->name);
-		return 1;
-	}
-
-	for (i = 1; i < 3; ++i) {
-		res = b->resource[i];
-		if (!res->flags && i == 0) {
-			printk(KERN_ERR "%s: no MEM resource for PHB %s\n",
-				__func__, b->name);
-			return 1;
-		}
-		if (res->flags && release_resource(res)) {
-			printk(KERN_ERR
-			       "%s: failed to release IO %d on bus %s\n",
-				__func__, i, b->name);
-			return 1;
-		}
-	}
-
-	pcibios_free_controller(phb);
-
-	return 0;
-}
-EXPORT_SYMBOL(pcibios_remove_root_bus);

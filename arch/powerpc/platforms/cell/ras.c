@@ -1,23 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2006-2008, IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #undef DEBUG
 
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/reboot.h>
+#include <linux/kexec.h>
+#include <linux/crash_dump.h>
 
+#include <asm/kexec.h>
 #include <asm/reg.h>
 #include <asm/io.h>
 #include <asm/prom.h>
-#include <asm/kexec.h>
 #include <asm/machdep.h>
 #include <asm/rtas.h>
 #include <asm/cell-regs.h>
@@ -36,16 +35,16 @@ static void dump_fir(int cpu)
 	/* Todo: do some nicer parsing of bits and based on them go down
 	 * to other sub-units FIRs and not only IIC
 	 */
-	printk(KERN_ERR "Global Checkstop FIR    : 0x%016lx\n",
+	printk(KERN_ERR "Global Checkstop FIR    : 0x%016llx\n",
 	       in_be64(&pregs->checkstop_fir));
-	printk(KERN_ERR "Global Recoverable FIR  : 0x%016lx\n",
+	printk(KERN_ERR "Global Recoverable FIR  : 0x%016llx\n",
 	       in_be64(&pregs->checkstop_fir));
-	printk(KERN_ERR "Global MachineCheck FIR : 0x%016lx\n",
+	printk(KERN_ERR "Global MachineCheck FIR : 0x%016llx\n",
 	       in_be64(&pregs->spec_att_mchk_fir));
 
 	if (iregs == NULL)
 		return;
-	printk(KERN_ERR "IOC FIR                 : 0x%016lx\n",
+	printk(KERN_ERR "IOC FIR                 : 0x%016llx\n",
 	       in_be64(&iregs->ioc_fir));
 
 }
@@ -111,9 +110,8 @@ static int __init cbe_ptcal_enable_on_node(int nid, int order)
 	int ret = -ENOMEM;
 	unsigned long addr;
 
-#ifdef CONFIG_CRASH_DUMP
-	rtas_call(ptcal_stop_tok, 1, 1, NULL, nid);
-#endif
+	if (is_kdump_kernel())
+		rtas_call(ptcal_stop_tok, 1, 1, NULL, nid);
 
 	area = kmalloc(sizeof(*area), GFP_KERNEL);
 	if (!area)
@@ -121,12 +119,24 @@ static int __init cbe_ptcal_enable_on_node(int nid, int order)
 
 	area->nid = nid;
 	area->order = order;
-	area->pages = alloc_pages_node(area->nid, GFP_KERNEL, area->order);
+	area->pages = __alloc_pages_node(area->nid,
+						GFP_KERNEL|__GFP_THISNODE,
+						area->order);
 
-	if (!area->pages)
+	if (!area->pages) {
+		printk(KERN_WARNING "%s: no page on node %d\n",
+			__func__, area->nid);
 		goto out_free_area;
+	}
 
-	addr = __pa(page_address(area->pages));
+	/*
+	 * We move the ptcal area to the middle of the allocated
+	 * page, in order to avoid prefetches in memcpy and similar
+	 * functions stepping on it.
+	 */
+	addr = __pa(page_address(area->pages)) + (PAGE_SIZE >> 1);
+	printk(KERN_DEBUG "%s: enabling PTCAL on node %d address=0x%016lx\n",
+			__func__, area->nid, addr);
 
 	ret = -EIO;
 	if (rtas_call(ptcal_start_tok, 3, 1, NULL, area->nid,
@@ -160,8 +170,10 @@ static int __init cbe_ptcal_enable(void)
 		return -ENODEV;
 
 	size = of_get_property(np, "ibm,cbe-ptcal-size", NULL);
-	if (!size)
+	if (!size) {
+		of_node_put(np);
 		return -ENODEV;
+	}
 
 	pr_debug("%s: enabling PTCAL, size = 0x%x\n", __func__, *size);
 	order = get_order(*size);
@@ -180,8 +192,8 @@ static int __init cbe_ptcal_enable(void)
 	for_each_node_by_type(np, "cpu") {
 		const u32 *nid = of_get_property(np, "node-id", NULL);
 		if (!nid) {
-			printk(KERN_ERR "%s: node %s is missing node-id?\n",
-					__func__, np->full_name);
+			printk(KERN_ERR "%s: node %pOF is missing node-id?\n",
+					__func__, np);
 			continue;
 		}
 		cbe_ptcal_enable_on_node(*nid, order);
@@ -243,7 +255,7 @@ static int __init cbe_sysreset_init(void)
 {
 	struct cbe_pmd_regs __iomem *regs;
 
-	sysreset_hack = machine_is_compatible("IBM,CBPLUS-1.0");
+	sysreset_hack = of_machine_is_compatible("IBM,CBPLUS-1.0");
 	if (!sysreset_hack)
 		return 0;
 
@@ -282,7 +294,7 @@ int cbe_sysreset_hack(void)
 }
 #endif /* CONFIG_PPC_IBM_CELL_RESETBUTTON */
 
-int __init cbe_ptcal_init(void)
+static int __init cbe_ptcal_init(void)
 {
 	int ret;
 	ptcal_start_tok = rtas_token("ibm,cbe-start-ptcal");

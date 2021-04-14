@@ -1,321 +1,104 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/topology.h>
 #include <linux/cpu.h>
-#include "pci.h"
+#include <linux/range.h>
 
-#ifdef CONFIG_X86_64
+#include <asm/amd_nb.h>
+#include <asm/pci_x86.h>
+
 #include <asm/pci-direct.h>
-#include <asm/mpspec.h>
-#include <linux/cpumask.h>
-#endif
 
-/*
- * This discovers the pcibus <-> node mapping on AMD K8.
- * also get peer root bus resource for io,mmio
- */
+#include "bus_numa.h"
 
-#ifdef CONFIG_NUMA
+#define AMD_NB_F0_NODE_ID			0x60
+#define AMD_NB_F0_UNIT_ID			0x64
+#define AMD_NB_F1_CONFIG_MAP_REG		0xe0
 
-#define BUS_NR 256
+#define RANGE_NUM				16
+#define AMD_NB_F1_CONFIG_MAP_RANGES		4
 
-#ifdef CONFIG_X86_64
-
-static int mp_bus_to_node[BUS_NR];
-
-void set_mp_bus_to_node(int busnum, int node)
-{
-	if (busnum >= 0 &&  busnum < BUS_NR)
-		mp_bus_to_node[busnum] = node;
-}
-
-int get_mp_bus_to_node(int busnum)
-{
-	int node = -1;
-
-	if (busnum < 0 || busnum > (BUS_NR - 1))
-		return node;
-
-	node = mp_bus_to_node[busnum];
-
-	/*
-	 * let numa_node_id to decide it later in dma_alloc_pages
-	 * if there is no ram on that node
-	 */
-	if (node != -1 && !node_online(node))
-		node = -1;
-
-	return node;
-}
-
-#else /* CONFIG_X86_32 */
-
-static unsigned char mp_bus_to_node[BUS_NR];
-
-void set_mp_bus_to_node(int busnum, int node)
-{
-	if (busnum >= 0 &&  busnum < BUS_NR)
-	mp_bus_to_node[busnum] = (unsigned char) node;
-}
-
-int get_mp_bus_to_node(int busnum)
-{
-	int node;
-
-	if (busnum < 0 || busnum > (BUS_NR - 1))
-		return 0;
-	node = mp_bus_to_node[busnum];
-	return node;
-}
-
-#endif /* CONFIG_X86_32 */
-
-#endif /* CONFIG_NUMA */
-
-#ifdef CONFIG_X86_64
-
-/*
- * sub bus (transparent) will use entres from 3 to store extra from root,
- * so need to make sure have enought slot there, increase PCI_BUS_NUM_RESOURCES?
- */
-#define RES_NUM 16
-struct pci_root_info {
-	char name[12];
-	unsigned int res_num;
-	struct resource res[RES_NUM];
-	int bus_min;
-	int bus_max;
-	int node;
-	int link;
-};
-
-/* 4 at this time, it may become to 32 */
-#define PCI_ROOT_NR 4
-static int pci_root_num;
-static struct pci_root_info pci_root_info[PCI_ROOT_NR];
-
-void set_pci_bus_resources_arch_default(struct pci_bus *b)
-{
-	int i;
-	int j;
-	struct pci_root_info *info;
-
-	/* if only one root bus, don't need to anything */
-	if (pci_root_num < 2)
-		return;
-
-	for (i = 0; i < pci_root_num; i++) {
-		if (pci_root_info[i].bus_min == b->number)
-			break;
-	}
-
-	if (i == pci_root_num)
-		return;
-
-	info = &pci_root_info[i];
-	for (j = 0; j < info->res_num; j++) {
-		struct resource *res;
-		struct resource *root;
-
-		res = &info->res[j];
-		b->resource[j] = res;
-		if (res->flags & IORESOURCE_IO)
-			root = &ioport_resource;
-		else
-			root = &iomem_resource;
-		insert_resource(root, res);
-	}
-}
-
-#define RANGE_NUM 16
-
-struct res_range {
-	size_t start;
-	size_t end;
-};
-
-static void __init update_range(struct res_range *range, size_t start,
-				size_t end)
-{
-	int i;
-	int j;
-
-	for (j = 0; j < RANGE_NUM; j++) {
-		if (!range[j].end)
-			continue;
-
-		if (start <= range[j].start && end >= range[j].end) {
-			range[j].start = 0;
-			range[j].end = 0;
-			continue;
-		}
-
-		if (start <= range[j].start && end < range[j].end && range[j].start < end + 1) {
-			range[j].start = end + 1;
-			continue;
-		}
-
-
-		if (start > range[j].start && end >= range[j].end && range[j].end > start - 1) {
-			range[j].end = start - 1;
-			continue;
-		}
-
-		if (start > range[j].start && end < range[j].end) {
-			/* find the new spare */
-			for (i = 0; i < RANGE_NUM; i++) {
-				if (range[i].end == 0)
-					break;
-			}
-			if (i < RANGE_NUM) {
-				range[i].end = range[j].end;
-				range[i].start = end + 1;
-			} else {
-				printk(KERN_ERR "run of slot in ranges\n");
-			}
-			range[j].end = start - 1;
-			continue;
-		}
-	}
-}
-
-static void __init update_res(struct pci_root_info *info, size_t start,
-			      size_t end, unsigned long flags, int merge)
-{
-	int i;
-	struct resource *res;
-
-	if (!merge)
-		goto addit;
-
-	/* try to merge it with old one */
-	for (i = 0; i < info->res_num; i++) {
-		size_t final_start, final_end;
-		size_t common_start, common_end;
-
-		res = &info->res[i];
-		if (res->flags != flags)
-			continue;
-
-		common_start = max((size_t)res->start, start);
-		common_end = min((size_t)res->end, end);
-		if (common_start > common_end + 1)
-			continue;
-
-		final_start = min((size_t)res->start, start);
-		final_end = max((size_t)res->end, end);
-
-		res->start = final_start;
-		res->end = final_end;
-		return;
-	}
-
-addit:
-
-	/* need to add that */
-	if (info->res_num >= RES_NUM)
-		return;
-
-	res = &info->res[info->res_num];
-	res->name = info->name;
-	res->flags = flags;
-	res->start = start;
-	res->end = end;
-	res->child = NULL;
-	info->res_num++;
-}
-
-struct pci_hostbridge_probe {
+struct amd_hostbridge {
 	u32 bus;
 	u32 slot;
-	u32 vendor;
 	u32 device;
 };
 
-static struct pci_hostbridge_probe pci_probes[] __initdata = {
-	{ 0, 0x18, PCI_VENDOR_ID_AMD, 0x1100 },
-	{ 0, 0x18, PCI_VENDOR_ID_AMD, 0x1200 },
-	{ 0xff, 0, PCI_VENDOR_ID_AMD, 0x1200 },
-	{ 0, 0x18, PCI_VENDOR_ID_AMD, 0x1300 },
+/*
+ * IMPORTANT NOTE:
+ * hb_probes[] and early_root_info_init() is in maintenance mode.
+ * It only supports K8, Fam10h, Fam11h, and Fam15h_00h-0fh .
+ * Future processor will rely on information in ACPI.
+ */
+static struct amd_hostbridge hb_probes[] __initdata = {
+	{ 0, 0x18, 0x1100 }, /* K8 */
+	{ 0, 0x18, 0x1200 }, /* Family10h */
+	{ 0xff, 0, 0x1200 }, /* Family10h */
+	{ 0, 0x18, 0x1300 }, /* Family11h */
+	{ 0, 0x18, 0x1600 }, /* Family15h */
 };
 
-static u64 __initdata fam10h_mmconf_start;
-static u64 __initdata fam10h_mmconf_end;
-static void __init get_pci_mmcfg_amd_fam10h_range(void)
+static struct pci_root_info __init *find_pci_root_info(int node, int link)
 {
-	u32 address;
-	u64 base, msr;
-	unsigned segn_busn_bits;
+	struct pci_root_info *info;
 
-	/* assume all cpus from fam10h have mmconf */
-        if (boot_cpu_data.x86 < 0x10)
-		return;
+	/* find the position */
+	list_for_each_entry(info, &pci_root_infos, list)
+		if (info->node == node && info->link == link)
+			return info;
 
-	address = MSR_FAM10H_MMIO_CONF_BASE;
-	rdmsrl(address, msr);
-
-	/* mmconfig is not enable */
-	if (!(msr & FAM10H_MMIO_CONF_ENABLE))
-		return;
-
-	base = msr & (FAM10H_MMIO_CONF_BASE_MASK<<FAM10H_MMIO_CONF_BASE_SHIFT);
-
-	segn_busn_bits = (msr >> FAM10H_MMIO_CONF_BUSRANGE_SHIFT) &
-			 FAM10H_MMIO_CONF_BUSRANGE_MASK;
-
-	fam10h_mmconf_start = base;
-	fam10h_mmconf_end = base + (1ULL<<(segn_busn_bits + 20)) - 1;
+	return NULL;
 }
 
 /**
- * early_fill_mp_bus_to_node()
+ * early_root_info_init()
  * called before pcibios_scan_root and pci_scan_bus
- * fills the mp_bus_to_cpumask array based according to the LDT Bus Number
- * Registers found in the K8 northbridge
+ * fills the mp_bus_to_cpumask array based according
+ * to the LDT Bus Number Registers found in the northbridge.
  */
-static int __init early_fill_mp_bus_info(void)
+static int __init early_root_info_init(void)
 {
 	int i;
-	int j;
 	unsigned bus;
 	unsigned slot;
-	int found;
 	int node;
 	int link;
 	int def_node;
 	int def_link;
 	struct pci_root_info *info;
 	u32 reg;
-	struct resource *res;
-	size_t start;
-	size_t end;
-	struct res_range range[RANGE_NUM];
+	u64 start;
+	u64 end;
+	struct range range[RANGE_NUM];
 	u64 val;
 	u32 address;
-
-#ifdef CONFIG_NUMA
-	for (i = 0; i < BUS_NR; i++)
-		mp_bus_to_node[i] = -1;
-#endif
+	bool found;
+	struct resource fam10h_mmconf_res, *fam10h_mmconf;
+	u64 fam10h_mmconf_start;
+	u64 fam10h_mmconf_end;
 
 	if (!early_pci_allowed())
 		return -1;
 
-	found = 0;
-	for (i = 0; i < ARRAY_SIZE(pci_probes); i++) {
+	found = false;
+	for (i = 0; i < ARRAY_SIZE(hb_probes); i++) {
 		u32 id;
 		u16 device;
 		u16 vendor;
 
-		bus = pci_probes[i].bus;
-		slot = pci_probes[i].slot;
+		bus = hb_probes[i].bus;
+		slot = hb_probes[i].slot;
 		id = read_pci_config(bus, slot, 0, PCI_VENDOR_ID);
-
 		vendor = id & 0xffff;
 		device = (id>>16) & 0xffff;
-		if (pci_probes[i].vendor == vendor &&
-		    pci_probes[i].device == device) {
-			found = 1;
+
+		if (vendor != PCI_VENDOR_ID_AMD &&
+		    vendor != PCI_VENDOR_ID_HYGON)
+			continue;
+
+		if (hb_probes[i].device == device) {
+			found = true;
 			break;
 		}
 	}
@@ -323,11 +106,16 @@ static int __init early_fill_mp_bus_info(void)
 	if (!found)
 		return 0;
 
-	pci_root_num = 0;
-	for (i = 0; i < 4; i++) {
+	/*
+	 * We should learn topology and routing information from _PXM and
+	 * _CRS methods in the ACPI namespace.  We extract node numbers
+	 * here to work around BIOSes that don't supply _PXM.
+	 */
+	for (i = 0; i < AMD_NB_F1_CONFIG_MAP_RANGES; i++) {
 		int min_bus;
 		int max_bus;
-		reg = read_pci_config(bus, slot, 1, 0xe0 + (i << 2));
+		reg = read_pci_config(bus, slot, 1,
+				AMD_NB_F1_CONFIG_MAP_REG + (i << 2));
 
 		/* Check if that register is enabled for bus range */
 		if ((reg & 7) != 3)
@@ -336,29 +124,30 @@ static int __init early_fill_mp_bus_info(void)
 		min_bus = (reg >> 16) & 0xff;
 		max_bus = (reg >> 24) & 0xff;
 		node = (reg >> 4) & 0x07;
-#ifdef CONFIG_NUMA
-		for (j = min_bus; j <= max_bus; j++)
-			mp_bus_to_node[j] = (unsigned char) node;
-#endif
 		link = (reg >> 8) & 0x03;
 
-		info = &pci_root_info[pci_root_num];
-		info->bus_min = min_bus;
-		info->bus_max = max_bus;
-		info->node = node;
-		info->link = link;
-		sprintf(info->name, "PCI Bus #%02x", min_bus);
-		pci_root_num++;
+		info = alloc_pci_root_info(min_bus, max_bus, node, link);
 	}
 
+	/*
+	 * The following code extracts routing information for use on old
+	 * systems where Linux doesn't automatically use host bridge _CRS
+	 * methods (or when the user specifies "pci=nocrs").
+	 *
+	 * We only do this through Fam11h, because _CRS should be enough on
+	 * newer systems.
+	 */
+	if (boot_cpu_data.x86 > 0x11)
+		return 0;
+
 	/* get the default node and link for left over res */
-	reg = read_pci_config(bus, slot, 0, 0x60);
+	reg = read_pci_config(bus, slot, 0, AMD_NB_F0_NODE_ID);
 	def_node = (reg >> 8) & 0x07;
-	reg = read_pci_config(bus, slot, 0, 0x64);
+	reg = read_pci_config(bus, slot, 0, AMD_NB_F0_UNIT_ID);
 	def_link = (reg >> 8) & 0x03;
 
 	memset(range, 0, sizeof(range));
-	range[0].end = 0xffff;
+	add_range(range, RANGE_NUM, 0, 0, 0xffff + 1);
 	/* io port resource */
 	for (i = 0; i < 4; i++) {
 		reg = read_pci_config(bus, slot, 1, 0xc0 + (i << 3));
@@ -371,61 +160,58 @@ static int __init early_fill_mp_bus_info(void)
 		link = (reg >> 4) & 0x03;
 		end = (reg & 0xfff000) | 0xfff;
 
-		/* find the position */
-		for (j = 0; j < pci_root_num; j++) {
-			info = &pci_root_info[j];
-			if (info->node == node && info->link == link)
-				break;
-		}
-		if (j == pci_root_num)
+		info = find_pci_root_info(node, link);
+		if (!info)
 			continue; /* not found */
 
-		info = &pci_root_info[j];
 		printk(KERN_DEBUG "node %d link %d: io port [%llx, %llx]\n",
-		       node, link, (u64)start, (u64)end);
+		       node, link, start, end);
 
 		/* kernel only handle 16 bit only */
 		if (end > 0xffff)
 			end = 0xffff;
 		update_res(info, start, end, IORESOURCE_IO, 1);
-		update_range(range, start, end);
+		subtract_range(range, RANGE_NUM, start, end + 1);
 	}
 	/* add left over io port range to def node/link, [0, 0xffff] */
 	/* find the position */
-	for (j = 0; j < pci_root_num; j++) {
-		info = &pci_root_info[j];
-		if (info->node == def_node && info->link == def_link)
-			break;
-	}
-	if (j < pci_root_num) {
-		info = &pci_root_info[j];
+	info = find_pci_root_info(def_node, def_link);
+	if (info) {
 		for (i = 0; i < RANGE_NUM; i++) {
 			if (!range[i].end)
 				continue;
 
-			update_res(info, range[i].start, range[i].end,
+			update_res(info, range[i].start, range[i].end - 1,
 				   IORESOURCE_IO, 1);
 		}
 	}
 
 	memset(range, 0, sizeof(range));
 	/* 0xfd00000000-0xffffffffff for HT */
-	range[0].end = (0xfdULL<<32) - 1;
+	end = cap_resource((0xfdULL<<32) - 1);
+	end++;
+	add_range(range, RANGE_NUM, 0, 0, end);
 
 	/* need to take out [0, TOM) for RAM*/
 	address = MSR_K8_TOP_MEM1;
 	rdmsrl(address, val);
 	end = (val & 0xffffff800000ULL);
-	printk(KERN_INFO "TOM: %016lx aka %ldM\n", end, end>>20);
+	printk(KERN_INFO "TOM: %016llx aka %lldM\n", end, end>>20);
 	if (end < (1ULL<<32))
-		update_range(range, 0, end - 1);
+		subtract_range(range, RANGE_NUM, 0, end);
 
 	/* get mmconfig */
-	get_pci_mmcfg_amd_fam10h_range();
+	fam10h_mmconf = amd_get_mmconfig_range(&fam10h_mmconf_res);
 	/* need to take out mmconf range */
-	if (fam10h_mmconf_end) {
-		printk(KERN_DEBUG "Fam 10h mmconf [%llx, %llx]\n", fam10h_mmconf_start, fam10h_mmconf_end);
-		update_range(range, fam10h_mmconf_start, fam10h_mmconf_end);
+	if (fam10h_mmconf) {
+		printk(KERN_DEBUG "Fam 10h mmconf %pR\n", fam10h_mmconf);
+		fam10h_mmconf_start = fam10h_mmconf->start;
+		fam10h_mmconf_end = fam10h_mmconf->end;
+		subtract_range(range, RANGE_NUM, fam10h_mmconf_start,
+				 fam10h_mmconf_end + 1);
+	} else {
+		fam10h_mmconf_start = 0;
+		fam10h_mmconf_end = 0;
 	}
 
 	/* mmio resource */
@@ -443,19 +229,13 @@ static int __init early_fill_mp_bus_info(void)
 		end <<= 8;
 		end |= 0xffff;
 
-		/* find the position */
-		for (j = 0; j < pci_root_num; j++) {
-			info = &pci_root_info[j];
-			if (info->node == node && info->link == link)
-				break;
-		}
-		if (j == pci_root_num)
-			continue; /* not found */
+		info = find_pci_root_info(node, link);
 
-		info = &pci_root_info[j];
+		if (!info)
+			continue;
 
 		printk(KERN_DEBUG "node %d link %d: mmio [%llx, %llx]",
-		       node, link, (u64)start, (u64)end);
+		       node, link, start, end);
 		/*
 		 * some sick allocation would have range overlap with fam10h
 		 * mmconf range, so need to update start and end.
@@ -480,14 +260,15 @@ static int __init early_fill_mp_bus_info(void)
 				/* we got a hole */
 				endx = fam10h_mmconf_start - 1;
 				update_res(info, start, endx, IORESOURCE_MEM, 0);
-				update_range(range, start, endx);
-				printk(KERN_CONT " ==> [%llx, %llx]", (u64)start, endx);
+				subtract_range(range, RANGE_NUM, start,
+						 endx + 1);
+				printk(KERN_CONT " ==> [%llx, %llx]", start, endx);
 				start = fam10h_mmconf_end + 1;
 				changed = 1;
 			}
 			if (changed) {
 				if (start <= end) {
-					printk(KERN_CONT " %s [%llx, %llx]", endx?"and":"==>", (u64)start, (u64)end);
+					printk(KERN_CONT " %s [%llx, %llx]", endx ? "and" : "==>", start, end);
 				} else {
 					printk(KERN_CONT "%s\n", endx?"":" ==> none");
 					continue;
@@ -495,8 +276,9 @@ static int __init early_fill_mp_bus_info(void)
 			}
 		}
 
-		update_res(info, start, end, IORESOURCE_MEM, 1);
-		update_range(range, start, end);
+		update_res(info, cap_resource(start), cap_resource(end),
+				 IORESOURCE_MEM, 1);
+		subtract_range(range, RANGE_NUM, start, end + 1);
 		printk(KERN_CONT "\n");
 	}
 
@@ -510,103 +292,98 @@ static int __init early_fill_mp_bus_info(void)
 		address = MSR_K8_TOP_MEM2;
 		rdmsrl(address, val);
 		end = (val & 0xffffff800000ULL);
-		printk(KERN_INFO "TOM2: %016lx aka %ldM\n", end, end>>20);
-		update_range(range, 1ULL<<32, end - 1);
+		printk(KERN_INFO "TOM2: %016llx aka %lldM\n", end, end>>20);
+		subtract_range(range, RANGE_NUM, 1ULL<<32, end);
 	}
 
 	/*
 	 * add left over mmio range to def node/link ?
 	 * that is tricky, just record range in from start_min to 4G
 	 */
-	for (j = 0; j < pci_root_num; j++) {
-		info = &pci_root_info[j];
-		if (info->node == def_node && info->link == def_link)
-			break;
-	}
-	if (j < pci_root_num) {
-		info = &pci_root_info[j];
-
+	info = find_pci_root_info(def_node, def_link);
+	if (info) {
 		for (i = 0; i < RANGE_NUM; i++) {
 			if (!range[i].end)
 				continue;
 
-			update_res(info, range[i].start, range[i].end,
+			update_res(info, cap_resource(range[i].start),
+				   cap_resource(range[i].end - 1),
 				   IORESOURCE_MEM, 1);
 		}
 	}
 
-	for (i = 0; i < pci_root_num; i++) {
-		int res_num;
+	list_for_each_entry(info, &pci_root_infos, list) {
 		int busnum;
+		struct pci_root_res *root_res;
 
-		info = &pci_root_info[i];
-		res_num = info->res_num;
-		busnum = info->bus_min;
-		printk(KERN_DEBUG "bus: [%02x,%02x] on node %x link %x\n",
-		       info->bus_min, info->bus_max, info->node, info->link);
-		for (j = 0; j < res_num; j++) {
-			res = &info->res[j];
-			printk(KERN_DEBUG "bus: %02x index %x %s: [%llx, %llx]\n",
-			       busnum, j,
-			       (res->flags & IORESOURCE_IO)?"io port":"mmio",
-			       res->start, res->end);
-		}
+		busnum = info->busn.start;
+		printk(KERN_DEBUG "bus: %pR on node %x link %x\n",
+		       &info->busn, info->node, info->link);
+		list_for_each_entry(root_res, &info->resources, list)
+			printk(KERN_DEBUG "bus: %02x %pR\n",
+				       busnum, &root_res->res);
 	}
 
 	return 0;
 }
 
-#else  /* !CONFIG_X86_64 */
-
-static int __init early_fill_mp_bus_info(void) { return 0; }
-
-#endif /* !CONFIG_X86_64 */
-
-/* common 32/64 bit code */
-
 #define ENABLE_CF8_EXT_CFG      (1ULL << 46)
 
-static void enable_pci_io_ecs(void *unused)
+static int amd_bus_cpu_online(unsigned int cpu)
 {
 	u64 reg;
+
 	rdmsrl(MSR_AMD64_NB_CFG, reg);
 	if (!(reg & ENABLE_CF8_EXT_CFG)) {
 		reg |= ENABLE_CF8_EXT_CFG;
 		wrmsrl(MSR_AMD64_NB_CFG, reg);
 	}
+	return 0;
 }
 
-static int __cpuinit amd_cpu_notify(struct notifier_block *self,
-				    unsigned long action, void *hcpu)
+static void __init pci_enable_pci_io_ecs(void)
 {
-	int cpu = (long)hcpu;
-	switch(action) {
-	case CPU_ONLINE:
-	case CPU_ONLINE_FROZEN:
-		smp_call_function_single(cpu, enable_pci_io_ecs, NULL, 0);
-		break;
-	default:
-		break;
-	}
-	return NOTIFY_OK;
-}
+#ifdef CONFIG_AMD_NB
+	unsigned int i, n;
 
-static struct notifier_block __cpuinitdata amd_cpu_notifier = {
-	.notifier_call	= amd_cpu_notify,
-};
+	for (n = i = 0; !n && amd_nb_bus_dev_ranges[i].dev_limit; ++i) {
+		u8 bus = amd_nb_bus_dev_ranges[i].bus;
+		u8 slot = amd_nb_bus_dev_ranges[i].dev_base;
+		u8 limit = amd_nb_bus_dev_ranges[i].dev_limit;
+
+		for (; slot < limit; ++slot) {
+			u32 val = read_pci_config(bus, slot, 3, 0);
+
+			if (!early_is_amd_nb(val))
+				continue;
+
+			val = read_pci_config(bus, slot, 3, 0x8c);
+			if (!(val & (ENABLE_CF8_EXT_CFG >> 32))) {
+				val |= ENABLE_CF8_EXT_CFG >> 32;
+				write_pci_config(bus, slot, 3, 0x8c, val);
+			}
+			++n;
+		}
+	}
+#endif
+}
 
 static int __init pci_io_ecs_init(void)
 {
-	int cpu;
+	int ret;
 
 	/* assume all cpus from fam10h have IO ECS */
-        if (boot_cpu_data.x86 < 0x10)
+	if (boot_cpu_data.x86 < 0x10)
 		return 0;
 
-	register_cpu_notifier(&amd_cpu_notifier);
-	for_each_online_cpu(cpu)
-		amd_cpu_notify(&amd_cpu_notifier, (unsigned long)CPU_ONLINE,
-			       (void *)(long)cpu);
+	/* Try the PCI method first. */
+	if (early_pci_allowed())
+		pci_enable_pci_io_ecs();
+
+	ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "pci/amd_bus:online",
+				amd_bus_cpu_online, NULL);
+	WARN_ON(ret < 0);
+
 	pci_probe |= PCI_HAS_IO_ECS;
 
 	return 0;
@@ -614,10 +391,11 @@ static int __init pci_io_ecs_init(void)
 
 static int __init amd_postcore_init(void)
 {
-	if (boot_cpu_data.x86_vendor != X86_VENDOR_AMD)
+	if (boot_cpu_data.x86_vendor != X86_VENDOR_AMD &&
+	    boot_cpu_data.x86_vendor != X86_VENDOR_HYGON)
 		return 0;
 
-	early_fill_mp_bus_info();
+	early_root_info_init();
 	pci_io_ecs_init();
 
 	return 0;

@@ -30,12 +30,24 @@
  *    Eric Anholt <anholt@FreeBSD.org>
  */
 
-#include "drmP.h"
-#include "drm.h"
-#include "r128_drm.h"
+#include <drm/drm_device.h>
+#include <drm/drm_print.h>
+#include <drm/drm_vblank.h>
+#include <drm/r128_drm.h>
+
 #include "r128_drv.h"
 
-irqreturn_t r128_driver_irq_handler(DRM_IRQ_ARGS)
+u32 r128_get_vblank_counter(struct drm_device *dev, unsigned int pipe)
+{
+	const drm_r128_private_t *dev_priv = dev->dev_private;
+
+	if (pipe != 0)
+		return 0;
+
+	return atomic_read(&dev_priv->vbl_received);
+}
+
+irqreturn_t r128_driver_irq_handler(int irq, void *arg)
 {
 	struct drm_device *dev = (struct drm_device *) arg;
 	drm_r128_private_t *dev_priv = (drm_r128_private_t *) dev->dev_private;
@@ -46,33 +58,41 @@ irqreturn_t r128_driver_irq_handler(DRM_IRQ_ARGS)
 	/* VBLANK interrupt */
 	if (status & R128_CRTC_VBLANK_INT) {
 		R128_WRITE(R128_GEN_INT_STATUS, R128_CRTC_VBLANK_INT_AK);
-		atomic_inc(&dev->vbl_received);
-		DRM_WAKEUP(&dev->vbl_queue);
-		drm_vbl_send_signals(dev);
+		atomic_inc(&dev_priv->vbl_received);
+		drm_handle_vblank(dev, 0);
 		return IRQ_HANDLED;
 	}
 	return IRQ_NONE;
 }
 
-int r128_driver_vblank_wait(struct drm_device * dev, unsigned int *sequence)
+int r128_enable_vblank(struct drm_device *dev, unsigned int pipe)
 {
-	unsigned int cur_vblank;
-	int ret = 0;
+	drm_r128_private_t *dev_priv = dev->dev_private;
 
-	/* Assume that the user has missed the current sequence number
-	 * by about a day rather than she wants to wait for years
-	 * using vertical blanks...
-	 */
-	DRM_WAIT_ON(ret, dev->vbl_queue, 3 * DRM_HZ,
-		    (((cur_vblank = atomic_read(&dev->vbl_received))
-		      - *sequence) <= (1 << 23)));
+	if (pipe != 0) {
+		DRM_ERROR("%s:  bad crtc %u\n", __func__, pipe);
+		return -EINVAL;
+	}
 
-	*sequence = cur_vblank;
-
-	return ret;
+	R128_WRITE(R128_GEN_INT_CNTL, R128_CRTC_VBLANK_INT_EN);
+	return 0;
 }
 
-void r128_driver_irq_preinstall(struct drm_device * dev)
+void r128_disable_vblank(struct drm_device *dev, unsigned int pipe)
+{
+	if (pipe != 0)
+		DRM_ERROR("%s:  bad crtc %u\n", __func__, pipe);
+
+	/*
+	 * FIXME: implement proper interrupt disable by using the vblank
+	 * counter register (if available)
+	 *
+	 * R128_WRITE(R128_GEN_INT_CNTL,
+	 *            R128_READ(R128_GEN_INT_CNTL) & ~R128_CRTC_VBLANK_INT_EN);
+	 */
+}
+
+void r128_driver_irq_preinstall(struct drm_device *dev)
 {
 	drm_r128_private_t *dev_priv = (drm_r128_private_t *) dev->dev_private;
 
@@ -82,15 +102,12 @@ void r128_driver_irq_preinstall(struct drm_device * dev)
 	R128_WRITE(R128_GEN_INT_STATUS, R128_CRTC_VBLANK_INT_AK);
 }
 
-void r128_driver_irq_postinstall(struct drm_device * dev)
+int r128_driver_irq_postinstall(struct drm_device *dev)
 {
-	drm_r128_private_t *dev_priv = (drm_r128_private_t *) dev->dev_private;
-
-	/* Turn on VBL interrupt */
-	R128_WRITE(R128_GEN_INT_CNTL, R128_CRTC_VBLANK_INT_EN);
+	return 0;
 }
 
-void r128_driver_irq_uninstall(struct drm_device * dev)
+void r128_driver_irq_uninstall(struct drm_device *dev)
 {
 	drm_r128_private_t *dev_priv = (drm_r128_private_t *) dev->dev_private;
 	if (!dev_priv)

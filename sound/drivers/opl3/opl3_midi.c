@@ -1,22 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) by Uros Bizjak <uros@kss-loka.si>
  *
  *  Midi synth routines for OPL2/OPL3/OPL4 FM
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #undef DEBUG_ALLOC
@@ -25,10 +11,8 @@
 #include "opl3_voice.h"
 #include <sound/asoundef.h>
 
-extern char snd_opl3_regmap[MAX_OPL2_VOICES][4];
-
-extern int use_internal_drums;
-
+static void snd_opl3_note_off_unsafe(void *p, int note, int vel,
+				     struct snd_midi_channel *chan);
 /*
  * The next table looks magical, but it certainly is not. Its values have
  * been calculated as table[i]=8*log(i/64)/log(2) with an obvious exception
@@ -39,7 +23,7 @@ extern int use_internal_drums;
  * it saves a lot of log() calculations. (Rob Hooft <hooft@chem.ruu.nl>)
  */
 
-static char opl3_volume_table[128] =
+static const char opl3_volume_table[128] =
 {
 	-63, -48, -40, -35, -32, -29, -27, -26,
 	-24, -23, -21, -20, -19, -18, -18, -17,
@@ -85,7 +69,7 @@ void snd_opl3_calc_volume(unsigned char *volbyte, int vel,
 /*
  * Converts the note frequency to block and fnum values for the FM chip
  */
-static short opl3_note_table[16] =
+static const short opl3_note_table[16] =
 {
 	305, 323,	/* for pitch bending, -2 semitones */
 	343, 363, 385, 408, 432, 458, 485, 514, 544, 577, 611, 647,
@@ -103,6 +87,8 @@ static void snd_opl3_calc_pitch(unsigned char *fnum, unsigned char *blocknum,
 		int pitchbend = chan->midi_pitchbend;
 		int segment;
 
+		if (pitchbend < -0x2000)
+			pitchbend = -0x2000;
 		if (pitchbend > 0x1FFF)
 			pitchbend = 0x1FFF;
 
@@ -125,10 +111,10 @@ static void debug_alloc(struct snd_opl3 *opl3, char *s, int voice) {
 	int i;
 	char *str = "x.24";
 
-	printk("time %.5i: %s [%.2i]: ", opl3->use_time, s, voice);
+	printk(KERN_DEBUG "time %.5i: %s [%.2i]: ", opl3->use_time, s, voice);
 	for (i = 0; i < opl3->max_voices; i++)
-		printk("%c", *(str + opl3->voices[i].state + 1));
-	printk("\n");
+		printk(KERN_CONT "%c", *(str + opl3->voices[i].state + 1));
+	printk(KERN_CONT "\n");
 }
 #endif
 
@@ -161,7 +147,7 @@ static int opl3_get_voice(struct snd_opl3 *opl3, int instr_4op,
 	struct best *bp;
 
 	for (i = 0; i < END; i++) {
-		best[i].time = (unsigned int)(-1); /* XXX MAX_?INT really */;
+		best[i].time = (unsigned int)(-1); /* XXX MAX_?INT really */
 		best[i].voice = -1;
 	}
 
@@ -218,7 +204,7 @@ static int opl3_get_voice(struct snd_opl3 *opl3, int instr_4op,
 	for (i = 0; i < END; i++) {
 		if (best[i].voice >= 0) {
 #ifdef DEBUG_ALLOC
-			printk("%s %iop allocation on voice %i\n",
+			printk(KERN_DEBUG "%s %iop allocation on voice %i\n",
 			       alloc_type[i], instr_4op ? 4 : 2,
 			       best[i].voice);
 #endif
@@ -234,30 +220,32 @@ static int opl3_get_voice(struct snd_opl3 *opl3, int instr_4op,
 /*
  * System timer interrupt function
  */
-void snd_opl3_timer_func(unsigned long data)
+void snd_opl3_timer_func(struct timer_list *t)
 {
 
-	struct snd_opl3 *opl3 = (struct snd_opl3 *)data;
+	struct snd_opl3 *opl3 = from_timer(opl3, t, tlist);
 	unsigned long flags;
 	int again = 0;
 	int i;
 
-	spin_lock_irqsave(&opl3->sys_timer_lock, flags);
+	spin_lock_irqsave(&opl3->voice_lock, flags);
 	for (i = 0; i < opl3->max_voices; i++) {
 		struct snd_opl3_voice *vp = &opl3->voices[i];
 		if (vp->state > 0 && vp->note_off_check) {
 			if (vp->note_off == jiffies)
-				snd_opl3_note_off(opl3, vp->note, 0, vp->chan);
+				snd_opl3_note_off_unsafe(opl3, vp->note, 0,
+							 vp->chan);
 			else
 				again++;
 		}
 	}
-	if (again) {
-		opl3->tlist.expires = jiffies + 1;	/* invoke again */
-		add_timer(&opl3->tlist);
-	} else {
+	spin_unlock_irqrestore(&opl3->voice_lock, flags);
+
+	spin_lock_irqsave(&opl3->sys_timer_lock, flags);
+	if (again)
+		mod_timer(&opl3->tlist, jiffies + 1);	/* invoke again */
+	else
 		opl3->sys_timer_status = 0;
-	}
 	spin_unlock_irqrestore(&opl3->sys_timer_lock, flags);
 }
 
@@ -269,8 +257,7 @@ static void snd_opl3_start_timer(struct snd_opl3 *opl3)
 	unsigned long flags;
 	spin_lock_irqsave(&opl3->sys_timer_lock, flags);
 	if (! opl3->sys_timer_status) {
-		opl3->tlist.expires = jiffies + 1;
-		add_timer(&opl3->tlist);
+		mod_timer(&opl3->tlist, jiffies + 1);
 		opl3->sys_timer_status = 1;
 	}
 	spin_unlock_irqrestore(&opl3->sys_timer_lock, flags);
@@ -279,7 +266,7 @@ static void snd_opl3_start_timer(struct snd_opl3 *opl3)
 /* ------------------------------ */
 
 
-static int snd_opl3_oss_map[MAX_OPL3_VOICES] = {
+static const int snd_opl3_oss_map[MAX_OPL3_VOICES] = {
 	0, 1, 2, 9, 10, 11, 6, 7, 8, 15, 16, 17, 3, 4 ,5, 12, 13, 14
 };
 
@@ -317,7 +304,7 @@ void snd_opl3_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 	opl3 = p;
 
 #ifdef DEBUG_MIDI
-	snd_printk("Note on, ch %i, inst %i, note %i, vel %i\n",
+	snd_printk(KERN_DEBUG "Note on, ch %i, inst %i, note %i, vel %i\n",
 		   chan->number, chan->midi_program, note, vel);
 #endif
 
@@ -367,12 +354,13 @@ void snd_opl3_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 			instr_4op = 1;
 			break;
 		}
+		fallthrough;
 	default:
 		spin_unlock_irqrestore(&opl3->voice_lock, flags);
 		return;
 	}
 #ifdef DEBUG_MIDI
-	snd_printk("  --> OPL%i instrument: %s\n",
+	snd_printk(KERN_DEBUG "  --> OPL%i instrument: %s\n",
 		   instr_4op ? 3 : 2, patch->name);
 #endif
 	/* in SYNTH mode, application takes care of voices */
@@ -382,6 +370,11 @@ void snd_opl3_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 	} else {
 		/* remap OSS voice */
 		voice = snd_opl3_oss_map[chan->number];		
+	}
+
+	if (voice < 0) {
+		spin_unlock_irqrestore(&opl3->voice_lock, flags);
+		return;
 	}
 
 	if (voice < MAX_OPL2_VOICES) {
@@ -431,7 +424,7 @@ void snd_opl3_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 	}
 
 #ifdef DEBUG_MIDI
-	snd_printk("  --> setting OPL3 connection: 0x%x\n",
+	snd_printk(KERN_DEBUG "  --> setting OPL3 connection: 0x%x\n",
 		   opl3->connection_reg);
 #endif
 	/*
@@ -450,7 +443,7 @@ void snd_opl3_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 		switch (connection) {
 		case 0x03:
 			snd_opl3_calc_volume(&vol_op[2], vel, chan);
-			/* fallthru */
+			fallthrough;
 		case 0x02:
 			snd_opl3_calc_volume(&vol_op[0], vel, chan);
 			break;
@@ -466,7 +459,7 @@ void snd_opl3_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 	/* Program the FM voice characteristics */
 	for (i = 0; i < (instr_4op ? 4 : 2); i++) {
 #ifdef DEBUG_MIDI
-		snd_printk("  --> programming operator %i\n", i);
+		snd_printk(KERN_DEBUG "  --> programming operator %i\n", i);
 #endif
 		op_offset = snd_opl3_regmap[voice_offset][i];
 
@@ -546,7 +539,7 @@ void snd_opl3_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 	blocknum |= OPL3_KEYON_BIT;
 
 #ifdef DEBUG_MIDI
-	snd_printk("  --> trigger voice %i\n", voice);
+	snd_printk(KERN_DEBUG "  --> trigger voice %i\n", voice);
 #endif
 	/* Set OPL3 KEYON_BLOCK register of requested voice */ 
 	opl3_reg = reg_side | (OPL3_REG_KEYON_BLOCK + voice_offset);
@@ -602,7 +595,7 @@ void snd_opl3_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 			prg = extra_prg - 1;
 		}
 #ifdef DEBUG_MIDI
-		snd_printk(" *** allocating extra program\n");
+		snd_printk(KERN_DEBUG " *** allocating extra program\n");
 #endif
 		goto __extra_prg;
 	}
@@ -617,7 +610,8 @@ static void snd_opl3_kill_voice(struct snd_opl3 *opl3, int voice)
 
 	struct snd_opl3_voice *vp, *vp2;
 
-	snd_assert(voice < MAX_OPL3_VOICES, return);
+	if (snd_BUG_ON(voice >= MAX_OPL3_VOICES))
+		return;
 
 	vp = &opl3->voices[voice];
 	if (voice < MAX_OPL2_VOICES) {
@@ -632,7 +626,7 @@ static void snd_opl3_kill_voice(struct snd_opl3 *opl3, int voice)
 
 	/* kill voice */
 #ifdef DEBUG_MIDI
-	snd_printk("  --> kill voice %i\n", voice);
+	snd_printk(KERN_DEBUG "  --> kill voice %i\n", voice);
 #endif
 	opl3_reg = reg_side | (OPL3_REG_KEYON_BLOCK + voice_offset);
 	/* clear Key ON bit */
@@ -657,28 +651,24 @@ static void snd_opl3_kill_voice(struct snd_opl3 *opl3, int voice)
 /*
  * Release a note in response to a midi note off.
  */
-void snd_opl3_note_off(void *p, int note, int vel, struct snd_midi_channel *chan)
+static void snd_opl3_note_off_unsafe(void *p, int note, int vel,
+				     struct snd_midi_channel *chan)
 {
   	struct snd_opl3 *opl3;
 
 	int voice;
 	struct snd_opl3_voice *vp;
 
-	unsigned long flags;
-
 	opl3 = p;
 
 #ifdef DEBUG_MIDI
-	snd_printk("Note off, ch %i, inst %i, note %i\n",
+	snd_printk(KERN_DEBUG "Note off, ch %i, inst %i, note %i\n",
 		   chan->number, chan->midi_program, note);
 #endif
-
-	spin_lock_irqsave(&opl3->voice_lock, flags);
 
 	if (opl3->synth_mode == SNDRV_OPL3_MODE_SEQ) {
 		if (chan->drum_channel && use_internal_drums) {
 			snd_opl3_drum_switch(opl3, note, vel, 0, chan);
-			spin_unlock_irqrestore(&opl3->voice_lock, flags);
 			return;
 		}
 		/* this loop will hopefully kill all extra voices, because
@@ -696,6 +686,16 @@ void snd_opl3_note_off(void *p, int note, int vel, struct snd_midi_channel *chan
 			snd_opl3_kill_voice(opl3, voice);
 		}
 	}
+}
+
+void snd_opl3_note_off(void *p, int note, int vel,
+		       struct snd_midi_channel *chan)
+{
+	struct snd_opl3 *opl3 = p;
+	unsigned long flags;
+
+	spin_lock_irqsave(&opl3->voice_lock, flags);
+	snd_opl3_note_off_unsafe(p, note, vel, chan);
 	spin_unlock_irqrestore(&opl3->voice_lock, flags);
 }
 
@@ -704,11 +704,8 @@ void snd_opl3_note_off(void *p, int note, int vel, struct snd_midi_channel *chan
  */
 void snd_opl3_key_press(void *p, int note, int vel, struct snd_midi_channel *chan)
 {
-  	struct snd_opl3 *opl3;
-
-	opl3 = p;
 #ifdef DEBUG_MIDI
-	snd_printk("Key pressure, ch#: %i, inst#: %i\n",
+	snd_printk(KERN_DEBUG "Key pressure, ch#: %i, inst#: %i\n",
 		   chan->number, chan->midi_program);
 #endif
 }
@@ -718,11 +715,8 @@ void snd_opl3_key_press(void *p, int note, int vel, struct snd_midi_channel *cha
  */
 void snd_opl3_terminate_note(void *p, int note, struct snd_midi_channel *chan)
 {
-  	struct snd_opl3 *opl3;
-
-	opl3 = p;
 #ifdef DEBUG_MIDI
-	snd_printk("Terminate note, ch#: %i, inst#: %i\n",
+	snd_printk(KERN_DEBUG "Terminate note, ch#: %i, inst#: %i\n",
 		   chan->number, chan->midi_program);
 #endif
 }
@@ -737,7 +731,8 @@ static void snd_opl3_update_pitch(struct snd_opl3 *opl3, int voice)
 
 	struct snd_opl3_voice *vp;
 
-	snd_assert(voice < MAX_OPL3_VOICES, return);
+	if (snd_BUG_ON(voice >= MAX_OPL3_VOICES))
+		return;
 
 	vp = &opl3->voices[voice];
 	if (vp->chan == NULL)
@@ -810,7 +805,7 @@ void snd_opl3_control(void *p, int type, struct snd_midi_channel *chan)
 
 	opl3 = p;
 #ifdef DEBUG_MIDI
-	snd_printk("Controller, TYPE = %i, ch#: %i, inst#: %i\n",
+	snd_printk(KERN_DEBUG "Controller, TYPE = %i, ch#: %i, inst#: %i\n",
 		   type, chan->number, chan->midi_program);
 #endif
 
@@ -843,11 +838,8 @@ void snd_opl3_control(void *p, int type, struct snd_midi_channel *chan)
 void snd_opl3_nrpn(void *p, struct snd_midi_channel *chan,
 		   struct snd_midi_channel_set *chset)
 {
-  	struct snd_opl3 *opl3;
-
-	opl3 = p;
 #ifdef DEBUG_MIDI
-	snd_printk("NRPN, ch#: %i, inst#: %i\n",
+	snd_printk(KERN_DEBUG "NRPN, ch#: %i, inst#: %i\n",
 		   chan->number, chan->midi_program);
 #endif
 }
@@ -858,10 +850,7 @@ void snd_opl3_nrpn(void *p, struct snd_midi_channel *chan,
 void snd_opl3_sysex(void *p, unsigned char *buf, int len,
 		    int parsed, struct snd_midi_channel_set *chset)
 {
-  	struct snd_opl3 *opl3;
-
-	opl3 = p;
 #ifdef DEBUG_MIDI
-	snd_printk("SYSEX\n");
+	snd_printk(KERN_DEBUG "SYSEX\n");
 #endif
 }

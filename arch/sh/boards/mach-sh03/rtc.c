@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/sh/boards/sh03/rtc.c -- CTP/PCI-SH03 on-chip RTC support
  *
@@ -12,8 +13,9 @@
 #include <linux/bcd.h>
 #include <linux/rtc.h>
 #include <linux/spinlock.h>
-#include <asm/io.h>
-#include <asm/rtc.h>
+#include <linux/io.h>
+#include <linux/rtc.h>
+#include <linux/platform_device.h>
 
 #define RTC_BASE	0xb0000000
 #define RTC_SEC1	(RTC_BASE + 0)
@@ -35,24 +37,24 @@
 #define RTC_BUSY	1
 #define RTC_STOP	2
 
-extern spinlock_t rtc_lock;
+static DEFINE_SPINLOCK(sh03_rtc_lock);
 
-unsigned long get_cmos_time(void)
+static int sh03_rtc_gettimeofday(struct device *dev, struct rtc_time *tm)
 {
 	unsigned int year, mon, day, hour, min, sec;
 
-	spin_lock(&rtc_lock);
+	spin_lock(&sh03_rtc_lock);
  again:
 	do {
-		sec  = (ctrl_inb(RTC_SEC1) & 0xf) + (ctrl_inb(RTC_SEC10) & 0x7) * 10;
-		min  = (ctrl_inb(RTC_MIN1) & 0xf) + (ctrl_inb(RTC_MIN10) & 0xf) * 10;
-		hour = (ctrl_inb(RTC_HOU1) & 0xf) + (ctrl_inb(RTC_HOU10) & 0xf) * 10;
-		day  = (ctrl_inb(RTC_DAY1) & 0xf) + (ctrl_inb(RTC_DAY10) & 0xf) * 10;
-		mon  = (ctrl_inb(RTC_MON1) & 0xf) + (ctrl_inb(RTC_MON10) & 0xf) * 10;
-		year = (ctrl_inb(RTC_YEA1) & 0xf) + (ctrl_inb(RTC_YEA10) & 0xf) * 10
-		     + (ctrl_inb(RTC_YEA100 ) & 0xf) * 100
-		     + (ctrl_inb(RTC_YEA1000) & 0xf) * 1000;
-	} while (sec != (ctrl_inb(RTC_SEC1) & 0xf) + (ctrl_inb(RTC_SEC10) & 0x7) * 10);
+		sec  = (__raw_readb(RTC_SEC1) & 0xf) + (__raw_readb(RTC_SEC10) & 0x7) * 10;
+		min  = (__raw_readb(RTC_MIN1) & 0xf) + (__raw_readb(RTC_MIN10) & 0xf) * 10;
+		hour = (__raw_readb(RTC_HOU1) & 0xf) + (__raw_readb(RTC_HOU10) & 0xf) * 10;
+		day  = (__raw_readb(RTC_DAY1) & 0xf) + (__raw_readb(RTC_DAY10) & 0xf) * 10;
+		mon  = (__raw_readb(RTC_MON1) & 0xf) + (__raw_readb(RTC_MON10) & 0xf) * 10;
+		year = (__raw_readb(RTC_YEA1) & 0xf) + (__raw_readb(RTC_YEA10) & 0xf) * 10
+		     + (__raw_readb(RTC_YEA100 ) & 0xf) * 100
+		     + (__raw_readb(RTC_YEA1000) & 0xf) * 1000;
+	} while (sec != (__raw_readb(RTC_SEC1) & 0xf) + (__raw_readb(RTC_SEC10) & 0x7) * 10);
 	if (year == 0 || mon < 1 || mon > 12 || day > 31 || day < 1 ||
 	    hour > 23 || min > 59 || sec > 59) {
 		printk(KERN_ERR
@@ -60,73 +62,83 @@ unsigned long get_cmos_time(void)
 		printk("year=%d, mon=%d, day=%d, hour=%d, min=%d, sec=%d\n",
 		       year, mon, day, hour, min, sec);
 
-		ctrl_outb(0, RTC_SEC1); ctrl_outb(0, RTC_SEC10);
-		ctrl_outb(0, RTC_MIN1); ctrl_outb(0, RTC_MIN10);
-		ctrl_outb(0, RTC_HOU1); ctrl_outb(0, RTC_HOU10);
-		ctrl_outb(6, RTC_WEE1);
-		ctrl_outb(1, RTC_DAY1); ctrl_outb(0, RTC_DAY10);
-		ctrl_outb(1, RTC_MON1); ctrl_outb(0, RTC_MON10);
-		ctrl_outb(0, RTC_YEA1); ctrl_outb(0, RTC_YEA10);
-		ctrl_outb(0, RTC_YEA100);
-		ctrl_outb(2, RTC_YEA1000);
-		ctrl_outb(0, RTC_CTL);
+		__raw_writeb(0, RTC_SEC1); __raw_writeb(0, RTC_SEC10);
+		__raw_writeb(0, RTC_MIN1); __raw_writeb(0, RTC_MIN10);
+		__raw_writeb(0, RTC_HOU1); __raw_writeb(0, RTC_HOU10);
+		__raw_writeb(6, RTC_WEE1);
+		__raw_writeb(1, RTC_DAY1); __raw_writeb(0, RTC_DAY10);
+		__raw_writeb(1, RTC_MON1); __raw_writeb(0, RTC_MON10);
+		__raw_writeb(0, RTC_YEA1); __raw_writeb(0, RTC_YEA10);
+		__raw_writeb(0, RTC_YEA100);
+		__raw_writeb(2, RTC_YEA1000);
+		__raw_writeb(0, RTC_CTL);
 		goto again;
 	}
 
-	spin_unlock(&rtc_lock);
-	return mktime(year, mon, day, hour, min, sec);
+	spin_unlock(&sh03_rtc_lock);
+
+	tm->tm_sec  = sec;
+	tm->tm_min  = min;
+	tm->tm_hour = hour;
+	tm->tm_mday = day;
+	tm->tm_mon  = mon;
+	tm->tm_year = year - 1900;
+
+	return 0;
 }
 
-void sh03_rtc_gettimeofday(struct timespec *tv)
-{
-
-	tv->tv_sec = get_cmos_time();
-	tv->tv_nsec = 0;
-}
-
-static int set_rtc_mmss(unsigned long nowtime)
+static int set_rtc_mmss(struct rtc_time *tm)
 {
 	int retval = 0;
 	int real_seconds, real_minutes, cmos_minutes;
 	int i;
 
 	/* gets recalled with irq locally disabled */
-	spin_lock(&rtc_lock);
+	spin_lock(&sh03_rtc_lock);
 	for (i = 0 ; i < 1000000 ; i++)	/* may take up to 1 second... */
-		if (!(ctrl_inb(RTC_CTL) & RTC_BUSY))
+		if (!(__raw_readb(RTC_CTL) & RTC_BUSY))
 			break;
-	cmos_minutes = (ctrl_inb(RTC_MIN1) & 0xf) + (ctrl_inb(RTC_MIN10) & 0xf) * 10;
-	real_seconds = nowtime % 60;
-	real_minutes = nowtime / 60;
+	cmos_minutes = (__raw_readb(RTC_MIN1) & 0xf) + (__raw_readb(RTC_MIN10) & 0xf) * 10;
+	real_seconds = tm->tm_sec;
+	real_minutes = tm->tm_min;
 	if (((abs(real_minutes - cmos_minutes) + 15)/30) & 1)
 		real_minutes += 30;		/* correct for half hour time zone */
 	real_minutes %= 60;
 
 	if (abs(real_minutes - cmos_minutes) < 30) {
-		ctrl_outb(real_seconds % 10, RTC_SEC1);
-		ctrl_outb(real_seconds / 10, RTC_SEC10);
-		ctrl_outb(real_minutes % 10, RTC_MIN1);
-		ctrl_outb(real_minutes / 10, RTC_MIN10);
+		__raw_writeb(real_seconds % 10, RTC_SEC1);
+		__raw_writeb(real_seconds / 10, RTC_SEC10);
+		__raw_writeb(real_minutes % 10, RTC_MIN1);
+		__raw_writeb(real_minutes / 10, RTC_MIN10);
 	} else {
-		printk(KERN_WARNING
+		printk_once(KERN_NOTICE
 		       "set_rtc_mmss: can't update from %d to %d\n",
 		       cmos_minutes, real_minutes);
-		retval = -1;
+		retval = -EINVAL;
 	}
-	spin_unlock(&rtc_lock);
+	spin_unlock(&sh03_rtc_lock);
 
 	return retval;
 }
 
-int sh03_rtc_settimeofday(const time_t secs)
+int sh03_rtc_settimeofday(struct device *dev, struct rtc_time *tm)
 {
-	unsigned long nowtime = secs;
-
-	return set_rtc_mmss(nowtime);
+	return set_rtc_mmss(tm);
 }
 
-void sh03_time_init(void)
+static const struct rtc_class_ops rtc_generic_ops = {
+	.read_time = sh03_rtc_gettimeofday,
+	.set_time = sh03_rtc_settimeofday,
+};
+
+static int __init sh03_time_init(void)
 {
-	rtc_sh_get_time = sh03_rtc_gettimeofday;
-	rtc_sh_set_time = sh03_rtc_settimeofday;
+	struct platform_device *pdev;
+
+	pdev = platform_device_register_data(NULL, "rtc-generic", -1,
+					     &rtc_generic_ops,
+					     sizeof(rtc_generic_ops));
+
+	return PTR_ERR_OR_ZERO(pdev);
 }
+arch_initcall(sh03_time_init);

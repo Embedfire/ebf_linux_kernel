@@ -1,33 +1,34 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * linux/arch/arm/plat-omap/sram-fn.S
  *
  * Functions that need to be run in internal SRAM
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/linkage.h>
+
 #include <asm/assembler.h>
-#include <mach/io.h>
+
 #include <mach/hardware.h>
+
+#include "iomap.h"
 
 	.text
 
 /*
  * Reprograms ULPD and CKCTL.
  */
+	.align	3
 ENTRY(omap1_sram_reprogram_clock)
 	stmfd	sp!, {r0 - r12, lr}		@ save registers on stack
 
-	mov	r2, #IO_ADDRESS(DPLL_CTL) & 0xff000000
-	orr	r2, r2, #IO_ADDRESS(DPLL_CTL) & 0x00ff0000
-	orr	r2, r2, #IO_ADDRESS(DPLL_CTL) & 0x0000ff00
+	mov	r2, #OMAP1_IO_ADDRESS(DPLL_CTL) & 0xff000000
+	orr	r2, r2, #OMAP1_IO_ADDRESS(DPLL_CTL) & 0x00ff0000
+	orr	r2, r2, #OMAP1_IO_ADDRESS(DPLL_CTL) & 0x0000ff00
 
-	mov	r3, #IO_ADDRESS(ARM_CKCTL) & 0xff000000
-	orr	r3, r3, #IO_ADDRESS(ARM_CKCTL) & 0x00ff0000
-	orr	r3, r3, #IO_ADDRESS(ARM_CKCTL) & 0x0000ff00
+	mov	r3, #OMAP1_IO_ADDRESS(ARM_CKCTL) & 0xff000000
+	orr	r3, r3, #OMAP1_IO_ADDRESS(ARM_CKCTL) & 0x00ff0000
+	orr	r3, r3, #OMAP1_IO_ADDRESS(ARM_CKCTL) & 0x0000ff00
 
 	tst	r0, #1 << 4			@ want lock mode?
 	beq	newck				@ nope

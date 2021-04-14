@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for ALSA Echoaudio soundcard drivers
 # Copyright (c) 2003 by Giuliano Pochini <pochini@shiny.it>
@@ -15,6 +16,8 @@ snd-echo3g-objs := echo3g.o
 snd-indigo-objs := indigo.o
 snd-indigoio-objs := indigoio.o
 snd-indigodj-objs := indigodj.o
+snd-indigoiox-objs := indigoiox.o
+snd-indigodjx-objs := indigodjx.o
 
 obj-$(CONFIG_SND_DARLA20) += snd-darla20.o
 obj-$(CONFIG_SND_GINA20) += snd-gina20.o
@@ -28,3 +31,5 @@ obj-$(CONFIG_SND_ECHO3G) += snd-echo3g.o
 obj-$(CONFIG_SND_INDIGO) += snd-indigo.o
 obj-$(CONFIG_SND_INDIGOIO) += snd-indigoio.o
 obj-$(CONFIG_SND_INDIGODJ) += snd-indigodj.o
+obj-$(CONFIG_SND_INDIGOIOX) += snd-indigoiox.o
+obj-$(CONFIG_SND_INDIGODJX) += snd-indigodjx.o

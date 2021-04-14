@@ -1,33 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2005 Simtec Electronics
  *	Ben Dooks <ben@simtec.co.uk>
  *
  * Simtec Generic I2C Controller
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
+#include <linux/io.h>
 
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
-
-#include <asm/io.h>
 
 struct simtec_i2c_data {
 	struct resource		*ioarea;
@@ -78,10 +65,8 @@ static int simtec_i2c_probe(struct platform_device *dev)
 	int ret;
 
 	pd = kzalloc(sizeof(struct simtec_i2c_data), GFP_KERNEL);
-	if (pd == NULL) {
-		dev_err(&dev->dev, "cannot allocate private data\n");
+	if (pd == NULL)
 		return -ENOMEM;
-	}
 
 	platform_set_drvdata(dev, pd);
 
@@ -92,7 +77,7 @@ static int simtec_i2c_probe(struct platform_device *dev)
 		goto err;
 	}
 
-	size = (res->end-res->start)+1;
+	size = resource_size(res);
 
 	pd->ioarea = request_mem_region(res->start, size, dev->name);
 	if (pd->ioarea == NULL) {
@@ -134,8 +119,7 @@ static int simtec_i2c_probe(struct platform_device *dev)
 	iounmap(pd->reg);
 
  err_res:
-	release_resource(pd->ioarea);
-	kfree(pd->ioarea);
+	release_mem_region(pd->ioarea->start, size);
 
  err:
 	kfree(pd);
@@ -149,41 +133,25 @@ static int simtec_i2c_remove(struct platform_device *dev)
 	i2c_del_adapter(&pd->adap);
 
 	iounmap(pd->reg);
-	release_resource(pd->ioarea);
-	kfree(pd->ioarea);
+	release_mem_region(pd->ioarea->start, resource_size(pd->ioarea));
 	kfree(pd);
 
 	return 0;
 }
 
-
 /* device driver */
-
-/* work with hotplug and coldplug */
-MODULE_ALIAS("platform:simtec-i2c");
 
 static struct platform_driver simtec_i2c_driver = {
 	.driver		= {
 		.name		= "simtec-i2c",
-		.owner		= THIS_MODULE,
 	},
 	.probe		= simtec_i2c_probe,
 	.remove		= simtec_i2c_remove,
 };
 
-static int __init i2c_adap_simtec_init(void)
-{
-	return platform_driver_register(&simtec_i2c_driver);
-}
-
-static void __exit i2c_adap_simtec_exit(void)
-{
-	platform_driver_unregister(&simtec_i2c_driver);
-}
-
-module_init(i2c_adap_simtec_init);
-module_exit(i2c_adap_simtec_exit);
+module_platform_driver(simtec_i2c_driver);
 
 MODULE_DESCRIPTION("Simtec Generic I2C Bus driver");
 MODULE_AUTHOR("Ben Dooks <ben@simtec.co.uk>");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:simtec-i2c");

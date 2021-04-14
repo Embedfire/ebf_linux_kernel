@@ -1,82 +1,49 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 2007 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License v2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
+ * Copyright (C) 2014 Fujitsu.  All rights reserved.
  */
 
-#ifndef __BTRFS_ASYNC_THREAD_
-#define __BTRFS_ASYNC_THREAD_
+#ifndef BTRFS_ASYNC_THREAD_H
+#define BTRFS_ASYNC_THREAD_H
 
-struct btrfs_worker_thread;
+#include <linux/workqueue.h>
 
-/*
- * This is similar to a workqueue, but it is meant to spread the operations
- * across all available cpus instead of just the CPU that was used to
- * queue the work.  There is also some batching introduced to try and
- * cut down on context switches.
- *
- * By default threads are added on demand up to 2 * the number of cpus.
- * Changing struct btrfs_workers->max_workers is one way to prevent
- * demand creation of kthreads.
- *
- * the basic model of these worker threads is to embed a btrfs_work
- * structure in your own data struct, and use container_of in a
- * work function to get back to your data struct.
- */
+struct btrfs_fs_info;
+struct btrfs_workqueue;
+/* Internal use only */
+struct __btrfs_workqueue;
+struct btrfs_work;
+typedef void (*btrfs_func_t)(struct btrfs_work *arg);
+typedef void (*btrfs_work_func_t)(struct work_struct *arg);
+
 struct btrfs_work {
-	/*
-	 * only func should be set to the function you want called
-	 * your work struct is passed as the only arg
-	 */
-	void (*func)(struct btrfs_work *work);
+	btrfs_func_t func;
+	btrfs_func_t ordered_func;
+	btrfs_func_t ordered_free;
 
-	/*
-	 * flags should be set to zero.  It is used to make sure the
-	 * struct is only inserted once into the list.
-	 */
+	/* Don't touch things below */
+	struct work_struct normal_work;
+	struct list_head ordered_list;
+	struct __btrfs_workqueue *wq;
 	unsigned long flags;
-
-	/* don't touch these */
-	struct btrfs_worker_thread *worker;
-	struct list_head list;
 };
 
-struct btrfs_workers {
-	/* current number of running workers */
-	int num_workers;
+struct btrfs_workqueue *btrfs_alloc_workqueue(struct btrfs_fs_info *fs_info,
+					      const char *name,
+					      unsigned int flags,
+					      int limit_active,
+					      int thresh);
+void btrfs_init_work(struct btrfs_work *work, btrfs_func_t func,
+		     btrfs_func_t ordered_func, btrfs_func_t ordered_free);
+void btrfs_queue_work(struct btrfs_workqueue *wq,
+		      struct btrfs_work *work);
+void btrfs_destroy_workqueue(struct btrfs_workqueue *wq);
+void btrfs_workqueue_set_max(struct btrfs_workqueue *wq, int max);
+void btrfs_set_work_high_priority(struct btrfs_work *work);
+struct btrfs_fs_info * __pure btrfs_work_owner(const struct btrfs_work *work);
+struct btrfs_fs_info * __pure btrfs_workqueue_owner(const struct __btrfs_workqueue *wq);
+bool btrfs_workqueue_normal_congested(const struct btrfs_workqueue *wq);
+void btrfs_flush_workqueue(struct btrfs_workqueue *wq);
 
-	/* max number of workers allowed.  changed by btrfs_start_workers */
-	int max_workers;
-
-	/* once a worker has this many requests or fewer, it is idle */
-	int idle_thresh;
-
-	/* list with all the work threads */
-	struct list_head worker_list;
-	struct list_head idle_list;
-
-	/* lock for finding the next worker thread to queue on */
-	spinlock_t lock;
-
-	/* extra name for this worker */
-	char *name;
-};
-
-int btrfs_queue_worker(struct btrfs_workers *workers, struct btrfs_work *work);
-int btrfs_start_workers(struct btrfs_workers *workers, int num_workers);
-int btrfs_stop_workers(struct btrfs_workers *workers);
-void btrfs_init_workers(struct btrfs_workers *workers, char *name, int max);
-int btrfs_requeue_work(struct btrfs_work *work);
 #endif

@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Audio support for Philips UDA1380
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Copyright (c) 2005 Giorgio Padrin <giorgio@mandarinlogiq.org>
  */
@@ -71,19 +68,5 @@
 #define R22_SEL_MIC	0x0004
 #define R22_SKIP_DCFIL	0x0002
 #define R23_AGC_EN	0x0001
-
-struct uda1380_setup_data {
-	unsigned short i2c_address;
-	int            dac_clk;
-#define UDA1380_DAC_CLK_SYSCLK 0
-#define UDA1380_DAC_CLK_WSPLL  1
-};
-
-#define UDA1380_DAI_DUPLEX	0 /* playback and capture on single DAI */
-#define UDA1380_DAI_PLAYBACK	1 /* playback DAI */
-#define UDA1380_DAI_CAPTURE	2 /* capture DAI */
-
-extern struct snd_soc_dai uda1380_dai[3];
-extern struct snd_soc_codec_device soc_codec_dev_uda1380;
 
 #endif /* _UDA1380_H */

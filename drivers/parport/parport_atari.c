@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Low-level parallel port routines for the Atari builtin port
  *
  * Author: Andreas Schwab <schwab@issan.informatik.uni-dortmund.de>
@@ -18,7 +19,7 @@
 #include <asm/irq.h>
 #include <asm/atariints.h>
 
-static struct parport *this_port = NULL;
+static struct parport *this_port;
 
 static unsigned char
 parport_atari_read_data(struct parport *p)
@@ -84,7 +85,7 @@ parport_atari_frob_control(struct parport *p, unsigned char mask,
 static unsigned char
 parport_atari_read_status(struct parport *p)
 {
-	return ((mfp.par_dt_reg & 1 ? 0 : PARPORT_STATUS_BUSY) |
+	return ((st_mfp.par_dt_reg & 1 ? 0 : PARPORT_STATUS_BUSY) |
 		PARPORT_STATUS_SELECT | PARPORT_STATUS_ERROR);
 }
 
@@ -130,15 +131,6 @@ parport_atari_data_forward(struct parport *p)
 static void
 parport_atari_data_reverse(struct parport *p)
 {
-#if 0 /* too dangerous, can kill sound chip */
-	unsigned long flags;
-
-	local_irq_save(flags);
-	/* Soundchip port B as input. */
-	sound_ym.rd_data_reg_sel = 7;
-	sound_ym.wd_data = sound_ym.rd_data_reg_sel & ~0x40;
-	local_irq_restore(flags);
-#endif
 }
 
 static struct parport_operations parport_atari_ops = {
@@ -193,22 +185,22 @@ static int __init parport_atari_init(void)
 		sound_ym.wd_data = sound_ym.rd_data_reg_sel | (1 << 5);
 		local_irq_restore(flags);
 		/* MFP port I0 as input. */
-		mfp.data_dir &= ~1;
+		st_mfp.data_dir &= ~1;
 		/* MFP port I0 interrupt on high->low edge. */
-		mfp.active_edge &= ~1;
+		st_mfp.active_edge &= ~1;
 		p = parport_register_port((unsigned long)&sound_ym.wd_data,
 					  IRQ_MFP_BUSY, PARPORT_DMA_NONE,
 					  &parport_atari_ops);
 		if (!p)
 			return -ENODEV;
-		if (request_irq(IRQ_MFP_BUSY, parport_irq_handler,
-				IRQ_TYPE_SLOW, p->name, p)) {
+		if (request_irq(IRQ_MFP_BUSY, parport_irq_handler, 0, p->name,
+				p)) {
 			parport_put_port (p);
 			return -ENODEV;
 		}
 
 		this_port = p;
-		printk(KERN_INFO "%s: Atari built-in port using irq\n", p->name);
+		pr_info("%s: Atari built-in port using irq\n", p->name);
 		parport_announce_port (p);
 
 		return 0;

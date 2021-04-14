@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * This file contains various system calls that have different calling
  * conventions on different platforms.
@@ -10,6 +11,8 @@
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/sched.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/task_stack.h>
 #include <linux/shm.h>
 #include <linux/file.h>		/* doh, must come after sched.h... */
 #include <linux/smp.h>
@@ -18,16 +21,16 @@
 #include <linux/hugetlb.h>
 
 #include <asm/shmparam.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 unsigned long
 arch_get_unmapped_area (struct file *filp, unsigned long addr, unsigned long len,
 			unsigned long pgoff, unsigned long flags)
 {
 	long map_shared = (flags & MAP_SHARED);
-	unsigned long start_addr, align_mask = PAGE_SIZE - 1;
+	unsigned long align_mask = 0;
 	struct mm_struct *mm = current->mm;
-	struct vm_area_struct *vma;
+	struct vm_unmapped_area_info info;
 
 	if (len > RGN_MAP_LIMIT)
 		return -ENOMEM;
@@ -44,7 +47,7 @@ arch_get_unmapped_area (struct file *filp, unsigned long addr, unsigned long len
 		addr = 0;
 #endif
 	if (!addr)
-		addr = mm->free_area_cache;
+		addr = TASK_UNMAPPED_BASE;
 
 	if (map_shared && (TASK_SIZE > 0xfffffffful))
 		/*
@@ -53,28 +56,15 @@ arch_get_unmapped_area (struct file *filp, unsigned long addr, unsigned long len
 		 * tasks, we prefer to avoid exhausting the address space too quickly by
 		 * limiting alignment to a single page.
 		 */
-		align_mask = SHMLBA - 1;
+		align_mask = PAGE_MASK & (SHMLBA - 1);
 
-  full_search:
-	start_addr = addr = (addr + align_mask) & ~align_mask;
-
-	for (vma = find_vma(mm, addr); ; vma = vma->vm_next) {
-		/* At this point:  (!vma || addr < vma->vm_end). */
-		if (TASK_SIZE - len < addr || RGN_MAP_LIMIT - len < REGION_OFFSET(addr)) {
-			if (start_addr != TASK_UNMAPPED_BASE) {
-				/* Start a new search --- just in case we missed some holes.  */
-				addr = TASK_UNMAPPED_BASE;
-				goto full_search;
-			}
-			return -ENOMEM;
-		}
-		if (!vma || addr + len <= vma->vm_start) {
-			/* Remember the address where we stopped this search:  */
-			mm->free_area_cache = addr + len;
-			return addr;
-		}
-		addr = (vma->vm_end + align_mask) & ~align_mask;
-	}
+	info.flags = 0;
+	info.length = len;
+	info.low_limit = addr;
+	info.high_limit = TASK_SIZE;
+	info.align_mask = align_mask;
+	info.align_offset = 0;
+	return vm_unmapped_area(&info);
 }
 
 asmlinkage long
@@ -100,51 +90,7 @@ sys_getpagesize (void)
 asmlinkage unsigned long
 ia64_brk (unsigned long brk)
 {
-	unsigned long rlim, retval, newbrk, oldbrk;
-	struct mm_struct *mm = current->mm;
-
-	/*
-	 * Most of this replicates the code in sys_brk() except for an additional safety
-	 * check and the clearing of r8.  However, we can't call sys_brk() because we need
-	 * to acquire the mmap_sem before we can do the test...
-	 */
-	down_write(&mm->mmap_sem);
-
-	if (brk < mm->end_code)
-		goto out;
-	newbrk = PAGE_ALIGN(brk);
-	oldbrk = PAGE_ALIGN(mm->brk);
-	if (oldbrk == newbrk)
-		goto set_brk;
-
-	/* Always allow shrinking brk. */
-	if (brk <= mm->brk) {
-		if (!do_munmap(mm, newbrk, oldbrk-newbrk))
-			goto set_brk;
-		goto out;
-	}
-
-	/* Check against unimplemented/unmapped addresses: */
-	if ((newbrk - oldbrk) > RGN_MAP_LIMIT || REGION_OFFSET(newbrk) > RGN_MAP_LIMIT)
-		goto out;
-
-	/* Check against rlimit.. */
-	rlim = current->signal->rlim[RLIMIT_DATA].rlim_cur;
-	if (rlim < RLIM_INFINITY && brk - mm->start_data > rlim)
-		goto out;
-
-	/* Check against existing mmap mappings. */
-	if (find_vma_intersection(mm, oldbrk, newbrk+PAGE_SIZE))
-		goto out;
-
-	/* Ok, looks good - let it rip. */
-	if (do_brk(oldbrk, newbrk-oldbrk) != oldbrk)
-		goto out;
-set_brk:
-	mm->brk = brk;
-out:
-	retval = mm->brk;
-	up_write(&mm->mmap_sem);
+	unsigned long retval = sys_brk(brk);
 	force_successful_syscall_return();
 	return retval;
 }
@@ -154,7 +100,7 @@ out:
  * and r9) as this is faster than doing a copy_to_user().
  */
 asmlinkage long
-sys_pipe (void)
+sys_ia64_pipe (void)
 {
 	struct pt_regs *regs = task_pt_regs(current);
 	int fd[2];
@@ -185,39 +131,6 @@ int ia64_mmap_check(unsigned long addr, unsigned long len,
 	return 0;
 }
 
-static inline unsigned long
-do_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, unsigned long pgoff)
-{
-	struct file *file = NULL;
-
-	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-	if (!(flags & MAP_ANONYMOUS)) {
-		file = fget(fd);
-		if (!file)
-			return -EBADF;
-
-		if (!file->f_op || !file->f_op->mmap) {
-			addr = -ENODEV;
-			goto out;
-		}
-	}
-
-	/* Careful about overflows.. */
-	len = PAGE_ALIGN(len);
-	if (!len || len > TASK_SIZE) {
-		addr = -EINVAL;
-		goto out;
-	}
-
-	down_write(&current->mm->mmap_sem);
-	addr = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-	up_write(&current->mm->mmap_sem);
-
-out:	if (file)
-		fput(file);
-	return addr;
-}
-
 /*
  * mmap2() is like mmap() except that the offset is expressed in units
  * of PAGE_SIZE (instead of bytes).  This allows to mmap2() (pieces
@@ -226,7 +139,7 @@ out:	if (file)
 asmlinkage unsigned long
 sys_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, long pgoff)
 {
-	addr = do_mmap2(addr, len, prot, flags, fd, pgoff);
+	addr = ksys_mmap_pgoff(addr, len, prot, flags, fd, pgoff);
 	if (!IS_ERR((void *) addr))
 		force_successful_syscall_return();
 	return addr;
@@ -238,7 +151,7 @@ sys_mmap (unsigned long addr, unsigned long len, int prot, int flags, int fd, lo
 	if (offset_in_page(off) != 0)
 		return -EINVAL;
 
-	addr = do_mmap2(addr, len, prot, flags, fd, off >> PAGE_SHIFT);
+	addr = ksys_mmap_pgoff(addr, len, prot, flags, fd, off >> PAGE_SHIFT);
 	if (!IS_ERR((void *) addr))
 		force_successful_syscall_return();
 	return addr;
@@ -248,39 +161,8 @@ asmlinkage unsigned long
 ia64_mremap (unsigned long addr, unsigned long old_len, unsigned long new_len, unsigned long flags,
 	     unsigned long new_addr)
 {
-	extern unsigned long do_mremap (unsigned long addr,
-					unsigned long old_len,
-					unsigned long new_len,
-					unsigned long flags,
-					unsigned long new_addr);
-
-	down_write(&current->mm->mmap_sem);
-	{
-		addr = do_mremap(addr, old_len, new_len, flags, new_addr);
-	}
-	up_write(&current->mm->mmap_sem);
-
-	if (IS_ERR((void *) addr))
-		return addr;
-
-	force_successful_syscall_return();
+	addr = sys_mremap(addr, old_len, new_len, flags, new_addr);
+	if (!IS_ERR((void *) addr))
+		force_successful_syscall_return();
 	return addr;
 }
-
-#ifndef CONFIG_PCI
-
-asmlinkage long
-sys_pciconfig_read (unsigned long bus, unsigned long dfn, unsigned long off, unsigned long len,
-		    void *buf)
-{
-	return -ENOSYS;
-}
-
-asmlinkage long
-sys_pciconfig_write (unsigned long bus, unsigned long dfn, unsigned long off, unsigned long len,
-		     void *buf)
-{
-	return -ENOSYS;
-}
-
-#endif /* CONFIG_PCI */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *	linux/arch/alpha/kernel/err_impl.h
  *
@@ -6,6 +7,8 @@
  *	Contains declarations and macros to support Alpha error handling
  * 	implementations.
  */
+
+#include <asm/mce.h>
 
 union el_timestamp;
 struct el_subpacket;
@@ -60,26 +63,26 @@ extern struct ev7_lf_subpackets *
 ev7_collect_logout_frame_subpackets(struct el_subpacket *,
 				    struct ev7_lf_subpackets *);
 extern void ev7_register_error_handlers(void);
-extern void ev7_machine_check(u64, u64);
+extern void ev7_machine_check(unsigned long, unsigned long);
 
 /*
  * err_ev6.c
  */
 extern void ev6_register_error_handlers(void);
 extern int ev6_process_logout_frame(struct el_common *, int);
-extern void ev6_machine_check(u64, u64);
+extern void ev6_machine_check(unsigned long, unsigned long);
 
 /*
  * err_marvel.c
  */
-extern void marvel_machine_check(u64, u64);
+extern void marvel_machine_check(unsigned long, unsigned long);
 extern void marvel_register_error_handlers(void);
 
 /*
  * err_titan.c
  */
 extern int titan_process_logout_frame(struct el_common *, int);
-extern void titan_machine_check(u64, u64);
+extern void titan_machine_check(unsigned long, unsigned long);
 extern void titan_register_error_handlers(void);
 extern int privateer_process_logout_frame(struct el_common *, int);
-extern void privateer_machine_check(u64, u64);
+extern void privateer_machine_check(unsigned long, unsigned long);

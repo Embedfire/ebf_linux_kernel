@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2020 FriendlyElec Computer Tech. Co., Ltd.
+ * (http://www.friendlyarm.com)
+ */
+
+/dts-v1/;
+#include "rk3328-nanopi-r2-common.dtsi"
+
+/ {
+	model = "FriendlyElec NanoPi R2";
+	compatible = "friendlyelec,nanopi-r2", "rockchip,rk3328";
+};
+
+&mach {
+	hwrev = <0x20>;
+	model = "NanoPi R2";
+};
+
+&emmc {
+	status = "okay";
+};
+
+&gmac2io {
+	pinctrl-0 = <&rgmiim1_pins>, <&phy_intb>, <&phy_rstb>;
+};
+
+&gpio_keys {
+	status = "disabled";
+};
+
+&leds {
+	status = "disabled";
+};
+
+&rk805 {
+	interrupt-parent = <&gpio2>;
+	interrupts = <RK_PA6 IRQ_TYPE_LEVEL_LOW>;
+};
+
+&rtl8211e {
+	interrupt-parent = <&gpio1>;
+	interrupts = <RK_PD0 IRQ_TYPE_LEVEL_LOW>;
+};
+
+&pinctrl {
+	pmic {
+		pmic_int_l: pmic-int-l {
+			rockchip,pins = <2 RK_PA6 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	phy {
+		phy_intb: phy-intb {
+			rockchip,pins = <1 RK_PD0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		phy_rstb: phy-rstb {
+			rockchip,pins = <1 RK_PC2 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	usb {
+		host_vbus_drv: host-vbus-drv {
+			rockchip,pins = <0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		otg_vbus_drv: otg-vbus-drv {
+			rockchip,pins = <3 RK_PA1 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};
+
+&pwm2 {
+	status = "disabled";
+};
+
+&brcmf {
+	interrupt-parent = <&gpio1>;
+	interrupts = <RK_PD2 IRQ_TYPE_LEVEL_HIGH>;
+};
+
+&sdmmc_ext {
+	status = "okay";
+};
+
+&sdio_pwrseq {
+	status = "okay";
+};

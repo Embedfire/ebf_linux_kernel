@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/sh/boards/se/770x/setup.c
  *
@@ -8,8 +9,10 @@
  */
 #include <linux/init.h>
 #include <linux/platform_device.h>
-#include <asm/machvec.h>
+#include <linux/sh_eth.h>
 #include <mach-se/mach/se.h>
+#include <mach-se/mach/mrshpc.h>
+#include <asm/machvec.h>
 #include <asm/io.h>
 #include <asm/smc37c93x.h>
 #include <asm/heartbeat.h>
@@ -92,15 +95,12 @@ static unsigned char heartbeat_bit_pos[] = { 8, 9, 10, 11, 12, 13, 14, 15 };
 static struct heartbeat_data heartbeat_data = {
 	.bit_pos	= heartbeat_bit_pos,
 	.nr_bits	= ARRAY_SIZE(heartbeat_bit_pos),
-	.regsize	= 16,
 };
 
-static struct resource heartbeat_resources[] = {
-	[0] = {
-		.start	= PA_LED,
-		.end	= PA_LED,
-		.flags	= IORESOURCE_MEM,
-	},
+static struct resource heartbeat_resource = {
+	.start	= PA_LED,
+	.end	= PA_LED,
+	.flags	= IORESOURCE_MEM | IORESOURCE_MEM_16BIT,
 };
 
 static struct platform_device heartbeat_device = {
@@ -109,20 +109,30 @@ static struct platform_device heartbeat_device = {
 	.dev	= {
 		.platform_data	= &heartbeat_data,
 	},
-	.num_resources	= ARRAY_SIZE(heartbeat_resources),
-	.resource	= heartbeat_resources,
+	.num_resources	= 1,
+	.resource	= &heartbeat_resource,
 };
 
 #if defined(CONFIG_CPU_SUBTYPE_SH7710) ||\
 	defined(CONFIG_CPU_SUBTYPE_SH7712)
 /* SH771X Ethernet driver */
+static struct sh_eth_plat_data sh_eth_plat = {
+	.phy = PHY_ID,
+	.phy_interface = PHY_INTERFACE_MODE_MII,
+};
+
 static struct resource sh_eth0_resources[] = {
 	[0] = {
 		.start = SH_ETH0_BASE,
-		.end = SH_ETH0_BASE + 0x1B8,
+		.end = SH_ETH0_BASE + 0x1B8 - 1,
 		.flags = IORESOURCE_MEM,
 	},
 	[1] = {
+		.start = SH_TSU_BASE,
+		.end = SH_TSU_BASE + 0x200 - 1,
+		.flags = IORESOURCE_MEM,
+	},
+	[2] = {
 		.start = SH_ETH0_IRQ,
 		.end = SH_ETH0_IRQ,
 		.flags = IORESOURCE_IRQ,
@@ -130,10 +140,10 @@ static struct resource sh_eth0_resources[] = {
 };
 
 static struct platform_device sh_eth0_device = {
-	.name = "sh-eth",
-	.id	= 0,
+	.name = "sh771x-ether",
+	.id = 0,
 	.dev = {
-		.platform_data = PHY_ID,
+		.platform_data = &sh_eth_plat,
 	},
 	.num_resources = ARRAY_SIZE(sh_eth0_resources),
 	.resource = sh_eth0_resources,
@@ -142,10 +152,15 @@ static struct platform_device sh_eth0_device = {
 static struct resource sh_eth1_resources[] = {
 	[0] = {
 		.start = SH_ETH1_BASE,
-		.end = SH_ETH1_BASE + 0x1B8,
+		.end = SH_ETH1_BASE + 0x1B8 - 1,
 		.flags = IORESOURCE_MEM,
 	},
 	[1] = {
+		.start = SH_TSU_BASE,
+		.end = SH_TSU_BASE + 0x200 - 1,
+		.flags = IORESOURCE_MEM,
+	},
+	[2] = {
 		.start = SH_ETH1_IRQ,
 		.end = SH_ETH1_IRQ,
 		.flags = IORESOURCE_IRQ,
@@ -153,10 +168,10 @@ static struct resource sh_eth1_resources[] = {
 };
 
 static struct platform_device sh_eth1_device = {
-	.name = "sh-eth",
-	.id	= 1,
+	.name = "sh771x-ether",
+	.id = 1,
 	.dev = {
-		.platform_data = PHY_ID,
+		.platform_data = &sh_eth_plat,
 	},
 	.num_resources = ARRAY_SIZE(sh_eth1_resources),
 	.resource = sh_eth1_resources,
@@ -175,6 +190,7 @@ static struct platform_device *se_devices[] __initdata = {
 
 static int __init se_devices_setup(void)
 {
+	mrshpc_setup_windows();
 	return platform_add_devices(se_devices, ARRAY_SIZE(se_devices));
 }
 device_initcall(se_devices_setup);
@@ -185,38 +201,5 @@ device_initcall(se_devices_setup);
 static struct sh_machine_vector mv_se __initmv = {
 	.mv_name		= "SolutionEngine",
 	.mv_setup		= smsc_setup,
-#if defined(CONFIG_CPU_SH4)
-	.mv_nr_irqs		= 48,
-#elif defined(CONFIG_CPU_SUBTYPE_SH7708)
-	.mv_nr_irqs		= 32,
-#elif defined(CONFIG_CPU_SUBTYPE_SH7709)
-	.mv_nr_irqs		= 61,
-#elif defined(CONFIG_CPU_SUBTYPE_SH7705)
-	.mv_nr_irqs		= 86,
-#elif defined(CONFIG_CPU_SUBTYPE_SH7710) || defined(CONFIG_CPU_SUBTYPE_SH7712)
-	.mv_nr_irqs             = 104,
-#endif
-
-	.mv_inb			= se_inb,
-	.mv_inw			= se_inw,
-	.mv_inl			= se_inl,
-	.mv_outb		= se_outb,
-	.mv_outw		= se_outw,
-	.mv_outl		= se_outl,
-
-	.mv_inb_p		= se_inb_p,
-	.mv_inw_p		= se_inw,
-	.mv_inl_p		= se_inl,
-	.mv_outb_p		= se_outb_p,
-	.mv_outw_p		= se_outw,
-	.mv_outl_p		= se_outl,
-
-	.mv_insb		= se_insb,
-	.mv_insw		= se_insw,
-	.mv_insl		= se_insl,
-	.mv_outsb		= se_outsb,
-	.mv_outsw		= se_outsw,
-	.mv_outsl		= se_outsl,
-
 	.mv_init_irq		= init_se_IRQ,
 };

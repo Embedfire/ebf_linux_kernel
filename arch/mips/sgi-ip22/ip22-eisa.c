@@ -2,7 +2,7 @@
  * Basic EISA bus support for the SGI Indigo-2.
  *
  * (C) 2002 Pascal Dameme <netinet@freesurf.fr>
- *      and Marc Zyngier <mzyngier@freesurf.fr>
+ *	and Marc Zyngier <mzyngier@freesurf.fr>
  *
  * This code is released under both the GPL version 2 and BSD
  * licenses.  Either license may be used.
@@ -40,19 +40,19 @@
 
 /* I2 has four EISA slots. */
 #define IP22_EISA_MAX_SLOTS	  4
-#define EISA_MAX_IRQ             16
+#define EISA_MAX_IRQ		 16
 
-#define EIU_MODE_REG     0x0001ffc0
-#define EIU_STAT_REG     0x0001ffc4
-#define EIU_PREMPT_REG   0x0001ffc8
-#define EIU_QUIET_REG    0x0001ffcc
-#define EIU_INTRPT_ACK   0x00010004
+#define EIU_MODE_REG	 0x0001ffc0
+#define EIU_STAT_REG	 0x0001ffc4
+#define EIU_PREMPT_REG	 0x0001ffc8
+#define EIU_QUIET_REG	 0x0001ffcc
+#define EIU_INTRPT_ACK	 0x00010004
 
 static char __init *decode_eisa_sig(unsigned long addr)
 {
-        static char sig_str[EISA_SIG_LEN];
+	static char sig_str[EISA_SIG_LEN] __initdata;
 	u8 sig[4];
-        u16 rev;
+	u16 rev;
 	int i;
 
 	for (i = 0; i < 4; i++) {
@@ -73,12 +73,10 @@ static char __init *decode_eisa_sig(unsigned long addr)
 
 static irqreturn_t ip22_eisa_intr(int irq, void *dev_id)
 {
-	u8 eisa_irq;
-	u8 dma1, dma2;
+	u8 eisa_irq = inb(EIU_INTRPT_ACK);
 
-	eisa_irq = inb(EIU_INTRPT_ACK);
-	dma1 = inb(EISA_DMA1_STATUS);
-	dma2 = inb(EISA_DMA2_STATUS);
+	inb(EISA_DMA1_STATUS);
+	inb(EISA_DMA2_STATUS);
 
 	if (eisa_irq < EISA_MAX_IRQ) {
 		do_IRQ(eisa_irq);
@@ -93,11 +91,6 @@ static irqreturn_t ip22_eisa_intr(int irq, void *dev_id)
 
 	return IRQ_NONE;
 }
-
-static struct irqaction eisa_action = {
-	.handler	= ip22_eisa_intr,
-	.name		= "EISA",
-};
 
 int __init ip22_eisa_init(void)
 {
@@ -138,9 +131,8 @@ int __init ip22_eisa_init(void)
 
 	init_i8259_irqs();
 
-	/* Cannot use request_irq because of kmalloc not being ready at such
-	 * an early stage. Yes, I've been bitten... */
-	setup_irq(SGI_EISA_IRQ, &eisa_action);
+	if (request_irq(SGI_EISA_IRQ, ip22_eisa_intr, 0, "EISA", NULL))
+		pr_err("Failed to request irq %d (EISA)\n", SGI_EISA_IRQ);
 
 	EISA_bus = 1;
 	return 0;

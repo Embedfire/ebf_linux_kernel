@@ -20,7 +20,7 @@ static int genprobe_new_chip(struct map_info *map, struct chip_probe *cp,
 
 struct mtd_info *mtd_do_chip_probe(struct map_info *map, struct chip_probe *cp)
 {
-	struct mtd_info *mtd = NULL;
+	struct mtd_info *mtd;
 	struct cfi_private *cfi;
 
 	/* First probe the map to see if we have CFI stuff there. */
@@ -111,10 +111,9 @@ static struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chi
 		max_chips = 1;
 	}
 
-	mapsize = sizeof(long) * ( (max_chips + BITS_PER_LONG-1) / BITS_PER_LONG );
+	mapsize = sizeof(long) * DIV_ROUND_UP(max_chips, BITS_PER_LONG);
 	chip_map = kzalloc(mapsize, GFP_KERNEL);
 	if (!chip_map) {
-		printk(KERN_WARNING "%s: kmalloc failed for CFI chip map\n", map->name);
 		kfree(cfi.cfiq);
 		return NULL;
 	}
@@ -136,10 +135,9 @@ static struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chi
 	 * our caller, and copy the appropriate data into them.
 	 */
 
-	retcfi = kmalloc(sizeof(struct cfi_private) + cfi.numchips * sizeof(struct flchip), GFP_KERNEL);
+	retcfi = kmalloc(struct_size(retcfi, chips, cfi.numchips), GFP_KERNEL);
 
 	if (!retcfi) {
-		printk(KERN_WARNING "%s: kmalloc failed for CFI private structure\n", map->name);
 		kfree(cfi.cfiq);
 		kfree(chip_map);
 		return NULL;
@@ -155,8 +153,7 @@ static struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chi
 			pchip->start = (i << cfi.chipshift);
 			pchip->state = FL_READY;
 			init_waitqueue_head(&pchip->wq);
-			spin_lock_init(&pchip->_spinlock);
-			pchip->mutex = &pchip->_spinlock;
+			mutex_init(&pchip->mutex);
 		}
 	}
 
@@ -205,16 +202,19 @@ static inline struct mtd_info *cfi_cmdset_unknown(struct map_info *map,
 	struct cfi_private *cfi = map->fldrv_priv;
 	__u16 type = primary?cfi->cfiq->P_ID:cfi->cfiq->A_ID;
 #ifdef CONFIG_MODULES
-	char probename[16+sizeof(MODULE_SYMBOL_PREFIX)];
 	cfi_cmdset_fn_t *probe_function;
+	char *probename;
 
-	sprintf(probename, MODULE_SYMBOL_PREFIX "cfi_cmdset_%4.4X", type);
+	probename = kasprintf(GFP_KERNEL, "cfi_cmdset_%4.4X", type);
+	if (!probename)
+		return NULL;
 
 	probe_function = __symbol_get(probename);
 	if (!probe_function) {
-		request_module(probename + sizeof(MODULE_SYMBOL_PREFIX) - 1);
+		request_module("cfi_cmdset_%4.4X", type);
 		probe_function = __symbol_get(probename);
 	}
+	kfree(probename);
 
 	if (probe_function) {
 		struct mtd_info *mtd;
@@ -242,17 +242,19 @@ static struct mtd_info *check_cmd_set(struct map_info *map, int primary)
 		/* We need these for the !CONFIG_MODULES case,
 		   because symbol_get() doesn't work there */
 #ifdef CONFIG_MTD_CFI_INTELEXT
-	case 0x0001:
-	case 0x0003:
-	case 0x0200:
+	case P_ID_INTEL_EXT:
+	case P_ID_INTEL_STD:
+	case P_ID_INTEL_PERFORMANCE:
 		return cfi_cmdset_0001(map, primary);
 #endif
 #ifdef CONFIG_MTD_CFI_AMDSTD
-	case 0x0002:
+	case P_ID_AMD_STD:
+	case P_ID_SST_OLD:
+	case P_ID_WINBOND:
 		return cfi_cmdset_0002(map, primary);
 #endif
 #ifdef CONFIG_MTD_CFI_STAA
-        case 0x0020:
+        case P_ID_ST_ADV:
 		return cfi_cmdset_0020(map, primary);
 #endif
 	default:

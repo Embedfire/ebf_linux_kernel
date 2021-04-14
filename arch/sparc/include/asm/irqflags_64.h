@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * include/asm/irqflags.h
  *
@@ -5,14 +6,16 @@
  *
  * This file gets included from lowlevel asm headers too, to provide
  * wrapped versions of the local_irq_*() APIs, based on the
- * raw_local_irq_*() functions from the lowlevel headers.
+ * arch_local_irq_*() functions from the lowlevel headers.
  */
 #ifndef _ASM_IRQFLAGS_H
 #define _ASM_IRQFLAGS_H
 
+#include <asm/pil.h>
+
 #ifndef __ASSEMBLY__
 
-static inline unsigned long __raw_local_save_flags(void)
+static inline notrace unsigned long arch_local_save_flags(void)
 {
 	unsigned long flags;
 
@@ -24,10 +27,7 @@ static inline unsigned long __raw_local_save_flags(void)
 	return flags;
 }
 
-#define raw_local_save_flags(flags) \
-		do { (flags) = __raw_local_save_flags(); } while (0)
-
-static inline void raw_local_irq_restore(unsigned long flags)
+static inline notrace void arch_local_irq_restore(unsigned long flags)
 {
 	__asm__ __volatile__(
 		"wrpr	%0, %%pil"
@@ -37,17 +37,17 @@ static inline void raw_local_irq_restore(unsigned long flags)
 	);
 }
 
-static inline void raw_local_irq_disable(void)
+static inline notrace void arch_local_irq_disable(void)
 {
 	__asm__ __volatile__(
-		"wrpr	15, %%pil"
+		"wrpr	%0, %%pil"
 		: /* no outputs */
-		: /* no inputs */
+		: "i" (PIL_NORMAL_MAX)
 		: "memory"
 	);
 }
 
-static inline void raw_local_irq_enable(void)
+static inline notrace void arch_local_irq_enable(void)
 {
 	__asm__ __volatile__(
 		"wrpr	0, %%pil"
@@ -57,32 +57,41 @@ static inline void raw_local_irq_enable(void)
 	);
 }
 
-static inline int raw_irqs_disabled_flags(unsigned long flags)
+static inline notrace int arch_irqs_disabled_flags(unsigned long flags)
 {
 	return (flags > 0);
 }
 
-static inline int raw_irqs_disabled(void)
+static inline notrace int arch_irqs_disabled(void)
 {
-	unsigned long flags = __raw_local_save_flags();
-
-	return raw_irqs_disabled_flags(flags);
+	return arch_irqs_disabled_flags(arch_local_save_flags());
 }
 
-/*
- * For spinlocks, etc:
- */
-static inline unsigned long __raw_local_irq_save(void)
+static inline notrace unsigned long arch_local_irq_save(void)
 {
-	unsigned long flags = __raw_local_save_flags();
+	unsigned long flags, tmp;
 
-	raw_local_irq_disable();
+	/* Disable interrupts to PIL_NORMAL_MAX unless we already
+	 * are using PIL_NMI, in which case PIL_NMI is retained.
+	 *
+	 * The only values we ever program into the %pil are 0,
+	 * PIL_NORMAL_MAX and PIL_NMI.
+	 *
+	 * Since PIL_NMI is the largest %pil value and all bits are
+	 * set in it (0xf), it doesn't matter what PIL_NORMAL_MAX
+	 * actually is.
+	 */
+	__asm__ __volatile__(
+		"rdpr	%%pil, %0\n\t"
+		"or	%0, %2, %1\n\t"
+		"wrpr	%1, 0x0, %%pil"
+		: "=r" (flags), "=r" (tmp)
+		: "i" (PIL_NORMAL_MAX)
+		: "memory"
+	);
 
 	return flags;
 }
-
-#define raw_local_irq_save(flags) \
-		do { (flags) = __raw_local_irq_save(); } while (0)
 
 #endif /* (__ASSEMBLY__) */
 

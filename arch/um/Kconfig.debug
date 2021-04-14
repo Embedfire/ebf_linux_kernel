@@ -1,6 +1,4 @@
-menu "Kernel hacking"
-
-source "lib/Kconfig.debug"
+# SPDX-License-Identifier: GPL-2.0
 
 config GPROF
 	bool "Enable gprof support"
@@ -18,6 +16,7 @@ config GPROF
 config GCOV
 	bool "Enable gcov support"
 	depends on DEBUG_INFO
+	depends on !KCOV
 	help
 	  This option allows developers to retrieve coverage data from a UML
 	  session.
@@ -28,13 +27,11 @@ config GCOV
 	  If you're involved in UML kernel development and want to use gcov,
 	  say Y.  If you're unsure, say N.
 
-config DEBUG_STACK_USAGE
-	bool "Stack utilization instrumentation"
-	default N
+config EARLY_PRINTK
+	bool "Early printk"
+	default y
 	help
-	  Track the maximum kernel stack usage - this will look at each
-	  kernel stack at process exit and log it if it's the deepest
-	  stack seen so far.
+	  Write kernel log output directly to stdout.
 
-	  This option will slow down process creation and destruction somewhat.
-endmenu
+	  This is useful for kernel debugging when your machine crashes very
+	  early before the console code is initialized.

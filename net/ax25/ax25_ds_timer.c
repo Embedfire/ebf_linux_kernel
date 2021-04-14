@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  * Copyright (C) Joerg Reuter DL1BKE (jreuter@yaina.de)
@@ -24,13 +21,12 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
+#include <linux/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 
-static void ax25_ds_timeout(unsigned long);
+static void ax25_ds_timeout(struct timer_list *);
 
 /*
  *	Add DAMA slave timeout timer to timer list.
@@ -42,8 +38,7 @@ static void ax25_ds_timeout(unsigned long);
 
 void ax25_ds_setup_timer(ax25_dev *ax25_dev)
 {
-	setup_timer(&ax25_dev->dama.slave_timer, ax25_ds_timeout,
-		    (unsigned long)ax25_dev);
+	timer_setup(&ax25_dev->dama.slave_timer, ax25_ds_timeout, 0);
 }
 
 void ax25_ds_del_timer(ax25_dev *ax25_dev)
@@ -67,11 +62,10 @@ void ax25_ds_set_timer(ax25_dev *ax25_dev)
  *	Silently discard all (slave) connections in case our master forgot us...
  */
 
-static void ax25_ds_timeout(unsigned long arg)
+static void ax25_ds_timeout(struct timer_list *t)
 {
-	ax25_dev *ax25_dev = (struct ax25_dev *) arg;
+	ax25_dev *ax25_dev = from_timer(ax25_dev, t, dama.slave_timer);
 	ax25_cb *ax25;
-	struct hlist_node *node;
 
 	if (ax25_dev == NULL || !ax25_dev->dama.slave)
 		return;			/* Yikes! */
@@ -82,7 +76,7 @@ static void ax25_ds_timeout(unsigned long arg)
 	}
 
 	spin_lock(&ax25_list_lock);
-	ax25_for_each(ax25, node, &ax25_list) {
+	ax25_for_each(ax25, &ax25_list) {
 		if (ax25->ax25_dev != ax25_dev || !(ax25->condition & AX25_COND_DAMA_MODE))
 			continue;
 
@@ -104,6 +98,7 @@ void ax25_ds_heartbeat_expiry(ax25_cb *ax25)
 	switch (ax25->state) {
 
 	case AX25_STATE_0:
+	case AX25_STATE_2:
 		/* Magic here: If we listen() and a new link dies before it
 		   is accepted() it isn't 'dead' so doesn't get removed. */
 		if (!sk || sock_flag(sk, SOCK_DESTROY) ||
@@ -112,8 +107,9 @@ void ax25_ds_heartbeat_expiry(ax25_cb *ax25)
 			if (sk) {
 				sock_hold(sk);
 				ax25_destroy_socket(ax25);
-				sock_put(sk);
 				bh_unlock_sock(sk);
+				/* Ungrab socket and destroy it */
+				sock_put(sk);
 			} else
 				ax25_destroy_socket(ax25);
 			return;
@@ -215,7 +211,8 @@ void ax25_ds_t1_timeout(ax25_cb *ax25)
 	case AX25_STATE_2:
 		if (ax25->n2count == ax25->n2) {
 			ax25_send_control(ax25, AX25_DISC, AX25_POLLON, AX25_COMMAND);
-			ax25_disconnect(ax25, ETIMEDOUT);
+			if (!sock_flag(ax25->sk, SOCK_DESTROY))
+				ax25_disconnect(ax25, ETIMEDOUT);
 			return;
 		} else {
 			ax25->n2count++;

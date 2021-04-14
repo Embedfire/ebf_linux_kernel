@@ -1,8 +1,5 @@
-include include/asm-generic/Kbuild.asm
-
-header-y += cpu-features.h
-
-unifdef-y += unistd_32.h
-unifdef-y += unistd_64.h
-unifdef-y += posix_types_32.h
-unifdef-y += posix_types_64.h
+# SPDX-License-Identifier: GPL-2.0
+generated-y += syscall_table.h
+generic-y += kvm_para.h
+generic-y += mcs_spinlock.h
+generic-y += parport.h

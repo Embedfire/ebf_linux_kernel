@@ -1,30 +1,28 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * This file provides autodetection for ISA PnP IDE interfaces.
  * It was tested with "ESS ES1868 Plug and Play AudioDrive" IDE interface.
  *
  * Copyright (C) 2000 Andrey Panin <pazke@donpac.ru>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example /usr/src/linux/COPYING); if not, write to the Free
- * Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/init.h>
 #include <linux/pnp.h>
 #include <linux/ide.h>
+#include <linux/module.h>
 
 #define DRV_NAME "ide-pnp"
 
 /* Add your devices here :)) */
-static struct pnp_device_id idepnp_devices[] = {
+static const struct pnp_device_id idepnp_devices[] = {
 	/* Generic ESDI/IDE/ATA compatible hard disk controller */
 	{.id = "PNP0600", .driver_data = 0},
 	{.id = ""}
+};
+
+static const struct ide_port_info ide_pnp_port_info = {
+	.host_flags		= IDE_HFLAG_NO_DMA,
+	.chipset		= ide_generic,
 };
 
 static int idepnp_probe(struct pnp_dev *dev, const struct pnp_device_id *dev_id)
@@ -32,7 +30,7 @@ static int idepnp_probe(struct pnp_dev *dev, const struct pnp_device_id *dev_id)
 	struct ide_host *host;
 	unsigned long base, ctl;
 	int rc;
-	hw_regs_t hw, *hws[] = { &hw, NULL, NULL, NULL };
+	struct ide_hw hw, *hws[] = { &hw };
 
 	printk(KERN_INFO DRV_NAME ": generic PnP IDE interface\n");
 
@@ -58,9 +56,8 @@ static int idepnp_probe(struct pnp_dev *dev, const struct pnp_device_id *dev_id)
 	memset(&hw, 0, sizeof(hw));
 	ide_std_init_ports(&hw, base, ctl);
 	hw.irq = pnp_irq(dev, 0);
-	hw.chipset = ide_generic;
 
-	rc = ide_host_add(NULL, hws, &host);
+	rc = ide_host_add(&ide_pnp_port_info, hws, 1, &host);
 	if (rc)
 		goto out;
 
@@ -91,17 +88,5 @@ static struct pnp_driver idepnp_driver = {
 	.remove		= idepnp_remove,
 };
 
-static int __init pnpide_init(void)
-{
-	return pnp_register_driver(&idepnp_driver);
-}
-
-static void __exit pnpide_exit(void)
-{
-	pnp_unregister_driver(&idepnp_driver);
-}
-
-module_init(pnpide_init);
-module_exit(pnpide_exit);
-
+module_pnp_driver(idepnp_driver);
 MODULE_LICENSE("GPL");

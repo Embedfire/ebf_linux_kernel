@@ -1,13 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- *  net/dccp/packet_history.c
- *
  *  Copyright (c) 2007   The University of Aberdeen, Scotland, UK
  *  Copyright (c) 2005-7 The University of Waikato, Hamilton, New Zealand.
  *
  *  An implementation of the DCCP protocol
  *
  *  This code has been developed by the University of Waikato WAND
- *  research group. For further information please see http://www.wand.net.nz/
+ *  research group. For further information please see https://www.wand.net.nz/
  *  or e-mail Ian McDonald - ian.mcdonald@jandi.co.nz
  *
  *  This code also uses code from Lulea University, rereleased as GPL by its
@@ -19,38 +18,12 @@
  *  Arnaldo Carvalho de Melo <acme@conectiva.com.br>.
  *
  *  Copyright (c) 2005 Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/string.h>
 #include <linux/slab.h>
 #include "packet_history.h"
 #include "../../dccp.h"
-
-/**
- *  tfrc_tx_hist_entry  -  Simple singly-linked TX history list
- *  @next:  next oldest entry (LIFO order)
- *  @seqno: sequence number of this entry
- *  @stamp: send time of packet with sequence number @seqno
- */
-struct tfrc_tx_hist_entry {
-	struct tfrc_tx_hist_entry *next;
-	u64			  seqno;
-	ktime_t			  stamp;
-};
 
 /*
  * Transmitter History Routines
@@ -73,15 +46,6 @@ void tfrc_tx_packet_history_exit(void)
 	}
 }
 
-static struct tfrc_tx_hist_entry *
-	tfrc_tx_hist_find_entry(struct tfrc_tx_hist_entry *head, u64 seqno)
-{
-	while (head != NULL && head->seqno != seqno)
-		head = head->next;
-
-	return head;
-}
-
 int tfrc_tx_hist_add(struct tfrc_tx_hist_entry **headp, u64 seqno)
 {
 	struct tfrc_tx_hist_entry *entry = kmem_cache_alloc(tfrc_tx_hist_slab, gfp_any());
@@ -94,7 +58,6 @@ int tfrc_tx_hist_add(struct tfrc_tx_hist_entry **headp, u64 seqno)
 	*headp	     = entry;
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tfrc_tx_hist_add);
 
 void tfrc_tx_hist_purge(struct tfrc_tx_hist_entry **headp)
 {
@@ -109,29 +72,9 @@ void tfrc_tx_hist_purge(struct tfrc_tx_hist_entry **headp)
 
 	*headp = NULL;
 }
-EXPORT_SYMBOL_GPL(tfrc_tx_hist_purge);
-
-u32 tfrc_tx_hist_rtt(struct tfrc_tx_hist_entry *head, const u64 seqno,
-		     const ktime_t now)
-{
-	u32 rtt = 0;
-	struct tfrc_tx_hist_entry *packet = tfrc_tx_hist_find_entry(head, seqno);
-
-	if (packet != NULL) {
-		rtt = ktime_us_delta(now, packet->stamp);
-		/*
-		 * Garbage-collect older (irrelevant) entries:
-		 */
-		tfrc_tx_hist_purge(&packet->next);
-	}
-
-	return rtt;
-}
-EXPORT_SYMBOL_GPL(tfrc_tx_hist_rtt);
-
 
 /*
- * 	Receiver History Routines
+ *	Receiver History Routines
  */
 static struct kmem_cache *tfrc_rx_hist_slab;
 
@@ -172,7 +115,6 @@ void tfrc_rx_hist_add_packet(struct tfrc_rx_hist *h,
 
 	tfrc_rx_hist_entry_from_skb(entry, skb, ndp);
 }
-EXPORT_SYMBOL_GPL(tfrc_rx_hist_add_packet);
 
 /* has the packet contained in skb been seen before? */
 int tfrc_rx_hist_duplicate(struct tfrc_rx_hist *h, struct sk_buff *skb)
@@ -189,16 +131,13 @@ int tfrc_rx_hist_duplicate(struct tfrc_rx_hist *h, struct sk_buff *skb)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(tfrc_rx_hist_duplicate);
 
 static void tfrc_rx_hist_swap(struct tfrc_rx_hist *h, const u8 a, const u8 b)
 {
 	const u8 idx_a = tfrc_rx_hist_index(h, a),
 		 idx_b = tfrc_rx_hist_index(h, b);
-	struct tfrc_rx_hist_entry *tmp = h->ring[idx_a];
 
-	h->ring[idx_a] = h->ring[idx_b];
-	h->ring[idx_b] = tmp;
+	swap(h->ring[idx_a], h->ring[idx_b]);
 }
 
 /*
@@ -361,6 +300,7 @@ static void __three_after_loss(struct tfrc_rx_hist *h)
  *  @ndp:	    The NDP count belonging to @skb
  *  @calc_first_li: Caller-dependent computation of first loss interval in @lh
  *  @sk:	    Used by @calc_first_li (see tfrc_lh_interval_add)
+ *
  *  Chooses action according to pending loss, updates LI database when a new
  *  loss was detected, and does required post-processing. Returns 1 when caller
  *  should send feedback, 0 otherwise.
@@ -390,7 +330,6 @@ int tfrc_rx_handle_loss(struct tfrc_rx_hist *h,
 	}
 	return is_new_loss;
 }
-EXPORT_SYMBOL_GPL(tfrc_rx_handle_loss);
 
 int tfrc_rx_hist_alloc(struct tfrc_rx_hist *h)
 {
@@ -412,7 +351,6 @@ out_free:
 	}
 	return -ENOBUFS;
 }
-EXPORT_SYMBOL_GPL(tfrc_rx_hist_alloc);
 
 void tfrc_rx_hist_purge(struct tfrc_rx_hist *h)
 {
@@ -424,10 +362,10 @@ void tfrc_rx_hist_purge(struct tfrc_rx_hist *h)
 			h->ring[i] = NULL;
 		}
 }
-EXPORT_SYMBOL_GPL(tfrc_rx_hist_purge);
 
 /**
  * tfrc_rx_hist_rtt_last_s - reference entry to compute RTT samples against
+ * @h:	The non-empty RX history object
  */
 static inline struct tfrc_rx_hist_entry *
 			tfrc_rx_hist_rtt_last_s(const struct tfrc_rx_hist *h)
@@ -436,7 +374,8 @@ static inline struct tfrc_rx_hist_entry *
 }
 
 /**
- * tfrc_rx_hist_rtt_prev_s: previously suitable (wrt rtt_last_s) RTT-sampling entry
+ * tfrc_rx_hist_rtt_prev_s - previously suitable (wrt rtt_last_s) RTT-sampling entry
+ * @h:	The non-empty RX history object
  */
 static inline struct tfrc_rx_hist_entry *
 			tfrc_rx_hist_rtt_prev_s(const struct tfrc_rx_hist *h)
@@ -495,4 +434,3 @@ keep_ref_for_next_time:
 
 	return sample;
 }
-EXPORT_SYMBOL_GPL(tfrc_rx_hist_sample_rtt);

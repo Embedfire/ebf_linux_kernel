@@ -1,20 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *  drivers/s390/char/keyboard.c
  *    ebcdic keycode functions for s390 console drivers
  *
  *  S390 version
- *    Copyright (C) 2003 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 2003
  *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
  */
 
 #include <linux/module.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/slab.h>
 #include <linux/sysrq.h>
 
 #include <linux/consolemap.h>
 #include <linux/kbd_kern.h>
 #include <linux/kbd_diacr.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "keyboard.h"
 
@@ -38,8 +39,34 @@ static const int kbd_max_vals[] = {
 };
 static const int KBD_NR_TYPES = ARRAY_SIZE(kbd_max_vals);
 
-static unsigned char ret_diacr[NR_DEAD] = {
-	'`', '\'', '^', '~', '"', ','
+static const unsigned char ret_diacr[NR_DEAD] = {
+	'`',	/* dead_grave */
+	'\'',	/* dead_acute */
+	'^',	/* dead_circumflex */
+	'~',	/* dead_tilda */
+	'"',	/* dead_diaeresis */
+	',',	/* dead_cedilla */
+	'_',	/* dead_macron */
+	'U',	/* dead_breve */
+	'.',	/* dead_abovedot */
+	'*',	/* dead_abovering */
+	'=',	/* dead_doubleacute */
+	'c',	/* dead_caron */
+	'k',	/* dead_ogonek */
+	'i',	/* dead_iota */
+	'#',	/* dead_voiced_sound */
+	'o',	/* dead_semivoiced_sound */
+	'!',	/* dead_belowdot */
+	'?',	/* dead_hook */
+	'+',	/* dead_horn */
+	'-',	/* dead_stroke */
+	')',	/* dead_abovecomma */
+	'(',	/* dead_abovereversedcomma */
+	':',	/* dead_doublegrave */
+	'n',	/* dead_invertedbreve */
+	';',	/* dead_belowcomma */
+	'$',	/* dead_currency */
+	'@',	/* dead_greek */
 };
 
 /*
@@ -48,57 +75,54 @@ static unsigned char ret_diacr[NR_DEAD] = {
 struct kbd_data *
 kbd_alloc(void) {
 	struct kbd_data *kbd;
-	int i, len;
+	int i;
 
 	kbd = kzalloc(sizeof(struct kbd_data), GFP_KERNEL);
 	if (!kbd)
 		goto out;
-	kbd->key_maps = kzalloc(sizeof(key_maps), GFP_KERNEL);
+	kbd->key_maps = kzalloc(sizeof(ebc_key_maps), GFP_KERNEL);
 	if (!kbd->key_maps)
 		goto out_kbd;
-	for (i = 0; i < ARRAY_SIZE(key_maps); i++) {
-		if (key_maps[i]) {
-			kbd->key_maps[i] =
-				kmalloc(sizeof(u_short)*NR_KEYS, GFP_KERNEL);
+	for (i = 0; i < ARRAY_SIZE(ebc_key_maps); i++) {
+		if (ebc_key_maps[i]) {
+			kbd->key_maps[i] = kmemdup(ebc_key_maps[i],
+						   sizeof(u_short) * NR_KEYS,
+						   GFP_KERNEL);
 			if (!kbd->key_maps[i])
 				goto out_maps;
-			memcpy(kbd->key_maps[i], key_maps[i],
-			       sizeof(u_short)*NR_KEYS);
 		}
 	}
-	kbd->func_table = kzalloc(sizeof(func_table), GFP_KERNEL);
+	kbd->func_table = kzalloc(sizeof(ebc_func_table), GFP_KERNEL);
 	if (!kbd->func_table)
 		goto out_maps;
-	for (i = 0; i < ARRAY_SIZE(func_table); i++) {
-		if (func_table[i]) {
-			len = strlen(func_table[i]) + 1;
-			kbd->func_table[i] = kmalloc(len, GFP_KERNEL);
+	for (i = 0; i < ARRAY_SIZE(ebc_func_table); i++) {
+		if (ebc_func_table[i]) {
+			kbd->func_table[i] = kstrdup(ebc_func_table[i],
+						     GFP_KERNEL);
 			if (!kbd->func_table[i])
 				goto out_func;
-			memcpy(kbd->func_table[i], func_table[i], len);
 		}
 	}
 	kbd->fn_handler =
-		kzalloc(sizeof(fn_handler_fn *) * NR_FN_HANDLER, GFP_KERNEL);
+		kcalloc(NR_FN_HANDLER, sizeof(fn_handler_fn *), GFP_KERNEL);
 	if (!kbd->fn_handler)
 		goto out_func;
-	kbd->accent_table =
-		kmalloc(sizeof(struct kbdiacruc)*MAX_DIACR, GFP_KERNEL);
+	kbd->accent_table = kmemdup(ebc_accent_table,
+				    sizeof(struct kbdiacruc) * MAX_DIACR,
+				    GFP_KERNEL);
 	if (!kbd->accent_table)
 		goto out_fn_handler;
-	memcpy(kbd->accent_table, accent_table,
-	       sizeof(struct kbdiacruc)*MAX_DIACR);
-	kbd->accent_table_size = accent_table_size;
+	kbd->accent_table_size = ebc_accent_table_size;
 	return kbd;
 
 out_fn_handler:
 	kfree(kbd->fn_handler);
 out_func:
-	for (i = 0; i < ARRAY_SIZE(func_table); i++)
+	for (i = 0; i < ARRAY_SIZE(ebc_func_table); i++)
 		kfree(kbd->func_table[i]);
 	kfree(kbd->func_table);
 out_maps:
-	for (i = 0; i < ARRAY_SIZE(key_maps); i++)
+	for (i = 0; i < ARRAY_SIZE(ebc_key_maps); i++)
 		kfree(kbd->key_maps[i]);
 	kfree(kbd->key_maps);
 out_kbd:
@@ -114,10 +138,10 @@ kbd_free(struct kbd_data *kbd)
 
 	kfree(kbd->accent_table);
 	kfree(kbd->fn_handler);
-	for (i = 0; i < ARRAY_SIZE(func_table); i++)
+	for (i = 0; i < ARRAY_SIZE(ebc_func_table); i++)
 		kfree(kbd->func_table[i]);
 	kfree(kbd->func_table);
-	for (i = 0; i < ARRAY_SIZE(key_maps); i++)
+	for (i = 0; i < ARRAY_SIZE(ebc_key_maps); i++)
 		kfree(kbd->key_maps[i]);
 	kfree(kbd->key_maps);
 	kfree(kbd);
@@ -133,7 +157,7 @@ kbd_ascebc(struct kbd_data *kbd, unsigned char *ascebc)
 	int i, j, k;
 
 	memset(ascebc, 0x40, 256);
-	for (i = 0; i < ARRAY_SIZE(key_maps); i++) {
+	for (i = 0; i < ARRAY_SIZE(ebc_key_maps); i++) {
 		keymap = kbd->key_maps[i];
 		if (!keymap)
 			continue;
@@ -160,7 +184,7 @@ kbd_ebcasc(struct kbd_data *kbd, unsigned char *ebcasc)
 	int i, j, k;
 
 	memset(ebcasc, ' ', 256);
-	for (i = 0; i < ARRAY_SIZE(key_maps); i++) {
+	for (i = 0; i < ARRAY_SIZE(ebc_key_maps); i++) {
 		keymap = kbd->key_maps[i];
 		if (!keymap)
 			continue;
@@ -201,7 +225,7 @@ handle_diacr(struct kbd_data *kbd, unsigned int ch)
 	if (ch == ' ' || ch == d)
 		return d;
 
-	kbd_put_queue(kbd->tty, d);
+	kbd_put_queue(kbd->port, d);
 	return ch;
 }
 
@@ -223,7 +247,7 @@ k_self(struct kbd_data *kbd, unsigned char value)
 {
 	if (kbd->diacr)
 		value = handle_diacr(kbd, value);
-	kbd_put_queue(kbd->tty, value);
+	kbd_put_queue(kbd->port, value);
 }
 
 /*
@@ -241,7 +265,7 @@ static void
 k_fn(struct kbd_data *kbd, unsigned char value)
 {
 	if (kbd->func_table[value])
-		kbd_puts_queue(kbd->tty, kbd->func_table[value]);
+		kbd_puts_queue(kbd->port, kbd->func_table[value]);
 }
 
 static void
@@ -259,20 +283,20 @@ k_spec(struct kbd_data *kbd, unsigned char value)
  * but we need only 16 bits here
  */
 static void
-to_utf8(struct tty_struct *tty, ushort c) 
+to_utf8(struct tty_port *port, ushort c)
 {
 	if (c < 0x80)
 		/*  0******* */
-		kbd_put_queue(tty, c);
+		kbd_put_queue(port, c);
 	else if (c < 0x800) {
 		/* 110***** 10****** */
-		kbd_put_queue(tty, 0xc0 | (c >> 6));
-		kbd_put_queue(tty, 0x80 | (c & 0x3f));
+		kbd_put_queue(port, 0xc0 | (c >> 6));
+		kbd_put_queue(port, 0x80 | (c & 0x3f));
 	} else {
 		/* 1110**** 10****** 10****** */
-		kbd_put_queue(tty, 0xe0 | (c >> 12));
-		kbd_put_queue(tty, 0x80 | ((c >> 6) & 0x3f));
-		kbd_put_queue(tty, 0x80 | (c & 0x3f));
+		kbd_put_queue(port, 0xe0 | (c >> 12));
+		kbd_put_queue(port, 0x80 | ((c >> 6) & 0x3f));
+		kbd_put_queue(port, 0x80 | (c & 0x3f));
 	}
 }
 
@@ -285,7 +309,7 @@ kbd_keycode(struct kbd_data *kbd, unsigned int keycode)
 	unsigned short keysym;
 	unsigned char type, value;
 
-	if (!kbd || !kbd->tty)
+	if (!kbd)
 		return;
 
 	if (keycode >= 384)
@@ -307,7 +331,7 @@ kbd_keycode(struct kbd_data *kbd, unsigned int keycode)
 		if (kbd->sysrq) {
 			if (kbd->sysrq == K(KT_LATIN, '-')) {
 				kbd->sysrq = 0;
-				handle_sysrq(value, kbd->tty);
+				handle_sysrq(value);
 				return;
 			}
 			if (value == '-') {
@@ -325,7 +349,7 @@ kbd_keycode(struct kbd_data *kbd, unsigned int keycode)
 #endif
 		(*k_handler[type])(kbd, value);
 	} else
-		to_utf8(kbd->tty, keysym);
+		to_utf8(kbd->port, keysym);
 }
 
 /*
@@ -336,37 +360,41 @@ do_kdsk_ioctl(struct kbd_data *kbd, struct kbentry __user *user_kbe,
 	      int cmd, int perm)
 {
 	struct kbentry tmp;
+	unsigned long kb_index, kb_table;
 	ushort *key_map, val, ov;
 
 	if (copy_from_user(&tmp, user_kbe, sizeof(struct kbentry)))
 		return -EFAULT;
+	kb_index = (unsigned long) tmp.kb_index;
 #if NR_KEYS < 256
-	if (tmp.kb_index >= NR_KEYS)
+	if (kb_index >= NR_KEYS)
 		return -EINVAL;
 #endif
+	kb_table = (unsigned long) tmp.kb_table;
 #if MAX_NR_KEYMAPS < 256
-	if (tmp.kb_table >= MAX_NR_KEYMAPS)
+	if (kb_table >= MAX_NR_KEYMAPS)
 		return -EINVAL;	
+	kb_table = array_index_nospec(kb_table , MAX_NR_KEYMAPS);
 #endif
 
 	switch (cmd) {
 	case KDGKBENT:
-		key_map = kbd->key_maps[tmp.kb_table];
+		key_map = kbd->key_maps[kb_table];
 		if (key_map) {
-		    val = U(key_map[tmp.kb_index]);
+		    val = U(key_map[kb_index]);
 		    if (KTYP(val) >= KBD_NR_TYPES)
 			val = K_HOLE;
 		} else
-		    val = (tmp.kb_index ? K_HOLE : K_NOSUCHMAP);
+		    val = (kb_index ? K_HOLE : K_NOSUCHMAP);
 		return put_user(val, &user_kbe->kb_value);
 	case KDSKBENT:
 		if (!perm)
 			return -EPERM;
-		if (!tmp.kb_index && tmp.kb_value == K_NOSUCHMAP) {
+		if (!kb_index && tmp.kb_value == K_NOSUCHMAP) {
 			/* disallocate map */
-			key_map = kbd->key_maps[tmp.kb_table];
+			key_map = kbd->key_maps[kb_table];
 			if (key_map) {
-			    kbd->key_maps[tmp.kb_table] = NULL;
+			    kbd->key_maps[kb_table] = NULL;
 			    kfree(key_map);
 			}
 			break;
@@ -377,18 +405,18 @@ do_kdsk_ioctl(struct kbd_data *kbd, struct kbentry __user *user_kbe,
 		if (KVAL(tmp.kb_value) > kbd_max_vals[KTYP(tmp.kb_value)])
 			return -EINVAL;
 
-		if (!(key_map = kbd->key_maps[tmp.kb_table])) {
+		if (!(key_map = kbd->key_maps[kb_table])) {
 			int j;
 
 			key_map = kmalloc(sizeof(plain_map),
 						     GFP_KERNEL);
 			if (!key_map)
 				return -ENOMEM;
-			kbd->key_maps[tmp.kb_table] = key_map;
+			kbd->key_maps[kb_table] = key_map;
 			for (j = 0; j < NR_KEYS; j++)
 				key_map[j] = U(K_HOLE);
 		}
-		ov = U(key_map[tmp.kb_index]);
+		ov = U(key_map[kb_index]);
 		if (tmp.kb_value == ov)
 			break;	/* nothing to do */
 		/*
@@ -397,7 +425,7 @@ do_kdsk_ioctl(struct kbd_data *kbd, struct kbentry __user *user_kbe,
 		if (((ov == K_SAK) || (tmp.kb_value == K_SAK)) &&
 		    !capable(CAP_SYS_ADMIN))
 			return -EPERM;
-		key_map[tmp.kb_index] = U(tmp.kb_value);
+		key_map[kb_index] = U(tmp.kb_value);
 		break;
 	}
 	return 0;
@@ -436,20 +464,9 @@ do_kdgkb_ioctl(struct kbd_data *kbd, struct kbsentry __user *u_kbs,
 	case KDSKBSENT:
 		if (!perm)
 			return -EPERM;
-		len = strnlen_user(u_kbs->kb_string,
-				   sizeof(u_kbs->kb_string) - 1);
-		if (!len)
-			return -EFAULT;
-		if (len > sizeof(u_kbs->kb_string) - 1)
-			return -EINVAL;
-		p = kmalloc(len + 1, GFP_KERNEL);
-		if (!p)
-			return -ENOMEM;
-		if (copy_from_user(p, u_kbs->kb_string, len)) {
-			kfree(p);
-			return -EFAULT;
-		}
-		p[len] = 0;
+		p = strndup_user(u_kbs->kb_string, sizeof(u_kbs->kb_string));
+		if (IS_ERR(p))
+			return PTR_ERR(p);
 		kfree(kbd->func_table[kb_func]);
 		kbd->func_table[kb_func] = p;
 		break;
@@ -457,12 +474,12 @@ do_kdgkb_ioctl(struct kbd_data *kbd, struct kbsentry __user *u_kbs,
 	return 0;
 }
 
-int
-kbd_ioctl(struct kbd_data *kbd, struct file *file,
-	  unsigned int cmd, unsigned long arg)
+int kbd_ioctl(struct kbd_data *kbd, unsigned int cmd, unsigned long arg)
 {
+	struct tty_struct *tty;
 	void __user *argp;
-	int ct, perm;
+	unsigned int ct;
+	int perm;
 
 	argp = (void __user *)arg;
 
@@ -470,7 +487,10 @@ kbd_ioctl(struct kbd_data *kbd, struct file *file,
 	 * To have permissions to do most of the vt ioctls, we either have
 	 * to be the owner of the tty, or have CAP_SYS_TTY_CONFIG.
 	 */
-	perm = current->signal->tty == kbd->tty || capable(CAP_SYS_TTY_CONFIG);
+	tty = tty_port_tty_get(kbd->port);
+	/* FIXME this test is pretty racy */
+	perm = current->signal->tty == tty || capable(CAP_SYS_TTY_CONFIG);
+	tty_kref_put(tty);
 	switch (cmd) {
 	case KDGKBTYPE:
 		return put_user(KB_101, (char __user *)argp);

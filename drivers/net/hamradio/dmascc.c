@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for high-speed SCC boards (those with DMA support)
  * Copyright (C) 1997-2000 Klaus Kudielka
  *
  * S5SCC/DMA support by Janko Koleznik S52HI
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 
@@ -32,14 +19,15 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/netdevice.h>
+#include <linux/slab.h>
 #include <linux/rtnetlink.h>
 #include <linux/sockios.h>
 #include <linux/workqueue.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/dma.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <net/ax25.h>
 #include "z8530.h"
 
@@ -195,7 +183,7 @@ struct scc_priv {
 	int chip;
 	struct net_device *dev;
 	struct scc_info *info;
-	struct net_device_stats stats;
+
 	int channel;
 	int card_base, scc_cmd, scc_data;
 	int tmr_cnt, tmr_ctrl, tmr_mode;
@@ -239,7 +227,6 @@ static int scc_open(struct net_device *dev);
 static int scc_close(struct net_device *dev);
 static int scc_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
 static int scc_send_packet(struct sk_buff *skb, struct net_device *dev);
-static struct net_device_stats *scc_get_stats(struct net_device *dev);
 static int scc_set_mac_address(struct net_device *dev, void *sa);
 
 static inline void tx_on(struct scc_priv *priv);
@@ -274,7 +261,7 @@ static unsigned long rand;
 
 MODULE_AUTHOR("Klaus Kudielka");
 MODULE_DESCRIPTION("Driver for high-speed SCC boards");
-module_param_array(io, int, NULL, 0);
+module_param_hw_array(io, int, ioport, NULL, 0);
 MODULE_LICENSE("GPL");
 
 static void __exit dmascc_exit(void)
@@ -332,8 +319,8 @@ static int __init dmascc_init(void)
 			for (i = 0; i < MAX_NUM_DEVS && io[i]; i++) {
 				j = (io[i] -
 				     hw[h].io_region) / hw[h].io_delta;
-				if (j >= 0 && j < hw[h].num_devs
-				    && hw[h].io_region +
+				if (j >= 0 && j < hw[h].num_devs &&
+				    hw[h].io_region +
 				    j * hw[h].io_delta == io[i]) {
 					base[j] = io[i];
 				}
@@ -397,8 +384,8 @@ static int __init dmascc_init(void)
 					t_val =
 					    inb(t1[i]) + (inb(t1[i]) << 8);
 					/* Also check whether counter did wrap */
-					if (t_val == 0
-					    || t_val > TMR_0_HZ / HZ * 10)
+					if (t_val == 0 ||
+					    t_val > TMR_0_HZ / HZ * 10)
 						counting[i] = 0;
 					delay[i] = jiffies - start[i];
 				}
@@ -441,9 +428,17 @@ static void __init dev_setup(struct net_device *dev)
 	memcpy(dev->dev_addr, &ax25_defaddr, AX25_ADDR_LEN);
 }
 
+static const struct net_device_ops scc_netdev_ops = {
+	.ndo_open = scc_open,
+	.ndo_stop = scc_close,
+	.ndo_start_xmit = scc_send_packet,
+	.ndo_do_ioctl = scc_ioctl,
+	.ndo_set_mac_address = scc_set_mac_address,
+};
+
 static int __init setup_adapter(int card_base, int type, int n)
 {
-	int i, irq, chip;
+	int i, irq, chip, err;
 	struct scc_info *info;
 	struct net_device *dev;
 	struct scc_priv *priv;
@@ -456,26 +451,25 @@ static int __init setup_adapter(int card_base, int type, int n)
 	/* Initialize what is necessary for write_scc and write_scc_data */
 	info = kzalloc(sizeof(struct scc_info), GFP_KERNEL | GFP_DMA);
 	if (!info) {
-		printk(KERN_ERR "dmascc: "
-		       "could not allocate memory for %s at %#3x\n",
-		       hw[type].name, card_base);
+		err = -ENOMEM;
 		goto out;
 	}
 
-
-	info->dev[0] = alloc_netdev(0, "", dev_setup);
+	info->dev[0] = alloc_netdev(0, "", NET_NAME_UNKNOWN, dev_setup);
 	if (!info->dev[0]) {
 		printk(KERN_ERR "dmascc: "
 		       "could not allocate memory for %s at %#3x\n",
 		       hw[type].name, card_base);
+		err = -ENOMEM;
 		goto out1;
 	}
 
-	info->dev[1] = alloc_netdev(0, "", dev_setup);
+	info->dev[1] = alloc_netdev(0, "", NET_NAME_UNKNOWN, dev_setup);
 	if (!info->dev[1]) {
 		printk(KERN_ERR "dmascc: "
 		       "could not allocate memory for %s at %#3x\n",
 		       hw[type].name, card_base);
+		err = -ENOMEM;
 		goto out2;
 	}
 	spin_lock_init(&info->register_lock);
@@ -546,6 +540,7 @@ static int __init setup_adapter(int card_base, int type, int n)
 		printk(KERN_ERR
 		       "dmascc: could not find irq of %s at %#3x (irq=%d)\n",
 		       hw[type].name, card_base, irq);
+		err = -ENODEV;
 		goto out3;
 	}
 
@@ -572,26 +567,23 @@ static int __init setup_adapter(int card_base, int type, int n)
 		priv->param.persist = 256;
 		priv->param.dma = -1;
 		INIT_WORK(&priv->rx_work, rx_bh);
-		dev->priv = priv;
-		sprintf(dev->name, "dmascc%i", 2 * n + i);
+		dev->ml_priv = priv;
+		snprintf(dev->name, sizeof(dev->name), "dmascc%i", 2 * n + i);
 		dev->base_addr = card_base;
 		dev->irq = irq;
-		dev->open = scc_open;
-		dev->stop = scc_close;
-		dev->do_ioctl = scc_ioctl;
-		dev->hard_start_xmit = scc_send_packet;
-		dev->get_stats = scc_get_stats;
+		dev->netdev_ops = &scc_netdev_ops;
 		dev->header_ops = &ax25_header_ops;
-		dev->set_mac_address = scc_set_mac_address;
 	}
 	if (register_netdev(info->dev[0])) {
 		printk(KERN_ERR "dmascc: could not register %s\n",
 		       info->dev[0]->name);
+		err = -ENODEV;
 		goto out3;
 	}
 	if (register_netdev(info->dev[1])) {
 		printk(KERN_ERR "dmascc: could not register %s\n",
 		       info->dev[1]->name);
+		err = -ENODEV;
 		goto out4;
 	}
 
@@ -614,7 +606,7 @@ static int __init setup_adapter(int card_base, int type, int n)
       out1:
 	kfree(info);
       out:
-	return -1;
+	return err;
 }
 
 
@@ -720,7 +712,7 @@ static int read_scc_data(struct scc_priv *priv)
 
 static int scc_open(struct net_device *dev)
 {
-	struct scc_priv *priv = dev->priv;
+	struct scc_priv *priv = dev->ml_priv;
 	struct scc_info *info = priv->info;
 	int card_base = priv->card_base;
 
@@ -862,7 +854,7 @@ static int scc_open(struct net_device *dev)
 
 static int scc_close(struct net_device *dev)
 {
-	struct scc_priv *priv = dev->priv;
+	struct scc_priv *priv = dev->ml_priv;
 	struct scc_info *info = priv->info;
 	int card_base = priv->card_base;
 
@@ -891,7 +883,7 @@ static int scc_close(struct net_device *dev)
 
 static int scc_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
-	struct scc_priv *priv = dev->priv;
+	struct scc_priv *priv = dev->ml_priv;
 
 	switch (cmd) {
 	case SIOCGSCCPARAM:
@@ -918,9 +910,12 @@ static int scc_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 static int scc_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
-	struct scc_priv *priv = dev->priv;
+	struct scc_priv *priv = dev->ml_priv;
 	unsigned long flags;
 	int i;
+
+	if (skb->protocol == htons(ETH_P_IP))
+		return ax25_ip_xmit(skb);
 
 	/* Temporarily stop the scheduler feeding us packets */
 	netif_stop_queue(dev);
@@ -957,15 +952,7 @@ static int scc_send_packet(struct sk_buff *skb, struct net_device *dev)
 	spin_unlock_irqrestore(&priv->ring_lock, flags);
 	dev_kfree_skb(skb);
 
-	return 0;
-}
-
-
-static struct net_device_stats *scc_get_stats(struct net_device *dev)
-{
-	struct scc_priv *priv = dev->priv;
-
-	return &priv->stats;
+	return NETDEV_TX_OK;
 }
 
 
@@ -1216,17 +1203,17 @@ static void special_condition(struct scc_priv *priv, int rc)
 		}
 		if (priv->rx_over) {
 			/* We had an overrun */
-			priv->stats.rx_errors++;
+			priv->dev->stats.rx_errors++;
 			if (priv->rx_over == 2)
-				priv->stats.rx_length_errors++;
+				priv->dev->stats.rx_length_errors++;
 			else
-				priv->stats.rx_fifo_errors++;
+				priv->dev->stats.rx_fifo_errors++;
 			priv->rx_over = 0;
 		} else if (rc & CRC_ERR) {
 			/* Count invalid CRC only if packet length >= minimum */
 			if (cb >= 15) {
-				priv->stats.rx_errors++;
-				priv->stats.rx_crc_errors++;
+				priv->dev->stats.rx_errors++;
+				priv->dev->stats.rx_crc_errors++;
 			}
 		} else {
 			if (cb >= 15) {
@@ -1239,8 +1226,8 @@ static void special_condition(struct scc_priv *priv, int rc)
 					priv->rx_count++;
 					schedule_work(&priv->rx_work);
 				} else {
-					priv->stats.rx_errors++;
-					priv->stats.rx_over_errors++;
+					priv->dev->stats.rx_errors++;
+					priv->dev->stats.rx_over_errors++;
 				}
 			}
 		}
@@ -1275,7 +1262,7 @@ static void rx_bh(struct work_struct *ugli_api)
 		skb = dev_alloc_skb(cb + 1);
 		if (skb == NULL) {
 			/* Drop packet */
-			priv->stats.rx_dropped++;
+			priv->dev->stats.rx_dropped++;
 		} else {
 			/* Fill buffer */
 			data = skb_put(skb, cb + 1);
@@ -1283,9 +1270,8 @@ static void rx_bh(struct work_struct *ugli_api)
 			memcpy(&data[1], priv->rx_buf[i], cb);
 			skb->protocol = ax25_type_trans(skb, priv->dev);
 			netif_rx(skb);
-			priv->dev->last_rx = jiffies;
-			priv->stats.rx_packets++;
-			priv->stats.rx_bytes += cb;
+			priv->dev->stats.rx_packets++;
+			priv->dev->stats.rx_bytes += cb;
 		}
 		spin_lock_irqsave(&priv->ring_lock, flags);
 		/* Move tail */
@@ -1352,15 +1338,15 @@ static void es_isr(struct scc_priv *priv)
 			write_scc(priv, R1, EXT_INT_ENAB | WT_FN_RDYFN);
 		if (res) {
 			/* Update packet statistics */
-			priv->stats.tx_errors++;
-			priv->stats.tx_fifo_errors++;
+			priv->dev->stats.tx_errors++;
+			priv->dev->stats.tx_fifo_errors++;
 			/* Other underrun interrupts may already be waiting */
 			write_scc(priv, R0, RES_EXT_INT);
 			write_scc(priv, R0, RES_EXT_INT);
 		} else {
 			/* Update packet statistics */
-			priv->stats.tx_packets++;
-			priv->stats.tx_bytes += priv->tx_len[i];
+			priv->dev->stats.tx_packets++;
+			priv->dev->stats.tx_bytes += priv->tx_len[i];
 			/* Remove frame from FIFO */
 			priv->tx_tail = (i + 1) % NUM_TX_BUF;
 			priv->tx_count--;
@@ -1426,7 +1412,7 @@ static void tm_isr(struct scc_priv *priv)
 		write_scc(priv, R15, DCDIE);
 		priv->rr0 = read_scc(priv, R0);
 		if (priv->rr0 & DCD) {
-			priv->stats.collisions++;
+			priv->dev->stats.collisions++;
 			rx_on(priv);
 			priv->state = RX_ON;
 		} else {

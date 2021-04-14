@@ -2,9 +2,9 @@
  * Setup the right wbflush routine for the different DECstations.
  *
  * Created with information from:
- *      DECstation 3100 Desktop Workstation Functional Specification
- *      DECstation 5000/200 KN02 System Module Functional Specification
- *      mipsel-linux-objdump --disassemble vmunix | grep "wbflush" :-)
+ *	DECstation 3100 Desktop Workstation Functional Specification
+ *	DECstation 5000/200 KN02 System Module Functional Specification
+ *	mipsel-linux-objdump --disassemble vmunix | grep "wbflush" :-)
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -14,11 +14,12 @@
  * Copyright (C) 2002 Maciej W. Rozycki
  */
 
+#include <linux/export.h>
 #include <linux/init.h>
 
 #include <asm/bootinfo.h>
-#include <asm/system.h>
 #include <asm/wbflush.h>
+#include <asm/barrier.h>
 
 static void wbflush_kn01(void);
 static void wbflush_kn210(void);
@@ -88,7 +89,4 @@ static void wbflush_mips(void)
 {
 	__fast_iob();
 }
-
-#include <linux/module.h>
-
 EXPORT_SYMBOL(__wbflush);

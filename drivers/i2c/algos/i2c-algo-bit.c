@@ -1,31 +1,16 @@
-/* -------------------------------------------------------------------------
- * i2c-algo-bit.c i2c driver algorithms for bit-shift adapters
- * -------------------------------------------------------------------------
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * i2c-algo-bit.c: i2c driver algorithms for bit-shift adapters
+ *
  *   Copyright (C) 1995-2000 Simon G. Vogl
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- * ------------------------------------------------------------------------- */
-
-/* With some changes from Frodo Looijaard <frodol@dds.nl>, Kyösti Mälkki
-   <kmalkki@cc.hut.fi> and Jean Delvare <khali@linux-fr.org> */
+ *
+ * With some changes from Frodo Looijaard <frodol@dds.nl>, Kyösti Mälkki
+ * <kmalkki@cc.hut.fi> and Jean Delvare <jdelvare@suse.de>
+ */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/delay.h>
-#include <linux/slab.h>
-#include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/i2c.h>
@@ -48,8 +33,8 @@
 /* ----- global variables ---------------------------------------------	*/
 
 static int bit_test;	/* see if the line-setting functions work	*/
-module_param(bit_test, bool, 0);
-MODULE_PARM_DESC(bit_test, "Test the lines of the bus to see if it is stuck");
+module_param(bit_test, int, S_IRUGO);
+MODULE_PARM_DESC(bit_test, "lines testing - 0 off; 1 report; 2 fail if stuck");
 
 #ifdef DEBUG
 static int i2c_debug = 1;
@@ -104,14 +89,20 @@ static int sclhi(struct i2c_algo_bit_data *adap)
 		 * chips may hold it low ("clock stretching") while they
 		 * are processing data internally.
 		 */
-		if (time_after_eq(jiffies, start + adap->timeout))
+		if (time_after(jiffies, start + adap->timeout)) {
+			/* Test one last time, as we may have been preempted
+			 * between last check and timeout test.
+			 */
+			if (getscl(adap))
+				break;
 			return -ETIMEDOUT;
-		cond_resched();
+		}
+		cpu_relax();
 	}
 #ifdef DEBUG
 	if (jiffies != start && i2c_debug >= 3)
-		pr_debug("i2c-algo-bit: needed %ld jiffies for SCL to go "
-			 "high\n", jiffies - start);
+		pr_debug("i2c-algo-bit: needed %ld jiffies for SCL to go high\n",
+			 jiffies - start);
 #endif
 
 done:
@@ -171,8 +162,9 @@ static int i2c_outb(struct i2c_adapter *i2c_adap, unsigned char c)
 		setsda(adap, sb);
 		udelay((adap->udelay + 1) / 2);
 		if (sclhi(adap) < 0) { /* timed out */
-			bit_dbg(1, &i2c_adap->dev, "i2c_outb: 0x%02x, "
-				"timeout at bit #%d\n", (int)c, i);
+			bit_dbg(1, &i2c_adap->dev,
+				"i2c_outb: 0x%02x, timeout at bit #%d\n",
+				(int)c, i);
 			return -ETIMEDOUT;
 		}
 		/* FIXME do arbitration here:
@@ -185,8 +177,8 @@ static int i2c_outb(struct i2c_adapter *i2c_adap, unsigned char c)
 	}
 	sdahi(adap);
 	if (sclhi(adap) < 0) { /* timeout */
-		bit_dbg(1, &i2c_adap->dev, "i2c_outb: 0x%02x, "
-			"timeout at ack\n", (int)c);
+		bit_dbg(1, &i2c_adap->dev,
+			"i2c_outb: 0x%02x, timeout at ack\n", (int)c);
 		return -ETIMEDOUT;
 	}
 
@@ -215,8 +207,9 @@ static int i2c_inb(struct i2c_adapter *i2c_adap)
 	sdahi(adap);
 	for (i = 0; i < 8; i++) {
 		if (sclhi(adap) < 0) { /* timeout */
-			bit_dbg(1, &i2c_adap->dev, "i2c_inb: timeout at bit "
-				"#%d\n", 7 - i);
+			bit_dbg(1, &i2c_adap->dev,
+				"i2c_inb: timeout at bit #%d\n",
+				7 - i);
 			return -ETIMEDOUT;
 		}
 		indata *= 2;
@@ -233,9 +226,17 @@ static int i2c_inb(struct i2c_adapter *i2c_adap)
  * Sanity check for the adapter hardware - check the reaction of
  * the bus lines only if it seems to be idle.
  */
-static int test_bus(struct i2c_algo_bit_data *adap, char *name)
+static int test_bus(struct i2c_adapter *i2c_adap)
 {
-	int scl, sda;
+	struct i2c_algo_bit_data *adap = i2c_adap->algo_data;
+	const char *name = i2c_adap->name;
+	int scl, sda, ret;
+
+	if (adap->pre_xfer) {
+		ret = adap->pre_xfer(i2c_adap);
+		if (ret < 0)
+			return -ENODEV;
+	}
 
 	if (adap->getscl == NULL)
 		pr_info("%s: Testing SDA only, SCL is not readable\n", name);
@@ -243,7 +244,9 @@ static int test_bus(struct i2c_algo_bit_data *adap, char *name)
 	sda = getsda(adap);
 	scl = (adap->getscl == NULL) ? 1 : getscl(adap);
 	if (!scl || !sda) {
-		printk(KERN_WARNING "%s: bus seems to be busy\n", name);
+		printk(KERN_WARNING
+		       "%s: bus seems to be busy (scl=%d, sda=%d)\n",
+		       name, scl, sda);
 		goto bailout;
 	}
 
@@ -255,8 +258,9 @@ static int test_bus(struct i2c_algo_bit_data *adap, char *name)
 		goto bailout;
 	}
 	if (!scl) {
-		printk(KERN_WARNING "%s: SCL unexpected low "
-		       "while pulling SDA low!\n", name);
+		printk(KERN_WARNING
+		       "%s: SCL unexpected low while pulling SDA low!\n",
+		       name);
 		goto bailout;
 	}
 
@@ -268,8 +272,9 @@ static int test_bus(struct i2c_algo_bit_data *adap, char *name)
 		goto bailout;
 	}
 	if (!scl) {
-		printk(KERN_WARNING "%s: SCL unexpected low "
-		       "while pulling SDA high!\n", name);
+		printk(KERN_WARNING
+		       "%s: SCL unexpected low while pulling SDA high!\n",
+		       name);
 		goto bailout;
 	}
 
@@ -281,8 +286,9 @@ static int test_bus(struct i2c_algo_bit_data *adap, char *name)
 		goto bailout;
 	}
 	if (!sda) {
-		printk(KERN_WARNING "%s: SDA unexpected low "
-		       "while pulling SCL low!\n", name);
+		printk(KERN_WARNING
+		       "%s: SDA unexpected low while pulling SCL low!\n",
+		       name);
 		goto bailout;
 	}
 
@@ -294,15 +300,24 @@ static int test_bus(struct i2c_algo_bit_data *adap, char *name)
 		goto bailout;
 	}
 	if (!sda) {
-		printk(KERN_WARNING "%s: SDA unexpected low "
-		       "while pulling SCL high!\n", name);
+		printk(KERN_WARNING
+		       "%s: SDA unexpected low while pulling SCL high!\n",
+		       name);
 		goto bailout;
 	}
+
+	if (adap->post_xfer)
+		adap->post_xfer(i2c_adap);
+
 	pr_info("%s: Test OK\n", name);
 	return 0;
 bailout:
 	sdahi(adap);
 	sclhi(adap);
+
+	if (adap->post_xfer)
+		adap->post_xfer(i2c_adap);
+
 	return -ENODEV;
 }
 
@@ -334,8 +349,8 @@ static int try_address(struct i2c_adapter *i2c_adap,
 		i2c_start(adap);
 	}
 	if (i && ret)
-		bit_dbg(1, &i2c_adap->dev, "Used %d tries to %s client at "
-			"0x%02x: %s\n", i + 1,
+		bit_dbg(1, &i2c_adap->dev,
+			"Used %d tries to %s client at 0x%02x: %s\n", i + 1,
 			addr & 1 ? "read from" : "write to", addr >> 1,
 			ret == 1 ? "success" : "failed, timeout?");
 	return ret;
@@ -424,9 +439,10 @@ static int readbytes(struct i2c_adapter *i2c_adap, struct i2c_msg *msg)
 			if (inval <= 0 || inval > I2C_SMBUS_BLOCK_MAX) {
 				if (!(flags & I2C_M_NO_RD_ACK))
 					acknak(i2c_adap, 0);
-				dev_err(&i2c_adap->dev, "readbytes: invalid "
-					"block length (%d)\n", inval);
-				return -EREMOTEIO;
+				dev_err(&i2c_adap->dev,
+					"readbytes: invalid block length (%d)\n",
+					inval);
+				return -EPROTO;
 			}
 			/* The original count value accounts for the extra
 			   bytes, that is, either 1 for a regular transaction,
@@ -455,7 +471,7 @@ static int readbytes(struct i2c_adapter *i2c_adap, struct i2c_msg *msg)
  * reads, writes as well as 10bit-addresses.
  * returns:
  *  0 everything went okay, the chip ack'ed, or IGNORE_NAK flag was set
- * -x an error occurred (like: -EREMOTEIO if the device did not answer, or
+ * -x an error occurred (like: -ENXIO if the device did not answer, or
  *	-ETIMEDOUT, for example if the lines are stuck...)
  */
 static int bit_doAddress(struct i2c_adapter *i2c_adap, struct i2c_msg *msg)
@@ -471,25 +487,25 @@ static int bit_doAddress(struct i2c_adapter *i2c_adap, struct i2c_msg *msg)
 
 	if (flags & I2C_M_TEN) {
 		/* a ten bit address */
-		addr = 0xf0 | ((msg->addr >> 7) & 0x03);
+		addr = 0xf0 | ((msg->addr >> 7) & 0x06);
 		bit_dbg(2, &i2c_adap->dev, "addr0: %d\n", addr);
 		/* try extended address code...*/
 		ret = try_address(i2c_adap, addr, retries);
 		if ((ret != 1) && !nak_ok)  {
 			dev_err(&i2c_adap->dev,
 				"died at extended address code\n");
-			return -EREMOTEIO;
+			return -ENXIO;
 		}
 		/* the remaining 8 bit address */
-		ret = i2c_outb(i2c_adap, msg->addr & 0x7f);
+		ret = i2c_outb(i2c_adap, msg->addr & 0xff);
 		if ((ret != 1) && !nak_ok) {
 			/* the chip did not ack / xmission error occurred */
 			dev_err(&i2c_adap->dev, "died at 2nd address code\n");
-			return -EREMOTEIO;
+			return -ENXIO;
 		}
 		if (flags & I2C_M_RD) {
-			bit_dbg(3, &i2c_adap->dev, "emitting repeated "
-				"start condition\n");
+			bit_dbg(3, &i2c_adap->dev,
+				"emitting repeated start condition\n");
 			i2c_repstart(adap);
 			/* okay, now switch into reading mode */
 			addr |= 0x01;
@@ -497,13 +513,11 @@ static int bit_doAddress(struct i2c_adapter *i2c_adap, struct i2c_msg *msg)
 			if ((ret != 1) && !nak_ok) {
 				dev_err(&i2c_adap->dev,
 					"died at repeated address code\n");
-				return -EREMOTEIO;
+				return -EIO;
 			}
 		}
 	} else {		/* normal 7bit address	*/
-		addr = msg->addr << 1;
-		if (flags & I2C_M_RD)
-			addr |= 1;
+		addr = i2c_8bit_addr_from_msg(msg);
 		if (flags & I2C_M_REV_DIR_ADDR)
 			addr ^= 1;
 		ret = try_address(i2c_adap, addr, retries);
@@ -522,6 +536,12 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 	int i, ret;
 	unsigned short nak_ok;
 
+	if (adap->pre_xfer) {
+		ret = adap->pre_xfer(i2c_adap);
+		if (ret < 0)
+			return ret;
+	}
+
 	bit_dbg(3, &i2c_adap->dev, "emitting start condition\n");
 	i2c_start(adap);
 	for (i = 0; i < num; i++) {
@@ -529,14 +549,21 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 		nak_ok = pmsg->flags & I2C_M_IGNORE_NAK;
 		if (!(pmsg->flags & I2C_M_NOSTART)) {
 			if (i) {
-				bit_dbg(3, &i2c_adap->dev, "emitting "
-					"repeated start condition\n");
-				i2c_repstart(adap);
+				if (msgs[i - 1].flags & I2C_M_STOP) {
+					bit_dbg(3, &i2c_adap->dev,
+						"emitting enforced stop/start condition\n");
+					i2c_stop(adap);
+					i2c_start(adap);
+				} else {
+					bit_dbg(3, &i2c_adap->dev,
+						"emitting repeated start condition\n");
+					i2c_repstart(adap);
+				}
 			}
 			ret = bit_doAddress(i2c_adap, pmsg);
 			if ((ret != 0) && !nak_ok) {
-				bit_dbg(1, &i2c_adap->dev, "NAK from "
-					"device addr 0x%02x msg #%d\n",
+				bit_dbg(1, &i2c_adap->dev,
+					"NAK from device addr 0x%02x msg #%d\n",
 					msgs[i].addr, i);
 				goto bailout;
 			}
@@ -549,7 +576,7 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 					ret, ret == 1 ? "" : "s");
 			if (ret < pmsg->len) {
 				if (ret >= 0)
-					ret = -EREMOTEIO;
+					ret = -EIO;
 				goto bailout;
 			}
 		} else {
@@ -560,7 +587,7 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 					ret, ret == 1 ? "" : "s");
 			if (ret < pmsg->len) {
 				if (ret >= 0)
-					ret = -EREMOTEIO;
+					ret = -EIO;
 				goto bailout;
 			}
 		}
@@ -570,12 +597,32 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 bailout:
 	bit_dbg(3, &i2c_adap->dev, "emitting stop condition\n");
 	i2c_stop(adap);
+
+	if (adap->post_xfer)
+		adap->post_xfer(i2c_adap);
 	return ret;
+}
+
+/*
+ * We print a warning when we are not flagged to support atomic transfers but
+ * will try anyhow. That's what the I2C core would do as well. Sadly, we can't
+ * modify the algorithm struct at probe time because this struct is exported
+ * 'const'.
+ */
+static int bit_xfer_atomic(struct i2c_adapter *i2c_adap, struct i2c_msg msgs[],
+			   int num)
+{
+	struct i2c_algo_bit_data *adap = i2c_adap->algo_data;
+
+	if (!adap->can_do_atomic)
+		dev_warn(&i2c_adap->dev, "not flagged for atomic transfers\n");
+
+	return bit_xfer(i2c_adap, msgs, num);
 }
 
 static u32 bit_func(struct i2c_adapter *adap)
 {
-	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL |
+	return I2C_FUNC_I2C | I2C_FUNC_NOSTART | I2C_FUNC_SMBUS_EMUL |
 	       I2C_FUNC_SMBUS_READ_BLOCK_DATA |
 	       I2C_FUNC_SMBUS_BLOCK_PROC_CALL |
 	       I2C_FUNC_10BIT_ADDR | I2C_FUNC_PROTOCOL_MANGLING;
@@ -584,54 +631,64 @@ static u32 bit_func(struct i2c_adapter *adap)
 
 /* -----exported algorithm data: -------------------------------------	*/
 
-static const struct i2c_algorithm i2c_bit_algo = {
-	.master_xfer	= bit_xfer,
-	.functionality	= bit_func,
+const struct i2c_algorithm i2c_bit_algo = {
+	.master_xfer = bit_xfer,
+	.master_xfer_atomic = bit_xfer_atomic,
+	.functionality = bit_func,
+};
+EXPORT_SYMBOL(i2c_bit_algo);
+
+static const struct i2c_adapter_quirks i2c_bit_quirk_no_clk_stretch = {
+	.flags = I2C_AQ_NO_CLK_STRETCH,
 };
 
 /*
  * registering functions to load algorithms at runtime
  */
-static int i2c_bit_prepare_bus(struct i2c_adapter *adap)
+static int __i2c_bit_add_bus(struct i2c_adapter *adap,
+			     int (*add_adapter)(struct i2c_adapter *))
 {
 	struct i2c_algo_bit_data *bit_adap = adap->algo_data;
+	int ret;
 
 	if (bit_test) {
-		int ret = test_bus(bit_adap, adap->name);
-		if (ret < 0)
+		ret = test_bus(adap);
+		if (bit_test >= 2 && ret < 0)
 			return -ENODEV;
 	}
 
 	/* register new adapter to i2c module... */
 	adap->algo = &i2c_bit_algo;
+	adap->retries = 3;
+	if (bit_adap->getscl == NULL)
+		adap->quirks = &i2c_bit_quirk_no_clk_stretch;
 
-	adap->timeout = 100;	/* default values, should	*/
-	adap->retries = 3;	/* be replaced by defines	*/
+	/*
+	 * We tried forcing SCL/SDA to an initial state here. But that caused a
+	 * regression, sadly. Check Bugzilla #200045 for details.
+	 */
 
+	ret = add_adapter(adap);
+	if (ret < 0)
+		return ret;
+
+	/* Complain if SCL can't be read */
+	if (bit_adap->getscl == NULL) {
+		dev_warn(&adap->dev, "Not I2C compliant: can't read SCL\n");
+		dev_warn(&adap->dev, "Bus may be unreliable\n");
+	}
 	return 0;
 }
 
 int i2c_bit_add_bus(struct i2c_adapter *adap)
 {
-	int err;
-
-	err = i2c_bit_prepare_bus(adap);
-	if (err)
-		return err;
-
-	return i2c_add_adapter(adap);
+	return __i2c_bit_add_bus(adap, i2c_add_adapter);
 }
 EXPORT_SYMBOL(i2c_bit_add_bus);
 
 int i2c_bit_add_numbered_bus(struct i2c_adapter *adap)
 {
-	int err;
-
-	err = i2c_bit_prepare_bus(adap);
-	if (err)
-		return err;
-
-	return i2c_add_numbered_adapter(adap);
+	return __i2c_bit_add_bus(adap, i2c_add_numbered_adapter);
 }
 EXPORT_SYMBOL(i2c_bit_add_numbered_bus);
 

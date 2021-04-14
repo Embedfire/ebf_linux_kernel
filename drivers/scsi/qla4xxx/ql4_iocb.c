@@ -1,8 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * QLogic iSCSI HBA Driver
- * Copyright (c)  2003-2006 QLogic Corporation
- *
- * See LICENSE.qla4xxx for copyright and licensing details.
+ * Copyright (c)  2003-2013 QLogic Corporation
  */
 
 #include "ql4_def.h"
@@ -10,8 +9,41 @@
 #include "ql4_dbg.h"
 #include "ql4_inline.h"
 
-
 #include <scsi/scsi_tcq.h>
+
+static int
+qla4xxx_space_in_req_ring(struct scsi_qla_host *ha, uint16_t req_cnt)
+{
+	uint16_t cnt;
+
+	/* Calculate number of free request entries. */
+	if ((req_cnt + 2) >= ha->req_q_count) {
+		cnt = (uint16_t) ha->isp_ops->rd_shdw_req_q_out(ha);
+		if (ha->request_in < cnt)
+			ha->req_q_count = cnt - ha->request_in;
+		else
+			ha->req_q_count = REQUEST_QUEUE_DEPTH -
+						(ha->request_in - cnt);
+	}
+
+	/* Check if room for request in request ring. */
+	if ((req_cnt + 2) < ha->req_q_count)
+		return 1;
+	else
+		return 0;
+}
+
+static void qla4xxx_advance_req_ring_ptr(struct scsi_qla_host *ha)
+{
+	/* Advance request queue pointer */
+	if (ha->request_in == (REQUEST_QUEUE_DEPTH - 1)) {
+		ha->request_in = 0;
+		ha->request_ptr = ha->request_ring;
+	} else {
+		ha->request_in++;
+		ha->request_ptr++;
+	}
+}
 
 /**
  * qla4xxx_get_req_pkt - returns a valid entry in request queue.
@@ -26,35 +58,18 @@
 static int qla4xxx_get_req_pkt(struct scsi_qla_host *ha,
 			       struct queue_entry **queue_entry)
 {
-	uint16_t request_in;
-	uint8_t status = QLA_SUCCESS;
+	uint16_t req_cnt = 1;
 
-	*queue_entry = ha->request_ptr;
-
-	/* get the latest request_in and request_out index */
-	request_in = ha->request_in;
-	ha->request_out = (uint16_t) le32_to_cpu(ha->shadow_regs->req_q_out);
-
-	/* Advance request queue pointer and check for queue full */
-	if (request_in == (REQUEST_QUEUE_DEPTH - 1)) {
-		request_in = 0;
-		ha->request_ptr = ha->request_ring;
-	} else {
-		request_in++;
-		ha->request_ptr++;
-	}
-
-	/* request queue is full, try again later */
-	if ((ha->iocb_cnt + 1) >= ha->iocb_hiwat) {
-		/* restore request pointer */
-		ha->request_ptr = *queue_entry;
-		status = QLA_ERROR;
-	} else {
-		ha->request_in = request_in;
+	if (qla4xxx_space_in_req_ring(ha, req_cnt)) {
+		*queue_entry = ha->request_ptr;
 		memset(*queue_entry, 0, sizeof(**queue_entry));
+
+		qla4xxx_advance_req_ring_ptr(ha);
+		ha->req_q_count -= req_cnt;
+		return QLA_SUCCESS;
 	}
 
-	return status;
+	return QLA_ERROR;
 }
 
 /**
@@ -62,12 +77,12 @@ static int qla4xxx_get_req_pkt(struct scsi_qla_host *ha,
  * @ha: Pointer to host adapter structure.
  * @ddb_entry: Pointer to device database entry
  * @lun: SCSI LUN
- * @marker_type: marker identifier
+ * @mrkr_mod: marker identifier
  *
  * This routine issues a marker IOCB.
  **/
 int qla4xxx_send_marker_iocb(struct scsi_qla_host *ha,
-	struct ddb_entry *ddb_entry, int lun, uint16_t mrkr_mod)
+	struct ddb_entry *ddb_entry, uint64_t lun, uint16_t mrkr_mod)
 {
 	struct qla4_marker_entry *marker_entry;
 	unsigned long flags = 0;
@@ -92,29 +107,21 @@ int qla4xxx_send_marker_iocb(struct scsi_qla_host *ha,
 	wmb();
 
 	/* Tell ISP it's got a new I/O request */
-	writel(ha->request_in, &ha->reg->req_q_in);
-	readl(&ha->reg->req_q_in);
+	ha->isp_ops->queue_iocb(ha);
 
 exit_send_marker:
 	spin_unlock_irqrestore(&ha->hardware_lock, flags);
 	return status;
 }
 
-static struct continuation_t1_entry* qla4xxx_alloc_cont_entry(
-	struct scsi_qla_host *ha)
+static struct continuation_t1_entry *
+qla4xxx_alloc_cont_entry(struct scsi_qla_host *ha)
 {
 	struct continuation_t1_entry *cont_entry;
 
 	cont_entry = (struct continuation_t1_entry *)ha->request_ptr;
 
-	/* Advance request queue pointer */
-	if (ha->request_in == (REQUEST_QUEUE_DEPTH - 1)) {
-		ha->request_in = 0;
-		ha->request_ptr = ha->request_ring;
-	} else {
-		ha->request_in++;
-		ha->request_ptr++;
-	}
+	qla4xxx_advance_req_ring_ptr(ha);
 
 	/* Load packet defaults */
 	cont_entry->hdr.entryType = ET_CONTINUE;
@@ -184,6 +191,76 @@ static void qla4xxx_build_scsi_iocbs(struct srb *srb,
 	}
 }
 
+void qla4_83xx_queue_iocb(struct scsi_qla_host *ha)
+{
+	writel(ha->request_in, &ha->qla4_83xx_reg->req_q_in);
+	readl(&ha->qla4_83xx_reg->req_q_in);
+}
+
+void qla4_83xx_complete_iocb(struct scsi_qla_host *ha)
+{
+	writel(ha->response_out, &ha->qla4_83xx_reg->rsp_q_out);
+	readl(&ha->qla4_83xx_reg->rsp_q_out);
+}
+
+/**
+ * qla4_82xx_queue_iocb - Tell ISP it's got new request(s)
+ * @ha: pointer to host adapter structure.
+ *
+ * This routine notifies the ISP that one or more new request
+ * queue entries have been placed on the request queue.
+ **/
+void qla4_82xx_queue_iocb(struct scsi_qla_host *ha)
+{
+	uint32_t dbval = 0;
+
+	dbval = 0x14 | (ha->func_num << 5);
+	dbval = dbval | (0 << 8) | (ha->request_in << 16);
+
+	qla4_82xx_wr_32(ha, ha->nx_db_wr_ptr, ha->request_in);
+}
+
+/**
+ * qla4_82xx_complete_iocb - Tell ISP we're done with response(s)
+ * @ha: pointer to host adapter structure.
+ *
+ * This routine notifies the ISP that one or more response/completion
+ * queue entries have been processed by the driver.
+ * This also clears the interrupt.
+ **/
+void qla4_82xx_complete_iocb(struct scsi_qla_host *ha)
+{
+	writel(ha->response_out, &ha->qla4_82xx_reg->rsp_q_out);
+	readl(&ha->qla4_82xx_reg->rsp_q_out);
+}
+
+/**
+ * qla4xxx_queue_iocb - Tell ISP it's got new request(s)
+ * @ha: pointer to host adapter structure.
+ *
+ * This routine is notifies the ISP that one or more new request
+ * queue entries have been placed on the request queue.
+ **/
+void qla4xxx_queue_iocb(struct scsi_qla_host *ha)
+{
+	writel(ha->request_in, &ha->reg->req_q_in);
+	readl(&ha->reg->req_q_in);
+}
+
+/**
+ * qla4xxx_complete_iocb - Tell ISP we're done with response(s)
+ * @ha: pointer to host adapter structure.
+ *
+ * This routine is notifies the ISP that one or more response/completion
+ * queue entries have been processed by the driver.
+ * This also clears the interrupt.
+ **/
+void qla4xxx_complete_iocb(struct scsi_qla_host *ha)
+{
+	writel(ha->response_out, &ha->reg->rsp_q_out);
+	readl(&ha->reg->rsp_q_out);
+}
+
 /**
  * qla4xxx_send_command_to_isp - issues command to HBA
  * @ha: pointer to host adapter structure.
@@ -197,15 +274,11 @@ int qla4xxx_send_command_to_isp(struct scsi_qla_host *ha, struct srb * srb)
 	struct scsi_cmnd *cmd = srb->cmd;
 	struct ddb_entry *ddb_entry;
 	struct command_t3_entry *cmd_entry;
-
 	int nseg;
 	uint16_t tot_dsds;
 	uint16_t req_cnt;
-
 	unsigned long flags;
-	uint16_t cnt;
 	uint32_t index;
-	char tag[2];
 
 	/* Get real lun and adapter */
 	ddb_entry = srb->ddb;
@@ -217,6 +290,19 @@ int qla4xxx_send_command_to_isp(struct scsi_qla_host *ha, struct srb * srb)
 
 	index = (uint32_t)cmd->request->tag;
 
+	/*
+	 * Check to see if adapter is online before placing request on
+	 * request queue.  If a reset occurs and a request is in the queue,
+	 * the firmware will still attempt to process the request, retrieving
+	 * garbage for pointers.
+	 */
+	if (!test_bit(AF_ONLINE, &ha->flags)) {
+		DEBUG2(printk("scsi%ld: %s: Adapter OFFLINE! "
+			      "Do not issue command.\n",
+			      ha->host_no, __func__));
+		goto queuing_error;
+	}
+
 	/* Calculate the number of request entries needed. */
 	nseg = scsi_dma_map(cmd);
 	if (nseg < 0)
@@ -224,21 +310,11 @@ int qla4xxx_send_command_to_isp(struct scsi_qla_host *ha, struct srb * srb)
 	tot_dsds = nseg;
 
 	req_cnt = qla4xxx_calc_request_entries(tot_dsds);
-
-	if (ha->req_q_count < (req_cnt + 2)) {
-		cnt = (uint16_t) le32_to_cpu(ha->shadow_regs->req_q_out);
-		if (ha->request_in < cnt)
-			ha->req_q_count = cnt - ha->request_in;
-		else
-			ha->req_q_count = REQUEST_QUEUE_DEPTH -
-				(ha->request_in - cnt);
-	}
-
-	if (ha->req_q_count < (req_cnt + 2))
+	if (!qla4xxx_space_in_req_ring(ha, req_cnt))
 		goto queuing_error;
 
 	/* total iocbs active */
-	if ((ha->iocb_cnt + req_cnt) >= REQUEST_QUEUE_DEPTH)
+	if ((ha->iocb_cnt + req_cnt) >= ha->iocb_hiwat)
 		goto queuing_error;
 
 	/* Build command packet */
@@ -247,10 +323,8 @@ int qla4xxx_send_command_to_isp(struct scsi_qla_host *ha, struct srb * srb)
 	cmd_entry->hdr.entryType = ET_COMMAND;
 	cmd_entry->handle = cpu_to_le32(index);
 	cmd_entry->target = cpu_to_le16(ddb_entry->fw_ddb_index);
-	cmd_entry->connection_id = cpu_to_le16(ddb_entry->connection_id);
 
 	int_to_scsilun(cmd->device->lun, &cmd_entry->lun);
-	cmd_entry->cmdSeqNum = cpu_to_le32(ddb_entry->CmdSn);
 	cmd_entry->ttlByteCnt = cpu_to_le32(scsi_bufflen(cmd));
 	memcpy(cmd_entry->cdb, cmd->cmnd, cmd->cmd_len);
 	cmd_entry->dataSegCnt = cpu_to_le16(tot_dsds);
@@ -276,43 +350,12 @@ int qla4xxx_send_command_to_isp(struct scsi_qla_host *ha, struct srb * srb)
 
 	/* Set tagged queueing control flags */
 	cmd_entry->control_flags |= CF_SIMPLE_TAG;
-	if (scsi_populate_tag_msg(cmd, tag))
-		switch (tag[0]) {
-		case MSG_HEAD_TAG:
-			cmd_entry->control_flags |= CF_HEAD_TAG;
-			break;
-		case MSG_ORDERED_TAG:
-			cmd_entry->control_flags |= CF_ORDERED_TAG;
-			break;
-		}
 
-
-	/* Advance request queue pointer */
-	ha->request_in++;
-	if (ha->request_in == REQUEST_QUEUE_DEPTH) {
-		ha->request_in = 0;
-		ha->request_ptr = ha->request_ring;
-	} else
-		ha->request_ptr++;
-
-
+	qla4xxx_advance_req_ring_ptr(ha);
 	qla4xxx_build_scsi_iocbs(srb, cmd_entry, tot_dsds);
 	wmb();
 
-	/*
-	 * Check to see if adapter is online before placing request on
-	 * request queue.  If a reset occurs and a request is in the queue,
-	 * the firmware will still attempt to process the request, retrieving
-	 * garbage for pointers.
-	 */
-	if (!test_bit(AF_ONLINE, &ha->flags)) {
-		DEBUG2(printk("scsi%ld: %s: Adapter OFFLINE! "
-			      "Do not issue command.\n",
-			      ha->host_no, __func__));
-		goto queuing_error;
-	}
-
-	srb->cmd->host_scribble = (unsigned char *)srb;
+	srb->cmd->host_scribble = (unsigned char *)(unsigned long)index;
 
 	/* update counters */
 	srb->state = SRB_ACTIVE_STATE;
@@ -323,9 +366,7 @@ int qla4xxx_send_command_to_isp(struct scsi_qla_host *ha, struct srb * srb)
 	srb->iocb_cnt = req_cnt;
 	ha->req_q_count -= req_cnt;
 
-	/* Debug print statements */
-	writel(ha->request_in, &ha->reg->req_q_in);
-	readl(&ha->reg->req_q_in);
+	ha->isp_ops->queue_iocb(ha);
 	spin_unlock_irqrestore(&ha->hardware_lock, flags);
 
 	return QLA_SUCCESS;
@@ -339,3 +380,162 @@ queuing_error:
 	return QLA_ERROR;
 }
 
+int qla4xxx_send_passthru0(struct iscsi_task *task)
+{
+	struct passthru0 *passthru_iocb;
+	struct iscsi_session *sess = task->conn->session;
+	struct ddb_entry *ddb_entry = sess->dd_data;
+	struct scsi_qla_host *ha = ddb_entry->ha;
+	struct ql4_task_data *task_data = task->dd_data;
+	uint16_t ctrl_flags = 0;
+	unsigned long flags;
+	int ret = QLA_ERROR;
+
+	spin_lock_irqsave(&ha->hardware_lock, flags);
+	task_data->iocb_req_cnt = 1;
+	/* Put the IOCB on the request queue */
+	if (!qla4xxx_space_in_req_ring(ha, task_data->iocb_req_cnt))
+		goto queuing_error;
+
+	passthru_iocb = (struct passthru0 *) ha->request_ptr;
+
+	memset(passthru_iocb, 0, sizeof(struct passthru0));
+	passthru_iocb->hdr.entryType = ET_PASSTHRU0;
+	passthru_iocb->hdr.systemDefined = SD_ISCSI_PDU;
+	passthru_iocb->hdr.entryCount = task_data->iocb_req_cnt;
+	passthru_iocb->handle = task->itt;
+	passthru_iocb->target = cpu_to_le16(ddb_entry->fw_ddb_index);
+	passthru_iocb->timeout = cpu_to_le16(PT_DEFAULT_TIMEOUT);
+
+	/* Setup the out & in DSDs */
+	if (task_data->req_len) {
+		memcpy((uint8_t *)task_data->req_buffer +
+		       sizeof(struct iscsi_hdr), task->data, task->data_count);
+		ctrl_flags |= PT_FLAG_SEND_BUFFER;
+		passthru_iocb->out_dsd.base.addrLow =
+					cpu_to_le32(LSDW(task_data->req_dma));
+		passthru_iocb->out_dsd.base.addrHigh =
+					cpu_to_le32(MSDW(task_data->req_dma));
+		passthru_iocb->out_dsd.count =
+					cpu_to_le32(task->data_count +
+						    sizeof(struct iscsi_hdr));
+	}
+	if (task_data->resp_len) {
+		passthru_iocb->in_dsd.base.addrLow =
+					cpu_to_le32(LSDW(task_data->resp_dma));
+		passthru_iocb->in_dsd.base.addrHigh =
+					cpu_to_le32(MSDW(task_data->resp_dma));
+		passthru_iocb->in_dsd.count =
+			cpu_to_le32(task_data->resp_len);
+	}
+
+	ctrl_flags |= (PT_FLAG_ISCSI_PDU | PT_FLAG_WAIT_4_RESPONSE);
+	passthru_iocb->control_flags = cpu_to_le16(ctrl_flags);
+
+	/* Update the request pointer */
+	qla4xxx_advance_req_ring_ptr(ha);
+	wmb();
+
+	/* Track IOCB used */
+	ha->iocb_cnt += task_data->iocb_req_cnt;
+	ha->req_q_count -= task_data->iocb_req_cnt;
+	ha->isp_ops->queue_iocb(ha);
+	ret = QLA_SUCCESS;
+
+queuing_error:
+	spin_unlock_irqrestore(&ha->hardware_lock, flags);
+	return ret;
+}
+
+static struct mrb *qla4xxx_get_new_mrb(struct scsi_qla_host *ha)
+{
+	struct mrb *mrb;
+
+	mrb = kzalloc(sizeof(*mrb), GFP_KERNEL);
+	if (!mrb)
+		return mrb;
+
+	mrb->ha = ha;
+	return mrb;
+}
+
+static int qla4xxx_send_mbox_iocb(struct scsi_qla_host *ha, struct mrb *mrb,
+				  uint32_t *in_mbox)
+{
+	int rval = QLA_SUCCESS;
+	uint32_t i;
+	unsigned long flags;
+	uint32_t index = 0;
+
+	/* Acquire hardware specific lock */
+	spin_lock_irqsave(&ha->hardware_lock, flags);
+
+	/* Get pointer to the queue entry for the marker */
+	rval = qla4xxx_get_req_pkt(ha, (struct queue_entry **) &(mrb->mbox));
+	if (rval != QLA_SUCCESS)
+		goto exit_mbox_iocb;
+
+	index = ha->mrb_index;
+	/* get valid mrb index*/
+	for (i = 0; i < MAX_MRB; i++) {
+		index++;
+		if (index == MAX_MRB)
+			index = 1;
+		if (ha->active_mrb_array[index] == NULL) {
+			ha->mrb_index = index;
+			break;
+		}
+	}
+
+	mrb->iocb_cnt = 1;
+	ha->active_mrb_array[index] = mrb;
+	mrb->mbox->handle = index;
+	mrb->mbox->hdr.entryType = ET_MBOX_CMD;
+	mrb->mbox->hdr.entryCount = mrb->iocb_cnt;
+	memcpy(mrb->mbox->in_mbox, in_mbox, 32);
+	mrb->mbox_cmd = in_mbox[0];
+	wmb();
+
+	ha->iocb_cnt += mrb->iocb_cnt;
+	ha->isp_ops->queue_iocb(ha);
+exit_mbox_iocb:
+	spin_unlock_irqrestore(&ha->hardware_lock, flags);
+	return rval;
+}
+
+int qla4xxx_ping_iocb(struct scsi_qla_host *ha, uint32_t options,
+		      uint32_t payload_size, uint32_t pid, uint8_t *ipaddr)
+{
+	uint32_t in_mbox[8];
+	struct mrb *mrb = NULL;
+	int rval = QLA_SUCCESS;
+
+	memset(in_mbox, 0, sizeof(in_mbox));
+
+	mrb = qla4xxx_get_new_mrb(ha);
+	if (!mrb) {
+		DEBUG2(ql4_printk(KERN_WARNING, ha, "%s: fail to get new mrb\n",
+				  __func__));
+		rval = QLA_ERROR;
+		goto exit_ping;
+	}
+
+	in_mbox[0] = MBOX_CMD_PING;
+	in_mbox[1] = options;
+	memcpy(&in_mbox[2], &ipaddr[0], 4);
+	memcpy(&in_mbox[3], &ipaddr[4], 4);
+	memcpy(&in_mbox[4], &ipaddr[8], 4);
+	memcpy(&in_mbox[5], &ipaddr[12], 4);
+	in_mbox[6] = payload_size;
+
+	mrb->pid = pid;
+	rval = qla4xxx_send_mbox_iocb(ha, mrb, in_mbox);
+
+	if (rval != QLA_SUCCESS)
+		goto exit_ping;
+
+	return rval;
+exit_ping:
+	kfree(mrb);
+	return rval;
+}

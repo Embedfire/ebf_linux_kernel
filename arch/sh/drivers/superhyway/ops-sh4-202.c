@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/drivers/superhyway/ops-sh4-202.c
  *
  * SuperHyway bus support for SH4-202
  *
  * Copyright (C) 2005  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU
- * General Public License.  See the file "COPYING" in the main
- * directory of this archive for more details.
  */
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -134,8 +131,8 @@ static int sh4202_read_vcr(unsigned long base, struct superhyway_vcr_info *vcr)
 	 *
 	 * Do not trust the documentation, for it is evil.
 	 */
-	vcrh = ctrl_inl(base);
-	vcrl = ctrl_inl(base + sizeof(u32));
+	vcrh = __raw_readl(base);
+	vcrl = __raw_readl(base + sizeof(u32));
 
 	tmp = ((u64)vcrh << 32) | vcrl;
 	memcpy(vcr, &tmp, sizeof(u64));
@@ -147,8 +144,8 @@ static int sh4202_write_vcr(unsigned long base, struct superhyway_vcr_info vcr)
 {
 	u64 tmp = *(u64 *)&vcr;
 
-	ctrl_outl((tmp >> 32) & 0xffffffff, base);
-	ctrl_outl(tmp & 0xffffffff, base + sizeof(u32));
+	__raw_writel((tmp >> 32) & 0xffffffff, base);
+	__raw_writel(tmp & 0xffffffff, base + sizeof(u32));
 
 	return 0;
 }

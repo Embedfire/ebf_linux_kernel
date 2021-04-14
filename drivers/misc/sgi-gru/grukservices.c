@@ -1,36 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * SN Platform GRU Driver
  *
  *              KERNEL SERVICES THAT USE THE GRU
  *
  *  Copyright (c) 2008 Silicon Graphics, Inc.  All Rights Reserved.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
-#include <linux/smp_lock.h>
 #include <linux/spinlock.h>
 #include <linux/device.h>
 #include <linux/miscdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/interrupt.h>
+#include <linux/sync_core.h>
 #include <linux/uaccess.h>
+#include <linux/delay.h>
+#include <linux/export.h>
+#include <asm/io_apic.h>
 #include "gru.h"
 #include "grulib.h"
 #include "grutables.h"
@@ -45,16 +35,63 @@
  * resources. This will likely be replaced when we better understand the
  * kernel/user requirements.
  *
- * At boot time, the kernel permanently reserves a fixed number of
- * CBRs/DSRs for each cpu to use. The resources are all taken from
- * the GRU chiplet 1 on the blade. This leaves the full set of resources
- * of chiplet 0 available to be allocated to a single user.
+ * Blade percpu resources reserved for kernel use. These resources are
+ * reserved whenever the the kernel context for the blade is loaded. Note
+ * that the kernel context is not guaranteed to be always available. It is
+ * loaded on demand & can be stolen by a user if the user demand exceeds the
+ * kernel demand. The kernel can always reload the kernel context but
+ * a SLEEP may be required!!!.
+ *
+ * Async Overview:
+ *
+ * 	Each blade has one "kernel context" that owns GRU kernel resources
+ * 	located on the blade. Kernel drivers use GRU resources in this context
+ * 	for sending messages, zeroing memory, etc.
+ *
+ * 	The kernel context is dynamically loaded on demand. If it is not in
+ * 	use by the kernel, the kernel context can be unloaded & given to a user.
+ * 	The kernel context will be reloaded when needed. This may require that
+ * 	a context be stolen from a user.
+ * 		NOTE: frequent unloading/reloading of the kernel context is
+ * 		expensive. We are depending on batch schedulers, cpusets, sane
+ * 		drivers or some other mechanism to prevent the need for frequent
+ *	 	stealing/reloading.
+ *
+ * 	The kernel context consists of two parts:
+ * 		- 1 CB & a few DSRs that are reserved for each cpu on the blade.
+ * 		  Each cpu has it's own private resources & does not share them
+ * 		  with other cpus. These resources are used serially, ie,
+ * 		  locked, used & unlocked  on each call to a function in
+ * 		  grukservices.
+ * 		  	(Now that we have dynamic loading of kernel contexts, I
+ * 		  	 may rethink this & allow sharing between cpus....)
+ *
+ *		- Additional resources can be reserved long term & used directly
+ *		  by UV drivers located in the kernel. Drivers using these GRU
+ *		  resources can use asynchronous GRU instructions that send
+ *		  interrupts on completion.
+ *		  	- these resources must be explicitly locked/unlocked
+ *		  	- locked resources prevent (obviously) the kernel
+ *		  	  context from being unloaded.
+ *			- drivers using these resource directly issue their own
+ *			  GRU instruction and must wait/check completion.
+ *
+ * 		  When these resources are reserved, the caller can optionally
+ * 		  associate a wait_queue with the resources and use asynchronous
+ * 		  GRU instructions. When an async GRU instruction completes, the
+ * 		  driver will do a wakeup on the event.
+ *
  */
 
-/* Blade percpu resources PERMANENTLY reserved for kernel use */
-#define GRU_NUM_KERNEL_CBR      1
+
+#define ASYNC_HAN_TO_BID(h)	((h) - 1)
+#define ASYNC_BID_TO_HAN(b)	((b) + 1)
+#define ASYNC_HAN_TO_BS(h)	gru_base[ASYNC_HAN_TO_BID(h)]
+
+#define GRU_NUM_KERNEL_CBR	1
 #define GRU_NUM_KERNEL_DSR_BYTES 256
-#define KERNEL_CTXNUM           15
+#define GRU_NUM_KERNEL_DSR_CL	(GRU_NUM_KERNEL_DSR_BYTES /		\
+					GRU_CACHE_LINE_BYTES)
 
 /* GRU instruction attributes for all instructions */
 #define IMA			IMA_CB_DELAY
@@ -94,9 +131,127 @@ struct message_header {
 	char	fill;
 };
 
-#define QLINES(mq)	((mq) + offsetof(struct message_queue, qlines))
 #define HSTATUS(mq, h)	((mq) + offsetof(struct message_queue, hstatus[h]))
 
+/*
+ * Reload the blade's kernel context into a GRU chiplet. Called holding
+ * the bs_kgts_sema for READ. Will steal user contexts if necessary.
+ */
+static void gru_load_kernel_context(struct gru_blade_state *bs, int blade_id)
+{
+	struct gru_state *gru;
+	struct gru_thread_state *kgts;
+	void *vaddr;
+	int ctxnum, ncpus;
+
+	up_read(&bs->bs_kgts_sema);
+	down_write(&bs->bs_kgts_sema);
+
+	if (!bs->bs_kgts) {
+		do {
+			bs->bs_kgts = gru_alloc_gts(NULL, 0, 0, 0, 0, 0);
+			if (!IS_ERR(bs->bs_kgts))
+				break;
+			msleep(1);
+		} while (true);
+		bs->bs_kgts->ts_user_blade_id = blade_id;
+	}
+	kgts = bs->bs_kgts;
+
+	if (!kgts->ts_gru) {
+		STAT(load_kernel_context);
+		ncpus = uv_blade_nr_possible_cpus(blade_id);
+		kgts->ts_cbr_au_count = GRU_CB_COUNT_TO_AU(
+			GRU_NUM_KERNEL_CBR * ncpus + bs->bs_async_cbrs);
+		kgts->ts_dsr_au_count = GRU_DS_BYTES_TO_AU(
+			GRU_NUM_KERNEL_DSR_BYTES * ncpus +
+				bs->bs_async_dsr_bytes);
+		while (!gru_assign_gru_context(kgts)) {
+			msleep(1);
+			gru_steal_context(kgts);
+		}
+		gru_load_context(kgts);
+		gru = bs->bs_kgts->ts_gru;
+		vaddr = gru->gs_gru_base_vaddr;
+		ctxnum = kgts->ts_ctxnum;
+		bs->kernel_cb = get_gseg_base_address_cb(vaddr, ctxnum, 0);
+		bs->kernel_dsr = get_gseg_base_address_ds(vaddr, ctxnum, 0);
+	}
+	downgrade_write(&bs->bs_kgts_sema);
+}
+
+/*
+ * Free all kernel contexts that are not currently in use.
+ *   Returns 0 if all freed, else number of inuse context.
+ */
+static int gru_free_kernel_contexts(void)
+{
+	struct gru_blade_state *bs;
+	struct gru_thread_state *kgts;
+	int bid, ret = 0;
+
+	for (bid = 0; bid < GRU_MAX_BLADES; bid++) {
+		bs = gru_base[bid];
+		if (!bs)
+			continue;
+
+		/* Ignore busy contexts. Don't want to block here.  */
+		if (down_write_trylock(&bs->bs_kgts_sema)) {
+			kgts = bs->bs_kgts;
+			if (kgts && kgts->ts_gru)
+				gru_unload_context(kgts, 0);
+			bs->bs_kgts = NULL;
+			up_write(&bs->bs_kgts_sema);
+			kfree(kgts);
+		} else {
+			ret++;
+		}
+	}
+	return ret;
+}
+
+/*
+ * Lock & load the kernel context for the specified blade.
+ */
+static struct gru_blade_state *gru_lock_kernel_context(int blade_id)
+{
+	struct gru_blade_state *bs;
+	int bid;
+
+	STAT(lock_kernel_context);
+again:
+	bid = blade_id < 0 ? uv_numa_blade_id() : blade_id;
+	bs = gru_base[bid];
+
+	/* Handle the case where migration occurred while waiting for the sema */
+	down_read(&bs->bs_kgts_sema);
+	if (blade_id < 0 && bid != uv_numa_blade_id()) {
+		up_read(&bs->bs_kgts_sema);
+		goto again;
+	}
+	if (!bs->bs_kgts || !bs->bs_kgts->ts_gru)
+		gru_load_kernel_context(bs, bid);
+	return bs;
+
+}
+
+/*
+ * Unlock the kernel context for the specified blade. Context is not
+ * unloaded but may be stolen before next use.
+ */
+static void gru_unlock_kernel_context(int blade_id)
+{
+	struct gru_blade_state *bs;
+
+	bs = gru_base[blade_id];
+	up_read(&bs->bs_kgts_sema);
+	STAT(unlock_kernel_context);
+}
+
+/*
+ * Reserve & get pointers to the DSR/CBRs reserved for the current cpu.
+ * 	- returns with preemption disabled
+ */
 static int gru_get_cpu_resources(int dsr_bytes, void **cb, void **dsr)
 {
 	struct gru_blade_state *bs;
@@ -104,34 +259,171 @@ static int gru_get_cpu_resources(int dsr_bytes, void **cb, void **dsr)
 
 	BUG_ON(dsr_bytes > GRU_NUM_KERNEL_DSR_BYTES);
 	preempt_disable();
-	bs = gru_base[uv_numa_blade_id()];
+	bs = gru_lock_kernel_context(-1);
 	lcpu = uv_blade_processor_id();
 	*cb = bs->kernel_cb + lcpu * GRU_HANDLE_STRIDE;
 	*dsr = bs->kernel_dsr + lcpu * GRU_NUM_KERNEL_DSR_BYTES;
 	return 0;
 }
 
+/*
+ * Free the current cpus reserved DSR/CBR resources.
+ */
 static void gru_free_cpu_resources(void *cb, void *dsr)
 {
+	gru_unlock_kernel_context(uv_numa_blade_id());
 	preempt_enable();
 }
 
+/*
+ * Reserve GRU resources to be used asynchronously.
+ *   Note: currently supports only 1 reservation per blade.
+ *
+ * 	input:
+ * 		blade_id  - blade on which resources should be reserved
+ * 		cbrs	  - number of CBRs
+ * 		dsr_bytes - number of DSR bytes needed
+ *	output:
+ *		handle to identify resource
+ *		(0 = async resources already reserved)
+ */
+unsigned long gru_reserve_async_resources(int blade_id, int cbrs, int dsr_bytes,
+			struct completion *cmp)
+{
+	struct gru_blade_state *bs;
+	struct gru_thread_state *kgts;
+	int ret = 0;
+
+	bs = gru_base[blade_id];
+
+	down_write(&bs->bs_kgts_sema);
+
+	/* Verify no resources already reserved */
+	if (bs->bs_async_dsr_bytes + bs->bs_async_cbrs)
+		goto done;
+	bs->bs_async_dsr_bytes = dsr_bytes;
+	bs->bs_async_cbrs = cbrs;
+	bs->bs_async_wq = cmp;
+	kgts = bs->bs_kgts;
+
+	/* Resources changed. Unload context if already loaded */
+	if (kgts && kgts->ts_gru)
+		gru_unload_context(kgts, 0);
+	ret = ASYNC_BID_TO_HAN(blade_id);
+
+done:
+	up_write(&bs->bs_kgts_sema);
+	return ret;
+}
+
+/*
+ * Release async resources previously reserved.
+ *
+ *	input:
+ *		han - handle to identify resources
+ */
+void gru_release_async_resources(unsigned long han)
+{
+	struct gru_blade_state *bs = ASYNC_HAN_TO_BS(han);
+
+	down_write(&bs->bs_kgts_sema);
+	bs->bs_async_dsr_bytes = 0;
+	bs->bs_async_cbrs = 0;
+	bs->bs_async_wq = NULL;
+	up_write(&bs->bs_kgts_sema);
+}
+
+/*
+ * Wait for async GRU instructions to complete.
+ *
+ *	input:
+ *		han - handle to identify resources
+ */
+void gru_wait_async_cbr(unsigned long han)
+{
+	struct gru_blade_state *bs = ASYNC_HAN_TO_BS(han);
+
+	wait_for_completion(bs->bs_async_wq);
+	mb();
+}
+
+/*
+ * Lock previous reserved async GRU resources
+ *
+ *	input:
+ *		han - handle to identify resources
+ *	output:
+ *		cb  - pointer to first CBR
+ *		dsr - pointer to first DSR
+ */
+void gru_lock_async_resource(unsigned long han,  void **cb, void **dsr)
+{
+	struct gru_blade_state *bs = ASYNC_HAN_TO_BS(han);
+	int blade_id = ASYNC_HAN_TO_BID(han);
+	int ncpus;
+
+	gru_lock_kernel_context(blade_id);
+	ncpus = uv_blade_nr_possible_cpus(blade_id);
+	if (cb)
+		*cb = bs->kernel_cb + ncpus * GRU_HANDLE_STRIDE;
+	if (dsr)
+		*dsr = bs->kernel_dsr + ncpus * GRU_NUM_KERNEL_DSR_BYTES;
+}
+
+/*
+ * Unlock previous reserved async GRU resources
+ *
+ *	input:
+ *		han - handle to identify resources
+ */
+void gru_unlock_async_resource(unsigned long han)
+{
+	int blade_id = ASYNC_HAN_TO_BID(han);
+
+	gru_unlock_kernel_context(blade_id);
+}
+
+/*----------------------------------------------------------------------*/
 int gru_get_cb_exception_detail(void *cb,
 		struct control_block_extended_exc_detail *excdet)
 {
 	struct gru_control_block_extended *cbe;
+	struct gru_thread_state *kgts = NULL;
+	unsigned long off;
+	int cbrnum, bid;
 
-	cbe = get_cbe(GRUBASE(cb), get_cb_number(cb));
+	/*
+	 * Locate kgts for cb. This algorithm is SLOW but
+	 * this function is rarely called (ie., almost never).
+	 * Performance does not matter.
+	 */
+	for_each_possible_blade(bid) {
+		if (!gru_base[bid])
+			break;
+		kgts = gru_base[bid]->bs_kgts;
+		if (!kgts || !kgts->ts_gru)
+			continue;
+		off = cb - kgts->ts_gru->gs_gru_base_vaddr;
+		if (off < GRU_SIZE)
+			break;
+		kgts = NULL;
+	}
+	BUG_ON(!kgts);
+	cbrnum = thread_cbr_number(kgts, get_cb_number(cb));
+	cbe = get_cbe(GRUBASE(cb), cbrnum);
+	gru_flush_cache(cbe);	/* CBE not coherent */
+	sync_core();
 	excdet->opc = cbe->opccpy;
 	excdet->exopc = cbe->exopccpy;
 	excdet->ecause = cbe->ecause;
 	excdet->exceptdet0 = cbe->idef1upd;
 	excdet->exceptdet1 = cbe->idef3upd;
+	gru_flush_cache(cbe);
 	return 0;
 }
 
-char *gru_get_cb_exception_detail_str(int ret, void *cb,
-				      char *buf, int size)
+static char *gru_get_cb_exception_detail_str(int ret, void *cb,
+					     char *buf, int size)
 {
 	struct gru_control_block_status *gen = (void *)cb;
 	struct control_block_extended_exc_detail excdet;
@@ -139,8 +431,8 @@ char *gru_get_cb_exception_detail_str(int ret, void *cb,
 	if (ret > 0 && gen->istatus == CBS_EXCEPTION) {
 		gru_get_cb_exception_detail(cb, &excdet);
 		snprintf(buf, size,
-			"GRU exception: cb %p, opc %d, exopc %d, ecause 0x%x,"
-			"excdet0 0x%lx, excdet1 0x%x",
+			"GRU:%d exception: cb %p, opc %d, exopc %d, ecause 0x%x,"
+			"excdet0 0x%lx, excdet1 0x%x", smp_processor_id(),
 			gen, excdet.opc, excdet.exopc, excdet.ecause,
 			excdet.exceptdet0, excdet.exceptdet1);
 	} else {
@@ -165,13 +457,13 @@ static int gru_retry_exception(void *cb)
 	int retry = EXCEPTION_RETRY_LIMIT;
 
 	while (1)  {
-		if (gru_get_cb_message_queue_substatus(cb))
-			break;
 		if (gru_wait_idle_or_exception(gen) == CBS_IDLE)
 			return CBS_IDLE;
-
+		if (gru_get_cb_message_queue_substatus(cb))
+			return CBS_EXCEPTION;
 		gru_get_cb_exception_detail(cb, &excdet);
-		if (excdet.ecause & ~EXCEPTION_RETRY_BITS)
+		if ((excdet.ecause & ~EXCEPTION_RETRY_BITS) ||
+				(excdet.cbrexecstatus & CBR_EXS_ABORT_OCC))
 			break;
 		if (retry-- == 0)
 			break;
@@ -187,9 +479,10 @@ int gru_check_status_proc(void *cb)
 	int ret;
 
 	ret = gen->istatus;
-	if (ret != CBS_EXCEPTION)
-		return ret;
-	return gru_retry_exception(cb);
+	if (ret == CBS_EXCEPTION)
+		ret = gru_retry_exception(cb);
+	rmb();
+	return ret;
 
 }
 
@@ -201,11 +494,11 @@ int gru_wait_proc(void *cb)
 	ret = gru_wait_idle_or_exception(gen);
 	if (ret == CBS_EXCEPTION)
 		ret = gru_retry_exception(cb);
-
+	rmb();
 	return ret;
 }
 
-void gru_abort(int ret, void *cb, char *str)
+static void gru_abort(int ret, void *cb, char *str)
 {
 	char buf[GRU_EXC_STR_SIZE];
 
@@ -249,7 +542,8 @@ static inline void restore_present2(void *p, int val)
  * Create a message queue.
  * 	qlines - message queue size in cache lines. Includes 2-line header.
  */
-int gru_create_message_queue(void *p, unsigned int bytes)
+int gru_create_message_queue(struct gru_message_queue_desc *mqd,
+		void *p, unsigned int bytes, int nasid, int vector, int apicid)
 {
 	struct message_queue *mq = p;
 	unsigned int qlines;
@@ -264,6 +558,12 @@ int gru_create_message_queue(void *p, unsigned int bytes)
 	mq->hstatus[0] = 0;
 	mq->hstatus[1] = 1;
 	mq->head = gru_mesq_head(2, qlines / 2 + 1);
+	mqd->mq = mq;
+	mqd->mq_gpa = uv_gpa(mq);
+	mqd->qlines = qlines;
+	mqd->interrupt_pnode = nasid >> 1;
+	mqd->interrupt_vector = vector;
+	mqd->interrupt_apicid = apicid;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(gru_create_message_queue);
@@ -276,8 +576,8 @@ EXPORT_SYMBOL_GPL(gru_create_message_queue);
  *		-1 - if mesq sent successfully but queue not full
  *		>0 - unexpected error. MQE_xxx returned
  */
-static int send_noop_message(void *cb,
-				unsigned long mq, void *mesg)
+static int send_noop_message(void *cb, struct gru_message_queue_desc *mqd,
+				void *mesg)
 {
 	const struct message_header noop_header = {
 					.present = MQS_NOOP, .lines = 1};
@@ -288,7 +588,7 @@ static int send_noop_message(void *cb,
 	STAT(mesq_noop);
 	save_mhdr = *mhdr;
 	*mhdr = noop_header;
-	gru_mesq(cb, mq, gru_get_tri(mhdr), 1, IMA);
+	gru_mesq(cb, mqd->mq_gpa, gru_get_tri(mhdr), 1, IMA);
 	ret = gru_wait(cb);
 
 	if (ret) {
@@ -312,7 +612,7 @@ static int send_noop_message(void *cb,
 			break;
 		case CBSS_PUT_NACKED:
 			STAT(mesq_noop_put_nacked);
-			m = mq + (gru_get_amo_value_head(cb) << 6);
+			m = mqd->mq_gpa + (gru_get_amo_value_head(cb) << 6);
 			gru_vstore(cb, m, gru_get_tri(mesg), XTYPE_CL, 1, 1,
 						IMA);
 			if (gru_wait(cb) == CBS_IDLE)
@@ -321,6 +621,8 @@ static int send_noop_message(void *cb,
 				ret = MQE_UNEXPECTED_CB_ERR;
 			break;
 		case CBSS_PAGE_OVERFLOW:
+			STAT(mesq_noop_page_overflow);
+			fallthrough;
 		default:
 			BUG();
 		}
@@ -332,30 +634,20 @@ static int send_noop_message(void *cb,
 /*
  * Handle a gru_mesq full.
  */
-static int send_message_queue_full(void *cb,
-			   unsigned long mq, void *mesg, int lines)
+static int send_message_queue_full(void *cb, struct gru_message_queue_desc *mqd,
+				void *mesg, int lines)
 {
 	union gru_mesqhead mqh;
 	unsigned int limit, head;
 	unsigned long avalue;
-	int half, qlines, save;
+	int half, qlines;
 
 	/* Determine if switching to first/second half of q */
 	avalue = gru_get_amo_value(cb);
 	head = gru_get_amo_value_head(cb);
 	limit = gru_get_amo_value_limit(cb);
 
-	/*
-	 * Fetch "qlines" from the queue header. Since the queue may be
-	 * in memory that can't be accessed using socket addresses, use
-	 * the GRU to access the data. Use DSR space from the message.
-	 */
-	save = *(int *)mesg;
-	gru_vload(cb, QLINES(mq), gru_get_tri(mesg), XTYPE_W, 1, 1, IMA);
-	if (gru_wait(cb) != CBS_IDLE)
-		goto cberr;
-	qlines = *(int *)mesg;
-	*(int *)mesg = save;
+	qlines = mqd->qlines;
 	half = (limit != qlines);
 
 	if (half)
@@ -364,7 +656,7 @@ static int send_message_queue_full(void *cb,
 		mqh = gru_mesq_head(2, qlines / 2 + 1);
 
 	/* Try to get lock for switching head pointer */
-	gru_gamir(cb, EOP_IR_CLR, HSTATUS(mq, half), XTYPE_DW, IMA);
+	gru_gamir(cb, EOP_IR_CLR, HSTATUS(mqd->mq_gpa, half), XTYPE_DW, IMA);
 	if (gru_wait(cb) != CBS_IDLE)
 		goto cberr;
 	if (!gru_get_amo_value(cb)) {
@@ -374,8 +666,8 @@ static int send_message_queue_full(void *cb,
 
 	/* Got the lock. Send optional NOP if queue not full, */
 	if (head != limit) {
-		if (send_noop_message(cb, mq, mesg)) {
-			gru_gamir(cb, EOP_IR_INC, HSTATUS(mq, half),
+		if (send_noop_message(cb, mqd, mesg)) {
+			gru_gamir(cb, EOP_IR_INC, HSTATUS(mqd->mq_gpa, half),
 					XTYPE_DW, IMA);
 			if (gru_wait(cb) != CBS_IDLE)
 				goto cberr;
@@ -386,14 +678,16 @@ static int send_message_queue_full(void *cb,
 	}
 
 	/* Then flip queuehead to other half of queue. */
-	gru_gamer(cb, EOP_ERR_CSWAP, mq, XTYPE_DW, mqh.val, avalue, IMA);
+	gru_gamer(cb, EOP_ERR_CSWAP, mqd->mq_gpa, XTYPE_DW, mqh.val, avalue,
+							IMA);
 	if (gru_wait(cb) != CBS_IDLE)
 		goto cberr;
 
 	/* If not successfully in swapping queue head, clear the hstatus lock */
 	if (gru_get_amo_value(cb) != avalue) {
 		STAT(mesq_qf_switch_head_failed);
-		gru_gamir(cb, EOP_IR_INC, HSTATUS(mq, half), XTYPE_DW, IMA);
+		gru_gamir(cb, EOP_IR_INC, HSTATUS(mqd->mq_gpa, half), XTYPE_DW,
+							IMA);
 		if (gru_wait(cb) != CBS_IDLE)
 			goto cberr;
 	}
@@ -403,18 +697,64 @@ cberr:
 	return MQE_UNEXPECTED_CB_ERR;
 }
 
+/*
+ * Handle a PUT failure. Note: if message was a 2-line message, one of the
+ * lines might have successfully have been written. Before sending the
+ * message, "present" must be cleared in BOTH lines to prevent the receiver
+ * from prematurely seeing the full message.
+ */
+static int send_message_put_nacked(void *cb, struct gru_message_queue_desc *mqd,
+			void *mesg, int lines)
+{
+	unsigned long m;
+	int ret, loops = 200;	/* experimentally determined */
+
+	m = mqd->mq_gpa + (gru_get_amo_value_head(cb) << 6);
+	if (lines == 2) {
+		gru_vset(cb, m, 0, XTYPE_CL, lines, 1, IMA);
+		if (gru_wait(cb) != CBS_IDLE)
+			return MQE_UNEXPECTED_CB_ERR;
+	}
+	gru_vstore(cb, m, gru_get_tri(mesg), XTYPE_CL, lines, 1, IMA);
+	if (gru_wait(cb) != CBS_IDLE)
+		return MQE_UNEXPECTED_CB_ERR;
+
+	if (!mqd->interrupt_vector)
+		return MQE_OK;
+
+	/*
+	 * Send a noop message in order to deliver a cross-partition interrupt
+	 * to the SSI that contains the target message queue. Normally, the
+	 * interrupt is automatically delivered by hardware following mesq
+	 * operations, but some error conditions require explicit delivery.
+	 * The noop message will trigger delivery. Otherwise partition failures
+	 * could cause unrecovered errors.
+	 */
+	do {
+		ret = send_noop_message(cb, mqd, mesg);
+	} while ((ret == MQIE_AGAIN || ret == MQE_CONGESTION) && (loops-- > 0));
+
+	if (ret == MQIE_AGAIN || ret == MQE_CONGESTION) {
+		/*
+		 * Don't indicate to the app to resend the message, as it's
+		 * already been successfully sent.  We simply send an OK
+		 * (rather than fail the send with MQE_UNEXPECTED_CB_ERR),
+		 * assuming that the other side is receiving enough
+		 * interrupts to get this message processed anyway.
+		 */
+		ret = MQE_OK;
+	}
+	return ret;
+}
 
 /*
  * Handle a gru_mesq failure. Some of these failures are software recoverable
  * or retryable.
  */
-static int send_message_failure(void *cb,
-				unsigned long mq,
-				void *mesg,
-				int lines)
+static int send_message_failure(void *cb, struct gru_message_queue_desc *mqd,
+				void *mesg, int lines)
 {
 	int substatus, ret = 0;
-	unsigned long m;
 
 	substatus = gru_get_cb_message_queue_substatus(cb);
 	switch (substatus) {
@@ -428,7 +768,7 @@ static int send_message_failure(void *cb,
 		break;
 	case CBSS_QLIMIT_REACHED:
 		STAT(mesq_send_qlimit_reached);
-		ret = send_message_queue_full(cb, mq, mesg, lines);
+		ret = send_message_queue_full(cb, mqd, mesg, lines);
 		break;
 	case CBSS_AMO_NACKED:
 		STAT(mesq_send_amo_nacked);
@@ -436,13 +776,11 @@ static int send_message_failure(void *cb,
 		break;
 	case CBSS_PUT_NACKED:
 		STAT(mesq_send_put_nacked);
-		m =mq + (gru_get_amo_value_head(cb) << 6);
-		gru_vstore(cb, m, gru_get_tri(mesg), XTYPE_CL, lines, 1, IMA);
-		if (gru_wait(cb) == CBS_IDLE)
-			ret = MQE_OK;
-		else
-			ret = MQE_UNEXPECTED_CB_ERR;
+		ret = send_message_put_nacked(cb, mqd, mesg, lines);
 		break;
+	case CBSS_PAGE_OVERFLOW:
+		STAT(mesq_page_overflow);
+		fallthrough;
 	default:
 		BUG();
 	}
@@ -451,12 +789,12 @@ static int send_message_failure(void *cb,
 
 /*
  * Send a message to a message queue
- * 	cb	GRU control block to use to send message
- * 	mq	message queue
+ * 	mqd	message queue descriptor
  * 	mesg	message. ust be vaddr within a GSEG
  * 	bytes	message size (<= 2 CL)
  */
-int gru_send_message_gpa(unsigned long mq, void *mesg, unsigned int bytes)
+int gru_send_message_gpa(struct gru_message_queue_desc *mqd, void *mesg,
+				unsigned int bytes)
 {
 	struct message_header *mhdr;
 	void *cb;
@@ -466,7 +804,7 @@ int gru_send_message_gpa(unsigned long mq, void *mesg, unsigned int bytes)
 	STAT(mesq_send);
 	BUG_ON(bytes < sizeof(int) || bytes > 2 * GRU_CACHE_LINE_BYTES);
 
-	clines = (bytes + GRU_CACHE_LINE_BYTES - 1) / GRU_CACHE_LINE_BYTES;
+	clines = DIV_ROUND_UP(bytes, GRU_CACHE_LINE_BYTES);
 	if (gru_get_cpu_resources(bytes, &cb, &dsr))
 		return MQE_BUG_NO_RESOURCES;
 	memcpy(dsr, mesg, bytes);
@@ -480,10 +818,10 @@ int gru_send_message_gpa(unsigned long mq, void *mesg, unsigned int bytes)
 
 	do {
 		ret = MQE_OK;
-		gru_mesq(cb, mq, gru_get_tri(mhdr), clines, IMA);
+		gru_mesq(cb, mqd->mq_gpa, gru_get_tri(mhdr), clines, IMA);
 		istatus = gru_wait(cb);
 		if (istatus != CBS_IDLE)
-			ret = send_message_failure(cb, mq, dsr, clines);
+			ret = send_message_failure(cb, mqd, dsr, clines);
 	} while (ret == MQIE_AGAIN);
 	gru_free_cpu_resources(cb, dsr);
 
@@ -496,9 +834,9 @@ EXPORT_SYMBOL_GPL(gru_send_message_gpa);
 /*
  * Advance the receive pointer for the queue to the next message.
  */
-void gru_free_message(void *rmq, void *mesg)
+void gru_free_message(struct gru_message_queue_desc *mqd, void *mesg)
 {
-	struct message_queue *mq = rmq;
+	struct message_queue *mq = mqd->mq;
 	struct message_header *mhdr = mq->next;
 	void *next, *pnext;
 	int half = -1;
@@ -528,16 +866,15 @@ EXPORT_SYMBOL_GPL(gru_free_message);
  * present. User must call next_message() to move to next message.
  * 	rmq	message queue
  */
-void *gru_get_next_message(void *rmq)
+void *gru_get_next_message(struct gru_message_queue_desc *mqd)
 {
-	struct message_queue *mq = rmq;
+	struct message_queue *mq = mqd->mq;
 	struct message_header *mhdr = mq->next;
 	int present = mhdr->present;
 
 	/* skip NOOP messages */
-	STAT(mesq_receive);
 	while (present == MQS_NOOP) {
-		gru_free_message(rmq, mhdr);
+		gru_free_message(mqd, mhdr);
 		mhdr = mq->next;
 		present = mhdr->present;
 	}
@@ -555,11 +892,35 @@ void *gru_get_next_message(void *rmq)
 	if (mhdr->lines == 2)
 		restore_present2(mhdr, mhdr->present2);
 
+	STAT(mesq_receive);
 	return mhdr;
 }
 EXPORT_SYMBOL_GPL(gru_get_next_message);
 
 /* ---------------------- GRU DATA COPY FUNCTIONS ---------------------------*/
+
+/*
+ * Load a DW from a global GPA. The GPA can be a memory or MMR address.
+ */
+int gru_read_gpa(unsigned long *value, unsigned long gpa)
+{
+	void *cb;
+	void *dsr;
+	int ret, iaa;
+
+	STAT(read_gpa);
+	if (gru_get_cpu_resources(GRU_NUM_KERNEL_DSR_BYTES, &cb, &dsr))
+		return MQE_BUG_NO_RESOURCES;
+	iaa = gpa >> 62;
+	gru_vload_phys(cb, gpa, gru_get_tri(dsr), iaa, IMA);
+	ret = gru_wait(cb);
+	if (ret == CBS_IDLE)
+		*value = *(unsigned long *)dsr;
+	gru_free_cpu_resources(cb, dsr);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(gru_read_gpa);
+
 
 /*
  * Copy a block of data using the GRU resources
@@ -575,7 +936,7 @@ int gru_copy_gpa(unsigned long dest_gpa, unsigned long src_gpa,
 	if (gru_get_cpu_resources(GRU_NUM_KERNEL_DSR_BYTES, &cb, &dsr))
 		return MQE_BUG_NO_RESOURCES;
 	gru_bcopy(cb, src_gpa, dest_gpa, gru_get_tri(dsr),
-		  XTYPE_B, bytes, GRU_NUM_KERNEL_DSR_BYTES, IMA);
+		  XTYPE_B, bytes, GRU_NUM_KERNEL_DSR_CL, IMA);
 	ret = gru_wait(cb);
 	gru_free_cpu_resources(cb, dsr);
 	return ret;
@@ -584,96 +945,215 @@ EXPORT_SYMBOL_GPL(gru_copy_gpa);
 
 /* ------------------- KERNEL QUICKTESTS RUN AT STARTUP ----------------*/
 /* 	Temp - will delete after we gain confidence in the GRU		*/
-static __cacheline_aligned unsigned long word0;
-static __cacheline_aligned unsigned long word1;
 
-static int quicktest(struct gru_state *gru)
+static int quicktest0(unsigned long arg)
 {
+	unsigned long word0;
+	unsigned long word1;
 	void *cb;
-	void *ds;
+	void *dsr;
 	unsigned long *p;
+	int ret = -EIO;
 
-	cb = get_gseg_base_address_cb(gru->gs_gru_base_vaddr, KERNEL_CTXNUM, 0);
-	ds = get_gseg_base_address_ds(gru->gs_gru_base_vaddr, KERNEL_CTXNUM, 0);
-	p = ds;
+	if (gru_get_cpu_resources(GRU_CACHE_LINE_BYTES, &cb, &dsr))
+		return MQE_BUG_NO_RESOURCES;
+	p = dsr;
 	word0 = MAGIC;
+	word1 = 0;
 
-	gru_vload(cb, uv_gpa(&word0), 0, XTYPE_DW, 1, 1, IMA);
-	if (gru_wait(cb) != CBS_IDLE)
-		BUG();
-
-	if (*(unsigned long *)ds != MAGIC)
-		BUG();
-	gru_vstore(cb, uv_gpa(&word1), 0, XTYPE_DW, 1, 1, IMA);
-	if (gru_wait(cb) != CBS_IDLE)
-		BUG();
-
-	if (word0 != word1 || word0 != MAGIC) {
-		printk
-		    ("GRU quicktest err: gru %d, found 0x%lx, expected 0x%lx\n",
-		     gru->gs_gid, word1, MAGIC);
-		BUG();		/* ZZZ should not be fatal */
+	gru_vload(cb, uv_gpa(&word0), gru_get_tri(dsr), XTYPE_DW, 1, 1, IMA);
+	if (gru_wait(cb) != CBS_IDLE) {
+		printk(KERN_DEBUG "GRU:%d quicktest0: CBR failure 1\n", smp_processor_id());
+		goto done;
 	}
 
-	return 0;
+	if (*p != MAGIC) {
+		printk(KERN_DEBUG "GRU:%d quicktest0 bad magic 0x%lx\n", smp_processor_id(), *p);
+		goto done;
+	}
+	gru_vstore(cb, uv_gpa(&word1), gru_get_tri(dsr), XTYPE_DW, 1, 1, IMA);
+	if (gru_wait(cb) != CBS_IDLE) {
+		printk(KERN_DEBUG "GRU:%d quicktest0: CBR failure 2\n", smp_processor_id());
+		goto done;
+	}
+
+	if (word0 != word1 || word1 != MAGIC) {
+		printk(KERN_DEBUG
+		       "GRU:%d quicktest0 err: found 0x%lx, expected 0x%lx\n",
+		     smp_processor_id(), word1, MAGIC);
+		goto done;
+	}
+	ret = 0;
+
+done:
+	gru_free_cpu_resources(cb, dsr);
+	return ret;
 }
 
+#define ALIGNUP(p, q)	((void *)(((unsigned long)(p) + (q) - 1) & ~(q - 1)))
 
-int gru_kservices_init(struct gru_state *gru)
+static int quicktest1(unsigned long arg)
 {
-	struct gru_blade_state *bs;
-	struct gru_context_configuration_handle *cch;
-	unsigned long cbr_map, dsr_map;
-	int err, num, cpus_possible;
+	struct gru_message_queue_desc mqd;
+	void *p, *mq;
+	int i, ret = -EIO;
+	char mes[GRU_CACHE_LINE_BYTES], *m;
 
-	/*
-	 * Currently, resources are reserved ONLY on the second chiplet
-	 * on each blade. This leaves ALL resources on chiplet 0 available
-	 * for user code.
-	 */
-	bs = gru->gs_blade;
-	if (gru != &bs->bs_grus[1])
-		return 0;
+	/* Need  1K cacheline aligned that does not cross page boundary */
+	p = kmalloc(4096, 0);
+	if (p == NULL)
+		return -ENOMEM;
+	mq = ALIGNUP(p, 1024);
+	memset(mes, 0xee, sizeof(mes));
 
-	cpus_possible = uv_blade_nr_possible_cpus(gru->gs_blade_id);
-
-	num = GRU_NUM_KERNEL_CBR * cpus_possible;
-	cbr_map = gru_reserve_cb_resources(gru, GRU_CB_COUNT_TO_AU(num), NULL);
-	gru->gs_reserved_cbrs += num;
-
-	num = GRU_NUM_KERNEL_DSR_BYTES * cpus_possible;
-	dsr_map = gru_reserve_ds_resources(gru, GRU_DS_BYTES_TO_AU(num), NULL);
-	gru->gs_reserved_dsr_bytes += num;
-
-	gru->gs_active_contexts++;
-	__set_bit(KERNEL_CTXNUM, &gru->gs_context_map);
-	cch = get_cch(gru->gs_gru_base_vaddr, KERNEL_CTXNUM);
-
-	bs->kernel_cb = get_gseg_base_address_cb(gru->gs_gru_base_vaddr,
-					KERNEL_CTXNUM, 0);
-	bs->kernel_dsr = get_gseg_base_address_ds(gru->gs_gru_base_vaddr,
-					KERNEL_CTXNUM, 0);
-
-	lock_cch_handle(cch);
-	cch->tfm_fault_bit_enable = 0;
-	cch->tlb_int_enable = 0;
-	cch->tfm_done_bit_enable = 0;
-	cch->unmap_enable = 1;
-	err = cch_allocate(cch, 0, cbr_map, dsr_map);
-	if (err) {
-		gru_dbg(grudev,
-			"Unable to allocate kernel CCH: gru %d, err %d\n",
-			gru->gs_gid, err);
-		BUG();
+	gru_create_message_queue(&mqd, mq, 8 * GRU_CACHE_LINE_BYTES, 0, 0, 0);
+	for (i = 0; i < 6; i++) {
+		mes[8] = i;
+		do {
+			ret = gru_send_message_gpa(&mqd, mes, sizeof(mes));
+		} while (ret == MQE_CONGESTION);
+		if (ret)
+			break;
 	}
-	if (cch_start(cch)) {
-		gru_dbg(grudev, "Unable to start kernel CCH: gru %d, err %d\n",
-			gru->gs_gid, err);
-		BUG();
+	if (ret != MQE_QUEUE_FULL || i != 4) {
+		printk(KERN_DEBUG "GRU:%d quicktest1: unexpect status %d, i %d\n",
+		       smp_processor_id(), ret, i);
+		goto done;
 	}
-	unlock_cch_handle(cch);
 
-	if (gru_options & GRU_QUICKLOOK)
-		quicktest(gru);
+	for (i = 0; i < 6; i++) {
+		m = gru_get_next_message(&mqd);
+		if (!m || m[8] != i)
+			break;
+		gru_free_message(&mqd, m);
+	}
+	if (i != 4) {
+		printk(KERN_DEBUG "GRU:%d quicktest2: bad message, i %d, m %p, m8 %d\n",
+			smp_processor_id(), i, m, m ? m[8] : -1);
+		goto done;
+	}
+	ret = 0;
+
+done:
+	kfree(p);
+	return ret;
+}
+
+static int quicktest2(unsigned long arg)
+{
+	static DECLARE_COMPLETION(cmp);
+	unsigned long han;
+	int blade_id = 0;
+	int numcb = 4;
+	int ret = 0;
+	unsigned long *buf;
+	void *cb0, *cb;
+	struct gru_control_block_status *gen;
+	int i, k, istatus, bytes;
+
+	bytes = numcb * 4 * 8;
+	buf = kmalloc(bytes, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	ret = -EBUSY;
+	han = gru_reserve_async_resources(blade_id, numcb, 0, &cmp);
+	if (!han)
+		goto done;
+
+	gru_lock_async_resource(han, &cb0, NULL);
+	memset(buf, 0xee, bytes);
+	for (i = 0; i < numcb; i++)
+		gru_vset(cb0 + i * GRU_HANDLE_STRIDE, uv_gpa(&buf[i * 4]), 0,
+				XTYPE_DW, 4, 1, IMA_INTERRUPT);
+
+	ret = 0;
+	k = numcb;
+	do {
+		gru_wait_async_cbr(han);
+		for (i = 0; i < numcb; i++) {
+			cb = cb0 + i * GRU_HANDLE_STRIDE;
+			istatus = gru_check_status(cb);
+			if (istatus != CBS_ACTIVE && istatus != CBS_CALL_OS)
+				break;
+		}
+		if (i == numcb)
+			continue;
+		if (istatus != CBS_IDLE) {
+			printk(KERN_DEBUG "GRU:%d quicktest2: cb %d, exception\n", smp_processor_id(), i);
+			ret = -EFAULT;
+		} else if (buf[4 * i] || buf[4 * i + 1] || buf[4 * i + 2] ||
+				buf[4 * i + 3]) {
+			printk(KERN_DEBUG "GRU:%d quicktest2:cb %d,  buf 0x%lx, 0x%lx, 0x%lx, 0x%lx\n",
+			       smp_processor_id(), i, buf[4 * i], buf[4 * i + 1], buf[4 * i + 2], buf[4 * i + 3]);
+			ret = -EIO;
+		}
+		k--;
+		gen = cb;
+		gen->istatus = CBS_CALL_OS; /* don't handle this CBR again */
+	} while (k);
+	BUG_ON(cmp.done);
+
+	gru_unlock_async_resource(han);
+	gru_release_async_resources(han);
+done:
+	kfree(buf);
+	return ret;
+}
+
+#define BUFSIZE 200
+static int quicktest3(unsigned long arg)
+{
+	char buf1[BUFSIZE], buf2[BUFSIZE];
+	int ret = 0;
+
+	memset(buf2, 0, sizeof(buf2));
+	memset(buf1, get_cycles() & 255, sizeof(buf1));
+	gru_copy_gpa(uv_gpa(buf2), uv_gpa(buf1), BUFSIZE);
+	if (memcmp(buf1, buf2, BUFSIZE)) {
+		printk(KERN_DEBUG "GRU:%d quicktest3 error\n", smp_processor_id());
+		ret = -EIO;
+	}
+	return ret;
+}
+
+/*
+ * Debugging only. User hook for various kernel tests
+ * of driver & gru.
+ */
+int gru_ktest(unsigned long arg)
+{
+	int ret = -EINVAL;
+
+	switch (arg & 0xff) {
+	case 0:
+		ret = quicktest0(arg);
+		break;
+	case 1:
+		ret = quicktest1(arg);
+		break;
+	case 2:
+		ret = quicktest2(arg);
+		break;
+	case 3:
+		ret = quicktest3(arg);
+		break;
+	case 99:
+		ret = gru_free_kernel_contexts();
+		break;
+	}
+	return ret;
+
+}
+
+int gru_kservices_init(void)
+{
 	return 0;
 }
+
+void gru_kservices_exit(void)
+{
+	if (gru_free_kernel_contexts())
+		BUG();
+}
+

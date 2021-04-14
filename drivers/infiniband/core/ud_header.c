@@ -33,12 +33,15 @@
 
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <linux/export.h>
+#include <linux/if_ether.h>
+#include <linux/ip.h>
 
 #include <rdma/ib_pack.h>
 
 #define STRUCT_FIELD(header, field) \
 	.struct_offset_bytes = offsetof(struct ib_unpacked_ ## header, field),      \
-	.struct_size_bytes   = sizeof ((struct ib_unpacked_ ## header *) 0)->field, \
+	.struct_size_bytes   = sizeof_field(struct ib_unpacked_ ## header, field), \
 	.field_name          = #header ":" #field
 
 static const struct ib_field lrh_table[]  = {
@@ -75,6 +78,106 @@ static const struct ib_field lrh_table[]  = {
 	  .offset_bits  = 5,
 	  .size_bits    = 11 },
 	{ STRUCT_FIELD(lrh, source_lid),
+	  .offset_words = 1,
+	  .offset_bits  = 16,
+	  .size_bits    = 16 }
+};
+
+static const struct ib_field eth_table[]  = {
+	{ STRUCT_FIELD(eth, dmac_h),
+	  .offset_words = 0,
+	  .offset_bits  = 0,
+	  .size_bits    = 32 },
+	{ STRUCT_FIELD(eth, dmac_l),
+	  .offset_words = 1,
+	  .offset_bits  = 0,
+	  .size_bits    = 16 },
+	{ STRUCT_FIELD(eth, smac_h),
+	  .offset_words = 1,
+	  .offset_bits  = 16,
+	  .size_bits    = 16 },
+	{ STRUCT_FIELD(eth, smac_l),
+	  .offset_words = 2,
+	  .offset_bits  = 0,
+	  .size_bits    = 32 },
+	{ STRUCT_FIELD(eth, type),
+	  .offset_words = 3,
+	  .offset_bits  = 0,
+	  .size_bits    = 16 }
+};
+
+static const struct ib_field vlan_table[]  = {
+	{ STRUCT_FIELD(vlan, tag),
+	  .offset_words = 0,
+	  .offset_bits  = 0,
+	  .size_bits    = 16 },
+	{ STRUCT_FIELD(vlan, type),
+	  .offset_words = 0,
+	  .offset_bits  = 16,
+	  .size_bits    = 16 }
+};
+
+static const struct ib_field ip4_table[]  = {
+	{ STRUCT_FIELD(ip4, ver),
+	  .offset_words = 0,
+	  .offset_bits  = 0,
+	  .size_bits    = 4 },
+	{ STRUCT_FIELD(ip4, hdr_len),
+	  .offset_words = 0,
+	  .offset_bits  = 4,
+	  .size_bits    = 4 },
+	{ STRUCT_FIELD(ip4, tos),
+	  .offset_words = 0,
+	  .offset_bits  = 8,
+	  .size_bits    = 8 },
+	{ STRUCT_FIELD(ip4, tot_len),
+	  .offset_words = 0,
+	  .offset_bits  = 16,
+	  .size_bits    = 16 },
+	{ STRUCT_FIELD(ip4, id),
+	  .offset_words = 1,
+	  .offset_bits  = 0,
+	  .size_bits    = 16 },
+	{ STRUCT_FIELD(ip4, frag_off),
+	  .offset_words = 1,
+	  .offset_bits  = 16,
+	  .size_bits    = 16 },
+	{ STRUCT_FIELD(ip4, ttl),
+	  .offset_words = 2,
+	  .offset_bits  = 0,
+	  .size_bits    = 8 },
+	{ STRUCT_FIELD(ip4, protocol),
+	  .offset_words = 2,
+	  .offset_bits  = 8,
+	  .size_bits    = 8 },
+	{ STRUCT_FIELD(ip4, check),
+	  .offset_words = 2,
+	  .offset_bits  = 16,
+	  .size_bits    = 16 },
+	{ STRUCT_FIELD(ip4, saddr),
+	  .offset_words = 3,
+	  .offset_bits  = 0,
+	  .size_bits    = 32 },
+	{ STRUCT_FIELD(ip4, daddr),
+	  .offset_words = 4,
+	  .offset_bits  = 0,
+	  .size_bits    = 32 }
+};
+
+static const struct ib_field udp_table[]  = {
+	{ STRUCT_FIELD(udp, sport),
+	  .offset_words = 0,
+	  .offset_bits  = 0,
+	  .size_bits    = 16 },
+	{ STRUCT_FIELD(udp, dport),
+	  .offset_words = 0,
+	  .offset_bits  = 16,
+	  .size_bits    = 16 },
+	{ STRUCT_FIELD(udp, length),
+	  .offset_words = 1,
+	  .offset_bits  = 0,
+	  .size_bits    = 16 },
+	{ STRUCT_FIELD(udp, csum),
 	  .offset_words = 1,
 	  .offset_bits  = 16,
 	  .size_bits    = 16 }
@@ -177,66 +280,125 @@ static const struct ib_field deth_table[] = {
 	  .size_bits    = 24 }
 };
 
+__sum16 ib_ud_ip4_csum(struct ib_ud_header *header)
+{
+	struct iphdr iph;
+
+	iph.ihl		= 5;
+	iph.version	= 4;
+	iph.tos		= header->ip4.tos;
+	iph.tot_len	= header->ip4.tot_len;
+	iph.id		= header->ip4.id;
+	iph.frag_off	= header->ip4.frag_off;
+	iph.ttl		= header->ip4.ttl;
+	iph.protocol	= header->ip4.protocol;
+	iph.check	= 0;
+	iph.saddr	= header->ip4.saddr;
+	iph.daddr	= header->ip4.daddr;
+
+	return ip_fast_csum((u8 *)&iph, iph.ihl);
+}
+EXPORT_SYMBOL(ib_ud_ip4_csum);
+
 /**
  * ib_ud_header_init - Initialize UD header structure
  * @payload_bytes:Length of packet payload
- * @grh_present:GRH flag (if non-zero, GRH will be included)
+ * @lrh_present: specify if LRH is present
+ * @eth_present: specify if Eth header is present
+ * @vlan_present: packet is tagged vlan
+ * @grh_present: GRH flag (if non-zero, GRH will be included)
+ * @ip_version: if non-zero, IP header, V4 or V6, will be included
+ * @udp_present :if non-zero, UDP header will be included
+ * @immediate_present: specify if immediate data is present
  * @header:Structure to initialize
- *
- * ib_ud_header_init() initializes the lrh.link_version, lrh.link_next_header,
- * lrh.packet_length, grh.ip_version, grh.payload_length,
- * grh.next_header, bth.opcode, bth.pad_count and
- * bth.transport_header_version fields of a &struct ib_ud_header given
- * the payload length and whether a GRH will be included.
  */
-void ib_ud_header_init(int     		    payload_bytes,
-		       int    		    grh_present,
-		       struct ib_ud_header *header)
+int ib_ud_header_init(int     payload_bytes,
+		      int    lrh_present,
+		      int    eth_present,
+		      int    vlan_present,
+		      int    grh_present,
+		      int    ip_version,
+		      int    udp_present,
+		      int    immediate_present,
+		      struct ib_ud_header *header)
 {
-	int header_len;
-	u16 packet_length;
+	size_t udp_bytes = udp_present ? IB_UDP_BYTES : 0;
 
+	grh_present = grh_present && !ip_version;
 	memset(header, 0, sizeof *header);
 
-	header_len =
-		IB_LRH_BYTES  +
-		IB_BTH_BYTES  +
-		IB_DETH_BYTES;
-	if (grh_present) {
-		header_len += IB_GRH_BYTES;
+	/*
+	 * UDP header without IP header doesn't make sense
+	 */
+	if (udp_present && ip_version != 4 && ip_version != 6)
+		return -EINVAL;
+
+	if (lrh_present) {
+		u16 packet_length;
+
+		header->lrh.link_version     = 0;
+		header->lrh.link_next_header =
+			grh_present ? IB_LNH_IBA_GLOBAL : IB_LNH_IBA_LOCAL;
+		packet_length = (IB_LRH_BYTES	+
+				 IB_BTH_BYTES	+
+				 IB_DETH_BYTES	+
+				 (grh_present ? IB_GRH_BYTES : 0) +
+				 payload_bytes	+
+				 4		+ /* ICRC     */
+				 3) / 4;	  /* round up */
+		header->lrh.packet_length = cpu_to_be16(packet_length);
 	}
 
-	header->lrh.link_version     = 0;
-	header->lrh.link_next_header =
-		grh_present ? IB_LNH_IBA_GLOBAL : IB_LNH_IBA_LOCAL;
-	packet_length		     = (IB_LRH_BYTES     +
-					IB_BTH_BYTES     +
-					IB_DETH_BYTES    +
-					payload_bytes    +
-					4                + /* ICRC     */
-					3) / 4;            /* round up */
+	if (vlan_present)
+		header->eth.type = cpu_to_be16(ETH_P_8021Q);
 
-	header->grh_present          = grh_present;
-	if (grh_present) {
-		packet_length		   += IB_GRH_BYTES / 4;
+	if (ip_version == 6 || grh_present) {
 		header->grh.ip_version      = 6;
 		header->grh.payload_length  =
-			cpu_to_be16((IB_BTH_BYTES     +
+			cpu_to_be16((udp_bytes        +
+				     IB_BTH_BYTES     +
 				     IB_DETH_BYTES    +
 				     payload_bytes    +
 				     4                + /* ICRC     */
 				     3) & ~3);          /* round up */
-		header->grh.next_header     = 0x1b;
+		header->grh.next_header     = udp_present ? IPPROTO_UDP : 0x1b;
 	}
 
-	header->lrh.packet_length = cpu_to_be16(packet_length);
+	if (ip_version == 4) {
+		header->ip4.ver = 4; /* version 4 */
+		header->ip4.hdr_len = 5; /* 5 words */
+		header->ip4.tot_len =
+			cpu_to_be16(IB_IP4_BYTES   +
+				     udp_bytes     +
+				     IB_BTH_BYTES  +
+				     IB_DETH_BYTES +
+				     payload_bytes +
+				     4);     /* ICRC     */
+		header->ip4.protocol = IPPROTO_UDP;
+	}
+	if (udp_present && ip_version)
+		header->udp.length =
+			cpu_to_be16(IB_UDP_BYTES   +
+				     IB_BTH_BYTES  +
+				     IB_DETH_BYTES +
+				     payload_bytes +
+				     4);     /* ICRC     */
 
-	if (header->immediate_present)
+	if (immediate_present)
 		header->bth.opcode           = IB_OPCODE_UD_SEND_ONLY_WITH_IMMEDIATE;
 	else
 		header->bth.opcode           = IB_OPCODE_UD_SEND_ONLY;
 	header->bth.pad_count                = (4 - payload_bytes) & 3;
 	header->bth.transport_header_version = 0;
+
+	header->lrh_present = lrh_present;
+	header->eth_present = eth_present;
+	header->vlan_present = vlan_present;
+	header->grh_present = grh_present || (ip_version == 6);
+	header->ipv4_present = ip_version == 4;
+	header->udp_present = udp_present;
+	header->immediate_present = immediate_present;
+	return 0;
 }
 EXPORT_SYMBOL(ib_ud_header_init);
 
@@ -253,14 +415,35 @@ int ib_ud_header_pack(struct ib_ud_header *header,
 {
 	int len = 0;
 
-	ib_pack(lrh_table, ARRAY_SIZE(lrh_table),
-		&header->lrh, buf);
-	len += IB_LRH_BYTES;
-
+	if (header->lrh_present) {
+		ib_pack(lrh_table, ARRAY_SIZE(lrh_table),
+			&header->lrh, buf + len);
+		len += IB_LRH_BYTES;
+	}
+	if (header->eth_present) {
+		ib_pack(eth_table, ARRAY_SIZE(eth_table),
+			&header->eth, buf + len);
+		len += IB_ETH_BYTES;
+	}
+	if (header->vlan_present) {
+		ib_pack(vlan_table, ARRAY_SIZE(vlan_table),
+			&header->vlan, buf + len);
+		len += IB_VLAN_BYTES;
+	}
 	if (header->grh_present) {
 		ib_pack(grh_table, ARRAY_SIZE(grh_table),
 			&header->grh, buf + len);
 		len += IB_GRH_BYTES;
+	}
+	if (header->ipv4_present) {
+		ib_pack(ip4_table, ARRAY_SIZE(ip4_table),
+			&header->ip4, buf + len);
+		len += IB_IP4_BYTES;
+	}
+	if (header->udp_present) {
+		ib_pack(udp_table, ARRAY_SIZE(udp_table),
+			&header->udp, buf + len);
+		len += IB_UDP_BYTES;
 	}
 
 	ib_pack(bth_table, ARRAY_SIZE(bth_table),
@@ -296,8 +479,8 @@ int ib_ud_header_unpack(void                *buf,
 	buf += IB_LRH_BYTES;
 
 	if (header->lrh.link_version != 0) {
-		printk(KERN_WARNING "Invalid LRH.link_version %d\n",
-		       header->lrh.link_version);
+		pr_warn("Invalid LRH.link_version %d\n",
+			header->lrh.link_version);
 		return -EINVAL;
 	}
 
@@ -313,20 +496,20 @@ int ib_ud_header_unpack(void                *buf,
 		buf += IB_GRH_BYTES;
 
 		if (header->grh.ip_version != 6) {
-			printk(KERN_WARNING "Invalid GRH.ip_version %d\n",
-			       header->grh.ip_version);
+			pr_warn("Invalid GRH.ip_version %d\n",
+				header->grh.ip_version);
 			return -EINVAL;
 		}
 		if (header->grh.next_header != 0x1b) {
-			printk(KERN_WARNING "Invalid GRH.next_header 0x%02x\n",
-			       header->grh.next_header);
+			pr_warn("Invalid GRH.next_header 0x%02x\n",
+				header->grh.next_header);
 			return -EINVAL;
 		}
 		break;
 
 	default:
-		printk(KERN_WARNING "Invalid LRH.link_next_header %d\n",
-		       header->lrh.link_next_header);
+		pr_warn("Invalid LRH.link_next_header %d\n",
+			header->lrh.link_next_header);
 		return -EINVAL;
 	}
 
@@ -342,14 +525,13 @@ int ib_ud_header_unpack(void                *buf,
 		header->immediate_present = 1;
 		break;
 	default:
-		printk(KERN_WARNING "Invalid BTH.opcode 0x%02x\n",
-		       header->bth.opcode);
+		pr_warn("Invalid BTH.opcode 0x%02x\n", header->bth.opcode);
 		return -EINVAL;
 	}
 
 	if (header->bth.transport_header_version != 0) {
-		printk(KERN_WARNING "Invalid BTH.transport_header_version %d\n",
-		       header->bth.transport_header_version);
+		pr_warn("Invalid BTH.transport_header_version %d\n",
+			header->bth.transport_header_version);
 		return -EINVAL;
 	}
 

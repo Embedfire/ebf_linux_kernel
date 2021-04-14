@@ -1,10 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This is the infamous ld script for the 32 bits vdso
  * library
  */
 #include <asm/vdso.h>
 
+#ifdef __LITTLE_ENDIAN__
+OUTPUT_FORMAT("elf32-powerpcle", "elf32-powerpcle", "elf32-powerpcle")
+#else
 OUTPUT_FORMAT("elf32-powerpc", "elf32-powerpc", "elf32-powerpc")
+#endif
 OUTPUT_ARCH(powerpc:common)
 ENTRY(_start)
 
@@ -25,13 +30,16 @@ SECTIONS
 	. = ALIGN(16);
 	.text		: {
 		*(.text .stub .text.* .gnu.linkonce.t.* __ftr_alt_*)
-	}
+	}		      	      			:text
 	PROVIDE(__etext = .);
 	PROVIDE(_etext = .);
 	PROVIDE(etext = .);
 
 	. = ALIGN(8);
 	__ftr_fixup	: { *(__ftr_fixup) }
+
+	. = ALIGN(8);
+	__mmu_ftr_fixup	: { *(__mmu_ftr_fixup) }
 
 	. = ALIGN(8);
 	__lwsync_fixup	: { *(__lwsync_fixup) }
@@ -53,7 +61,7 @@ SECTIONS
 	.fixup		: { *(.fixup) }
 
 	.dynamic	: { *(.dynamic) }		:text	:dynamic
-	.got		: { *(.got) }
+	.got		: { *(.got) }			:text
 	.plt		: { *(.plt) }
 
 	_end = .;
@@ -139,11 +147,15 @@ VERSION
 		__kernel_gettimeofday;
 		__kernel_clock_gettime;
 		__kernel_clock_getres;
+		__kernel_time;
 		__kernel_get_tbfreq;
 		__kernel_sync_dicache;
 		__kernel_sync_dicache_p5;
 		__kernel_sigtramp32;
 		__kernel_sigtramp_rt32;
+#if defined(CONFIG_PPC64) || !defined(CONFIG_SMP)
+		__kernel_getcpu;
+#endif
 
 	local: *;
 	};

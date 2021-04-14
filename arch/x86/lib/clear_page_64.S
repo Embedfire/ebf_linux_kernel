@@ -1,22 +1,27 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #include <linux/linkage.h>
-#include <asm/dwarf2.h>
+#include <asm/export.h>
 
 /*
- * Zero a page. 	
- * rdi	page
- */			
-	ALIGN
-clear_page_c:
-	CFI_STARTPROC
+ * Most CPUs support enhanced REP MOVSB/STOSB instructions. It is
+ * recommended to use this when possible and we do use them by default.
+ * If enhanced REP MOVSB/STOSB is not available, try to use fast string.
+ * Otherwise, use original.
+ */
+
+/*
+ * Zero a page.
+ * %rdi	- page
+ */
+SYM_FUNC_START(clear_page_rep)
 	movl $4096/8,%ecx
 	xorl %eax,%eax
 	rep stosq
 	ret
-	CFI_ENDPROC
-ENDPROC(clear_page)
+SYM_FUNC_END(clear_page_rep)
+EXPORT_SYMBOL_GPL(clear_page_rep)
 
-ENTRY(clear_page)
-	CFI_STARTPROC
+SYM_FUNC_START(clear_page_orig)
 	xorl   %eax,%eax
 	movl   $4096/64,%ecx
 	.p2align 4
@@ -35,25 +40,13 @@ ENTRY(clear_page)
 	jnz	.Lloop
 	nop
 	ret
-	CFI_ENDPROC
-.Lclear_page_end:
-ENDPROC(clear_page)
+SYM_FUNC_END(clear_page_orig)
+EXPORT_SYMBOL_GPL(clear_page_orig)
 
-	/* Some CPUs run faster using the string instructions.
-	   It is also a lot simpler. Use this when possible */
-
-#include <asm/cpufeature.h>
-
-	.section .altinstr_replacement,"ax"
-1:	.byte 0xeb					/* jmp <disp8> */
-	.byte (clear_page_c - clear_page) - (2f - 1b)	/* offset */
-2:
-	.previous
-	.section .altinstructions,"a"
-	.align 8
-	.quad clear_page
-	.quad 1b
-	.byte X86_FEATURE_REP_GOOD
-	.byte .Lclear_page_end - clear_page
-	.byte 2b - 1b
-	.previous
+SYM_FUNC_START(clear_page_erms)
+	movl $4096,%ecx
+	xorl %eax,%eax
+	rep stosb
+	ret
+SYM_FUNC_END(clear_page_erms)
+EXPORT_SYMBOL_GPL(clear_page_erms)

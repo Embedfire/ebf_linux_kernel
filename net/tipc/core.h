@@ -1,8 +1,8 @@
 /*
  * net/tipc/core.h: Include file for TIPC global declarations
  *
- * Copyright (c) 2005-2006, Ericsson AB
- * Copyright (c) 2005-2007, Wind River Systems
+ * Copyright (c) 2005-2006, 2013-2018 Ericsson AB
+ * Copyright (c) 2005-2007, 2010-2013, Wind River Systems
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,337 +39,185 @@
 
 #include <linux/tipc.h>
 #include <linux/tipc_config.h>
-#include <net/tipc/tipc_msg.h>
-#include <net/tipc/tipc_port.h>
-#include <net/tipc/tipc_bearer.h>
-#include <net/tipc/tipc.h>
+#include <linux/tipc_netlink.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/timer.h>
 #include <linux/string.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/interrupt.h>
-#include <asm/atomic.h>
-#include <asm/hardirq.h>
+#include <linux/atomic.h>
 #include <linux/netdevice.h>
 #include <linux/in.h>
 #include <linux/list.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/rtnetlink.h>
+#include <linux/etherdevice.h>
+#include <net/netns/generic.h>
+#include <linux/rhashtable.h>
+#include <net/genetlink.h>
+#include <net/netns/hash.h>
 
-/*
- * TIPC sanity test macros
- */
-
-#define assert(i)  BUG_ON(!(i))
-
-/*
- * TIPC system monitoring code
- */
-
-/*
- * TIPC's print buffer subsystem supports the following print buffers:
- *
- * TIPC_NULL : null buffer (i.e. print nowhere)
- * TIPC_CONS : system console
- * TIPC_LOG  : TIPC log buffer
- * &buf	     : user-defined buffer (struct print_buf *)
- *
- * Note: TIPC_LOG is configured to echo its output to the system console;
- *       user-defined buffers can be configured to do the same thing.
- */
-
-extern struct print_buf *const TIPC_NULL;
-extern struct print_buf *const TIPC_CONS;
-extern struct print_buf *const TIPC_LOG;
-
-void tipc_printf(struct print_buf *, const char *fmt, ...);
-
-/*
- * TIPC_OUTPUT is the destination print buffer for system messages.
- */
-
-#ifndef TIPC_OUTPUT
-#define TIPC_OUTPUT TIPC_LOG
+#ifdef pr_fmt
+#undef pr_fmt
 #endif
 
-/*
- * TIPC can be configured to send system messages to TIPC_OUTPUT
- * or to the system console only.
- */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#ifdef CONFIG_TIPC_DEBUG
-
-#define err(fmt, arg...)  tipc_printf(TIPC_OUTPUT, \
-					KERN_ERR "TIPC: " fmt, ## arg)
-#define warn(fmt, arg...) tipc_printf(TIPC_OUTPUT, \
-					KERN_WARNING "TIPC: " fmt, ## arg)
-#define info(fmt, arg...) tipc_printf(TIPC_OUTPUT, \
-					KERN_NOTICE "TIPC: " fmt, ## arg)
-
-#else
-
-#define err(fmt, arg...)  printk(KERN_ERR "TIPC: " fmt , ## arg)
-#define info(fmt, arg...) printk(KERN_INFO "TIPC: " fmt , ## arg)
-#define warn(fmt, arg...) printk(KERN_WARNING "TIPC: " fmt , ## arg)
-
+struct tipc_node;
+struct tipc_bearer;
+struct tipc_bc_base;
+struct tipc_link;
+struct tipc_name_table;
+struct tipc_topsrv;
+struct tipc_monitor;
+#ifdef CONFIG_TIPC_CRYPTO
+struct tipc_crypto;
 #endif
 
-/*
- * DBG_OUTPUT is the destination print buffer for debug messages.
- * It defaults to the the null print buffer, but can be redefined
- * (typically in the individual .c files being debugged) to allow
- * selected debug messages to be generated where needed.
- */
+#define TIPC_MOD_VER "2.0.0"
 
-#ifndef DBG_OUTPUT
-#define DBG_OUTPUT TIPC_NULL
-#endif
+#define NODE_HTABLE_SIZE       512
+#define MAX_BEARERS	         3
+#define TIPC_DEF_MON_THRESHOLD  32
+#define NODE_ID_LEN             16
+#define NODE_ID_STR_LEN        (NODE_ID_LEN * 2 + 1)
 
-/*
- * TIPC can be configured to send debug messages to the specified print buffer
- * (typically DBG_OUTPUT) or to suppress them entirely.
- */
+extern unsigned int tipc_net_id __read_mostly;
+extern int sysctl_tipc_rmem[3] __read_mostly;
+extern int sysctl_tipc_named_timeout __read_mostly;
 
-#ifdef CONFIG_TIPC_DEBUG
-
-#define dbg(fmt, arg...)  \
-	do { \
-		if (DBG_OUTPUT != TIPC_NULL) \
-			tipc_printf(DBG_OUTPUT, fmt, ## arg); \
-	} while (0)
-#define msg_dbg(msg, txt) \
-	do { \
-		if (DBG_OUTPUT != TIPC_NULL) \
-			tipc_msg_dbg(DBG_OUTPUT, msg, txt); \
-	} while (0)
-#define dump(fmt, arg...) \
-	do { \
-		if (DBG_OUTPUT != TIPC_NULL) \
-			tipc_dump_dbg(DBG_OUTPUT, fmt, ##arg); \
-	} while (0)
-
-void tipc_msg_dbg(struct print_buf *, struct tipc_msg *, const char *);
-void tipc_dump_dbg(struct print_buf *, const char *fmt, ...);
-
-#else
-
-#define dbg(fmt, arg...)	do {} while (0)
-#define msg_dbg(msg, txt)	do {} while (0)
-#define dump(fmt, arg...)	do {} while (0)
-
-#define tipc_msg_dbg(...)	do {} while (0)
-#define tipc_dump_dbg(...)	do {} while (0)
-
-#endif
-
-
-/*
- * TIPC-specific error codes
- */
-
-#define ELINKCONG EAGAIN	/* link congestion <=> resource unavailable */
-
-/*
- * Global configuration variables
- */
-
-extern u32 tipc_own_addr;
-extern int tipc_max_zones;
-extern int tipc_max_clusters;
-extern int tipc_max_nodes;
-extern int tipc_max_slaves;
-extern int tipc_max_ports;
-extern int tipc_max_subscriptions;
-extern int tipc_max_publications;
-extern int tipc_net_id;
-extern int tipc_remote_management;
-
-/*
- * Other global variables
- */
-
-extern int tipc_mode;
-extern int tipc_random;
-extern const char tipc_alphabet[];
-extern atomic_t tipc_user_count;
-
-
-/*
- * Routines available to privileged subsystems
- */
-
-extern int  tipc_core_start(void);
-extern void tipc_core_stop(void);
-extern int  tipc_core_start_net(unsigned long addr);
-extern void tipc_core_stop_net(void);
-extern int  tipc_handler_start(void);
-extern void tipc_handler_stop(void);
-extern int  tipc_netlink_start(void);
-extern void tipc_netlink_stop(void);
-extern int  tipc_socket_init(void);
-extern void tipc_socket_stop(void);
-
-static inline int delimit(int val, int min, int max)
-{
-	if (val > max)
-		return max;
-	if (val < min)
-		return min;
-	return val;
-}
-
-
-/*
- * TIPC timer and signal code
- */
-
-typedef void (*Handler) (unsigned long);
-
-u32 tipc_k_signal(Handler routine, unsigned long argument);
-
-/**
- * k_init_timer - initialize a timer
- * @timer: pointer to timer structure
- * @routine: pointer to routine to invoke when timer expires
- * @argument: value to pass to routine when timer expires
- *
- * Timer must be initialized before use (and terminated when no longer needed).
- */
-
-static inline void k_init_timer(struct timer_list *timer, Handler routine,
-				unsigned long argument)
-{
-	dbg("initializing timer %p\n", timer);
-	setup_timer(timer, routine, argument);
-}
-
-/**
- * k_start_timer - start a timer
- * @timer: pointer to timer structure
- * @msec: time to delay (in ms)
- *
- * Schedules a previously initialized timer for later execution.
- * If timer is already running, the new timeout overrides the previous request.
- *
- * To ensure the timer doesn't expire before the specified delay elapses,
- * the amount of delay is rounded up when converting to the jiffies
- * then an additional jiffy is added to account for the fact that
- * the starting time may be in the middle of the current jiffy.
- */
-
-static inline void k_start_timer(struct timer_list *timer, unsigned long msec)
-{
-	dbg("starting timer %p for %u\n", timer, msec);
-	mod_timer(timer, jiffies + msecs_to_jiffies(msec) + 1);
-}
-
-/**
- * k_cancel_timer - cancel a timer
- * @timer: pointer to timer structure
- *
- * Cancels a previously initialized timer.
- * Can be called safely even if the timer is already inactive.
- *
- * WARNING: Must not be called when holding locks required by the timer's
- *          timeout routine, otherwise deadlock can occur on SMP systems!
- */
-
-static inline void k_cancel_timer(struct timer_list *timer)
-{
-	dbg("cancelling timer %p\n", timer);
-	del_timer_sync(timer);
-}
-
-/**
- * k_term_timer - terminate a timer
- * @timer: pointer to timer structure
- *
- * Prevents further use of a previously initialized timer.
- *
- * WARNING: Caller must ensure timer isn't currently running.
- *
- * (Do not "enhance" this routine to automatically cancel an active timer,
- * otherwise deadlock can arise when a timeout routine calls k_term_timer.)
- */
-
-static inline void k_term_timer(struct timer_list *timer)
-{
-	dbg("terminating timer %p\n", timer);
-}
-
-
-/*
- * TIPC message buffer code
- *
- * TIPC message buffer headroom reserves space for the worst-case
- * link-level device header (in case the message is sent off-node).
- *
- * Note: Headroom should be a multiple of 4 to ensure the TIPC header fields
- *       are word aligned for quicker access
- */
-
-#define BUF_HEADROOM LL_MAX_HEADER
-
-struct tipc_skb_cb {
-	void *handle;
+struct tipc_net_work {
+	struct work_struct work;
+	struct net *net;
+	u32 addr;
 };
 
-#define TIPC_SKB_CB(__skb) ((struct tipc_skb_cb *)&((__skb)->cb[0]))
+struct tipc_net {
+	u8  node_id[NODE_ID_LEN];
+	u32 node_addr;
+	u32 trial_addr;
+	unsigned long addr_trial_end;
+	char node_id_string[NODE_ID_STR_LEN];
+	int net_id;
+	int random;
+	bool legacy_addr_format;
 
+	/* Node table and node list */
+	spinlock_t node_list_lock;
+	struct hlist_head node_htable[NODE_HTABLE_SIZE];
+	struct list_head node_list;
+	u32 num_nodes;
+	u32 num_links;
 
-static inline struct tipc_msg *buf_msg(struct sk_buff *skb)
+	/* Neighbor monitoring list */
+	struct tipc_monitor *monitors[MAX_BEARERS];
+	int mon_threshold;
+
+	/* Bearer list */
+	struct tipc_bearer __rcu *bearer_list[MAX_BEARERS + 1];
+
+	/* Broadcast link */
+	spinlock_t bclock;
+	struct tipc_bc_base *bcbase;
+	struct tipc_link *bcl;
+
+	/* Socket hash table */
+	struct rhashtable sk_rht;
+
+	/* Name table */
+	spinlock_t nametbl_lock;
+	struct name_table *nametbl;
+
+	/* Name dist queue */
+	struct list_head dist_queue;
+
+	/* Topology subscription server */
+	struct tipc_topsrv *topsrv;
+	atomic_t subscription_count;
+
+	/* Cluster capabilities */
+	u16 capabilities;
+
+	/* Tracing of node internal messages */
+	struct packet_type loopback_pt;
+
+#ifdef CONFIG_TIPC_CRYPTO
+	/* TX crypto handler */
+	struct tipc_crypto *crypto_tx;
+#endif
+	/* Work item for net finalize */
+	struct tipc_net_work final_work;
+};
+
+static inline struct tipc_net *tipc_net(struct net *net)
 {
-	return (struct tipc_msg *)skb->data;
+	return net_generic(net, tipc_net_id);
 }
 
-/**
- * buf_acquire - creates a TIPC message buffer
- * @size: message size (including TIPC header)
- *
- * Returns a new buffer with data pointers set to the specified size.
- *
- * NOTE: Headroom is reserved to allow prepending of a data link header.
- *       There may also be unrequested tailroom present at the buffer's end.
- */
-
-static inline struct sk_buff *buf_acquire(u32 size)
+static inline int tipc_netid(struct net *net)
 {
-	struct sk_buff *skb;
-	unsigned int buf_size = (BUF_HEADROOM + size + 3) & ~3u;
-
-	skb = alloc_skb_fclone(buf_size, GFP_ATOMIC);
-	if (skb) {
-		skb_reserve(skb, BUF_HEADROOM);
-		skb_put(skb, size);
-		skb->next = NULL;
-	}
-	return skb;
+	return tipc_net(net)->net_id;
 }
 
-/**
- * buf_discard - frees a TIPC message buffer
- * @skb: message buffer
- *
- * Frees a message buffer.  If passed NULL, just returns.
- */
-
-static inline void buf_discard(struct sk_buff *skb)
+static inline struct list_head *tipc_nodes(struct net *net)
 {
-	kfree_skb(skb);
+	return &tipc_net(net)->node_list;
 }
 
-/**
- * buf_linearize - convert a TIPC message buffer into a single contiguous piece
- * @skb: message buffer
- *
- * Returns 0 on success.
- */
-
-static inline int buf_linearize(struct sk_buff *skb)
+static inline struct name_table *tipc_name_table(struct net *net)
 {
-	return skb_linearize(skb);
+	return tipc_net(net)->nametbl;
 }
 
+static inline struct tipc_topsrv *tipc_topsrv(struct net *net)
+{
+	return tipc_net(net)->topsrv;
+}
+
+static inline unsigned int tipc_hashfn(u32 addr)
+{
+	return addr & (NODE_HTABLE_SIZE - 1);
+}
+
+static inline u16 mod(u16 x)
+{
+	return x & 0xffffu;
+}
+
+static inline int less_eq(u16 left, u16 right)
+{
+	return mod(right - left) < 32768u;
+}
+
+static inline int more(u16 left, u16 right)
+{
+	return !less_eq(left, right);
+}
+
+static inline int less(u16 left, u16 right)
+{
+	return less_eq(left, right) && (mod(right) != mod(left));
+}
+
+static inline int in_range(u16 val, u16 min, u16 max)
+{
+	return !less(val, min) && !more(val, max);
+}
+
+static inline u32 tipc_net_hash_mixes(struct net *net, int tn_rand)
+{
+	return net_hash_mix(&init_net) ^ net_hash_mix(net) ^ tn_rand;
+}
+
+#ifdef CONFIG_SYSCTL
+int tipc_register_sysctl(void);
+void tipc_unregister_sysctl(void);
+#else
+#define tipc_register_sysctl() 0
+#define tipc_unregister_sysctl()
+#endif
 #endif

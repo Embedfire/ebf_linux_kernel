@@ -848,12 +848,12 @@ static void khazad_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
 
 static struct crypto_alg khazad_alg = {
 	.cra_name		=	"khazad",
+	.cra_driver_name	=	"khazad-generic",
 	.cra_flags		=	CRYPTO_ALG_TYPE_CIPHER,
 	.cra_blocksize		=	KHAZAD_BLOCK_SIZE,
 	.cra_ctxsize		=	sizeof (struct khazad_ctx),
 	.cra_alignmask		=	7,
 	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(khazad_alg.cra_list),
 	.cra_u			=	{ .cipher = {
 	.cia_min_keysize	=	KHAZAD_KEY_SIZE,
 	.cia_max_keysize	=	KHAZAD_KEY_SIZE,
@@ -876,8 +876,9 @@ static void __exit khazad_mod_fini(void)
 }
 
 
-module_init(khazad_mod_init);
+subsys_initcall(khazad_mod_init);
 module_exit(khazad_mod_fini);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Khazad Cryptographic Algorithm");
+MODULE_ALIAS_CRYPTO("khazad");

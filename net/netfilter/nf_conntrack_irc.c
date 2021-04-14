@@ -1,12 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* IRC extension for IP connection tracking, Version 1.21
  * (C) 2000-2002 by Harald Welte <laforge@gnumonks.org>
  * based on RR's ip_conntrack_ftp.c
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
+ * (C) 2006-2012 Patrick McHardy <kaber@trash.net>
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -15,6 +14,7 @@
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/netfilter.h>
+#include <linux/slab.h>
 
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_expect.h>
@@ -32,15 +32,19 @@ static DEFINE_SPINLOCK(irc_buffer_lock);
 
 unsigned int (*nf_nat_irc_hook)(struct sk_buff *skb,
 				enum ip_conntrack_info ctinfo,
+				unsigned int protoff,
 				unsigned int matchoff,
 				unsigned int matchlen,
 				struct nf_conntrack_expect *exp) __read_mostly;
 EXPORT_SYMBOL_GPL(nf_nat_irc_hook);
 
+#define HELPER_NAME "irc"
+
 MODULE_AUTHOR("Harald Welte <laforge@netfilter.org>");
 MODULE_DESCRIPTION("IRC (DCC) connection tracking helper");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("ip_conntrack_irc");
+MODULE_ALIAS_NFCT_HELPER(HELPER_NAME);
 
 module_param_array(ports, ushort, &ports_c, 0400);
 MODULE_PARM_DESC(ports, "port numbers of IRC servers");
@@ -65,7 +69,7 @@ static const char *const dccprotos[] = {
  *	ad_beg_p	returns pointer to first byte of addr data
  *	ad_end_p	returns pointer to last byte of addr data
  */
-static int parse_dcc(char *data, const char *data_end, u_int32_t *ip,
+static int parse_dcc(char *data, const char *data_end, __be32 *ip,
 		     u_int16_t *port, char **ad_beg_p, char **ad_end_p)
 {
 	char *tmp;
@@ -84,7 +88,7 @@ static int parse_dcc(char *data, const char *data_end, u_int32_t *ip,
 		return -1;
 
 	*ad_beg_p = data;
-	*ip = simple_strtoul(data, &data, 10);
+	*ip = cpu_to_be32(simple_strtoul(data, &data, 10));
 
 	/* skip blanks between ip and port */
 	while (*data == ' ') {
@@ -111,7 +115,7 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 	int dir = CTINFO2DIR(ctinfo);
 	struct nf_conntrack_expect *exp;
 	struct nf_conntrack_tuple *tuple;
-	u_int32_t dcc_ip;
+	__be32 dcc_ip;
 	u_int16_t dcc_port;
 	__be16 port;
 	int i, ret = NF_ACCEPT;
@@ -123,8 +127,7 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 		return NF_ACCEPT;
 
 	/* Until there's been traffic both ways, don't look in packets. */
-	if (ctinfo != IP_CT_ESTABLISHED &&
-	    ctinfo != IP_CT_ESTABLISHED + IP_CT_IS_REPLY)
+	if (ctinfo != IP_CT_ESTABLISHED && ctinfo != IP_CT_ESTABLISHED_REPLY)
 		return NF_ACCEPT;
 
 	/* Not a full tcp header? */
@@ -156,9 +159,9 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 		/* we have at least (19+MINMATCHLEN)-5 bytes valid data left */
 
 		iph = ip_hdr(skb);
-		pr_debug("DCC found in master %u.%u.%u.%u:%u %u.%u.%u.%u:%u\n",
-			 NIPQUAD(iph->saddr), ntohs(th->source),
-			 NIPQUAD(iph->daddr), ntohs(th->dest));
+		pr_debug("DCC found in master %pI4:%u %pI4:%u\n",
+			 &iph->saddr, ntohs(th->source),
+			 &iph->daddr, ntohs(th->dest));
 
 		for (i = 0; i < ARRAY_SIZE(dccprotos); i++) {
 			if (memcmp(data, dccprotos[i], strlen(dccprotos[i]))) {
@@ -176,24 +179,24 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 				pr_debug("unable to parse dcc command\n");
 				continue;
 			}
-			pr_debug("DCC bound ip/port: %u.%u.%u.%u:%u\n",
-				 HIPQUAD(dcc_ip), dcc_port);
+
+			pr_debug("DCC bound ip/port: %pI4:%u\n",
+				 &dcc_ip, dcc_port);
 
 			/* dcc_ip can be the internal OR external (NAT'ed) IP */
 			tuple = &ct->tuplehash[dir].tuple;
-			if (tuple->src.u3.ip != htonl(dcc_ip) &&
-			    tuple->dst.u3.ip != htonl(dcc_ip)) {
-				if (net_ratelimit())
-					printk(KERN_WARNING
-						"Forged DCC command from "
-						"%u.%u.%u.%u: %u.%u.%u.%u:%u\n",
-						NIPQUAD(tuple->src.u3.ip),
-						HIPQUAD(dcc_ip), dcc_port);
+			if (tuple->src.u3.ip != dcc_ip &&
+			    tuple->dst.u3.ip != dcc_ip) {
+				net_warn_ratelimited("Forged DCC command from %pI4: %pI4:%u\n",
+						     &tuple->src.u3.ip,
+						     &dcc_ip, dcc_port);
 				continue;
 			}
 
 			exp = nf_ct_expect_alloc(ct);
 			if (exp == NULL) {
+				nf_ct_helper_log(skb, ct,
+						 "cannot alloc expectation");
 				ret = NF_DROP;
 				goto out;
 			}
@@ -206,12 +209,15 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 
 			nf_nat_irc = rcu_dereference(nf_nat_irc_hook);
 			if (nf_nat_irc && ct->status & IPS_NAT_MASK)
-				ret = nf_nat_irc(skb, ctinfo,
+				ret = nf_nat_irc(skb, ctinfo, protoff,
 						 addr_beg_p - ib_ptr,
 						 addr_end_p - addr_beg_p,
 						 exp);
-			else if (nf_ct_expect_related(exp) != 0)
+			else if (nf_ct_expect_related(exp, 0) != 0) {
+				nf_ct_helper_log(skb, ct,
+						 "cannot add expectation");
 				ret = NF_DROP;
+			}
 			nf_ct_expect_put(exp);
 			goto out;
 		}
@@ -222,18 +228,20 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 }
 
 static struct nf_conntrack_helper irc[MAX_PORTS] __read_mostly;
-static char irc_names[MAX_PORTS][sizeof("irc-65535")] __read_mostly;
 static struct nf_conntrack_expect_policy irc_exp_policy;
-
-static void nf_conntrack_irc_fini(void);
 
 static int __init nf_conntrack_irc_init(void)
 {
 	int i, ret;
-	char *tmpname;
 
 	if (max_dcc_channels < 1) {
-		printk("nf_ct_irc: max_dcc_channels must not be zero\n");
+		pr_err("max_dcc_channels must not be zero\n");
+		return -EINVAL;
+	}
+
+	if (max_dcc_channels > NF_CT_EXPECT_MAX_CNT) {
+		pr_err("max_dcc_channels must not be more than %u\n",
+		       NF_CT_EXPECT_MAX_CNT);
 		return -EINVAL;
 	}
 
@@ -249,40 +257,24 @@ static int __init nf_conntrack_irc_init(void)
 		ports[ports_c++] = IRC_PORT;
 
 	for (i = 0; i < ports_c; i++) {
-		irc[i].tuple.src.l3num = AF_INET;
-		irc[i].tuple.src.u.tcp.port = htons(ports[i]);
-		irc[i].tuple.dst.protonum = IPPROTO_TCP;
-		irc[i].expect_policy = &irc_exp_policy;
-		irc[i].me = THIS_MODULE;
-		irc[i].help = help;
-
-		tmpname = &irc_names[i][0];
-		if (ports[i] == IRC_PORT)
-			sprintf(tmpname, "irc");
-		else
-			sprintf(tmpname, "irc-%u", i);
-		irc[i].name = tmpname;
-
-		ret = nf_conntrack_helper_register(&irc[i]);
-		if (ret) {
-			printk("nf_ct_irc: failed to register helper "
-			       "for pf: %u port: %u\n",
-			       irc[i].tuple.src.l3num, ports[i]);
-			nf_conntrack_irc_fini();
-			return ret;
-		}
+		nf_ct_helper_init(&irc[i], AF_INET, IPPROTO_TCP, HELPER_NAME,
+				  IRC_PORT, ports[i], i, &irc_exp_policy,
+				  0, help, NULL, THIS_MODULE);
 	}
+
+	ret = nf_conntrack_helpers_register(&irc[0], ports_c);
+	if (ret) {
+		pr_err("failed to register helpers\n");
+		kfree(irc_buffer);
+		return ret;
+	}
+
 	return 0;
 }
 
-/* This function is intentionally _NOT_ defined as __exit, because
- * it is needed by the init function */
-static void nf_conntrack_irc_fini(void)
+static void __exit nf_conntrack_irc_fini(void)
 {
-	int i;
-
-	for (i = 0; i < ports_c; i++)
-		nf_conntrack_helper_unregister(&irc[i]);
+	nf_conntrack_helpers_unregister(irc, ports_c);
 	kfree(irc_buffer);
 }
 

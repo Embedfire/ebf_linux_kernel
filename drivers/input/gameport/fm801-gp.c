@@ -1,23 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  FM801 gameport driver for Linux
  *
  *  Copyright (c) by Takashi Iwai <tiwai@suse.de>
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
 #include <asm/io.h>
@@ -27,7 +12,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/gameport.h>
 
@@ -78,7 +62,7 @@ static int fm801_gp_open(struct gameport *gameport, int mode)
 	return 0;
 }
 
-static int __devinit fm801_gp_probe(struct pci_dev *pci, const struct pci_device_id *id)
+static int fm801_gp_probe(struct pci_dev *pci, const struct pci_device_id *id)
 {
 	struct fm801_gp *gp;
 	struct gameport *port;
@@ -129,43 +113,32 @@ static int __devinit fm801_gp_probe(struct pci_dev *pci, const struct pci_device
 	return error;
 }
 
-static void __devexit fm801_gp_remove(struct pci_dev *pci)
+static void fm801_gp_remove(struct pci_dev *pci)
 {
 	struct fm801_gp *gp = pci_get_drvdata(pci);
 
-	if (gp) {
-		gameport_unregister_port(gp->gameport);
-		release_resource(gp->res_port);
-		kfree(gp);
-	}
+	gameport_unregister_port(gp->gameport);
+	release_resource(gp->res_port);
+	kfree(gp);
+
+	pci_disable_device(pci);
 }
 
-static struct pci_device_id fm801_gp_id_table[] = {
+static const struct pci_device_id fm801_gp_id_table[] = {
 	{ PCI_VENDOR_ID_FORTEMEDIA, PCI_DEVICE_ID_FM801_GP, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0  },
 	{ 0 }
 };
+MODULE_DEVICE_TABLE(pci, fm801_gp_id_table);
 
 static struct pci_driver fm801_gp_driver = {
 	.name =		"FM801_gameport",
 	.id_table =	fm801_gp_id_table,
 	.probe =	fm801_gp_probe,
-	.remove =	__devexit_p(fm801_gp_remove),
+	.remove =	fm801_gp_remove,
 };
 
-static int __init fm801_gp_init(void)
-{
-	return pci_register_driver(&fm801_gp_driver);
-}
+module_pci_driver(fm801_gp_driver);
 
-static void __exit fm801_gp_exit(void)
-{
-	pci_unregister_driver(&fm801_gp_driver);
-}
-
-module_init(fm801_gp_init);
-module_exit(fm801_gp_exit);
-
-MODULE_DEVICE_TABLE(pci, fm801_gp_id_table);
-
+MODULE_DESCRIPTION("FM801 gameport driver");
 MODULE_AUTHOR("Takashi Iwai <tiwai@suse.de>");
 MODULE_LICENSE("GPL");

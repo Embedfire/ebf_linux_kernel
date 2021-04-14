@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* -*- linux-c -*- ------------------------------------------------------- *
  *
  *   Copyright (C) 1991, 1992 Linus Torvalds
  *   Copyright 2007 rPath, Inc. - All Rights Reserved
- *
- *   This file is part of the Linux kernel, and is made available under
- *   the terms of the GNU General Public License version 2.
+ *   Copyright 2009 Intel Corporation; author H. Peter Anvin
  *
  * ----------------------------------------------------------------------- */
 
@@ -12,39 +11,45 @@
  * Select video mode
  */
 
+#include <uapi/asm/boot.h>
+
 #include "boot.h"
 #include "video.h"
 #include "vesa.h"
 
+static u16 video_segment;
+
 static void store_cursor_position(void)
 {
-	u16 curpos;
-	u16 ax, bx;
+	struct biosregs ireg, oreg;
 
-	ax = 0x0300;
-	bx = 0;
-	asm(INT10
-	    : "=d" (curpos), "+a" (ax), "+b" (bx)
-	    : : "ecx", "esi", "edi");
+	initregs(&ireg);
+	ireg.ah = 0x03;
+	intcall(0x10, &ireg, &oreg);
 
-	boot_params.screen_info.orig_x = curpos;
-	boot_params.screen_info.orig_y = curpos >> 8;
+	boot_params.screen_info.orig_x = oreg.dl;
+	boot_params.screen_info.orig_y = oreg.dh;
+
+	if (oreg.ch & 0x20)
+		boot_params.screen_info.flags |= VIDEO_FLAGS_NOCURSOR;
+
+	if ((oreg.ch & 0x1f) > (oreg.cl & 0x1f))
+		boot_params.screen_info.flags |= VIDEO_FLAGS_NOCURSOR;
 }
 
 static void store_video_mode(void)
 {
-	u16 ax, page;
+	struct biosregs ireg, oreg;
 
 	/* N.B.: the saving of the video page here is a bit silly,
 	   since we pretty much assume page 0 everywhere. */
-	ax = 0x0f00;
-	asm(INT10
-	    : "+a" (ax), "=b" (page)
-	    : : "ecx", "edx", "esi", "edi");
+	initregs(&ireg);
+	ireg.ah = 0x0f;
+	intcall(0x10, &ireg, &oreg);
 
 	/* Not all BIOSes are clean with respect to the top bit */
-	boot_params.screen_info.orig_video_mode = ax & 0x7f;
-	boot_params.screen_info.orig_video_page = page >> 8;
+	boot_params.screen_info.orig_video_mode = oreg.al & 0x7f;
+	boot_params.screen_info.orig_video_page = oreg.bh;
 }
 
 /*
@@ -108,7 +113,7 @@ static unsigned int get_entry(void)
 		} else if ((key >= '0' && key <= '9') ||
 			   (key >= 'A' && key <= 'Z') ||
 			   (key >= 'a' && key <= 'z')) {
-			if (len < sizeof entry_buf) {
+			if (len < sizeof(entry_buf)) {
 				entry_buf[len++] = key;
 				putchar(key);
 			}
@@ -224,9 +229,8 @@ static unsigned int mode_menu(void)
 	}
 }
 
-#ifdef CONFIG_VIDEO_RETAIN
 /* Save screen content to the heap */
-struct saved_screen {
+static struct saved_screen {
 	int x, y;
 	int curx, cury;
 	u16 *data;
@@ -257,7 +261,7 @@ static void restore_screen(void)
 	int y;
 	addr_t dst = 0;
 	u16 *src = saved.data;
-	u16 ax, bx, dx;
+	struct biosregs ireg;
 
 	if (graphic_mode)
 		return;		/* Can't restore onto a graphic mode */
@@ -296,17 +300,19 @@ static void restore_screen(void)
 	}
 
 	/* Restore cursor position */
-	ax = 0x0200;		/* Set cursor position */
-	bx = 0;			/* Page number (<< 8) */
-	dx = (saved.cury << 8)+saved.curx;
-	asm volatile(INT10
-		     : "+a" (ax), "+b" (bx), "+d" (dx)
-		     : : "ecx", "esi", "edi");
+	if (saved.curx >= xs)
+		saved.curx = xs-1;
+	if (saved.cury >= ys)
+		saved.cury = ys-1;
+
+	initregs(&ireg);
+	ireg.ah = 0x02;		/* Set cursor position */
+	ireg.dh = saved.cury;
+	ireg.dl = saved.curx;
+	intcall(0x10, &ireg, NULL);
+
+	store_cursor_position();
 }
-#else
-#define save_screen()		((void)0)
-#define restore_screen()	((void)0)
-#endif
 
 void set_video(void)
 {

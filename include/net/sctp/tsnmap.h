@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* SCTP kernel implementation
  * (C) Copyright IBM Corp. 2001, 2004
  * Copyright (c) 1999-2000 Cisco, Inc.
@@ -9,38 +10,15 @@
  * These are the definitions needed for the tsnmap type.  The tsnmap is used
  * to track out of order TSNs received.
  *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *                 ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, write to
- * the Free Software Foundation, 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
- *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <lksctp-developers@lists.sourceforge.net>
- *
- * Or submit a bug report through the following website:
- *    http://www.sf.net/projects/lksctp
+ *    lksctp developers <linux-sctp@vger.kernel.org>
  *
  * Written or modified by:
  *   Jon Grimm             <jgrimm@us.ibm.com>
  *   La Monte H.P. Yarroll <piggy@acm.org>
  *   Karl Knutson          <karl@athena.chicago.il.us>
  *   Sridhar Samudrala     <sri@us.ibm.com>
- *
- * Any bugs reported given to us we will try to fix... any fixes shared will
- * be incorporated into the next SCTP release.
  */
 #include <net/sctp/constants.h>
 
@@ -60,18 +38,7 @@ struct sctp_tsnmap {
 	 * It points at one of the two buffers with which we will
 	 * ping-pong between.
 	 */
-	__u8 *tsn_map;
-
-	/* This marks the tsn which overflows the tsn_map, when the
-	 * cumulative ack point reaches this point we know we can switch
-	 * maps (tsn_map and overflow_map swap).
-	 */
-	__u32 overflow_tsn;
-
-	/* This is the overflow array for tsn_map.
-	 * It points at one of the other ping-pong buffers.
-	 */
-	__u8 *overflow_map;
+	unsigned long *tsn_map;
 
 	/* This is the TSN at tsn_map[0].  */
 	__u32 base_tsn;
@@ -89,14 +56,14 @@ struct sctp_tsnmap {
 	 */
 	__u32 cumulative_tsn_ack_point;
 
+	/* This is the highest TSN we've marked.  */
+	__u32 max_tsn_seen;
+
 	/* This is the minimum number of TSNs we can track.  This corresponds
 	 * to the size of tsn_map.   Note: the overflow_map allows us to
 	 * potentially track more than this quantity.
 	 */
 	__u16 len;
-
-	/* This is the highest TSN we've marked.  */
-	__u32 max_tsn_seen;
 
 	/* Data chunks pending receipt. used by SCTP_STATUS sockopt */
 	__u16 pending_data;
@@ -105,29 +72,19 @@ struct sctp_tsnmap {
 	 * every SACK.  Store up to SCTP_MAX_DUP_TSNS worth of
 	 * information.
 	 */
-	__be32 dup_tsns[SCTP_MAX_DUP_TSNS];
 	__u16 num_dup_tsns;
-
-	/* Record gap ack block information here.  */
-	struct sctp_gap_ack_block gabs[SCTP_MAX_GABS];
-
-	int malloced;
-
-	__u8 raw_map[0];
+	__be32 dup_tsns[SCTP_MAX_DUP_TSNS];
 };
 
 struct sctp_tsnmap_iter {
 	__u32 start;
 };
 
-/* This macro assists in creation of external storage for variable length
- * internal buffers.  We double allocate so the overflow map works.
- */
-#define sctp_tsnmap_storage_size(count) (sizeof(__u8) * (count) * 2)
-
 /* Initialize a block of memory as a tsnmap.  */
 struct sctp_tsnmap *sctp_tsnmap_init(struct sctp_tsnmap *, __u16 len,
-				     __u32 initial_tsn);
+				     __u32 initial_tsn, gfp_t gfp);
+
+void sctp_tsnmap_free(struct sctp_tsnmap *map);
 
 /* Test the tracking state of this TSN.
  * Returns:
@@ -138,7 +95,8 @@ struct sctp_tsnmap *sctp_tsnmap_init(struct sctp_tsnmap *, __u16 len,
 int sctp_tsnmap_check(const struct sctp_tsnmap *, __u32 tsn);
 
 /* Mark this TSN as seen.  */
-void sctp_tsnmap_mark(struct sctp_tsnmap *, __u32 tsn);
+int sctp_tsnmap_mark(struct sctp_tsnmap *, __u32 tsn,
+		     struct sctp_transport *trans);
 
 /* Mark this TSN and all lower as seen. */
 void sctp_tsnmap_skip(struct sctp_tsnmap *map, __u32 tsn);
@@ -169,24 +127,16 @@ static inline __be32 *sctp_tsnmap_get_dups(struct sctp_tsnmap *map)
 }
 
 /* How many gap ack blocks do we have recorded? */
-__u16 sctp_tsnmap_num_gabs(struct sctp_tsnmap *map);
+__u16 sctp_tsnmap_num_gabs(struct sctp_tsnmap *map,
+			   struct sctp_gap_ack_block *gabs);
 
 /* Refresh the count on pending data. */
 __u16 sctp_tsnmap_pending(struct sctp_tsnmap *map);
 
-/* Return pointer to gap ack blocks as needed by SACK. */
-static inline struct sctp_gap_ack_block *sctp_tsnmap_get_gabs(struct sctp_tsnmap *map)
-{
-	return map->gabs;
-}
-
 /* Is there a gap in the TSN map?  */
 static inline int sctp_tsnmap_has_gap(const struct sctp_tsnmap *map)
 {
-	int has_gap;
-
-	has_gap = (map->cumulative_tsn_ack_point != map->max_tsn_seen);
-	return has_gap;
+	return map->cumulative_tsn_ack_point != map->max_tsn_seen;
 }
 
 /* Mark a duplicate TSN.  Note:  limit the storage of duplicate TSN

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-pxa/zylonite_pxa300.c
  *
@@ -7,22 +8,19 @@
  * Copyright (C) 2007 Marvell Internation Ltd.
  * 2007-08-21: eric miao <eric.miao@marvell.com>
  *             initial version
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/i2c.h>
-#include <linux/i2c/pca953x.h>
+#include <linux/platform_data/i2c-pxa.h>
+#include <linux/platform_data/pca953x.h>
+#include <linux/gpio.h>
 
-#include <asm/gpio.h>
-#include <mach/mfp-pxa300.h>
-#include <mach/i2c.h>
-#include <mach/zylonite.h>
+#include "pxa300.h"
+#include "devices.h"
+#include "zylonite.h"
 
 #include "generic.h"
 
@@ -72,6 +70,13 @@ static mfp_cfg_t common_mfp_cfg[] __initdata = {
 	GPIO25_AC97_SDATA_IN_0,
 	GPIO27_AC97_SDATA_OUT,
 	GPIO28_AC97_SYNC,
+	GPIO17_GPIO,	/* SDATA_IN_1 but unused - configure to GPIO */
+
+	/* SSP3 */
+	GPIO91_SSP3_SCLK,
+	GPIO92_SSP3_FRM,
+	GPIO93_SSP3_TXD,
+	GPIO94_SSP3_RXD,
 
 	/* WM9713 IRQ */
 	GPIO26_GPIO,
@@ -113,9 +118,17 @@ static mfp_cfg_t common_mfp_cfg[] __initdata = {
 	GPIO13_MMC2_CLK,
 	GPIO14_MMC2_CMD,
 
+	/* USB Host */
+	GPIO0_2_USBH_PEN,
+	GPIO1_2_USBH_PWR,
+
 	/* Standard I2C */
 	GPIO21_I2C_SCL,
 	GPIO22_I2C_SDA,
+
+	/* GPIO */
+	GPIO18_GPIO | MFP_PULL_HIGH,	/* GPIO Expander #0 INT_N */
+	GPIO19_GPIO | MFP_PULL_HIGH,	/* GPIO Expander #1 INT_N */
 };
 
 static mfp_cfg_t pxa300_mfp_cfg[] __initdata = {
@@ -182,10 +195,12 @@ static void __init zylonite_detect_lcd_panel(void)
 	for (i = 0; i < NUM_LCD_DETECT_PINS; i++) {
 		id = id << 1;
 		gpio = mfp_to_gpio(lcd_detect_pins[i]);
+		gpio_request(gpio, "LCD_ID_PINS");
 		gpio_direction_input(gpio);
 
 		if (gpio_get_value(gpio))
 			id = id | 0x1;
+		gpio_free(gpio);
 	}
 
 	/* lcd id, flush out bit 1 */
@@ -209,17 +224,19 @@ static struct pca953x_platform_data gpio_exp[] = {
 	},
 };
 
-struct i2c_board_info zylonite_i2c_board_info[] = {
+static struct i2c_board_info zylonite_i2c_board_info[] = {
 	{
 		.type		= "pca9539",
+		.dev_name	= "pca9539-a",
 		.addr		= 0x74,
 		.platform_data	= &gpio_exp[0],
-		.irq		= IRQ_GPIO(18),
+		.irq		= PXA_GPIO_TO_IRQ(18),
 	}, {
 		.type		= "pca9539",
+		.dev_name	= "pca9539-b",
 		.addr		= 0x75,
 		.platform_data	= &gpio_exp[1],
-		.irq		= IRQ_GPIO(19),
+		.irq		= PXA_GPIO_TO_IRQ(19),
 	},
 };
 
@@ -241,10 +258,6 @@ void __init zylonite_pxa300_init(void)
 		/* detect LCD panel */
 		zylonite_detect_lcd_panel();
 
-		/* MMC card detect & write protect for controller 0 */
-		zylonite_mmc_slot[0].gpio_cd  = EXT_GPIO(0);
-		zylonite_mmc_slot[0].gpio_wp  = EXT_GPIO(2);
-
 		/* WM9713 IRQ */
 		wm9713_irq = mfp_to_gpio(MFP_PIN_GPIO26);
 
@@ -259,10 +272,6 @@ void __init zylonite_pxa300_init(void)
 	if (cpu_is_pxa310()) {
 		pxa3xx_mfp_config(ARRAY_AND_SIZE(pxa310_mfp_cfg));
 		gpio_eth_irq = mfp_to_gpio(MFP_PIN_GPIO102);
-
-		/* MMC card detect & write protect for controller 2 */
-		zylonite_mmc_slot[2].gpio_cd = EXT_GPIO(30);
-		zylonite_mmc_slot[2].gpio_wp = EXT_GPIO(31);
 	}
 
 	/* GPIOs for Debug LEDs */

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-sa1100/hackkit.c
  *
@@ -5,11 +6,6 @@
  *
  * This file contains all HackKit tweaks. Based on original work from
  * Nicolas Pitre's assabet fixes
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -18,22 +14,27 @@
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/cpufreq.h>
+#include <linux/platform_data/sa11x0-serial.h>
 #include <linux/serial_core.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
+#include <linux/tty.h>
+#include <linux/gpio.h>
+#include <linux/leds.h>
+#include <linux/platform_device.h>
+#include <linux/pgtable.h>
 
-#include <mach/hardware.h>
 #include <asm/mach-types.h>
 #include <asm/setup.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
-#include <asm/irq.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
 #include <asm/mach/map.h>
 #include <asm/mach/irq.h>
-#include <asm/mach/serial_sa1100.h>
+
+#include <mach/hardware.h>
+#include <mach/irqs.h>
 
 #include "generic.h"
 
@@ -44,8 +45,6 @@
 /* init funcs */
 static void __init hackkit_map_io(void);
 
-static u_int hackkit_get_mctrl(struct uart_port *port);
-static void hackkit_set_mctrl(struct uart_port *port, u_int mctrl);
 static void hackkit_uart_pm(struct uart_port *port, u_int state, u_int oldstate);
 
 /**********************************************************************
@@ -66,8 +65,6 @@ static struct map_desc hackkit_io_desc[] __initdata = {
 };
 
 static struct sa1100_port_fns hackkit_port_fns __initdata = {
-	.set_mctrl	= hackkit_set_mctrl,
-	.get_mctrl	= hackkit_get_mctrl,
 	.pm		= hackkit_uart_pm,
 };
 
@@ -98,50 +95,6 @@ static void __init hackkit_map_io(void)
 static void hackkit_uart_pm(struct uart_port *port, u_int state, u_int oldstate)
 {
 	/* TODO: switch on/off uart in powersave mode */
-}
-
-/*
- * Note! this can be called from IRQ context.
- * FIXME: No modem ctrl lines yet.
- */
-static void hackkit_set_mctrl(struct uart_port *port, u_int mctrl)
-{
-#if 0
-	if (port->mapbase == _Ser1UTCR0) {
-		u_int set = 0, clear = 0;
-
-		if (mctrl & TIOCM_RTS)
-			set |= PT_CTRL2_RS1_RTS;
-		else
-			clear |= PT_CTRL2_RS1_RTS;
-
-		if (mctrl & TIOCM_DTR)
-			set |= PT_CTRL2_RS1_DTR;
-		else
-			clear |= PT_CTRL2_RS1_DTR;
-
-		PTCTRL2_clear(clear);
-		PTCTRL2_set(set);
-	}
-#endif
-}
-
-static u_int hackkit_get_mctrl(struct uart_port *port)
-{
-	u_int ret = 0;
-#if 0
-	u_int irqsr = PT_IRQSR;
-
-	/* need 2 reads to read current value */
-	irqsr = PT_IRQSR;
-
-	/* TODO: check IRQ source register for modem/com
-	 status lines and set them correctly. */
-#endif
-
-	ret = TIOCM_CD | TIOCM_CTS | TIOCM_DSR;
-
-	return ret;
 }
 
 static struct mtd_partition hackkit_partitions[] = {
@@ -179,15 +132,40 @@ static struct flash_platform_data hackkit_flash_data = {
 	.nr_parts	= ARRAY_SIZE(hackkit_partitions),
 };
 
-static struct resource hackkit_flash_resource = {
-	.start		= SA1100_CS0_PHYS,
-	.end		= SA1100_CS0_PHYS + SZ_32M,
-	.flags		= IORESOURCE_MEM,
+static struct resource hackkit_flash_resource =
+	DEFINE_RES_MEM(SA1100_CS0_PHYS, SZ_32M);
+
+/* LEDs */
+struct gpio_led hackkit_gpio_leds[] = {
+	{
+		.name			= "hackkit:red",
+		.default_trigger	= "cpu0",
+		.gpio			= 22,
+	},
+	{
+		.name			= "hackkit:green",
+		.default_trigger	= "heartbeat",
+		.gpio			= 23,
+	},
+};
+
+static struct gpio_led_platform_data hackkit_gpio_led_info = {
+	.leds		= hackkit_gpio_leds,
+	.num_leds	= ARRAY_SIZE(hackkit_gpio_leds),
+};
+
+static struct platform_device hackkit_leds = {
+	.name	= "leds-gpio",
+	.id	= -1,
+	.dev	= {
+		.platform_data	= &hackkit_gpio_led_info,
+	}
 };
 
 static void __init hackkit_init(void)
 {
-	sa11x0_set_flash_data(&hackkit_flash_data, &hackkit_flash_resource, 1);
+	sa11x0_register_mtd(&hackkit_flash_data, &hackkit_flash_resource, 1);
+	platform_device_register(&hackkit_leds);
 }
 
 /**********************************************************************
@@ -195,11 +173,12 @@ static void __init hackkit_init(void)
  */
 
 MACHINE_START(HACKKIT, "HackKit Cpu Board")
-	.phys_io	= 0x80000000,
-	.io_pg_offst	= ((0xf8000000) >> 18) & 0xfffc,
-	.boot_params	= 0xc0000100,
+	.atag_offset	= 0x100,
 	.map_io		= hackkit_map_io,
+	.nr_irqs	= SA1100_NR_IRQS,
 	.init_irq	= sa1100_init_irq,
-	.timer		= &sa1100_timer,
+	.init_time	= sa1100_timer_init,
 	.init_machine	= hackkit_init,
+	.init_late	= sa11x0_init_late,
+	.restart	= sa11x0_restart,
 MACHINE_END

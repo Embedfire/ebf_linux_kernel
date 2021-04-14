@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* ipv6header match - matches IPv6 packets based
    on whether they contain certain headers */
 
@@ -5,10 +6,6 @@
  * Rewritten by: Andras Kis-Szabo <kisza@sch.bme.hu> */
 
 /* (C) 2001-2002 Andras Kis-Szabo <kisza@sch.bme.hu>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -19,7 +16,7 @@
 #include <net/ipv6.h>
 
 #include <linux/netfilter/x_tables.h>
-#include <linux/netfilter_ipv6/ip6_tables.h>
+#include <linux/netfilter_ipv6.h>
 #include <linux/netfilter_ipv6/ip6t_ipv6header.h>
 
 MODULE_LICENSE("GPL");
@@ -27,12 +24,9 @@ MODULE_DESCRIPTION("Xtables: IPv6 header types match");
 MODULE_AUTHOR("Andras Kis-Szabo <kisza@sch.bme.hu>");
 
 static bool
-ipv6header_mt6(const struct sk_buff *skb, const struct net_device *in,
-               const struct net_device *out, const struct xt_match *match,
-               const void *matchinfo, int offset, unsigned int protoff,
-               bool *hotdrop)
+ipv6header_mt6(const struct sk_buff *skb, struct xt_action_param *par)
 {
-	const struct ip6t_ipv6header_info *info = matchinfo;
+	const struct ip6t_ipv6header_info *info = par->matchinfo;
 	unsigned int temp;
 	int len;
 	u8 nexthdr;
@@ -48,19 +42,19 @@ ipv6header_mt6(const struct sk_buff *skb, const struct net_device *in,
 	len = skb->len - ptr;
 	temp = 0;
 
-	while (ip6t_ext_hdr(nexthdr)) {
+	while (nf_ip6_ext_hdr(nexthdr)) {
 		const struct ipv6_opt_hdr *hp;
 		struct ipv6_opt_hdr _hdr;
 		int hdrlen;
 
-		/* Is there enough space for the next ext header? */
-		if (len < (int)sizeof(struct ipv6_opt_hdr))
-			return false;
 		/* No more exthdr -> evaluate */
 		if (nexthdr == NEXTHDR_NONE) {
 			temp |= MASK_NONE;
 			break;
 		}
+		/* Is there enough space for the next ext header? */
+		if (len < (int)sizeof(struct ipv6_opt_hdr))
+			return false;
 		/* ESP -> evaluate */
 		if (nexthdr == NEXTHDR_ESP) {
 			temp |= MASK_ESP;
@@ -68,13 +62,16 @@ ipv6header_mt6(const struct sk_buff *skb, const struct net_device *in,
 		}
 
 		hp = skb_header_pointer(skb, ptr, sizeof(_hdr), &_hdr);
-		BUG_ON(hp == NULL);
+		if (!hp) {
+			par->hotdrop = true;
+			return false;
+		}
 
 		/* Calculate the header length */
 		if (nexthdr == NEXTHDR_FRAGMENT)
 			hdrlen = 8;
 		else if (nexthdr == NEXTHDR_AUTH)
-			hdrlen = (hp->hdrlen + 2) << 2;
+			hdrlen = ipv6_authlen(hp);
 		else
 			hdrlen = ipv6_optlen(hp);
 
@@ -97,7 +94,6 @@ ipv6header_mt6(const struct sk_buff *skb, const struct net_device *in,
 			break;
 		default:
 			return false;
-			break;
 		}
 
 		nexthdr = hp->nexthdr;
@@ -121,24 +117,21 @@ ipv6header_mt6(const struct sk_buff *skb, const struct net_device *in,
 	}
 }
 
-static bool
-ipv6header_mt6_check(const char *tablename, const void *ip,
-                     const struct xt_match *match, void *matchinfo,
-                     unsigned int hook_mask)
+static int ipv6header_mt6_check(const struct xt_mtchk_param *par)
 {
-	const struct ip6t_ipv6header_info *info = matchinfo;
+	const struct ip6t_ipv6header_info *info = par->matchinfo;
 
 	/* invflags is 0 or 0xff in hard mode */
 	if ((!info->modeflag) && info->invflags != 0x00 &&
 	    info->invflags != 0xFF)
-		return false;
+		return -EINVAL;
 
-	return true;
+	return 0;
 }
 
 static struct xt_match ipv6header_mt6_reg __read_mostly = {
 	.name		= "ipv6header",
-	.family		= AF_INET6,
+	.family		= NFPROTO_IPV6,
 	.match		= ipv6header_mt6,
 	.matchsize	= sizeof(struct ip6t_ipv6header_info),
 	.checkentry	= ipv6header_mt6_check,

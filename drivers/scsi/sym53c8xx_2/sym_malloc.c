@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Device driver for the SYMBIOS/LSILOGIC 53C8XX and 53C1010 family 
  * of PCI-SCSI IO processors.
@@ -21,20 +22,6 @@
  * Copyright (C) 1997 Richard Waltham <dormouse@farsrobt.demon.co.uk>
  *
  *-----------------------------------------------------------------------------
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "sym_glue.h"
@@ -50,7 +37,7 @@
  *  from the SCRIPTS code. In addition, cache line alignment 
  *  is guaranteed for power of 2 cache line size.
  *
- *  This allocator has been developped for the Linux sym53c8xx  
+ *  This allocator has been developed for the Linux sym53c8xx  
  *  driver, since this O/S does not provide naturally aligned 
  *  allocations.
  *  It has the advantage of allowing the driver to use private 
@@ -262,7 +249,7 @@ static void ___free_dma_mem_cluster(m_pool_p mp, void *m)
 #endif
 
 /* Fetch the memory pool for a given pool id (i.e. DMA constraints) */
-static __inline m_pool_p ___get_dma_pool(m_pool_ident_t dev_dmat)
+static inline m_pool_p ___get_dma_pool(m_pool_ident_t dev_dmat)
 {
 	m_pool_p mp;
 	for (mp = mp0.next;

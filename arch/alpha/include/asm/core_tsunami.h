@@ -1,8 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ALPHA_TSUNAMI__H__
 #define __ALPHA_TSUNAMI__H__
 
 #include <linux/types.h>
-#include <linux/pci.h>
 #include <asm/compiler.h>
 
 /*

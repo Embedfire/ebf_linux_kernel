@@ -1,25 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Interface for OSS sequencer emulation
  *
  *  Copyright (C) 2000 Uros Bizjak <uros@kss-loka.si>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
+#include <linux/export.h>
 #include "opl3_voice.h"
-#include <linux/slab.h>
 
 static int snd_opl3_open_seq_oss(struct snd_seq_oss_arg *arg, void *closure);
 static int snd_opl3_close_seq_oss(struct snd_seq_oss_arg *arg);
@@ -27,25 +14,9 @@ static int snd_opl3_ioctl_seq_oss(struct snd_seq_oss_arg *arg, unsigned int cmd,
 static int snd_opl3_load_patch_seq_oss(struct snd_seq_oss_arg *arg, int format, const char __user *buf, int offs, int count);
 static int snd_opl3_reset_seq_oss(struct snd_seq_oss_arg *arg);
 
-/* */
-
-static inline mm_segment_t snd_enter_user(void)
-{
-	mm_segment_t fs = get_fs();
-	set_fs(get_ds());
-	return fs;
-}
-
-static inline void snd_leave_user(mm_segment_t fs)
-{
-	set_fs(fs);
-}
-
 /* operators */
 
-extern struct snd_midi_op opl3_ops;
-
-static struct snd_seq_oss_callback oss_callback = {
+static const struct snd_seq_oss_callback oss_callback = {
 	.owner = 	THIS_MODULE,
 	.open =		snd_opl3_open_seq_oss,
 	.close =	snd_opl3_close_seq_oss,
@@ -162,7 +133,8 @@ static int snd_opl3_open_seq_oss(struct snd_seq_oss_arg *arg, void *closure)
 	struct snd_opl3 *opl3 = closure;
 	int err;
 
-	snd_assert(arg != NULL, return -ENXIO);
+	if (snd_BUG_ON(!arg))
+		return -ENXIO;
 
 	if ((err = snd_opl3_synth_setup(opl3)) < 0)
 		return err;
@@ -184,7 +156,8 @@ static int snd_opl3_close_seq_oss(struct snd_seq_oss_arg *arg)
 {
 	struct snd_opl3 *opl3;
 
-	snd_assert(arg != NULL, return -ENXIO);
+	if (snd_BUG_ON(!arg))
+		return -ENXIO;
 	opl3 = arg->private_data;
 
 	snd_opl3_synth_cleanup(opl3);
@@ -206,7 +179,8 @@ static int snd_opl3_load_patch_seq_oss(struct snd_seq_oss_arg *arg, int format,
 	char name[32];
 	int err, type;
 
-	snd_assert(arg != NULL, return -ENXIO);
+	if (snd_BUG_ON(!arg))
+		return -ENXIO;
 	opl3 = arg->private_data;
 
 	if (format == FM_PATCH)
@@ -217,14 +191,14 @@ static int snd_opl3_load_patch_seq_oss(struct snd_seq_oss_arg *arg, int format,
 		return -EINVAL;
 
 	if (count < (int)sizeof(sbi)) {
-		snd_printk("FM Error: Patch record too short\n");
+		snd_printk(KERN_ERR "FM Error: Patch record too short\n");
 		return -EINVAL;
 	}
 	if (copy_from_user(&sbi, buf, sizeof(sbi)))
 		return -EFAULT;
 
 	if (sbi.channel < 0 || sbi.channel >= SBFM_MAXINSTR) {
-		snd_printk("FM Error: Invalid instrument number %d\n",
+		snd_printk(KERN_ERR "FM Error: Invalid instrument number %d\n",
 			   sbi.channel);
 		return -EINVAL;
 	}
@@ -244,13 +218,13 @@ static int snd_opl3_load_patch_seq_oss(struct snd_seq_oss_arg *arg, int format,
 static int snd_opl3_ioctl_seq_oss(struct snd_seq_oss_arg *arg, unsigned int cmd,
 				  unsigned long ioarg)
 {
-	struct snd_opl3 *opl3;
-
-	snd_assert(arg != NULL, return -ENXIO);
-	opl3 = arg->private_data;
+	if (snd_BUG_ON(!arg))
+		return -ENXIO;
 	switch (cmd) {
 		case SNDCTL_FM_LOAD_INSTR:
-			snd_printk("OPL3: Obsolete ioctl(SNDCTL_FM_LOAD_INSTR) used. Fix the program.\n");
+			snd_printk(KERN_ERR "OPL3: "
+				   "Obsolete ioctl(SNDCTL_FM_LOAD_INSTR) used. "
+				   "Fix the program.\n");
 			return -EINVAL;
 
 		case SNDCTL_SYNTH_MEMAVL:
@@ -269,10 +243,8 @@ static int snd_opl3_ioctl_seq_oss(struct snd_seq_oss_arg *arg, unsigned int cmd,
 /* reset device */
 static int snd_opl3_reset_seq_oss(struct snd_seq_oss_arg *arg)
 {
-	struct snd_opl3 *opl3;
-
-	snd_assert(arg != NULL, return -ENXIO);
-	opl3 = arg->private_data;
+	if (snd_BUG_ON(!arg))
+		return -ENXIO;
 
 	return 0;
 }

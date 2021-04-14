@@ -1,15 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Copyright (C) 2007 Freescale Semiconductor, Inc. All rights reserved.
+ * Copyright (C) 2007-2010 Freescale Semiconductor, Inc. All rights reserved.
  *
  * Author:
  *   Zhang Wei <wei.zhang@freescale.com>, Jul 2007
  *   Ebony Zhu <ebony.zhu@freescale.com>, May 2007
- *
- * This is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
  */
 #ifndef __DMA_FSLDMA_H
 #define __DMA_FSLDMA_H
@@ -36,8 +31,20 @@
 #define FSL_DMA_MR_DAHE		0x00002000
 #define FSL_DMA_MR_SAHE		0x00001000
 
+#define FSL_DMA_MR_SAHTS_MASK	0x0000C000
+#define FSL_DMA_MR_DAHTS_MASK	0x00030000
+#define FSL_DMA_MR_BWC_MASK	0x0f000000
+
+/*
+ * Bandwidth/pause control determines how many bytes a given
+ * channel is allowed to transfer before the DMA engine pauses
+ * the current channel and switches to the next channel
+ */
+#define FSL_DMA_MR_BWC         0x0A000000
+
 /* Special MR definition for MPC8349 */
 #define FSL_DMA_MR_EOTIE	0x00000080
+#define FSL_DMA_MR_PRC_RM	0x00000800
 
 #define FSL_DMA_SR_CH		0x00000020
 #define FSL_DMA_SR_PE		0x00000010
@@ -75,6 +82,10 @@
 #define FSL_DMA_DGSR_EOSI	0x02
 #define FSL_DMA_DGSR_EOLSI	0x01
 
+#define FSL_DMA_BUSWIDTHS	(BIT(DMA_SLAVE_BUSWIDTH_1_BYTE) | \
+				BIT(DMA_SLAVE_BUSWIDTH_2_BYTES) | \
+				BIT(DMA_SLAVE_BUSWIDTH_4_BYTES) | \
+				BIT(DMA_SLAVE_BUSWIDTH_8_BYTES))
 typedef u64 __bitwise v64;
 typedef u32 __bitwise v32;
 
@@ -89,14 +100,13 @@ struct fsl_dma_ld_hw {
 struct fsl_desc_sw {
 	struct fsl_dma_ld_hw hw;
 	struct list_head node;
+	struct list_head tx_list;
 	struct dma_async_tx_descriptor async_tx;
-	struct list_head *ld;
-	void *priv;
 } __attribute__((aligned(32)));
 
-struct fsl_dma_chan_regs {
-	u32 mr;	/* 0x00 - Mode Register */
-	u32 sr;	/* 0x04 - Status Register */
+struct fsldma_chan_regs {
+	u32 mr;		/* 0x00 - Mode Register */
+	u32 sr;		/* 0x04 - Status Register */
 	u64 cdar;	/* 0x08 - Current descriptor address register */
 	u64 sar;	/* 0x10 - Source Address Register */
 	u64 dar;	/* 0x18 - Destination Address Register */
@@ -104,19 +114,19 @@ struct fsl_dma_chan_regs {
 	u64 ndar;	/* 0x24 - Next Descriptor Address Register */
 };
 
-struct fsl_dma_chan;
-#define FSL_DMA_MAX_CHANS_PER_DEVICE 4
+struct fsldma_chan;
+#define FSL_DMA_MAX_CHANS_PER_DEVICE 8
 
-struct fsl_dma_device {
-	void __iomem *reg_base;	/* DGSR register base */
-	struct resource reg;	/* Resource for register */
+struct fsldma_device {
+	void __iomem *regs;	/* DGSR register base */
 	struct device *dev;
 	struct dma_device common;
-	struct fsl_dma_chan *chan[FSL_DMA_MAX_CHANS_PER_DEVICE];
+	struct fsldma_chan *chan[FSL_DMA_MAX_CHANS_PER_DEVICE];
 	u32 feature;		/* The same as DMA channels */
+	int irq;		/* Channel IRQ */
 };
 
-/* Define macros for fsl_dma_chan->feature property */
+/* Define macros for fsldma_chan->feature property */
 #define FSL_DMA_LITTLE_ENDIAN	0x00000000
 #define FSL_DMA_BIG_ENDIAN	0x00000001
 
@@ -127,63 +137,121 @@ struct fsl_dma_device {
 #define FSL_DMA_CHAN_PAUSE_EXT	0x00001000
 #define FSL_DMA_CHAN_START_EXT	0x00002000
 
-struct fsl_dma_chan {
-	struct fsl_dma_chan_regs __iomem *reg_base;
-	dma_cookie_t completed_cookie;	/* The maximum cookie completed */
+#ifdef CONFIG_PM
+struct fsldma_chan_regs_save {
+	u32 mr;
+};
+
+enum fsldma_pm_state {
+	RUNNING = 0,
+	SUSPENDED,
+};
+#endif
+
+struct fsldma_chan {
+	char name[8];			/* Channel name */
+	struct fsldma_chan_regs __iomem *regs;
 	spinlock_t desc_lock;		/* Descriptor operation lock */
-	struct list_head ld_queue;	/* Link descriptors queue */
+	/*
+	 * Descriptors which are queued to run, but have not yet been
+	 * submitted to the hardware for execution
+	 */
+	struct list_head ld_pending;
+	/*
+	 * Descriptors which are currently being executed by the hardware
+	 */
+	struct list_head ld_running;
+	/*
+	 * Descriptors which have finished execution by the hardware. These
+	 * descriptors have already had their cleanup actions run. They are
+	 * waiting for the ACK bit to be set by the async_tx API.
+	 */
+	struct list_head ld_completed;	/* Link descriptors queue */
 	struct dma_chan common;		/* DMA common channel */
 	struct dma_pool *desc_pool;	/* Descriptors pool */
 	struct device *dev;		/* Channel device */
-	struct resource reg;		/* Resource for register */
 	int irq;			/* Channel IRQ */
 	int id;				/* Raw id of this channel */
 	struct tasklet_struct tasklet;
 	u32 feature;
+	bool idle;			/* DMA controller is idle */
+#ifdef CONFIG_PM
+	struct fsldma_chan_regs_save regs_save;
+	enum fsldma_pm_state pm_state;
+#endif
 
-	void (*toggle_ext_pause)(struct fsl_dma_chan *fsl_chan, int size);
-	void (*toggle_ext_start)(struct fsl_dma_chan *fsl_chan, int enable);
-	void (*set_src_loop_size)(struct fsl_dma_chan *fsl_chan, int size);
-	void (*set_dest_loop_size)(struct fsl_dma_chan *fsl_chan, int size);
+	void (*toggle_ext_pause)(struct fsldma_chan *fsl_chan, int enable);
+	void (*toggle_ext_start)(struct fsldma_chan *fsl_chan, int enable);
+	void (*set_src_loop_size)(struct fsldma_chan *fsl_chan, int size);
+	void (*set_dst_loop_size)(struct fsldma_chan *fsl_chan, int size);
+	void (*set_request_count)(struct fsldma_chan *fsl_chan, int size);
 };
 
-#define to_fsl_chan(chan) container_of(chan, struct fsl_dma_chan, common)
+#define to_fsl_chan(chan) container_of(chan, struct fsldma_chan, common)
 #define to_fsl_desc(lh) container_of(lh, struct fsl_desc_sw, node)
 #define tx_to_fsl_desc(tx) container_of(tx, struct fsl_desc_sw, async_tx)
 
-#ifndef __powerpc64__
-static u64 in_be64(const u64 __iomem *addr)
+#ifdef	CONFIG_PPC
+#define fsl_ioread32(p)		in_le32(p)
+#define fsl_ioread32be(p)	in_be32(p)
+#define fsl_iowrite32(v, p)	out_le32(p, v)
+#define fsl_iowrite32be(v, p)	out_be32(p, v)
+
+#ifdef __powerpc64__
+#define fsl_ioread64(p)		in_le64(p)
+#define fsl_ioread64be(p)	in_be64(p)
+#define fsl_iowrite64(v, p)	out_le64(p, v)
+#define fsl_iowrite64be(v, p)	out_be64(p, v)
+#else
+static u64 fsl_ioread64(const u64 __iomem *addr)
 {
-	return ((u64)in_be32((u32 __iomem *)addr) << 32) |
-		(in_be32((u32 __iomem *)addr + 1));
+	u32 val_lo = in_le32((u32 __iomem *)addr);
+	u32 val_hi = in_le32((u32 __iomem *)addr + 1);
+
+	return ((u64)val_hi << 32) + val_lo;
 }
 
-static void out_be64(u64 __iomem *addr, u64 val)
-{
-	out_be32((u32 __iomem *)addr, val >> 32);
-	out_be32((u32 __iomem *)addr + 1, (u32)val);
-}
-
-/* There is no asm instructions for 64 bits reverse loads and stores */
-static u64 in_le64(const u64 __iomem *addr)
-{
-	return ((u64)in_le32((u32 __iomem *)addr + 1) << 32) |
-		(in_le32((u32 __iomem *)addr));
-}
-
-static void out_le64(u64 __iomem *addr, u64 val)
+static void fsl_iowrite64(u64 val, u64 __iomem *addr)
 {
 	out_le32((u32 __iomem *)addr + 1, val >> 32);
 	out_le32((u32 __iomem *)addr, (u32)val);
 }
+
+static u64 fsl_ioread64be(const u64 __iomem *addr)
+{
+	u32 val_hi = in_be32((u32 __iomem *)addr);
+	u32 val_lo = in_be32((u32 __iomem *)addr + 1);
+
+	return ((u64)val_hi << 32) + val_lo;
+}
+
+static void fsl_iowrite64be(u64 val, u64 __iomem *addr)
+{
+	out_be32((u32 __iomem *)addr, val >> 32);
+	out_be32((u32 __iomem *)addr + 1, (u32)val);
+}
+#endif
 #endif
 
-#define DMA_IN(fsl_chan, addr, width)					\
-		(((fsl_chan)->feature & FSL_DMA_BIG_ENDIAN) ?		\
-			in_be##width(addr) : in_le##width(addr))
-#define DMA_OUT(fsl_chan, addr, val, width)				\
-		(((fsl_chan)->feature & FSL_DMA_BIG_ENDIAN) ?		\
-			out_be##width(addr, val) : out_le##width(addr, val))
+#if defined(CONFIG_ARM64) || defined(CONFIG_ARM)
+#define fsl_ioread32(p)		ioread32(p)
+#define fsl_ioread32be(p)	ioread32be(p)
+#define fsl_iowrite32(v, p)	iowrite32(v, p)
+#define fsl_iowrite32be(v, p)	iowrite32be(v, p)
+#define fsl_ioread64(p)		ioread64(p)
+#define fsl_ioread64be(p)	ioread64be(p)
+#define fsl_iowrite64(v, p)	iowrite64(v, p)
+#define fsl_iowrite64be(v, p)	iowrite64be(v, p)
+#endif
+
+#define FSL_DMA_IN(fsl_dma, addr, width)			\
+		(((fsl_dma)->feature & FSL_DMA_BIG_ENDIAN) ?	\
+			fsl_ioread##width##be(addr) : fsl_ioread##width(addr))
+
+#define FSL_DMA_OUT(fsl_dma, addr, val, width)			\
+		(((fsl_dma)->feature & FSL_DMA_BIG_ENDIAN) ?	\
+			fsl_iowrite##width##be(val, addr) : fsl_iowrite	\
+		##width(val, addr))
 
 #define DMA_TO_CPU(fsl_chan, d, width)					\
 		(((fsl_chan)->feature & FSL_DMA_BIG_ENDIAN) ?		\

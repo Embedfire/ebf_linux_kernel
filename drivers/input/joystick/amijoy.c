@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 1998-2001 Vojtech Pavlik
  */
@@ -7,23 +8,6 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
- * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
  */
 
 #include <linux/types.h>
@@ -35,7 +19,6 @@
 #include <linux/interrupt.h>
 #include <linux/mutex.h>
 
-#include <asm/system.h>
 #include <asm/amigahw.h>
 #include <asm/amigaints.h>
 
@@ -108,6 +91,9 @@ static int __init amijoy_init(void)
 	int i, j;
 	int err;
 
+	if (!MACH_IS_AMIGA)
+		return -ENODEV;
+
 	for (i = 0; i < 2; i++) {
 		if (!amijoy[i])
 			continue;
@@ -139,8 +125,8 @@ static int __init amijoy_init(void)
 		amijoy_dev[i]->keybit[BIT_WORD(BTN_LEFT)] = BIT_MASK(BTN_LEFT) |
 			BIT_MASK(BTN_MIDDLE) | BIT_MASK(BTN_RIGHT);
 		for (j = 0; j < 2; j++) {
-			amijoy_dev[i]->absmin[ABS_X + j] = -1;
-			amijoy_dev[i]->absmax[ABS_X + j] = 1;
+			input_set_abs_params(amijoy_dev[i], ABS_X + j,
+					     -1, 1, 0, 0);
 		}
 
 		err = input_register_device(amijoy_dev[i]);

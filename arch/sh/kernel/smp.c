@@ -1,14 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/kernel/smp.c
  *
  * SMP support for the SuperH processors.
  *
- * Copyright (C) 2002 - 2007 Paul Mundt
+ * Copyright (C) 2002 - 2010 Paul Mundt
  * Copyright (C) 2006 - 2007 Akio Idehara
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/err.h>
 #include <linux/cache.h>
@@ -18,27 +15,40 @@
 #include <linux/spinlock.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/cpu.h>
 #include <linux/interrupt.h>
-#include <asm/atomic.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/hotplug.h>
+#include <linux/atomic.h>
+#include <linux/clockchips.h>
 #include <asm/processor.h>
-#include <asm/system.h>
 #include <asm/mmu_context.h>
 #include <asm/smp.h>
 #include <asm/cacheflush.h>
 #include <asm/sections.h>
+#include <asm/setup.h>
 
 int __cpu_number_map[NR_CPUS];		/* Map physical to logical */
 int __cpu_logical_map[NR_CPUS];		/* Map logical to physical */
 
-cpumask_t cpu_possible_map;
-EXPORT_SYMBOL(cpu_possible_map);
+struct plat_smp_ops *mp_ops = NULL;
 
-cpumask_t cpu_online_map;
-EXPORT_SYMBOL(cpu_online_map);
+/* State of each CPU */
+DEFINE_PER_CPU(int, cpu_state) = { 0 };
 
-static inline void __init smp_store_cpu_info(unsigned int cpu)
+void register_smp_ops(struct plat_smp_ops *ops)
+{
+	if (mp_ops)
+		printk(KERN_WARNING "Overriding previously set SMP ops\n");
+
+	mp_ops = ops;
+}
+
+static inline void smp_store_cpu_info(unsigned int cpu)
 {
 	struct sh_cpuinfo *c = cpu_data + cpu;
+
+	memcpy(c, &boot_cpu_data, sizeof(struct sh_cpuinfo));
 
 	c->loops_per_jiffy = loops_per_jiffy;
 }
@@ -49,49 +59,147 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 
 	init_new_context(current, &init_mm);
 	current_thread_info()->cpu = cpu;
-	plat_prepare_cpus(max_cpus);
+	mp_ops->prepare_cpus(max_cpus);
 
 #ifndef CONFIG_HOTPLUG_CPU
-	cpu_present_map = cpu_possible_map;
+	init_cpu_present(cpu_possible_mask);
 #endif
 }
 
-void __devinit smp_prepare_boot_cpu(void)
+void __init smp_prepare_boot_cpu(void)
 {
 	unsigned int cpu = smp_processor_id();
 
 	__cpu_number_map[0] = cpu;
 	__cpu_logical_map[0] = cpu;
 
-	cpu_set(cpu, cpu_online_map);
-	cpu_set(cpu, cpu_possible_map);
+	set_cpu_online(cpu, true);
+	set_cpu_possible(cpu, true);
+
+	per_cpu(cpu_state, cpu) = CPU_ONLINE;
 }
 
-asmlinkage void __cpuinit start_secondary(void)
+#ifdef CONFIG_HOTPLUG_CPU
+void native_cpu_die(unsigned int cpu)
 {
-	unsigned int cpu;
+	unsigned int i;
+
+	for (i = 0; i < 10; i++) {
+		smp_rmb();
+		if (per_cpu(cpu_state, cpu) == CPU_DEAD) {
+			if (system_state == SYSTEM_RUNNING)
+				pr_info("CPU %u is now offline\n", cpu);
+
+			return;
+		}
+
+		msleep(100);
+	}
+
+	pr_err("CPU %u didn't die...\n", cpu);
+}
+
+int native_cpu_disable(unsigned int cpu)
+{
+	return cpu == 0 ? -EPERM : 0;
+}
+
+void play_dead_common(void)
+{
+	idle_task_exit();
+	irq_ctx_exit(raw_smp_processor_id());
+	mb();
+
+	__this_cpu_write(cpu_state, CPU_DEAD);
+	local_irq_disable();
+}
+
+void native_play_dead(void)
+{
+	play_dead_common();
+}
+
+int __cpu_disable(void)
+{
+	unsigned int cpu = smp_processor_id();
+	int ret;
+
+	ret = mp_ops->cpu_disable(cpu);
+	if (ret)
+		return ret;
+
+	/*
+	 * Take this CPU offline.  Once we clear this, we can't return,
+	 * and we must not schedule until we're ready to give up the cpu.
+	 */
+	set_cpu_online(cpu, false);
+
+	/*
+	 * OK - migrate IRQs away from this CPU
+	 */
+	migrate_irqs();
+
+	/*
+	 * Flush user cache and TLB mappings, and then remove this CPU
+	 * from the vm mask set of all processes.
+	 */
+	flush_cache_all();
+#ifdef CONFIG_MMU
+	local_flush_tlb_all();
+#endif
+
+	clear_tasks_mm_cpumask(cpu);
+
+	return 0;
+}
+#else /* ... !CONFIG_HOTPLUG_CPU */
+int native_cpu_disable(unsigned int cpu)
+{
+	return -ENOSYS;
+}
+
+void native_cpu_die(unsigned int cpu)
+{
+	/* We said "no" in __cpu_disable */
+	BUG();
+}
+
+void native_play_dead(void)
+{
+	BUG();
+}
+#endif
+
+asmlinkage void start_secondary(void)
+{
+	unsigned int cpu = smp_processor_id();
 	struct mm_struct *mm = &init_mm;
 
-	atomic_inc(&mm->mm_count);
-	atomic_inc(&mm->mm_users);
+	enable_mmu();
+	mmgrab(mm);
+	mmget(mm);
 	current->active_mm = mm;
-	BUG_ON(current->mm);
+#ifdef CONFIG_MMU
 	enter_lazy_tlb(mm, current);
+	local_flush_tlb_all();
+#endif
 
 	per_cpu_trap_init();
 
 	preempt_disable();
 
+	notify_cpu_starting(cpu);
+
 	local_irq_enable();
 
 	calibrate_delay();
 
-	cpu = smp_processor_id();
 	smp_store_cpu_info(cpu);
 
-	cpu_set(cpu, cpu_online_map);
+	set_cpu_online(cpu, true);
+	per_cpu(cpu_state, cpu) = CPU_ONLINE;
 
-	cpu_idle();
+	cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
 }
 
 extern struct {
@@ -103,16 +211,11 @@ extern struct {
 	void *thread_info;
 } stack_start;
 
-int __cpuinit __cpu_up(unsigned int cpu)
+int __cpu_up(unsigned int cpu, struct task_struct *tsk)
 {
-	struct task_struct *tsk;
 	unsigned long timeout;
 
-	tsk = fork_idle(cpu);
-	if (IS_ERR(tsk)) {
-		printk(KERN_ERR "Failed forking idle task for cpu %d\n", cpu);
-		return PTR_ERR(tsk);
-	}
+	per_cpu(cpu_state, cpu) = CPU_UP_PREPARE;
 
 	/* Fill in data in head.S for secondary cpus */
 	stack_start.sp = tsk->thread.sp;
@@ -120,9 +223,11 @@ int __cpuinit __cpu_up(unsigned int cpu)
 	stack_start.bss_start = 0; /* don't clear bss for secondary cpus */
 	stack_start.start_kernel_fn = start_secondary;
 
-	flush_cache_all();
+	flush_icache_range((unsigned long)&stack_start,
+			   (unsigned long)&stack_start + sizeof(stack_start));
+	wmb();
 
-	plat_start_cpu(cpu, (unsigned long)_stext);
+	mp_ops->start_cpu(cpu, (unsigned long)_stext);
 
 	timeout = jiffies + HZ;
 	while (time_before(jiffies, timeout)) {
@@ -130,6 +235,7 @@ int __cpuinit __cpu_up(unsigned int cpu)
 			break;
 
 		udelay(10);
+		barrier();
 	}
 
 	if (cpu_online(cpu))
@@ -154,16 +260,7 @@ void __init smp_cpus_done(unsigned int max_cpus)
 
 void smp_send_reschedule(int cpu)
 {
-	plat_send_ipi(cpu, SMP_MSG_RESCHEDULE);
-}
-
-static void stop_this_cpu(void *unused)
-{
-	cpu_clear(smp_processor_id(), cpu_online_map);
-	local_irq_disable();
-
-	for (;;)
-		cpu_relax();
+	mp_ops->send_ipi(cpu, SMP_MSG_RESCHEDULE);
 }
 
 void smp_send_stop(void)
@@ -171,17 +268,58 @@ void smp_send_stop(void)
 	smp_call_function(stop_this_cpu, 0, 0);
 }
 
-void arch_send_call_function_ipi(cpumask_t mask)
+void arch_send_call_function_ipi_mask(const struct cpumask *mask)
 {
 	int cpu;
 
-	for_each_cpu_mask(cpu, mask)
-		plat_send_ipi(cpu, SMP_MSG_FUNCTION);
+	for_each_cpu(cpu, mask)
+		mp_ops->send_ipi(cpu, SMP_MSG_FUNCTION);
 }
 
 void arch_send_call_function_single_ipi(int cpu)
 {
-	plat_send_ipi(cpu, SMP_MSG_FUNCTION_SINGLE);
+	mp_ops->send_ipi(cpu, SMP_MSG_FUNCTION_SINGLE);
+}
+
+#ifdef CONFIG_GENERIC_CLOCKEVENTS_BROADCAST
+void tick_broadcast(const struct cpumask *mask)
+{
+	int cpu;
+
+	for_each_cpu(cpu, mask)
+		mp_ops->send_ipi(cpu, SMP_MSG_TIMER);
+}
+
+static void ipi_timer(void)
+{
+	irq_enter();
+	tick_receive_broadcast();
+	irq_exit();
+}
+#endif
+
+void smp_message_recv(unsigned int msg)
+{
+	switch (msg) {
+	case SMP_MSG_FUNCTION:
+		generic_smp_call_function_interrupt();
+		break;
+	case SMP_MSG_RESCHEDULE:
+		scheduler_ipi();
+		break;
+	case SMP_MSG_FUNCTION_SINGLE:
+		generic_smp_call_function_single_interrupt();
+		break;
+#ifdef CONFIG_GENERIC_CLOCKEVENTS_BROADCAST
+	case SMP_MSG_TIMER:
+		ipi_timer();
+		break;
+#endif
+	default:
+		printk(KERN_WARNING "SMP %d: %s(): unknown IPI %d\n",
+		       smp_processor_id(), __func__, msg);
+		break;
+	}
 }
 
 /* Not really SMP stuff ... */
@@ -189,6 +327,8 @@ int setup_profiling_timer(unsigned int multiplier)
 {
 	return 0;
 }
+
+#ifdef CONFIG_MMU
 
 static void flush_tlb_all_ipi(void *info)
 {
@@ -217,7 +357,6 @@ static void flush_tlb_mm_ipi(void *mm)
  * behalf of debugees, kswapd stealing pages from another process etc).
  * Kanoj 07/00.
  */
-
 void flush_tlb_mm(struct mm_struct *mm)
 {
 	preempt_disable();
@@ -226,7 +365,7 @@ void flush_tlb_mm(struct mm_struct *mm)
 		smp_call_function(flush_tlb_mm_ipi, (void *)mm, 1);
 	} else {
 		int i;
-		for (i = 0; i < num_online_cpus(); i++)
+		for_each_online_cpu(i)
 			if (smp_processor_id() != i)
 				cpu_context(i, mm) = 0;
 	}
@@ -263,7 +402,7 @@ void flush_tlb_range(struct vm_area_struct *vma,
 		smp_call_function(flush_tlb_range_ipi, (void *)&fd, 1);
 	} else {
 		int i;
-		for (i = 0; i < num_online_cpus(); i++)
+		for_each_online_cpu(i)
 			if (smp_processor_id() != i)
 				cpu_context(i, mm) = 0;
 	}
@@ -306,7 +445,7 @@ void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 		smp_call_function(flush_tlb_page_ipi, (void *)&fd, 1);
 	} else {
 		int i;
-		for (i = 0; i < num_online_cpus(); i++)
+		for_each_online_cpu(i)
 			if (smp_processor_id() != i)
 				cpu_context(i, vma->vm_mm) = 0;
 	}
@@ -330,3 +469,5 @@ void flush_tlb_one(unsigned long asid, unsigned long vaddr)
 	smp_call_function(flush_tlb_one_ipi, (void *)&fd, 1);
 	local_flush_tlb_one(asid, vaddr);
 }
+
+#endif

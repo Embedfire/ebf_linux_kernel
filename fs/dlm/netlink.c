@@ -1,32 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2007 Red Hat, Inc.  All rights reserved.
- *
- * This copyrighted material is made available to anyone wishing to use,
- * modify, copy, or redistribute it subject to the terms and conditions
- * of the GNU General Public License v.2.
  */
 
 #include <net/genetlink.h>
 #include <linux/dlm.h>
 #include <linux/dlm_netlink.h>
+#include <linux/gfp.h>
 
 #include "dlm_internal.h"
 
 static uint32_t dlm_nl_seqnum;
-static uint32_t listener_nlpid;
+static uint32_t listener_nlportid;
 
-static struct genl_family family = {
-	.id		= GENL_ID_GENERATE,
-	.name		= DLM_GENL_NAME,
-	.version	= DLM_GENL_VERSION,
-};
+static struct genl_family family;
 
 static int prepare_data(u8 cmd, struct sk_buff **skbp, size_t size)
 {
 	struct sk_buff *skb;
 	void *data;
 
-	skb = genlmsg_new(size, GFP_KERNEL);
+	skb = genlmsg_new(size, GFP_NOFS);
 	if (!skb)
 		return -ENOMEM;
 
@@ -55,49 +49,42 @@ static int send_data(struct sk_buff *skb)
 {
 	struct genlmsghdr *genlhdr = nlmsg_data((struct nlmsghdr *)skb->data);
 	void *data = genlmsg_data(genlhdr);
-	int rv;
 
-	rv = genlmsg_end(skb, data);
-	if (rv < 0) {
-		nlmsg_free(skb);
-		return rv;
-	}
+	genlmsg_end(skb, data);
 
-	return genlmsg_unicast(skb, listener_nlpid);
+	return genlmsg_unicast(&init_net, skb, listener_nlportid);
 }
 
 static int user_cmd(struct sk_buff *skb, struct genl_info *info)
 {
-	listener_nlpid = info->snd_pid;
-	printk("user_cmd nlpid %u\n", listener_nlpid);
+	listener_nlportid = info->snd_portid;
+	printk("user_cmd nlpid %u\n", listener_nlportid);
 	return 0;
 }
 
-static struct genl_ops dlm_nl_ops = {
-	.cmd		= DLM_CMD_HELLO,
-	.doit		= user_cmd,
+static const struct genl_small_ops dlm_nl_ops[] = {
+	{
+		.cmd	= DLM_CMD_HELLO,
+		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
+		.doit	= user_cmd,
+	},
+};
+
+static struct genl_family family __ro_after_init = {
+	.name		= DLM_GENL_NAME,
+	.version	= DLM_GENL_VERSION,
+	.small_ops	= dlm_nl_ops,
+	.n_small_ops	= ARRAY_SIZE(dlm_nl_ops),
+	.module		= THIS_MODULE,
 };
 
 int __init dlm_netlink_init(void)
 {
-	int rv;
-
-	rv = genl_register_family(&family);
-	if (rv)
-		return rv;
-
-	rv = genl_register_ops(&family, &dlm_nl_ops);
-	if (rv < 0)
-		goto err;
-	return 0;
- err:
-	genl_unregister_family(&family);
-	return rv;
+	return genl_register_family(&family);
 }
 
 void dlm_netlink_exit(void)
 {
-	genl_unregister_ops(&family, &dlm_nl_ops);
 	genl_unregister_family(&family);
 }
 
@@ -115,7 +102,6 @@ static void fill_data(struct dlm_lock_data *data, struct dlm_lkb *lkb)
 	data->status = lkb->lkb_status;
 	data->grmode = lkb->lkb_grmode;
 	data->rqmode = lkb->lkb_rqmode;
-	data->timestamp = lkb->lkb_timestamp;
 	if (lkb->lkb_ua)
 		data->xid = lkb->lkb_ua->xid;
 	if (r) {
@@ -127,8 +113,8 @@ static void fill_data(struct dlm_lock_data *data, struct dlm_lkb *lkb)
 
 void dlm_timeout_warn(struct dlm_lkb *lkb)
 {
-	struct dlm_lock_data *data;
 	struct sk_buff *send_skb;
+	struct dlm_lock_data *data;
 	size_t size;
 	int rv;
 

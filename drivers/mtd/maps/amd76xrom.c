@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * amd76xrom.c
  *
@@ -8,6 +9,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
@@ -81,7 +83,7 @@ static void amd76xrom_cleanup(struct amd76xrom_window *window)
 		if (map->rsrc.parent) {
 			release_resource(&map->rsrc);
 		}
-		del_mtd_device(map->mtd);
+		mtd_device_unregister(map->mtd);
 		map_destroy(map->mtd);
 		list_del(&map->list);
 		kfree(map);
@@ -99,8 +101,8 @@ static void amd76xrom_cleanup(struct amd76xrom_window *window)
 }
 
 
-static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
-	const struct pci_device_id *ent)
+static int amd76xrom_init_one(struct pci_dev *pdev,
+			      const struct pci_device_id *ent)
 {
 	static char *rom_probe_types[] = { "cfi_probe", "jedec_probe", NULL };
 	u8 byte;
@@ -137,7 +139,7 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 	/*
 	 * Try to reserve the window mem region.  If this fails then
 	 * it is likely due to a fragment of the window being
-	 * "reseved" by the BIOS.  In the case that the
+	 * "reserved" by the BIOS.  In the case that the
 	 * request_mem_region() fails then once the rom size is
 	 * discovered we will try to reserve the unreserved fragment.
 	 */
@@ -148,11 +150,9 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 	if (request_resource(&iomem_resource, &window->rsrc)) {
 		window->rsrc.parent = NULL;
 		printk(KERN_ERR MOD_NAME
-			" %s(): Unable to register resource"
-			" 0x%.16llx-0x%.16llx - kernel bug?\n",
-			__func__,
-			(unsigned long long)window->rsrc.start,
-			(unsigned long long)window->rsrc.end);
+		       " %s(): Unable to register resource %pR - kernel bug?\n",
+		       __func__, &window->rsrc);
+		return -EBUSY;
 	}
 
 
@@ -163,7 +163,7 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 	/* FIXME handle registers 0x80 - 0x8C the bios region locks */
 
 	/* For write accesses caches are useless */
-	window->virt = ioremap_nocache(window->phys, window->size);
+	window->virt = ioremap(window->phys, window->size);
 	if (!window->virt) {
 		printk(KERN_ERR MOD_NAME ": ioremap(%08lx, %08lx) failed\n",
 			window->phys, window->size);
@@ -232,8 +232,8 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 		/* Trim the size if we are larger than the map */
 		if (map->mtd->size > map->map.size) {
 			printk(KERN_WARNING MOD_NAME
-				" rom(%u) larger than window(%lu). fixing...\n",
-				map->mtd->size, map->map.size);
+				" rom(%llu) larger than window(%lu). fixing...\n",
+				(unsigned long long)map->mtd->size, map->map.size);
 			map->mtd->size = map->map.size;
 		}
 		if (window->rsrc.parent) {
@@ -263,7 +263,7 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 
 		/* Now that the mtd devices is complete claim and export it */
 		map->mtd->owner = THIS_MODULE;
-		if (add_mtd_device(map->mtd)) {
+		if (mtd_device_register(map->mtd, NULL, 0)) {
 			map_destroy(map->mtd);
 			map->mtd = NULL;
 			goto out;
@@ -290,14 +290,14 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 }
 
 
-static void __devexit amd76xrom_remove_one (struct pci_dev *pdev)
+static void amd76xrom_remove_one(struct pci_dev *pdev)
 {
 	struct amd76xrom_window *window = &amd76xrom_window;
 
 	amd76xrom_cleanup(window);
 }
 
-static struct pci_device_id amd76xrom_pci_tbl[] = {
+static const struct pci_device_id amd76xrom_pci_tbl[] = {
 	{ PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VIPER_7410,
 		PCI_ANY_ID, PCI_ANY_ID, },
 	{ PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VIPER_7440,
@@ -320,7 +320,7 @@ static struct pci_driver amd76xrom_driver = {
 static int __init init_amd76xrom(void)
 {
 	struct pci_dev *pdev;
-	struct pci_device_id *id;
+	const struct pci_device_id *id;
 	pdev = NULL;
 	for(id = amd76xrom_pci_tbl; id->vendor; id++) {
 		pdev = pci_get_device(id->vendor, id->device, NULL);
@@ -348,4 +348,3 @@ module_exit(cleanup_amd76xrom);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Eric Biederman <ebiederman@lnxi.com>");
 MODULE_DESCRIPTION("MTD map driver for BIOS chips on the AMD76X southbridge");
-

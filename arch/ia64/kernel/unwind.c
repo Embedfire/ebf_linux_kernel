@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 1999-2004 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
@@ -27,7 +28,7 @@
  *	  acquired, then the read-write lock must be acquired first.
  */
 #include <linux/module.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/elf.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -41,8 +42,7 @@
 #include <asm/ptrace_offsets.h>
 #include <asm/rse.h>
 #include <asm/sections.h>
-#include <asm/system.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "entry.h"
 #include "unwind_i.h"
@@ -324,7 +324,7 @@ unw_access_gr (struct unw_frame_info *info, int regnum, unsigned long *val, char
 							return 0;
 						}
 					}
-					/* fall through */
+					fallthrough;
 				      case UNW_NAT_NONE:
 					dummy_nat = 0;
 					nat_addr = &dummy_nat;
@@ -1204,10 +1204,10 @@ desc_spill_sprel_p (unsigned char qp, unw_word t, unsigned char abreg, unw_word 
 static inline unw_hash_index_t
 hash (unsigned long ip)
 {
-#	define hashmagic	0x9e3779b97f4a7c16UL	/* based on (sqrt(5)/2-1)*2^64 */
+	/* magic number = ((sqrt(5)-1)/2)*2^64 */
+	static const unsigned long hashmagic = 0x9e3779b97f4a7c16UL;
 
-	return (ip >> 4)*hashmagic >> (64 - UNW_LOG_HASH_SIZE);
-#undef hashmagic
+	return (ip >> 4) * hashmagic >> (64 - UNW_LOG_HASH_SIZE);
 }
 
 static inline long
@@ -1531,7 +1531,7 @@ build_script (struct unw_frame_info *info)
 	struct unw_labeled_state *ls, *next;
 	unsigned long ip = info->ip;
 	struct unw_state_record sr;
-	struct unw_table *table;
+	struct unw_table *table, *prev;
 	struct unw_reg_info *r;
 	struct unw_insn insn;
 	u8 *dp, *desc_end;
@@ -1560,11 +1560,26 @@ build_script (struct unw_frame_info *info)
 
 	STAT(parse_start = ia64_get_itc());
 
+	prev = NULL;
 	for (table = unw.tables; table; table = table->next) {
 		if (ip >= table->start && ip < table->end) {
+			/*
+			 * Leave the kernel unwind table at the very front,
+			 * lest moving it breaks some assumption elsewhere.
+			 * Otherwise, move the matching table to the second
+			 * position in the list so that traversals can benefit
+			 * from commonality in backtrace paths.
+			 */
+			if (prev && prev != unw.tables) {
+				/* unw is safe - we're already spinlocked */
+				prev->next = table->next;
+				table->next = unw.tables->next;
+				unw.tables->next = table;
+			}
 			e = lookup(table, ip - table->segment_base);
 			break;
 		}
+		prev = table;
 	}
 	if (!e) {
 		/* no info, return default unwinder (leaf proc, no mem stack, no saved regs)  */
@@ -2149,7 +2164,7 @@ unw_remove_unwind_table (void *handle)
 
 	/* next, remove hash table entries for this table */
 
-	for (index = 0; index <= UNW_HASH_SIZE; ++index) {
+	for (index = 0; index < UNW_HASH_SIZE; ++index) {
 		tmp = unw.cache + unw.hash[index];
 		if (unw.hash[index] >= UNW_CACHE_SIZE
 		    || tmp->ip < table->start || tmp->ip >= table->end)

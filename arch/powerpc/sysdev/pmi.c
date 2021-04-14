@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * pmi driver
  *
@@ -8,25 +9,13 @@
  * Unlike IPMI it is bidirectional and has a low latency.
  *
  * Author: Christian Krafft <krafft@de.ibm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/interrupt.h>
+#include <linux/slab.h>
 #include <linux/completion.h>
 #include <linux/spinlock.h>
+#include <linux/module.h>
 #include <linux/workqueue.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
@@ -42,7 +31,7 @@ struct pmi_data {
 	struct mutex		msg_mutex;
 	pmi_message_t		msg;
 	struct completion	*completion;
-	struct of_device	*dev;
+	struct platform_device	*dev;
 	int			irq;
 	u8 __iomem		*pmi_reg;
 	struct work_struct	work;
@@ -50,7 +39,7 @@ struct pmi_data {
 
 static struct pmi_data *data;
 
-static int pmi_irq_handler(int irq, void *dev_id)
+static irqreturn_t pmi_irq_handler(int irq, void *dev_id)
 {
 	u8 type;
 	int rc;
@@ -99,7 +88,7 @@ out:
 }
 
 
-static struct of_device_id pmi_match[] = {
+static const struct of_device_id pmi_match[] = {
 	{ .type = "ibm,pmi", .name = "ibm,pmi" },
 	{ .type = "ibm,pmi" },
 	{},
@@ -113,17 +102,16 @@ static void pmi_notify_handlers(struct work_struct *work)
 
 	spin_lock(&data->handler_spinlock);
 	list_for_each_entry(handler, &data->handler, node) {
-		pr_debug(KERN_INFO "pmi: notifying handler %p\n", handler);
+		pr_debug("pmi: notifying handler %p\n", handler);
 		if (handler->type == data->msg.type)
 			handler->handle_pmi_message(data->msg);
 	}
 	spin_unlock(&data->handler_spinlock);
 }
 
-static int pmi_of_probe(struct of_device *dev,
-			const struct of_device_id *match)
+static int pmi_of_probe(struct platform_device *dev)
 {
-	struct device_node *np = dev->node;
+	struct device_node *np = dev->dev.of_node;
 	int rc;
 
 	if (data) {
@@ -157,7 +145,7 @@ static int pmi_of_probe(struct of_device *dev,
 	data->dev = dev;
 
 	data->irq = irq_of_parse_and_map(np, 0);
-	if (data->irq == NO_IRQ) {
+	if (!data->irq) {
 		printk(KERN_ERR "pmi: invalid interrupt.\n");
 		rc = -EFAULT;
 		goto error_cleanup_iomap;
@@ -184,7 +172,7 @@ out:
 	return rc;
 }
 
-static int pmi_of_remove(struct of_device *dev)
+static int pmi_of_remove(struct platform_device *dev)
 {
 	struct pmi_handler *handler, *tmp;
 
@@ -204,26 +192,15 @@ static int pmi_of_remove(struct of_device *dev)
 	return 0;
 }
 
-static struct of_platform_driver pmi_of_platform_driver = {
-	.match_table	= pmi_match,
+static struct platform_driver pmi_of_platform_driver = {
 	.probe		= pmi_of_probe,
 	.remove		= pmi_of_remove,
-	.driver		= {
-		.name	= "pmi",
+	.driver = {
+		.name = "pmi",
+		.of_match_table = pmi_match,
 	},
 };
-
-static int __init pmi_module_init(void)
-{
-	return of_register_platform_driver(&pmi_of_platform_driver);
-}
-module_init(pmi_module_init);
-
-static void __exit pmi_module_exit(void)
-{
-	of_unregister_platform_driver(&pmi_of_platform_driver);
-}
-module_exit(pmi_module_exit);
+module_platform_driver(pmi_of_platform_driver);
 
 int pmi_send_message(pmi_message_t msg)
 {

@@ -1,15 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_SH_MMZONE_H
 #define __ASM_SH_MMZONE_H
 
-#ifdef __KERNEL__
-
 #ifdef CONFIG_NEED_MULTIPLE_NODES
+#include <linux/numa.h>
+
 extern struct pglist_data *node_data[];
 #define NODE_DATA(nid)		(node_data[nid])
-
-#define node_start_pfn(nid)	(NODE_DATA(nid)->node_start_pfn)
-#define node_end_pfn(nid)	(NODE_DATA(nid)->node_start_pfn + \
-				 NODE_DATA(nid)->node_spanned_pages)
 
 static inline int pfn_to_nid(unsigned long pfn)
 {
@@ -40,9 +37,9 @@ setup_bootmem_node(int nid, unsigned long start, unsigned long end)
 void __init plat_mem_setup(void);
 
 /* arch/sh/kernel/setup.c */
-void __init setup_bootmem_allocator(unsigned long start_pfn);
 void __init __add_active_range(unsigned int nid, unsigned long start_pfn,
 			       unsigned long end_pfn);
+/* arch/sh/mm/init.c */
+void __init allocate_pgdat(unsigned int nid);
 
-#endif /* __KERNEL__ */
 #endif /* __ASM_SH_MMZONE_H */

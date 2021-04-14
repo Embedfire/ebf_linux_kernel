@@ -22,27 +22,21 @@ struct jffs2_acl_entry_short {
 
 struct jffs2_acl_header {
 	jint32_t	a_version;
+	struct jffs2_acl_entry	a_entries[];
 };
 
 #ifdef CONFIG_JFFS2_FS_POSIX_ACL
 
-#define JFFS2_ACL_NOT_CACHED ((void *)-1)
-
-extern int jffs2_permission(struct inode *, int);
-extern int jffs2_acl_chmod(struct inode *);
-extern int jffs2_init_acl_pre(struct inode *, struct inode *, int *);
+struct posix_acl *jffs2_get_acl(struct inode *inode, int type);
+int jffs2_set_acl(struct inode *inode, struct posix_acl *acl, int type);
+extern int jffs2_init_acl_pre(struct inode *, struct inode *, umode_t *);
 extern int jffs2_init_acl_post(struct inode *);
-extern void jffs2_clear_acl(struct jffs2_inode_info *);
-
-extern struct xattr_handler jffs2_acl_access_xattr_handler;
-extern struct xattr_handler jffs2_acl_default_xattr_handler;
 
 #else
 
-#define jffs2_permission			(NULL)
-#define jffs2_acl_chmod(inode)			(0)
+#define jffs2_get_acl				(NULL)
+#define jffs2_set_acl				(NULL)
 #define jffs2_init_acl_pre(dir_i,inode,mode)	(0)
 #define jffs2_init_acl_post(inode)		(0)
-#define jffs2_clear_acl(f)
 
 #endif	/* CONFIG_JFFS2_FS_POSIX_ACL */

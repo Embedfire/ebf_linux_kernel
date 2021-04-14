@@ -1,23 +1,23 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * attribute_container.h - a generic container for all classes
  *
  * Copyright (c) 2005 - James Bottomley <James.Bottomley@steeleye.com>
- *
- * This file is licensed under GPLv2
  */
 
 #ifndef _ATTRIBUTE_CONTAINER_H_
 #define _ATTRIBUTE_CONTAINER_H_
 
-#include <linux/device.h>
 #include <linux/list.h>
 #include <linux/klist.h>
+
+struct device;
 
 struct attribute_container {
 	struct list_head	node;
 	struct klist		containers;
 	struct class		*class;
-	struct attribute_group	*grp;
+	const struct attribute_group *grp;
 	struct device_attribute **attrs;
 	int (*match)(struct attribute_container *, struct device *);
 #define	ATTRIBUTE_CONTAINER_NO_CLASSDEVS	0x01
@@ -54,6 +54,13 @@ void attribute_container_device_trigger(struct device *dev,
 					int (*fn)(struct attribute_container *,
 						  struct device *,
 						  struct device *));
+int attribute_container_device_trigger_safe(struct device *dev,
+					    int (*fn)(struct attribute_container *,
+						      struct device *,
+						      struct device *),
+					    int (*undo)(struct attribute_container *,
+							struct device *,
+							struct device *));
 void attribute_container_trigger(struct device *dev, 
 				 int (*fn)(struct attribute_container *,
 					   struct device *));

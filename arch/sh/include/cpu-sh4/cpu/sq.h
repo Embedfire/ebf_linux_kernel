@@ -1,17 +1,15 @@
-/*
+/* SPDX-License-Identifier: GPL-2.0
+ *
  * include/asm-sh/cpu-sh4/sq.h
  *
  * Copyright (C) 2001, 2002, 2003  Paul Mundt
  * Copyright (C) 2001, 2002  M. R. Brown
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #ifndef __ASM_CPU_SH4_SQ_H
 #define __ASM_CPU_SH4_SQ_H
 
 #include <asm/addrspace.h>
+#include <asm/page.h>
 
 /*
  * Store queues range from e0000000-e3fffffc, allowing approx. 64MB to be
@@ -28,7 +26,7 @@
 
 /* arch/sh/kernel/cpu/sh4/sq.c */
 unsigned long sq_remap(unsigned long phys, unsigned int size,
-		       const char *name, unsigned long flags);
+		       const char *name, pgprot_t prot);
 void sq_unmap(unsigned long vaddr);
 void sq_flush_range(unsigned long start, unsigned int len);
 

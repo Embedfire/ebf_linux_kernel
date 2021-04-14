@@ -1,15 +1,10 @@
-include include/asm-generic/Kbuild.asm
+# SPDX-License-Identifier: GPL-2.0
+generated-y += dis-defs.h
+generated-y += facility-defs.h
+generated-y += syscall_table.h
+generated-y += unistd_nr.h
 
-header-y += dasd.h
-header-y += monwriter.h
-header-y += qeth.h
-header-y += tape390.h
-header-y += ucontext.h
-header-y += vtoc.h
-header-y += zcrypt.h
-header-y += chsc.h
-
-unifdef-y += cmb.h
-unifdef-y += debug.h
-unifdef-y += chpid.h
-unifdef-y += schid.h
+generic-y += asm-offsets.h
+generic-y += export.h
+generic-y += kvm_types.h
+generic-y += mcs_spinlock.h

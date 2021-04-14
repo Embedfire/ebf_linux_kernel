@@ -1,10 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * MPC8xx Communication Processor Module.
  * Copyright (c) 1997 Dan Malek (dmalek@jlc.net)
  *
  * This file contains structures and information for the communication
  * processor channels.  Some CPM control and status is available
- * throught the MPC8xx internal memory map.  See immap.h for details.
+ * through the MPC8xx internal memory map.  See immap.h for details.
  * This file only contains what I need for the moment, not the total
  * CPM capabilities.  I (or someone else) will add definitions as they
  * are needed.  -- Dan
@@ -17,6 +18,7 @@
 #ifndef __CPM1__
 #define __CPM1__
 
+#include <linux/init.h>
 #include <asm/8xx_immap.h>
 #include <asm/ptrace.h>
 #include <asm/cpm.h>
@@ -54,7 +56,7 @@ extern cpm8xx_t __iomem *cpmp; /* Pointer to comm processor */
 
 extern void cpm_setbrg(uint brg, uint rate);
 
-extern void cpm_load_patch(cpm8xx_t *cp);
+extern void __init cpm_load_patch(cpm8xx_t *cp);
 
 extern void cpm_reset(void);
 
@@ -66,6 +68,7 @@ extern void cpm_reset(void);
 #define PROFF_SPI	((uint)0x0180)
 #define PROFF_SCC3	((uint)0x0200)
 #define PROFF_SMC1	((uint)0x0280)
+#define PROFF_DSP1	((uint)0x02c0)
 #define PROFF_SCC4	((uint)0x0300)
 #define PROFF_SMC2	((uint)0x0380)
 
@@ -478,51 +481,6 @@ typedef struct iic {
 	char	res2[2];	/* Reserved */
 } iic_t;
 
-/* SPI parameter RAM.
-*/
-typedef struct spi {
-	ushort	spi_rbase;	/* Rx Buffer descriptor base address */
-	ushort	spi_tbase;	/* Tx Buffer descriptor base address */
-	u_char	spi_rfcr;	/* Rx function code */
-	u_char	spi_tfcr;	/* Tx function code */
-	ushort	spi_mrblr;	/* Max receive buffer length */
-	uint	spi_rstate;	/* Internal */
-	uint	spi_rdp;	/* Internal */
-	ushort	spi_rbptr;	/* Internal */
-	ushort	spi_rbc;	/* Internal */
-	uint	spi_rxtmp;	/* Internal */
-	uint	spi_tstate;	/* Internal */
-	uint	spi_tdp;	/* Internal */
-	ushort	spi_tbptr;	/* Internal */
-	ushort	spi_tbc;	/* Internal */
-	uint	spi_txtmp;	/* Internal */
-	uint	spi_res;
-	ushort	spi_rpbase;	/* Relocation pointer */
-	ushort	spi_res2;
-} spi_t;
-
-/* SPI Mode register.
-*/
-#define SPMODE_LOOP	((ushort)0x4000)	/* Loopback */
-#define SPMODE_CI	((ushort)0x2000)	/* Clock Invert */
-#define SPMODE_CP	((ushort)0x1000)	/* Clock Phase */
-#define SPMODE_DIV16	((ushort)0x0800)	/* BRG/16 mode */
-#define SPMODE_REV	((ushort)0x0400)	/* Reversed Data */
-#define SPMODE_MSTR	((ushort)0x0200)	/* SPI Master */
-#define SPMODE_EN	((ushort)0x0100)	/* Enable */
-#define SPMODE_LENMSK	((ushort)0x00f0)	/* character length */
-#define SPMODE_LEN4	((ushort)0x0030)	/*  4 bits per char */
-#define SPMODE_LEN8	((ushort)0x0070)	/*  8 bits per char */
-#define SPMODE_LEN16	((ushort)0x00f0)	/* 16 bits per char */
-#define SPMODE_PMMSK	((ushort)0x000f)	/* prescale modulus */
-
-/* SPIE fields */
-#define SPIE_MME	0x20
-#define SPIE_TXE	0x10
-#define SPIE_BSY	0x04
-#define SPIE_TXB	0x02
-#define SPIE_RXB	0x01
-
 /*
  * RISC Controller Configuration Register definitons
  */
@@ -598,14 +556,14 @@ typedef struct risc_timer_pram {
 #define CICR_IEN		((uint)0x00000080)	/* Int. enable */
 #define CICR_SPS		((uint)0x00000001)	/* SCC Spread */
 
-#define IMAP_ADDR		(get_immrbase())
-
 #define CPM_PIN_INPUT     0
 #define CPM_PIN_OUTPUT    1
 #define CPM_PIN_PRIMARY   0
 #define CPM_PIN_SECONDARY 2
 #define CPM_PIN_GPIO      4
 #define CPM_PIN_OPENDRAIN 8
+#define CPM_PIN_FALLEDGE  16
+#define CPM_PIN_ANYEDGE   0
 
 enum cpm_port {
 	CPM_PORTA,
@@ -648,5 +606,7 @@ enum cpm_clk {
 };
 
 int cpm1_clk_setup(enum cpm_clk_target target, int clock, int mode);
+int cpm1_gpiochip_add16(struct device *dev);
+int cpm1_gpiochip_add32(struct device *dev);
 
 #endif /* __CPM1__ */

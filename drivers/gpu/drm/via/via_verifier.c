@@ -28,12 +28,13 @@
  * be very slow.
  */
 
+#include <drm/drm_device.h>
+#include <drm/drm_legacy.h>
+#include <drm/via_drm.h>
+
 #include "via_3d_reg.h"
-#include "drmP.h"
-#include "drm.h"
-#include "via_drm.h"
-#include "via_verifier.h"
 #include "via_drv.h"
+#include "via_verifier.h"
 
 typedef enum {
 	state_command,
@@ -235,7 +236,7 @@ static hazard_t table2[256];
 static hazard_t table3[256];
 
 static __inline__ int
-eat_words(const uint32_t ** buf, const uint32_t * buf_end, unsigned num_words)
+eat_words(const uint32_t **buf, const uint32_t *buf_end, unsigned num_words)
 {
 	if ((buf_end - *buf) >= num_words) {
 		*buf += num_words;
@@ -252,7 +253,7 @@ eat_words(const uint32_t ** buf, const uint32_t * buf_end, unsigned num_words)
 static __inline__ drm_local_map_t *via_drm_lookup_agp_map(drm_via_state_t *seq,
 						    unsigned long offset,
 						    unsigned long size,
-						    struct drm_device * dev)
+						    struct drm_device *dev)
 {
 	struct drm_map_list *r_list;
 	drm_local_map_t *map = seq->map_cache;
@@ -344,7 +345,7 @@ static __inline__ int finish_current_sequence(drm_via_state_t * cur_seq)
 }
 
 static __inline__ int
-investigate_hazard(uint32_t cmd, hazard_t hz, drm_via_state_t * cur_seq)
+investigate_hazard(uint32_t cmd, hazard_t hz, drm_via_state_t *cur_seq)
 {
 	register uint32_t tmp, *tmp_addr;
 
@@ -518,7 +519,7 @@ investigate_hazard(uint32_t cmd, hazard_t hz, drm_via_state_t * cur_seq)
 
 static __inline__ int
 via_check_prim_list(uint32_t const **buffer, const uint32_t * buf_end,
-		    drm_via_state_t * cur_seq)
+		    drm_via_state_t *cur_seq)
 {
 	drm_via_private_t *dev_priv =
 	    (drm_via_private_t *) cur_seq->dev->dev_private;
@@ -621,8 +622,8 @@ via_check_prim_list(uint32_t const **buffer, const uint32_t * buf_end,
 }
 
 static __inline__ verifier_state_t
-via_check_header2(uint32_t const **buffer, const uint32_t * buf_end,
-		  drm_via_state_t * hc_state)
+via_check_header2(uint32_t const **buffer, const uint32_t *buf_end,
+		  drm_via_state_t *hc_state)
 {
 	uint32_t cmd;
 	int hz_mode;
@@ -706,16 +707,15 @@ via_check_header2(uint32_t const **buffer, const uint32_t * buf_end,
 			return state_error;
 		}
 	}
-	if (hc_state->unfinished && finish_current_sequence(hc_state)) {
+	if (hc_state->unfinished && finish_current_sequence(hc_state))
 		return state_error;
-	}
 	*buffer = buf;
 	return state_command;
 }
 
 static __inline__ verifier_state_t
-via_parse_header2(drm_via_private_t * dev_priv, uint32_t const **buffer,
-		  const uint32_t * buf_end, int *fire_count)
+via_parse_header2(drm_via_private_t *dev_priv, uint32_t const **buffer,
+		  const uint32_t *buf_end, int *fire_count)
 {
 	uint32_t cmd;
 	const uint32_t *buf = *buffer;
@@ -725,14 +725,14 @@ via_parse_header2(drm_via_private_t * dev_priv, uint32_t const **buffer,
 	next_fire = dev_priv->fire_offsets[*fire_count];
 	buf++;
 	cmd = (*buf & 0xFFFF0000) >> 16;
-	VIA_WRITE(HC_REG_TRANS_SET + HC_REG_BASE, *buf++);
+	via_write(dev_priv, HC_REG_TRANS_SET + HC_REG_BASE, *buf++);
 	switch (cmd) {
 	case HC_ParaType_CmdVdata:
 		while ((buf < buf_end) &&
 		       (*fire_count < dev_priv->num_fire_offsets) &&
 		       (*buf & HC_ACMD_MASK) == HC_ACMD_HCmdB) {
 			while (buf <= next_fire) {
-				VIA_WRITE(HC_REG_TRANS_SPACE + HC_REG_BASE +
+				via_write(dev_priv, HC_REG_TRANS_SPACE + HC_REG_BASE +
 					  (burst & 63), *buf++);
 				burst += 4;
 			}
@@ -753,7 +753,7 @@ via_parse_header2(drm_via_private_t * dev_priv, uint32_t const **buffer,
 			    (*buf & VIA_VIDEOMASK) == VIA_VIDEO_HEADER6)
 				break;
 
-			VIA_WRITE(HC_REG_TRANS_SPACE + HC_REG_BASE +
+			via_write(dev_priv, HC_REG_TRANS_SPACE + HC_REG_BASE +
 				  (burst & 63), *buf++);
 			burst += 4;
 		}
@@ -833,8 +833,8 @@ via_check_header1(uint32_t const **buffer, const uint32_t * buf_end)
 }
 
 static __inline__ verifier_state_t
-via_parse_header1(drm_via_private_t * dev_priv, uint32_t const **buffer,
-		  const uint32_t * buf_end)
+via_parse_header1(drm_via_private_t *dev_priv, uint32_t const **buffer,
+		  const uint32_t *buf_end)
 {
 	register uint32_t cmd;
 	const uint32_t *buf = *buffer;
@@ -843,7 +843,7 @@ via_parse_header1(drm_via_private_t * dev_priv, uint32_t const **buffer,
 		cmd = *buf;
 		if ((cmd & HALCYON_HEADER1MASK) != HALCYON_HEADER1)
 			break;
-		VIA_WRITE((cmd & ~HALCYON_HEADER1MASK) << 2, *++buf);
+		via_write(dev_priv, (cmd & ~HALCYON_HEADER1MASK) << 2, *++buf);
 		buf++;
 	}
 	*buffer = buf;
@@ -851,7 +851,7 @@ via_parse_header1(drm_via_private_t * dev_priv, uint32_t const **buffer,
 }
 
 static __inline__ verifier_state_t
-via_check_vheader5(uint32_t const **buffer, const uint32_t * buf_end)
+via_check_vheader5(uint32_t const **buffer, const uint32_t *buf_end)
 {
 	uint32_t data;
 	const uint32_t *buf = *buffer;
@@ -884,8 +884,8 @@ via_check_vheader5(uint32_t const **buffer, const uint32_t * buf_end)
 }
 
 static __inline__ verifier_state_t
-via_parse_vheader5(drm_via_private_t * dev_priv, uint32_t const **buffer,
-		   const uint32_t * buf_end)
+via_parse_vheader5(drm_via_private_t *dev_priv, uint32_t const **buffer,
+		   const uint32_t *buf_end)
 {
 	uint32_t addr, count, i;
 	const uint32_t *buf = *buffer;
@@ -893,9 +893,8 @@ via_parse_vheader5(drm_via_private_t * dev_priv, uint32_t const **buffer,
 	addr = *buf++ & ~VIA_VIDEOMASK;
 	i = count = *buf;
 	buf += 3;
-	while (i--) {
-		VIA_WRITE(addr, *buf++);
-	}
+	while (i--)
+		via_write(dev_priv, addr, *buf++);
 	if (count & 3)
 		buf += 4 - (count & 3);
 	*buffer = buf;
@@ -940,8 +939,8 @@ via_check_vheader6(uint32_t const **buffer, const uint32_t * buf_end)
 }
 
 static __inline__ verifier_state_t
-via_parse_vheader6(drm_via_private_t * dev_priv, uint32_t const **buffer,
-		   const uint32_t * buf_end)
+via_parse_vheader6(drm_via_private_t *dev_priv, uint32_t const **buffer,
+		   const uint32_t *buf_end)
 {
 
 	uint32_t addr, count, i;
@@ -951,7 +950,7 @@ via_parse_vheader6(drm_via_private_t * dev_priv, uint32_t const **buffer,
 	buf += 3;
 	while (i--) {
 		addr = *buf++;
-		VIA_WRITE(addr, *buf++);
+		via_write(dev_priv, addr, *buf++);
 	}
 	count <<= 1;
 	if (count & 3)
@@ -1037,7 +1036,7 @@ via_verify_command_stream(const uint32_t * buf, unsigned int size,
 }
 
 int
-via_parse_command_stream(struct drm_device * dev, const uint32_t * buf,
+via_parse_command_stream(struct drm_device *dev, const uint32_t *buf,
 			 unsigned int size)
 {
 
@@ -1085,9 +1084,8 @@ via_parse_command_stream(struct drm_device * dev, const uint32_t * buf,
 			return -EINVAL;
 		}
 	}
-	if (state == state_error) {
+	if (state == state_error)
 		return -EINVAL;
-	}
 	return 0;
 }
 
@@ -1096,21 +1094,16 @@ setup_hazard_table(hz_init_t init_table[], hazard_t table[], int size)
 {
 	int i;
 
-	for (i = 0; i < 256; ++i) {
+	for (i = 0; i < 256; ++i)
 		table[i] = forbidden_command;
-	}
 
-	for (i = 0; i < size; ++i) {
+	for (i = 0; i < size; ++i)
 		table[init_table[i].code] = init_table[i].hz;
-	}
 }
 
 void via_init_command_verifier(void)
 {
-	setup_hazard_table(init_table1, table1,
-			   sizeof(init_table1) / sizeof(hz_init_t));
-	setup_hazard_table(init_table2, table2,
-			   sizeof(init_table2) / sizeof(hz_init_t));
-	setup_hazard_table(init_table3, table3,
-			   sizeof(init_table3) / sizeof(hz_init_t));
+	setup_hazard_table(init_table1, table1, ARRAY_SIZE(init_table1));
+	setup_hazard_table(init_table2, table2, ARRAY_SIZE(init_table2));
+	setup_hazard_table(init_table3, table3, ARRAY_SIZE(init_table3));
 }

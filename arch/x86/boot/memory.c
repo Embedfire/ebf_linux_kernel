@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* -*- linux-c -*- ------------------------------------------------------- *
  *
  *   Copyright (C) 1991, 1992 Linus Torvalds
  *   Copyright 2007 rPath, Inc. - All Rights Reserved
- *
- *   This file is part of the Linux kernel, and is made available under
- *   the terms of the GNU General Public License version 2.
+ *   Copyright 2009 Intel Corporation; author H. Peter Anvin
  *
  * ----------------------------------------------------------------------- */
 
@@ -16,29 +15,41 @@
 
 #define SMAP	0x534d4150	/* ASCII "SMAP" */
 
-static int detect_memory_e820(void)
+static void detect_memory_e820(void)
 {
 	int count = 0;
-	u32 next = 0;
-	u32 size, id;
-	u8 err;
-	struct e820entry *desc = boot_params.e820_map;
+	struct biosregs ireg, oreg;
+	struct boot_e820_entry *desc = boot_params.e820_table;
+	static struct boot_e820_entry buf; /* static so it is zeroed */
+
+	initregs(&ireg);
+	ireg.ax  = 0xe820;
+	ireg.cx  = sizeof(buf);
+	ireg.edx = SMAP;
+	ireg.di  = (size_t)&buf;
+
+	/*
+	 * Note: at least one BIOS is known which assumes that the
+	 * buffer pointed to by one e820 call is the same one as
+	 * the previous call, and only changes modified fields.  Therefore,
+	 * we use a temporary buffer and copy the results entry by entry.
+	 *
+	 * This routine deliberately does not try to account for
+	 * ACPI 3+ extended attributes.  This is because there are
+	 * BIOSes in the field which report zero for the valid bit for
+	 * all ranges, and we don't currently make any use of the
+	 * other attribute bits.  Revisit this if we see the extended
+	 * attribute bits deployed in a meaningful way in the future.
+	 */
 
 	do {
-		size = sizeof(struct e820entry);
-
-		/* Important: %edx is clobbered by some BIOSes,
-		   so it must be either used for the error output
-		   or explicitly marked clobbered. */
-		asm("int $0x15; setc %0"
-		    : "=d" (err), "+b" (next), "=a" (id), "+c" (size),
-		      "=m" (*desc)
-		    : "D" (desc), "d" (SMAP), "a" (0xe820));
+		intcall(0x15, &ireg, &oreg);
+		ireg.ebx = oreg.ebx; /* for next iteration... */
 
 		/* BIOSes which terminate the chain with CF = 1 as opposed
 		   to %ebx = 0 don't always report the SMAP signature on
 		   the final, failing, probe. */
-		if (err)
+		if (oreg.eflags & X86_EFLAGS_CF)
 			break;
 
 		/* Some BIOSes stop returning SMAP in the middle of
@@ -46,74 +57,67 @@ static int detect_memory_e820(void)
 		   screwed up the map at that point, we might have a
 		   partial map, the full map, or complete garbage, so
 		   just return failure. */
-		if (id != SMAP) {
+		if (oreg.eax != SMAP) {
 			count = 0;
 			break;
 		}
 
+		*desc++ = buf;
 		count++;
-		desc++;
-	} while (next && count < ARRAY_SIZE(boot_params.e820_map));
+	} while (ireg.ebx && count < ARRAY_SIZE(boot_params.e820_table));
 
-	return boot_params.e820_entries = count;
+	boot_params.e820_entries = count;
 }
 
-static int detect_memory_e801(void)
+static void detect_memory_e801(void)
 {
-	u16 ax, bx, cx, dx;
-	u8 err;
+	struct biosregs ireg, oreg;
 
-	bx = cx = dx = 0;
-	ax = 0xe801;
-	asm("stc; int $0x15; setc %0"
-	    : "=m" (err), "+a" (ax), "+b" (bx), "+c" (cx), "+d" (dx));
+	initregs(&ireg);
+	ireg.ax = 0xe801;
+	intcall(0x15, &ireg, &oreg);
 
-	if (err)
-		return -1;
+	if (oreg.eflags & X86_EFLAGS_CF)
+		return;
 
 	/* Do we really need to do this? */
-	if (cx || dx) {
-		ax = cx;
-		bx = dx;
+	if (oreg.cx || oreg.dx) {
+		oreg.ax = oreg.cx;
+		oreg.bx = oreg.dx;
 	}
 
-	if (ax > 15*1024)
-		return -1;	/* Bogus! */
-
-	/* This ignores memory above 16MB if we have a memory hole
-	   there.  If someone actually finds a machine with a memory
-	   hole at 16MB and no support for 0E820h they should probably
-	   generate a fake e820 map. */
-	boot_params.alt_mem_k = (ax == 15*1024) ? (dx << 6)+ax : ax;
-
-	return 0;
+	if (oreg.ax > 15*1024) {
+		return;	/* Bogus! */
+	} else if (oreg.ax == 15*1024) {
+		boot_params.alt_mem_k = (oreg.bx << 6) + oreg.ax;
+	} else {
+		/*
+		 * This ignores memory above 16MB if we have a memory
+		 * hole there.  If someone actually finds a machine
+		 * with a memory hole at 16MB and no support for
+		 * 0E820h they should probably generate a fake e820
+		 * map.
+		 */
+		boot_params.alt_mem_k = oreg.ax;
+	}
 }
 
-static int detect_memory_88(void)
+static void detect_memory_88(void)
 {
-	u16 ax;
-	u8 err;
+	struct biosregs ireg, oreg;
 
-	ax = 0x8800;
-	asm("stc; int $0x15; setc %0" : "=bcdm" (err), "+a" (ax));
+	initregs(&ireg);
+	ireg.ah = 0x88;
+	intcall(0x15, &ireg, &oreg);
 
-	boot_params.screen_info.ext_mem_k = ax;
-
-	return -err;
+	boot_params.screen_info.ext_mem_k = oreg.ax;
 }
 
-int detect_memory(void)
+void detect_memory(void)
 {
-	int err = -1;
+	detect_memory_e820();
 
-	if (detect_memory_e820() > 0)
-		err = 0;
+	detect_memory_e801();
 
-	if (!detect_memory_e801())
-		err = 0;
-
-	if (!detect_memory_88())
-		err = 0;
-
-	return err;
+	detect_memory_88();
 }

@@ -1,31 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Driver for Sound Cors PDAudioCF soundcard
  *
  * Copyright (c) 2003 by Jaroslav Kysela <perex@perex.cz>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef __PDAUDIOCF_H
 #define __PDAUDIOCF_H
 
 #include <sound/pcm.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <linux/interrupt.h>
-#include <pcmcia/cs_types.h>
-#include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
 
@@ -90,10 +75,9 @@ struct snd_pdacf {
 	unsigned long port;
 	int irq;
 
-	spinlock_t reg_lock;
+	struct mutex reg_lock;
 	unsigned short regmap[8];
 	unsigned short suspend_reg_scr;
-	struct tasklet_struct tq;
 
 	spinlock_t ak4117_lock;
 	struct ak4117 *ak4117;
@@ -117,7 +101,6 @@ struct snd_pdacf {
 	
 	/* pcmcia stuff */
 	struct pcmcia_device	*p_dev;
-	dev_node_t node;
 };
 
 static inline void pdacf_reg_write(struct snd_pdacf *chip, unsigned char reg, unsigned short val)
@@ -134,12 +117,12 @@ struct snd_pdacf *snd_pdacf_create(struct snd_card *card);
 int snd_pdacf_ak4117_create(struct snd_pdacf *pdacf);
 void snd_pdacf_powerdown(struct snd_pdacf *chip);
 #ifdef CONFIG_PM
-int snd_pdacf_suspend(struct snd_pdacf *chip, pm_message_t state);
+int snd_pdacf_suspend(struct snd_pdacf *chip);
 int snd_pdacf_resume(struct snd_pdacf *chip);
 #endif
 int snd_pdacf_pcm_new(struct snd_pdacf *chip);
 irqreturn_t pdacf_interrupt(int irq, void *dev);
-void pdacf_tasklet(unsigned long private_data);
+irqreturn_t pdacf_threaded_irq(int irq, void *dev);
 void pdacf_reinit(struct snd_pdacf *chip, int resume);
 
 #endif /* __PDAUDIOCF_H */

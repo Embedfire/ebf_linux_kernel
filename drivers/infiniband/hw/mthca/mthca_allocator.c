@@ -90,8 +90,8 @@ int mthca_alloc_init(struct mthca_alloc *alloc, u32 num, u32 mask,
 	alloc->max  = num;
 	alloc->mask = mask;
 	spin_lock_init(&alloc->lock);
-	alloc->table = kmalloc(BITS_TO_LONGS(num) * sizeof (long),
-			       GFP_KERNEL);
+	alloc->table = kmalloc_array(BITS_TO_LONGS(num), sizeof(long),
+				     GFP_KERNEL);
 	if (!alloc->table)
 		return -ENOMEM;
 
@@ -162,7 +162,8 @@ int mthca_array_init(struct mthca_array *array, int nent)
 	int npage = (nent * sizeof (void *) + PAGE_SIZE - 1) / PAGE_SIZE;
 	int i;
 
-	array->page_list = kmalloc(npage * sizeof *array->page_list, GFP_KERNEL);
+	array->page_list = kmalloc_array(npage, sizeof(*array->page_list),
+					 GFP_KERNEL);
 	if (!array->page_list)
 		return -ENOMEM;
 
@@ -211,16 +212,15 @@ int mthca_buf_alloc(struct mthca_dev *dev, int size, int max_direct,
 		if (!buf->direct.buf)
 			return -ENOMEM;
 
-		pci_unmap_addr_set(&buf->direct, mapping, t);
-
-		memset(buf->direct.buf, 0, size);
+		dma_unmap_addr_set(&buf->direct, mapping, t);
 
 		while (t & ((1 << shift) - 1)) {
 			--shift;
 			npages *= 2;
 		}
 
-		dma_list = kmalloc(npages * sizeof *dma_list, GFP_KERNEL);
+		dma_list = kmalloc_array(npages, sizeof(*dma_list),
+					 GFP_KERNEL);
 		if (!dma_list)
 			goto err_free;
 
@@ -231,12 +231,14 @@ int mthca_buf_alloc(struct mthca_dev *dev, int size, int max_direct,
 		npages     = (size + PAGE_SIZE - 1) / PAGE_SIZE;
 		shift      = PAGE_SHIFT;
 
-		dma_list = kmalloc(npages * sizeof *dma_list, GFP_KERNEL);
+		dma_list = kmalloc_array(npages, sizeof(*dma_list),
+					 GFP_KERNEL);
 		if (!dma_list)
 			return -ENOMEM;
 
-		buf->page_list = kmalloc(npages * sizeof *buf->page_list,
-					 GFP_KERNEL);
+		buf->page_list = kmalloc_array(npages,
+					       sizeof(*buf->page_list),
+					       GFP_KERNEL);
 		if (!buf->page_list)
 			goto err_out;
 
@@ -251,7 +253,7 @@ int mthca_buf_alloc(struct mthca_dev *dev, int size, int max_direct,
 				goto err_free;
 
 			dma_list[i] = t;
-			pci_unmap_addr_set(&buf->page_list[i], mapping, t);
+			dma_unmap_addr_set(&buf->page_list[i], mapping, t);
 
 			clear_page(buf->page_list[i].buf);
 		}
@@ -289,12 +291,12 @@ void mthca_buf_free(struct mthca_dev *dev, int size, union mthca_buf *buf,
 
 	if (is_direct)
 		dma_free_coherent(&dev->pdev->dev, size, buf->direct.buf,
-				  pci_unmap_addr(&buf->direct, mapping));
+				  dma_unmap_addr(&buf->direct, mapping));
 	else {
 		for (i = 0; i < (size + PAGE_SIZE - 1) / PAGE_SIZE; ++i)
 			dma_free_coherent(&dev->pdev->dev, PAGE_SIZE,
 					  buf->page_list[i].buf,
-					  pci_unmap_addr(&buf->page_list[i],
+					  dma_unmap_addr(&buf->page_list[i],
 							 mapping));
 		kfree(buf->page_list);
 	}

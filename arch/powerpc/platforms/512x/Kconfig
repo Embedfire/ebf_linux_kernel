@@ -1,30 +1,42 @@
+# SPDX-License-Identifier: GPL-2.0
 config PPC_MPC512x
-	bool
+	bool "512x-based boards"
+	depends on PPC_BOOK3S_32
+	select COMMON_CLK
 	select FSL_SOC
 	select IPIC
-	select PPC_CLOCK
+	select HAVE_PCI
+	select FSL_PCI if PCI
+	select USB_EHCI_BIG_ENDIAN_MMIO if USB_EHCI_HCD
+	select USB_EHCI_BIG_ENDIAN_DESC if USB_EHCI_HCD
 
-config PPC_MPC5121
-	bool
-	select PPC_MPC512x
+config MPC512x_LPBFIFO
+	tristate "MPC512x LocalPlus Bus FIFO driver"
+	depends on PPC_MPC512x && MPC512X_DMA
+	help
+	  Enable support for Freescale MPC512x LocalPlus Bus FIFO (SCLPC).
 
 config MPC5121_ADS
 	bool "Freescale MPC5121E ADS"
-	depends on PPC_MULTIPLATFORM && PPC32
+	depends on PPC_MPC512x
 	select DEFAULT_UIMAGE
-	select PPC_MPC5121
-	select MPC5121_ADS_CPLD
 	help
 	  This option enables support for the MPC5121E ADS board.
 
-config MPC5121_GENERIC
-	bool "Generic support for simple MPC5121 based boards"
-	depends on PPC_MULTIPLATFORM && PPC32
+config MPC512x_GENERIC
+	bool "Generic support for simple MPC512x based boards"
+	depends on PPC_MPC512x
 	select DEFAULT_UIMAGE
-	select PPC_MPC5121
 	help
-	  This option enables support for simple MPC5121 based boards
+	  This option enables support for simple MPC512x based boards
 	  which do not need custom platform specific setup.
 
 	  Compatible boards include:  Protonic LVT base boards (ZANMCU
-	  and VICVT2).
+	  and VICVT2), Freescale MPC5125 Tower system.
+
+config PDM360NG
+	bool "ifm PDM360NG board"
+	depends on PPC_MPC512x
+	select DEFAULT_UIMAGE
+	help
+	  This option enables support for the PDM360NG board.

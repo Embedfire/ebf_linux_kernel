@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Old U-boot compatibility for MPC5200
  *
@@ -5,10 +6,6 @@
  *
  * Copyright (c) 2007 Secret Lab Technologies Ltd.
  * Copyright (c) 2007 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
  */
 
 #include "ops.h"
@@ -37,6 +34,10 @@ static void platform_fixups(void)
 	 * this can do a simple path lookup.
 	 */
 	soc = find_node_by_devtype(NULL, "soc");
+	if (!soc)
+		soc = find_node_by_compatible(NULL, "fsl,mpc5200-immr");
+	if (!soc)
+		soc = find_node_by_compatible(NULL, "fsl,mpc5200b-immr");
 	if (soc) {
 		setprop(soc, "bus-frequency", &bd.bi_ipbfreq,
 			sizeof(bd.bi_ipbfreq));

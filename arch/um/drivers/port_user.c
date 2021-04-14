@@ -1,6 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{linux.intel,addtoit}.com)
- * Licensed under the GPL
  */
 
 #include <stdio.h>
@@ -10,11 +10,9 @@
 #include <unistd.h>
 #include <netinet/in.h>
 #include "chan_user.h"
-#include "kern_constants.h"
-#include "os.h"
+#include <os.h>
 #include "port.h"
-#include "um_malloc.h"
-#include "user.h"
+#include <um_malloc.h>
 
 struct port_chan {
 	int raw;
@@ -170,7 +168,7 @@ int port_connection(int fd, int *socket, int *pid_out)
 {
 	int new, err;
 	char *argv[] = { "/usr/sbin/in.telnetd", "-L",
-			 "/usr/lib/uml/port-helper", NULL };
+			 OS_LIB_PATH "/uml/port-helper", NULL };
 	struct port_pre_exec_data data;
 
 	new = accept(fd, NULL, 0);

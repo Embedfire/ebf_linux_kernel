@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Power control for Samsung LTV350QV Quarter VGA LCD Panel
  *
  * Copyright (C) 2006, 2007 Atmel Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/delay.h>
 #include <linux/err.h>
@@ -13,6 +10,7 @@
 #include <linux/init.h>
 #include <linux/lcd.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/spi/spi.h>
 
 #include "ltv350qv.h"
@@ -74,7 +72,7 @@ static int ltv350qv_power_on(struct ltv350qv *lcd)
 	/* Power On Reset Display off State */
 	if (ltv350qv_write_reg(lcd, LTV_PWRCTL1, 0x0000))
 		goto err;
-	msleep(15);
+	usleep_range(15000, 16000);
 
 	/* Power Setting Function 1 */
 	if (ltv350qv_write_reg(lcd, LTV_PWRCTL1, LTV_VCOM_DISABLE))
@@ -152,7 +150,7 @@ err_settings:
 err_power2:
 err_power1:
 	ltv350qv_write_reg(lcd, LTV_PWRCTL2, 0x0000);
-	msleep(1);
+	usleep_range(1000, 1100);
 err:
 	ltv350qv_write_reg(lcd, LTV_PWRCTL1, LTV_VCOM_DISABLE);
 	return -EIO;
@@ -174,7 +172,7 @@ static int ltv350qv_power_off(struct ltv350qv *lcd)
 	ret |= ltv350qv_write_reg(lcd, LTV_PWRCTL2, 0x0000);
 
 	/* Wait at least 1 ms */
-	msleep(1);
+	usleep_range(1000, 1100);
 
 	/* Power down setting 2 */
 	ret |= ltv350qv_write_reg(lcd, LTV_PWRCTL1, LTV_VCOM_DISABLE);
@@ -225,76 +223,68 @@ static struct lcd_ops ltv_ops = {
 	.set_power	= ltv350qv_set_power,
 };
 
-static int __devinit ltv350qv_probe(struct spi_device *spi)
+static int ltv350qv_probe(struct spi_device *spi)
 {
 	struct ltv350qv *lcd;
 	struct lcd_device *ld;
 	int ret;
 
-	lcd = kzalloc(sizeof(struct ltv350qv), GFP_KERNEL);
+	lcd = devm_kzalloc(&spi->dev, sizeof(struct ltv350qv), GFP_KERNEL);
 	if (!lcd)
 		return -ENOMEM;
 
 	lcd->spi = spi;
 	lcd->power = FB_BLANK_POWERDOWN;
-	lcd->buffer = kzalloc(8, GFP_KERNEL);
+	lcd->buffer = devm_kzalloc(&spi->dev, 8, GFP_KERNEL);
+	if (!lcd->buffer)
+		return -ENOMEM;
 
-	ld = lcd_device_register("ltv350qv", &spi->dev, lcd, &ltv_ops);
-	if (IS_ERR(ld)) {
-		ret = PTR_ERR(ld);
-		goto out_free_lcd;
-	}
+	ld = devm_lcd_device_register(&spi->dev, "ltv350qv", &spi->dev, lcd,
+					&ltv_ops);
+	if (IS_ERR(ld))
+		return PTR_ERR(ld);
+
 	lcd->ld = ld;
 
 	ret = ltv350qv_power(lcd, FB_BLANK_UNBLANK);
 	if (ret)
-		goto out_unregister;
+		return ret;
 
-	dev_set_drvdata(&spi->dev, lcd);
+	spi_set_drvdata(spi, lcd);
 
 	return 0;
-
-out_unregister:
-	lcd_device_unregister(ld);
-out_free_lcd:
-	kfree(lcd);
-	return ret;
 }
 
-static int __devexit ltv350qv_remove(struct spi_device *spi)
+static int ltv350qv_remove(struct spi_device *spi)
 {
-	struct ltv350qv *lcd = dev_get_drvdata(&spi->dev);
+	struct ltv350qv *lcd = spi_get_drvdata(spi);
 
 	ltv350qv_power(lcd, FB_BLANK_POWERDOWN);
-	lcd_device_unregister(lcd->ld);
-	kfree(lcd);
-
 	return 0;
 }
 
-#ifdef CONFIG_PM
-static int ltv350qv_suspend(struct spi_device *spi, pm_message_t state)
+#ifdef CONFIG_PM_SLEEP
+static int ltv350qv_suspend(struct device *dev)
 {
-	struct ltv350qv *lcd = dev_get_drvdata(&spi->dev);
+	struct ltv350qv *lcd = dev_get_drvdata(dev);
 
 	return ltv350qv_power(lcd, FB_BLANK_POWERDOWN);
 }
 
-static int ltv350qv_resume(struct spi_device *spi)
+static int ltv350qv_resume(struct device *dev)
 {
-	struct ltv350qv *lcd = dev_get_drvdata(&spi->dev);
+	struct ltv350qv *lcd = dev_get_drvdata(dev);
 
 	return ltv350qv_power(lcd, FB_BLANK_UNBLANK);
 }
-#else
-#define ltv350qv_suspend	NULL
-#define ltv350qv_resume		NULL
 #endif
+
+static SIMPLE_DEV_PM_OPS(ltv350qv_pm_ops, ltv350qv_suspend, ltv350qv_resume);
 
 /* Power down all displays on reboot, poweroff or halt */
 static void ltv350qv_shutdown(struct spi_device *spi)
 {
-	struct ltv350qv *lcd = dev_get_drvdata(&spi->dev);
+	struct ltv350qv *lcd = spi_get_drvdata(spi);
 
 	ltv350qv_power(lcd, FB_BLANK_POWERDOWN);
 }
@@ -302,29 +292,17 @@ static void ltv350qv_shutdown(struct spi_device *spi)
 static struct spi_driver ltv350qv_driver = {
 	.driver = {
 		.name		= "ltv350qv",
-		.bus		= &spi_bus_type,
-		.owner		= THIS_MODULE,
+		.pm		= &ltv350qv_pm_ops,
 	},
 
 	.probe		= ltv350qv_probe,
-	.remove		= __devexit_p(ltv350qv_remove),
+	.remove		= ltv350qv_remove,
 	.shutdown	= ltv350qv_shutdown,
-	.suspend	= ltv350qv_suspend,
-	.resume		= ltv350qv_resume,
 };
 
-static int __init ltv350qv_init(void)
-{
-	return spi_register_driver(&ltv350qv_driver);
-}
+module_spi_driver(ltv350qv_driver);
 
-static void __exit ltv350qv_exit(void)
-{
-	spi_unregister_driver(&ltv350qv_driver);
-}
-module_init(ltv350qv_init);
-module_exit(ltv350qv_exit);
-
-MODULE_AUTHOR("Haavard Skinnemoen <hskinnemoen@atmel.com>");
+MODULE_AUTHOR("Haavard Skinnemoen (Atmel)");
 MODULE_DESCRIPTION("Samsung LTV350QV LCD Driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("spi:ltv350qv");

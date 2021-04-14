@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * resource.c - Contains functions for registering and analyzing resource information
  *
@@ -8,6 +9,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
@@ -30,7 +32,7 @@ static int pnp_reserve_mem[16] = {[0 ... 15] = -1 };	/* reserve (don't use) some
  * option registration
  */
 
-struct pnp_option *pnp_build_option(struct pnp_dev *dev, unsigned long type,
+static struct pnp_option *pnp_build_option(struct pnp_dev *dev, unsigned long type,
 				    unsigned int option_flags)
 {
 	struct pnp_option *option;
@@ -178,8 +180,9 @@ int pnp_check_port(struct pnp_dev *dev, struct resource *res)
 	/* check if the resource is already in use, skip if the
 	 * device is active because it itself may be in use */
 	if (!dev->active) {
-		if (__check_region(&ioport_resource, *port, length(port, end)))
+		if (!request_region(*port, length(port, end), "pnp"))
 			return 0;
+		release_region(*port, length(port, end));
 	}
 
 	/* check if the resource is reserved */
@@ -210,6 +213,8 @@ int pnp_check_port(struct pnp_dev *dev, struct resource *res)
 			if (tres->flags & IORESOURCE_IO) {
 				if (cannot_compare(tres->flags))
 					continue;
+				if (tres->flags & IORESOURCE_WINDOW)
+					continue;
 				tport = &tres->start;
 				tend = &tres->end;
 				if (ranged_conflict(port, end, tport, tend))
@@ -238,8 +243,9 @@ int pnp_check_mem(struct pnp_dev *dev, struct resource *res)
 	/* check if the resource is already in use, skip if the
 	 * device is active because it itself may be in use */
 	if (!dev->active) {
-		if (check_mem_region(*addr, length(addr, end)))
+		if (!request_mem_region(*addr, length(addr, end), "pnp"))
 			return 0;
+		release_mem_region(*addr, length(addr, end));
 	}
 
 	/* check if the resource is reserved */
@@ -270,6 +276,8 @@ int pnp_check_mem(struct pnp_dev *dev, struct resource *res)
 			if (tres->flags & IORESOURCE_MEM) {
 				if (cannot_compare(tres->flags))
 					continue;
+				if (tres->flags & IORESOURCE_WINDOW)
+					continue;
 				taddr = &tres->start;
 				tend = &tres->end;
 				if (ranged_conflict(addr, end, taddr, tend))
@@ -294,7 +302,7 @@ static int pci_dev_uses_irq(struct pnp_dev *pnp, struct pci_dev *pci,
 	u8 progif;
 
 	if (pci->irq == irq) {
-		dev_dbg(&pnp->dev, "device %s using irq %d\n",
+		pnp_dbg(&pnp->dev, "  device %s using irq %d\n",
 			pci_name(pci), irq);
 		return 1;
 	}
@@ -316,7 +324,7 @@ static int pci_dev_uses_irq(struct pnp_dev *pnp, struct pci_dev *pci,
 		if ((progif & 0x5) != 0x5)
 			if (pci_get_legacy_ide_irq(pci, 0) == irq ||
 			    pci_get_legacy_ide_irq(pci, 1) == irq) {
-				dev_dbg(&pnp->dev, "legacy IDE device %s "
+				pnp_dbg(&pnp->dev, "  legacy IDE device %s "
 					"using irq %d\n", pci_name(pci), irq);
 				return 1;
 			}
@@ -355,7 +363,7 @@ int pnp_check_irq(struct pnp_dev *dev, struct resource *res)
 		return 1;
 
 	/* check if the resource is valid */
-	if (*irq < 0 || *irq > 15)
+	if (*irq > 15)
 		return 0;
 
 	/* check if the resource is reserved */
@@ -380,7 +388,7 @@ int pnp_check_irq(struct pnp_dev *dev, struct resource *res)
 	 * device is active because it itself may be in use */
 	if (!dev->active) {
 		if (request_irq(*irq, pnp_test_handler,
-				IRQF_DISABLED | IRQF_PROBE_SHARED, "pnp", NULL))
+				IRQF_PROBE_SHARED, "pnp", NULL))
 			return 0;
 		free_irq(*irq, NULL);
 	}
@@ -404,9 +412,9 @@ int pnp_check_irq(struct pnp_dev *dev, struct resource *res)
 	return 1;
 }
 
+#ifdef CONFIG_ISA_DMA_API
 int pnp_check_dma(struct pnp_dev *dev, struct resource *res)
 {
-#ifndef CONFIG_IA64
 	int i;
 	struct pnp_dev *tdev;
 	struct resource *tres;
@@ -419,7 +427,7 @@ int pnp_check_dma(struct pnp_dev *dev, struct resource *res)
 		return 1;
 
 	/* check if the resource is valid */
-	if (*dma < 0 || *dma == 4 || *dma > 7)
+	if (*dma == 4 || *dma > 7)
 		return 0;
 
 	/* check if the resource is reserved */
@@ -461,20 +469,18 @@ int pnp_check_dma(struct pnp_dev *dev, struct resource *res)
 	}
 
 	return 1;
-#else
-	/* IA64 does not have legacy DMA */
-	return 0;
-#endif
 }
+#endif /* CONFIG_ISA_DMA_API */
 
-int pnp_resource_type(struct resource *res)
+unsigned long pnp_resource_type(struct resource *res)
 {
 	return res->flags & (IORESOURCE_IO  | IORESOURCE_MEM |
-			     IORESOURCE_IRQ | IORESOURCE_DMA);
+			     IORESOURCE_IRQ | IORESOURCE_DMA |
+			     IORESOURCE_BUS);
 }
 
 struct resource *pnp_get_resource(struct pnp_dev *dev,
-				  unsigned int type, unsigned int num)
+				  unsigned long type, unsigned int num)
 {
 	struct pnp_resource *pnp_res;
 	struct resource *res;
@@ -500,6 +506,23 @@ static struct pnp_resource *pnp_new_resource(struct pnp_dev *dev)
 	return pnp_res;
 }
 
+struct pnp_resource *pnp_add_resource(struct pnp_dev *dev,
+				      struct resource *res)
+{
+	struct pnp_resource *pnp_res;
+
+	pnp_res = pnp_new_resource(dev);
+	if (!pnp_res) {
+		dev_err(&dev->dev, "can't add resource %pR\n", res);
+		return NULL;
+	}
+
+	pnp_res->res = *res;
+	pnp_res->res.name = dev->name;
+	dev_dbg(&dev->dev, "%pR\n", res);
+	return pnp_res;
+}
+
 struct pnp_resource *pnp_add_irq_resource(struct pnp_dev *dev, int irq,
 					  int flags)
 {
@@ -517,7 +540,7 @@ struct pnp_resource *pnp_add_irq_resource(struct pnp_dev *dev, int irq,
 	res->start = irq;
 	res->end = irq;
 
-	dev_dbg(&dev->dev, "  add irq %d flags %#x\n", irq, flags);
+	dev_printk(KERN_DEBUG, &dev->dev, "%pR\n", res);
 	return pnp_res;
 }
 
@@ -538,7 +561,7 @@ struct pnp_resource *pnp_add_dma_resource(struct pnp_dev *dev, int dma,
 	res->start = dma;
 	res->end = dma;
 
-	dev_dbg(&dev->dev, "  add dma %d flags %#x\n", dma, flags);
+	dev_printk(KERN_DEBUG, &dev->dev, "%pR\n", res);
 	return pnp_res;
 }
 
@@ -562,8 +585,7 @@ struct pnp_resource *pnp_add_io_resource(struct pnp_dev *dev,
 	res->start = start;
 	res->end = end;
 
-	dev_dbg(&dev->dev, "  add io  %#llx-%#llx flags %#x\n",
-		(unsigned long long) start, (unsigned long long) end, flags);
+	dev_printk(KERN_DEBUG, &dev->dev, "%pR\n", res);
 	return pnp_res;
 }
 
@@ -587,8 +609,31 @@ struct pnp_resource *pnp_add_mem_resource(struct pnp_dev *dev,
 	res->start = start;
 	res->end = end;
 
-	dev_dbg(&dev->dev, "  add mem %#llx-%#llx flags %#x\n",
-		(unsigned long long) start, (unsigned long long) end, flags);
+	dev_printk(KERN_DEBUG, &dev->dev, "%pR\n", res);
+	return pnp_res;
+}
+
+struct pnp_resource *pnp_add_bus_resource(struct pnp_dev *dev,
+					  resource_size_t start,
+					  resource_size_t end)
+{
+	struct pnp_resource *pnp_res;
+	struct resource *res;
+
+	pnp_res = pnp_new_resource(dev);
+	if (!pnp_res) {
+		dev_err(&dev->dev, "can't add resource for BUS %#llx-%#llx\n",
+			(unsigned long long) start,
+			(unsigned long long) end);
+		return NULL;
+	}
+
+	res = &pnp_res->res;
+	res->flags = IORESOURCE_BUS;
+	res->start = start;
+	res->end = end;
+
+	dev_printk(KERN_DEBUG, &dev->dev, "%pR\n", res);
 	return pnp_res;
 }
 
@@ -637,6 +682,24 @@ int pnp_possible_config(struct pnp_dev *dev, int type, resource_size_t start,
 	return 0;
 }
 EXPORT_SYMBOL(pnp_possible_config);
+
+int pnp_range_reserved(resource_size_t start, resource_size_t end)
+{
+	struct pnp_dev *dev;
+	struct pnp_resource *pnp_res;
+	resource_size_t *dev_start, *dev_end;
+
+	pnp_for_each_dev(dev) {
+		list_for_each_entry(pnp_res, &dev->resources, list) {
+			dev_start = &pnp_res->res.start;
+			dev_end   = &pnp_res->res.end;
+			if (ranged_conflict(&start, &end, dev_start, dev_end))
+				return 1;
+		}
+	}
+	return 0;
+}
+EXPORT_SYMBOL(pnp_range_reserved);
 
 /* format is: pnp_reserve_irq=irq1[,irq2] .... */
 static int __init pnp_setup_reserve_irq(char *str)

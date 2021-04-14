@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2002-2003 Hewlett-Packard Co
  *               Stephane Eranian <eranian@hpl.hp.com>
@@ -150,7 +151,7 @@ default_handler(struct task_struct *task, void *buf, pfm_ovfl_arg_t *arg, struct
 	 * current = task running at the time of the overflow.
 	 *
 	 * per-task mode:
-	 * 	- this is ususally the task being monitored.
+	 * 	- this is usually the task being monitored.
 	 * 	  Under certain conditions, it might be a different task
 	 *
 	 * system-wide:

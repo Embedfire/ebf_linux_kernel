@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * viking.S: High speed Viking cache/mmu operations
  *
@@ -12,9 +13,9 @@
 #include <asm/asi.h>
 #include <asm/mxcc.h>
 #include <asm/page.h>
+#include <asm/pgtable.h>
 #include <asm/pgtsrmmu.h>
 #include <asm/viking.h>
-#include <asm/btfixup.h>
 
 #ifdef CONFIG_SMP
 	.data
@@ -109,7 +110,7 @@ viking_mxcc_flush_page:
 viking_flush_cache_page:
 viking_flush_cache_range:
 #ifndef CONFIG_SMP
-	ld	[%o0 + 0x0], %o0		/* XXX vma->vm_mm, GROSS XXX */
+	ld	[%o0 + VMA_VM_MM], %o0
 #endif
 viking_flush_cache_mm:
 #ifndef CONFIG_SMP
@@ -149,7 +150,7 @@ viking_flush_tlb_mm:
 #endif
 
 viking_flush_tlb_range:
-	ld	[%o0 + 0x00], %o0	/* XXX vma->vm_mm GROSS XXX */
+	ld	[%o0 + VMA_VM_MM], %o0
 	mov	SRMMU_CTX_REG, %g1
 	ld	[%o0 + AOFF_mm_context], %o3
 	lda	[%g1] ASI_M_MMUREGS, %g5
@@ -157,7 +158,7 @@ viking_flush_tlb_range:
 	cmp	%o3, -1
 	be	2f
 #endif
-	sethi	%hi(~((1 << SRMMU_PGDIR_SHIFT) - 1)), %o4
+	sethi	%hi(~((1 << PGDIR_SHIFT) - 1)), %o4
 	sta	%o3, [%g1] ASI_M_MMUREGS
 	and	%o1, %o4, %o1
 	add	%o1, 0x200, %o1
@@ -174,7 +175,7 @@ viking_flush_tlb_range:
 #endif
 
 viking_flush_tlb_page:
-	ld	[%o0 + 0x00], %o0	/* XXX vma->vm_mm GROSS XXX */
+	ld	[%o0 + VMA_VM_MM], %o0
 	mov	SRMMU_CTX_REG, %g1
 	ld	[%o0 + AOFF_mm_context], %o3
 	lda	[%g1] ASI_M_MMUREGS, %g5
@@ -240,10 +241,10 @@ sun4dsmp_flush_tlb_range:
 	tst	%g5
 	bne	3f
 	 mov	SRMMU_CTX_REG, %g1
-	ld	[%o0 + 0x00], %o0	/* XXX vma->vm_mm GROSS XXX */
+	ld	[%o0 + VMA_VM_MM], %o0
 	ld	[%o0 + AOFF_mm_context], %o3
 	lda	[%g1] ASI_M_MMUREGS, %g5
-	sethi	%hi(~((1 << SRMMU_PGDIR_SHIFT) - 1)), %o4
+	sethi	%hi(~((1 << PGDIR_SHIFT) - 1)), %o4
 	sta	%o3, [%g1] ASI_M_MMUREGS
 	and	%o1, %o4, %o1
 	add	%o1, 0x200, %o1
@@ -266,7 +267,7 @@ sun4dsmp_flush_tlb_page:
 	tst	%g5
 	bne	2f
 	 mov	SRMMU_CTX_REG, %g1
-	ld	[%o0 + 0x00], %o0	/* XXX vma->vm_mm GROSS XXX */
+	ld	[%o0 + VMA_VM_MM], %o0
 	ld	[%o0 + AOFF_mm_context], %o3
 	lda	[%g1] ASI_M_MMUREGS, %g5
 	and	%o1, PAGE_MASK, %o1

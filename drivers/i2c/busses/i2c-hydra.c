@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
     i2c Support for the Apple `Hydra' Mac I/O
 
@@ -6,19 +7,6 @@
     Based on i2c Support for Via Technologies 82C586B South Bridge
     Copyright (c) 1998, 1999 Kyösti Mälkki <kmalkki@cc.hut.fi>
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
 #include <linux/kernel.h>
@@ -27,8 +15,7 @@
 #include <linux/types.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
-#include <linux/init.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <asm/hydra.h>
 
 
@@ -102,18 +89,17 @@ static struct i2c_algo_bit_data hydra_bit_data = {
 static struct i2c_adapter hydra_adap = {
 	.owner		= THIS_MODULE,
 	.name		= "Hydra i2c",
-	.id		= I2C_HW_B_HYDRA,
 	.algo_data	= &hydra_bit_data,
 };
 
-static struct pci_device_id hydra_ids[] = {
+static const struct pci_device_id hydra_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_APPLE, PCI_DEVICE_ID_APPLE_HYDRA) },
 	{ 0, }
 };
 
 MODULE_DEVICE_TABLE (pci, hydra_ids);
 
-static int __devinit hydra_probe(struct pci_dev *dev,
+static int hydra_probe(struct pci_dev *dev,
 				 const struct pci_device_id *id)
 {
 	unsigned long base = pci_resource_start(dev, 0);
@@ -123,7 +109,7 @@ static int __devinit hydra_probe(struct pci_dev *dev,
 				hydra_adap.name))
 		return -EBUSY;
 
-	hydra_bit_data.data = ioremap(base, pci_resource_len(dev, 0));
+	hydra_bit_data.data = pci_ioremap_bar(dev, 0);
 	if (hydra_bit_data.data == NULL) {
 		release_mem_region(base+offsetof(struct Hydra, CachePD), 4);
 		return -ENODEV;
@@ -140,7 +126,7 @@ static int __devinit hydra_probe(struct pci_dev *dev,
 	return 0;
 }
 
-static void __devexit hydra_remove(struct pci_dev *dev)
+static void hydra_remove(struct pci_dev *dev)
 {
 	pdregw(hydra_bit_data.data, 0);		/* clear SCLK_OE and SDAT_OE */
 	i2c_del_adapter(&hydra_adap);
@@ -154,26 +140,11 @@ static struct pci_driver hydra_driver = {
 	.name		= "hydra_smbus",
 	.id_table	= hydra_ids,
 	.probe		= hydra_probe,
-	.remove		= __devexit_p(hydra_remove),
+	.remove		= hydra_remove,
 };
 
-static int __init i2c_hydra_init(void)
-{
-	return pci_register_driver(&hydra_driver);
-}
-
-
-static void __exit i2c_hydra_exit(void)
-{
-	pci_unregister_driver(&hydra_driver);
-}
-
-
+module_pci_driver(hydra_driver);
 
 MODULE_AUTHOR("Geert Uytterhoeven <geert@linux-m68k.org>");
 MODULE_DESCRIPTION("i2c for Apple Hydra Mac I/O");
 MODULE_LICENSE("GPL");
-
-module_init(i2c_hydra_init);
-module_exit(i2c_hydra_exit);
-

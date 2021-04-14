@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  Generic cache management functions. Everything is arch-specific,  
  *  but this header exists to make sure the defines/functions can be
@@ -14,6 +15,7 @@
 #include <asm/processor.h>
 #include <asm/cache.h>
 
+struct page;
 /*
 	prefetch(x) attempts to pre-emptively get the memory pointed to
 	by address "x" into the CPU L1 cache. 
@@ -29,7 +31,7 @@
 	prefetchw(x)	- prefetches the cacheline at "x" for write
 	spin_lock_prefetch(x) - prefetches the spinlock *x for taking
 	
-	there is also PREFETCH_STRIDE which is the architecure-prefered 
+	there is also PREFETCH_STRIDE which is the architecure-preferred 
 	"lookahead" size for prefetching streamed operations.
 	
 */
@@ -58,6 +60,13 @@ static inline void prefetch_range(void *addr, size_t len)
 
 	for (cp = addr; cp < end; cp += PREFETCH_STRIDE)
 		prefetch(cp);
+#endif
+}
+
+static inline void prefetch_page_address(struct page *page)
+{
+#if defined(WANT_PAGE_VIRTUAL) || defined(HASHED_PAGE_VIRTUAL)
+	prefetch(page);
 #endif
 }
 

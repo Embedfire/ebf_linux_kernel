@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  linux/include/linux/sunrpc/metrics.h
  *
@@ -26,10 +27,14 @@
 #define _LINUX_SUNRPC_METRICS_H
 
 #include <linux/seq_file.h>
+#include <linux/ktime.h>
+#include <linux/spinlock.h>
 
-#define RPC_IOSTATS_VERS	"1.0"
+#define RPC_IOSTATS_VERS	"1.1"
 
 struct rpc_iostats {
+	spinlock_t		om_lock;
+
 	/*
 	 * These counters give an idea about how many request
 	 * transmissions are required, on average, to complete that
@@ -58,9 +63,14 @@ struct rpc_iostats {
 	 * and the total time the request spent from init to release
 	 * are measured.
 	 */
-	unsigned long long	om_queue,	/* jiffies queued for xmit */
-				om_rtt,		/* jiffies for RPC RTT */
-				om_execute;	/* jiffies for RPC execution */
+	ktime_t			om_queue,	/* queued for xmit */
+				om_rtt,		/* RPC RTT */
+				om_execute;	/* RPC execution */
+	/*
+	 * The count of operations that complete with tk_status < 0.
+	 * These statuses usually indicate error conditions.
+	 */
+	unsigned long           om_error_status;
 } ____cacheline_aligned;
 
 struct rpc_task;
@@ -73,15 +83,24 @@ struct rpc_clnt;
 #ifdef CONFIG_PROC_FS
 
 struct rpc_iostats *	rpc_alloc_iostats(struct rpc_clnt *);
-void			rpc_count_iostats(struct rpc_task *);
-void			rpc_print_iostats(struct seq_file *, struct rpc_clnt *);
+void			rpc_count_iostats(const struct rpc_task *,
+					  struct rpc_iostats *);
+void			rpc_count_iostats_metrics(const struct rpc_task *,
+					  struct rpc_iostats *);
+void			rpc_clnt_show_stats(struct seq_file *, struct rpc_clnt *);
 void			rpc_free_iostats(struct rpc_iostats *);
 
 #else  /*  CONFIG_PROC_FS  */
 
 static inline struct rpc_iostats *rpc_alloc_iostats(struct rpc_clnt *clnt) { return NULL; }
-static inline void rpc_count_iostats(struct rpc_task *task) {}
-static inline void rpc_print_iostats(struct seq_file *seq, struct rpc_clnt *clnt) {}
+static inline void rpc_count_iostats(const struct rpc_task *task,
+				     struct rpc_iostats *stats) {}
+static inline void rpc_count_iostats_metrics(const struct rpc_task *task,
+					     struct rpc_iostats *stats)
+{
+}
+
+static inline void rpc_clnt_show_stats(struct seq_file *seq, struct rpc_clnt *clnt) {}
 static inline void rpc_free_iostats(struct rpc_iostats *stats) {}
 
 #endif  /*  CONFIG_PROC_FS  */

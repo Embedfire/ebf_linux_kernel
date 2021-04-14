@@ -1,29 +1,37 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
+ * Copyright (C) 2015 Anton Ivanov (aivanov@{brocade.com,kot-begemot.co.uk})
+ * Copyright (C) 2015 Thomas Meyer (thomas@m3y3r.de)
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Copyright 2003 PathScale, Inc.
- * Licensed under the GPL
  */
 
 #include <linux/stddef.h>
 #include <linux/err.h>
 #include <linux/hardirq.h>
-#include <linux/gfp.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/personality.h>
 #include <linux/proc_fs.h>
 #include <linux/ptrace.h>
 #include <linux/random.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
+#include <linux/seq_file.h>
 #include <linux/tick.h>
 #include <linux/threads.h>
+#include <linux/tracehook.h>
 #include <asm/current.h>
-#include <asm/pgtable.h>
-#include <asm/uaccess.h>
-#include "as-layout.h"
-#include "kern_util.h"
-#include "os.h"
-#include "skas.h"
-#include "tlb.h"
+#include <asm/mmu_context.h>
+#include <linux/uaccess.h>
+#include <as-layout.h>
+#include <kern_util.h>
+#include <os.h>
+#include <skas.h>
+#include <linux/time-internal.h>
 
 /*
  * This is a per-cpu array.  A processor only modifies its entry and it only
@@ -66,17 +74,6 @@ unsigned long alloc_stack(int order, int atomic)
 	return page;
 }
 
-int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
-{
-	int pid;
-
-	current->thread.request.u.thread.proc = fn;
-	current->thread.request.u.thread.arg = arg;
-	pid = do_fork(CLONE_VM | CLONE_UNTRACED | flags, 0,
-		      &current->thread.regs, 0, NULL, NULL);
-	return pid;
-}
-
 static inline void set_current(struct task_struct *task)
 {
 	cpu_tasks[task_thread_info(task)->cpu] = ((struct cpu_task)
@@ -85,47 +82,32 @@ static inline void set_current(struct task_struct *task)
 
 extern void arch_switch_to(struct task_struct *to);
 
-void *_switch_to(void *prev, void *next, void *last)
+void *__switch_to(struct task_struct *from, struct task_struct *to)
 {
-	struct task_struct *from = prev;
-	struct task_struct *to = next;
-
 	to->thread.prev_sched = from;
 	set_current(to);
 
-	do {
-		current->thread.saved_task = NULL;
-
-		switch_threads(&from->thread.switch_buf,
-			       &to->thread.switch_buf);
-
-		arch_switch_to(current);
-
-		if (current->thread.saved_task)
-			show_regs(&(current->thread.regs));
-		to = current->thread.saved_task;
-		from = current;
-	} while (current->thread.saved_task);
+	switch_threads(&from->thread.switch_buf, &to->thread.switch_buf);
+	arch_switch_to(current);
 
 	return current->thread.prev_sched;
-
 }
 
 void interrupt_end(void)
 {
+	struct pt_regs *regs = &current->thread.regs;
+
 	if (need_resched())
 		schedule();
-	if (test_tsk_thread_flag(current, TIF_SIGPENDING))
-		do_signal();
+	if (test_thread_flag(TIF_SIGPENDING))
+		do_signal(regs);
+	if (test_thread_flag(TIF_NOTIFY_RESUME))
+		tracehook_notify_resume(regs);
 }
 
-void exit_thread(void)
+int get_current_pid(void)
 {
-}
-
-void *get_current(void)
-{
-	return current;
+	return task_pid_nr(current);
 }
 
 /*
@@ -145,16 +127,10 @@ void new_thread_handler(void)
 	arg = current->thread.request.u.thread.arg;
 
 	/*
-	 * The return value is 1 if the kernel thread execs a process,
-	 * 0 if it just exits
+	 * callback returns only if the kernel thread execs a process
 	 */
-	n = run_kernel_thread(fn, arg, &current->thread.exec_buf);
-	if (n == 1) {
-		/* Handle any immediate reschedules or signals */
-		interrupt_end();
-		userspace(&current->thread.regs.regs);
-	}
-	else do_exit(0);
+	n = fn(arg);
+	userspace(&current->thread.regs.regs, current_thread_info()->aux_fp_regs);
 }
 
 /* Called magically, see new_thread_handler above */
@@ -173,48 +149,45 @@ void fork_handler(void)
 
 	current->thread.prev_sched = NULL;
 
-	/* Handle any immediate reschedules or signals */
-	interrupt_end();
-
-	userspace(&current->thread.regs.regs);
+	userspace(&current->thread.regs.regs, current_thread_info()->aux_fp_regs);
 }
 
-int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
-		unsigned long stack_top, struct task_struct * p,
-		struct pt_regs *regs)
+int copy_thread(unsigned long clone_flags, unsigned long sp,
+		unsigned long arg, struct task_struct * p, unsigned long tls)
 {
 	void (*handler)(void);
+	int kthread = current->flags & PF_KTHREAD;
 	int ret = 0;
 
 	p->thread = (struct thread_struct) INIT_THREAD;
 
-	if (current->thread.forking) {
-	  	memcpy(&p->thread.regs.regs, &regs->regs,
+	if (!kthread) {
+	  	memcpy(&p->thread.regs.regs, current_pt_regs(),
 		       sizeof(p->thread.regs.regs));
-		REGS_SET_SYSCALL_RETURN(p->thread.regs.regs.gp, 0);
+		PT_REGS_SET_SYSCALL_RETURN(&p->thread.regs, 0);
 		if (sp != 0)
 			REGS_SP(p->thread.regs.regs.gp) = sp;
 
 		handler = fork_handler;
 
 		arch_copy_thread(&current->thread.arch, &p->thread.arch);
-	}
-	else {
-		get_safe_registers(p->thread.regs.regs.gp);
-		p->thread.request.u.thread = current->thread.request.u.thread;
+	} else {
+		get_safe_registers(p->thread.regs.regs.gp, p->thread.regs.regs.fp);
+		p->thread.request.u.thread.proc = (int (*)(void *))sp;
+		p->thread.request.u.thread.arg = (void *)arg;
 		handler = new_thread_handler;
 	}
 
 	new_thread(task_stack_page(p), &p->thread.switch_buf, handler);
 
-	if (current->thread.forking) {
+	if (!kthread) {
 		clear_flushed_tls(p);
 
 		/*
 		 * Set a new TLS for the child thread?
 		 */
 		if (clone_flags & CLONE_SETTLS)
-			ret = arch_copy_tls(p);
+			ret = arch_set_tls(p, tls);
 	}
 
 	return ret;
@@ -229,31 +202,22 @@ void initial_thread_cb(void (*proc)(void *), void *arg)
 	kmalloc_ok = save_kmalloc_ok;
 }
 
-void default_idle(void)
+static void um_idle_sleep(void)
 {
-	unsigned long long nsecs;
+	unsigned long long duration = UM_NSEC_PER_SEC;
 
-	while (1) {
-		/* endless idle loop with no priority at all */
-
-		/*
-		 * although we are an idle CPU, we do not want to
-		 * get into the scheduler unnecessarily.
-		 */
-		if (need_resched())
-			schedule();
-
-		tick_nohz_stop_sched_tick(1);
-		nsecs = disable_timer();
-		idle_sleep(nsecs);
-		tick_nohz_restart_sched_tick();
+	if (time_travel_mode != TT_MODE_OFF) {
+		time_travel_sleep(duration);
+	} else {
+		os_idle_sleep(duration);
 	}
 }
 
-void cpu_idle(void)
+void arch_cpu_idle(void)
 {
 	cpu_tasks[current_thread_info()->cpu].pid = os_getpid();
-	default_idle();
+	um_idle_sleep();
+	raw_local_irq_enable();
 }
 
 int __cant_sleep(void) {
@@ -284,6 +248,7 @@ char *uml_strdup(const char *string)
 {
 	return kstrdup(string, GFP_KERNEL);
 }
+EXPORT_SYMBOL(uml_strdup);
 
 int copy_to_user_proc(void __user *to, void *from, int size)
 {
@@ -298,22 +263,6 @@ int copy_from_user_proc(void *to, void __user *from, int size)
 int clear_user_proc(void __user *buf, int size)
 {
 	return clear_user(buf, size);
-}
-
-int strlen_user_proc(char __user *str)
-{
-	return strlen_user(str);
-}
-
-int smp_sigio_handler(void)
-{
-#ifdef CONFIG_SMP
-	int cpu = current_thread_info()->cpu;
-	IPI_handler(cpu);
-	if (cpu != 0)
-		return 1;
-#endif
-	return 0;
 }
 
 int cpu(void)
@@ -336,16 +285,19 @@ int get_using_sysemu(void)
 	return atomic_read(&using_sysemu);
 }
 
-static int proc_read_sysemu(char *buf, char **start, off_t offset, int size,int *eof, void *data)
+static int sysemu_proc_show(struct seq_file *m, void *v)
 {
-	if (snprintf(buf, size, "%d\n", get_using_sysemu()) < size)
-		/* No overflow */
-		*eof = 1;
-
-	return strlen(buf);
+	seq_printf(m, "%d\n", get_using_sysemu());
+	return 0;
 }
 
-static int proc_write_sysemu(struct file *file,const char __user *buf, unsigned long count,void *data)
+static int sysemu_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, sysemu_proc_show, NULL);
+}
+
+static ssize_t sysemu_proc_write(struct file *file, const char __user *buf,
+				 size_t count, loff_t *pos)
 {
 	char tmp[2];
 
@@ -358,22 +310,27 @@ static int proc_write_sysemu(struct file *file,const char __user *buf, unsigned 
 	return count;
 }
 
+static const struct proc_ops sysemu_proc_ops = {
+	.proc_open	= sysemu_proc_open,
+	.proc_read	= seq_read,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
+	.proc_write	= sysemu_proc_write,
+};
+
 int __init make_proc_sysemu(void)
 {
 	struct proc_dir_entry *ent;
 	if (!sysemu_supported)
 		return 0;
 
-	ent = create_proc_entry("sysemu", 0600, NULL);
+	ent = proc_create("sysemu", 0600, NULL, &sysemu_proc_ops);
 
 	if (ent == NULL)
 	{
 		printk(KERN_WARNING "Failed to register /proc/sysemu\n");
 		return 0;
 	}
-
-	ent->read_proc  = proc_read_sysemu;
-	ent->write_proc = proc_write_sysemu;
 
 	return 0;
 }
@@ -396,7 +353,7 @@ int singlestepping(void * t)
 /*
  * Only x86 and x86_64 have an arch_align_stack().
  * All other arches have "#define arch_align_stack(x) (x)"
- * in their asm/system.h
+ * in their asm/exec.h
  * As this is included in UML from asm-um/system-generic.h,
  * we can use it to behave as the subarch does.
  */
@@ -448,6 +405,6 @@ int elf_core_copy_fpregs(struct task_struct *t, elf_fpregset_t *fpu)
 {
 	int cpu = current_thread_info()->cpu;
 
-	return save_fp_registers(userspace_pid[cpu], (unsigned long *) fpu);
+	return save_i387_registers(userspace_pid[cpu], (unsigned long *) fpu);
 }
 

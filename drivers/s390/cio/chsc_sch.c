@@ -1,15 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Driver for s390 chsc subchannels
  *
- * Copyright IBM Corp. 2008
+ * Copyright IBM Corp. 2008, 2011
+ *
  * Author(s): Cornelia Huck <cornelia.huck@de.ibm.com>
  *
  */
 
+#include <linux/slab.h>
+#include <linux/compat.h>
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/uaccess.h>
 #include <linux/miscdevice.h>
+#include <linux/kernel_stat.h>
 
 #include <asm/cio.h>
 #include <asm/chsc.h>
@@ -24,6 +29,10 @@
 static debug_info_t *chsc_debug_msg_id;
 static debug_info_t *chsc_debug_log_id;
 
+static struct chsc_request *on_close_request;
+static struct chsc_async_area *on_close_chsc_area;
+static DEFINE_MUTEX(on_close_mutex);
+
 #define CHSC_MSG(imp, args...) do {					\
 		debug_sprintf_event(chsc_debug_msg_id, imp , ##args);	\
 	} while (0)
@@ -34,11 +43,7 @@ static debug_info_t *chsc_debug_log_id;
 
 static void CHSC_LOG_HEX(int level, void *data, int length)
 {
-	while (length > 0) {
-		debug_event(chsc_debug_log_id, level, data, length);
-		length -= chsc_debug_log_id->buf_size;
-		data += chsc_debug_log_id->buf_size;
-	}
+	debug_event(chsc_debug_log_id, level, data, length);
 }
 
 MODULE_AUTHOR("IBM Corporation");
@@ -47,12 +52,14 @@ MODULE_LICENSE("GPL");
 
 static void chsc_subchannel_irq(struct subchannel *sch)
 {
-	struct chsc_private *private = sch->private;
+	struct chsc_private *private = dev_get_drvdata(&sch->dev);
 	struct chsc_request *request = private->request;
-	struct irb *irb = (struct irb *)__LC_IRB;
+	struct irb *irb = this_cpu_ptr(&cio_irb);
 
 	CHSC_LOG(4, "irb");
 	CHSC_LOG_HEX(4, irb, sizeof(*irb));
+	inc_irq_stat(IRQIO_CSC);
+
 	/* Copy irb to provided request and set done. */
 	if (!request) {
 		CHSC_MSG(0, "Interrupt on sch 0.%x.%04x with no request\n",
@@ -61,7 +68,7 @@ static void chsc_subchannel_irq(struct subchannel *sch)
 	}
 	private->request = NULL;
 	memcpy(&request->irb, irb, sizeof(*irb));
-	stsch(sch->schid, &sch->schib);
+	cio_update_schib(sch);
 	complete(&request->completion);
 	put_device(&sch->dev);
 }
@@ -77,15 +84,16 @@ static int chsc_subchannel_probe(struct subchannel *sch)
 	private = kzalloc(sizeof(*private), GFP_KERNEL);
 	if (!private)
 		return -ENOMEM;
+	dev_set_drvdata(&sch->dev, private);
 	ret = cio_enable_subchannel(sch, (u32)(unsigned long)sch);
 	if (ret) {
 		CHSC_MSG(0, "Failed to enable 0.%x.%04x: %d\n",
 			 sch->schid.ssid, sch->schid.sch_no, ret);
+		dev_set_drvdata(&sch->dev, NULL);
 		kfree(private);
 	} else {
-		sch->private = private;
-		if (sch->dev.uevent_suppress) {
-			sch->dev.uevent_suppress = 0;
+		if (dev_get_uevent_suppress(&sch->dev)) {
+			dev_set_uevent_suppress(&sch->dev, 0);
 			kobject_uevent(&sch->dev.kobj, KOBJ_ADD);
 		}
 	}
@@ -97,8 +105,8 @@ static int chsc_subchannel_remove(struct subchannel *sch)
 	struct chsc_private *private;
 
 	cio_disable_subchannel(sch);
-	private = sch->private;
-	sch->private = NULL;
+	private = dev_get_drvdata(&sch->dev);
+	dev_set_drvdata(&sch->dev, NULL);
 	if (private->request) {
 		complete(&private->request->completion);
 		put_device(&sch->dev);
@@ -112,6 +120,31 @@ static void chsc_subchannel_shutdown(struct subchannel *sch)
 	cio_disable_subchannel(sch);
 }
 
+static int chsc_subchannel_prepare(struct subchannel *sch)
+{
+	int cc;
+	struct schib schib;
+	/*
+	 * Don't allow suspend while the subchannel is not idle
+	 * since we don't have a way to clear the subchannel and
+	 * cannot disable it with a request running.
+	 */
+	cc = stsch(sch->schid, &schib);
+	if (!cc && scsw_stctl(&schib.scsw))
+		return -EAGAIN;
+	return 0;
+}
+
+static int chsc_subchannel_freeze(struct subchannel *sch)
+{
+	return cio_disable_subchannel(sch);
+}
+
+static int chsc_subchannel_restore(struct subchannel *sch)
+{
+	return cio_enable_subchannel(sch, (u32)(unsigned long)sch);
+}
+
 static struct css_device_id chsc_subchannel_ids[] = {
 	{ .match_flags = 0x1, .type =SUBCHANNEL_TYPE_CHSC, },
 	{ /* end of list */ },
@@ -119,19 +152,24 @@ static struct css_device_id chsc_subchannel_ids[] = {
 MODULE_DEVICE_TABLE(css, chsc_subchannel_ids);
 
 static struct css_driver chsc_subchannel_driver = {
-	.owner = THIS_MODULE,
+	.drv = {
+		.owner = THIS_MODULE,
+		.name = "chsc_subchannel",
+	},
 	.subchannel_type = chsc_subchannel_ids,
 	.irq = chsc_subchannel_irq,
 	.probe = chsc_subchannel_probe,
 	.remove = chsc_subchannel_remove,
 	.shutdown = chsc_subchannel_shutdown,
-	.name = "chsc_subchannel",
+	.prepare = chsc_subchannel_prepare,
+	.freeze = chsc_subchannel_freeze,
+	.thaw = chsc_subchannel_restore,
+	.restore = chsc_subchannel_restore,
 };
 
 static int __init chsc_init_dbfs(void)
 {
-	chsc_debug_msg_id = debug_register("chsc_msg", 16, 1,
-					   16 * sizeof(long));
+	chsc_debug_msg_id = debug_register("chsc_msg", 8, 1, 4 * sizeof(long));
 	if (!chsc_debug_msg_id)
 		goto out;
 	debug_register_view(chsc_debug_msg_id, &debug_sprintf_view);
@@ -143,8 +181,7 @@ static int __init chsc_init_dbfs(void)
 	debug_set_level(chsc_debug_log_id, 2);
 	return 0;
 out:
-	if (chsc_debug_msg_id)
-		debug_unregister(chsc_debug_msg_id);
+	debug_unregister(chsc_debug_msg_id);
 	return -ENOMEM;
 }
 
@@ -166,7 +203,7 @@ static void chsc_cleanup_sch_driver(void)
 
 static DEFINE_SPINLOCK(chsc_lock);
 
-static int chsc_subchannel_match_next_free(struct device *dev, void *data)
+static int chsc_subchannel_match_next_free(struct device *dev, const void *data)
 {
 	struct subchannel *sch = to_subchannel(dev);
 
@@ -206,10 +243,10 @@ static int chsc_async(struct chsc_async_area *chsc_area,
 	int ret = -ENODEV;
 	char dbf[10];
 
-	chsc_area->header.key = PAGE_DEFAULT_KEY;
+	chsc_area->header.key = PAGE_DEFAULT_KEY >> 4;
 	while ((sch = chsc_get_next_subchannel(sch))) {
 		spin_lock(sch->lock);
-		private = sch->private;
+		private = dev_get_drvdata(&sch->dev);
 		if (private->request) {
 			spin_unlock(sch->lock);
 			ret = -EBUSY;
@@ -219,7 +256,7 @@ static int chsc_async(struct chsc_async_area *chsc_area,
 		CHSC_LOG(2, "schid");
 		CHSC_LOG_HEX(2, &sch->schid, sizeof(sch->schid));
 		cc = chsc(chsc_area);
-		sprintf(dbf, "cc:%d", cc);
+		snprintf(dbf, sizeof(dbf), "cc:%d", cc);
 		CHSC_LOG(2, dbf);
 		switch (cc) {
 		case 0:
@@ -248,11 +285,11 @@ static int chsc_async(struct chsc_async_area *chsc_area,
 	return ret;
 }
 
-static void chsc_log_command(struct chsc_async_area *chsc_area)
+static void chsc_log_command(void *chsc_area)
 {
 	char dbf[10];
 
-	sprintf(dbf, "CHSC:%x", chsc_area->header.code);
+	snprintf(dbf, sizeof(dbf), "CHSC:%x", ((uint16_t *)chsc_area)[1]);
 	CHSC_LOG(0, dbf);
 	CHSC_LOG_HEX(0, chsc_area, 32);
 }
@@ -261,7 +298,7 @@ static int chsc_examine_irb(struct chsc_request *request)
 {
 	int backed_up;
 
-	if (!scsw_stctl(&request->irb.scsw) & SCSW_STCTL_STATUS_PEND)
+	if (!(scsw_stctl(&request->irb.scsw) & SCSW_STCTL_STATUS_PEND))
 		return -EIO;
 	backed_up = scsw_cstat(&request->irb.scsw) & SCHN_STAT_CHAIN_CHECK;
 	request->irb.scsw.cmd.cstat &= ~SCHN_STAT_CHAIN_CHECK;
@@ -316,9 +353,102 @@ static int chsc_ioctl_start(void __user *user_area)
 		if (copy_to_user(user_area, chsc_area, PAGE_SIZE))
 			ret = -EFAULT;
 out_free:
-	sprintf(dbf, "ret:%d", ret);
+	snprintf(dbf, sizeof(dbf), "ret:%d", ret);
 	CHSC_LOG(0, dbf);
 	kfree(request);
+	free_page((unsigned long)chsc_area);
+	return ret;
+}
+
+static int chsc_ioctl_on_close_set(void __user *user_area)
+{
+	char dbf[13];
+	int ret;
+
+	mutex_lock(&on_close_mutex);
+	if (on_close_chsc_area) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+	on_close_request = kzalloc(sizeof(*on_close_request), GFP_KERNEL);
+	if (!on_close_request) {
+		ret = -ENOMEM;
+		goto out_unlock;
+	}
+	on_close_chsc_area = (void *)get_zeroed_page(GFP_DMA | GFP_KERNEL);
+	if (!on_close_chsc_area) {
+		ret = -ENOMEM;
+		goto out_free_request;
+	}
+	if (copy_from_user(on_close_chsc_area, user_area, PAGE_SIZE)) {
+		ret = -EFAULT;
+		goto out_free_chsc;
+	}
+	ret = 0;
+	goto out_unlock;
+
+out_free_chsc:
+	free_page((unsigned long)on_close_chsc_area);
+	on_close_chsc_area = NULL;
+out_free_request:
+	kfree(on_close_request);
+	on_close_request = NULL;
+out_unlock:
+	mutex_unlock(&on_close_mutex);
+	snprintf(dbf, sizeof(dbf), "ocsret:%d", ret);
+	CHSC_LOG(0, dbf);
+	return ret;
+}
+
+static int chsc_ioctl_on_close_remove(void)
+{
+	char dbf[13];
+	int ret;
+
+	mutex_lock(&on_close_mutex);
+	if (!on_close_chsc_area) {
+		ret = -ENOENT;
+		goto out_unlock;
+	}
+	free_page((unsigned long)on_close_chsc_area);
+	on_close_chsc_area = NULL;
+	kfree(on_close_request);
+	on_close_request = NULL;
+	ret = 0;
+out_unlock:
+	mutex_unlock(&on_close_mutex);
+	snprintf(dbf, sizeof(dbf), "ocrret:%d", ret);
+	CHSC_LOG(0, dbf);
+	return ret;
+}
+
+static int chsc_ioctl_start_sync(void __user *user_area)
+{
+	struct chsc_sync_area *chsc_area;
+	int ret, ccode;
+
+	chsc_area = (void *)get_zeroed_page(GFP_KERNEL | GFP_DMA);
+	if (!chsc_area)
+		return -ENOMEM;
+	if (copy_from_user(chsc_area, user_area, PAGE_SIZE)) {
+		ret = -EFAULT;
+		goto out_free;
+	}
+	if (chsc_area->header.code & 0x4000) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+	chsc_log_command(chsc_area);
+	ccode = chsc(chsc_area);
+	if (ccode != 0) {
+		ret = -EIO;
+		goto out_free;
+	}
+	if (copy_to_user(user_area, chsc_area, PAGE_SIZE))
+		ret = -EFAULT;
+	else
+		ret = 0;
+out_free:
 	free_page((unsigned long)chsc_area);
 	return ret;
 }
@@ -418,7 +548,7 @@ static int chsc_ioctl_info_cu(void __user *user_cd)
 		goto out_free;
 	}
 	scucd_area->request.length = 0x0010;
-	scucd_area->request.code = 0x0028;
+	scucd_area->request.code = 0x0026;
 	scucd_area->m = cd->m;
 	scucd_area->fmt1 = cd->fmt;
 	scucd_area->cssid = cd->cssid;
@@ -656,25 +786,31 @@ out_free:
 
 static int chsc_ioctl_chpd(void __user *user_chpd)
 {
+	struct chsc_scpd *scpd_area;
 	struct chsc_cpd_info *chpd;
 	int ret;
 
 	chpd = kzalloc(sizeof(*chpd), GFP_KERNEL);
-	if (!chpd)
-		return -ENOMEM;
+	scpd_area = (void *)get_zeroed_page(GFP_KERNEL | GFP_DMA);
+	if (!scpd_area || !chpd) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
 	if (copy_from_user(chpd, user_chpd, sizeof(*chpd))) {
 		ret = -EFAULT;
 		goto out_free;
 	}
 	ret = chsc_determine_channel_path_desc(chpd->chpid, chpd->fmt,
 					       chpd->rfmt, chpd->c, chpd->m,
-					       &chpd->chpdb);
+					       scpd_area);
 	if (ret)
 		goto out_free;
+	memcpy(&chpd->chpdb, &scpd_area->response, scpd_area->response.length);
 	if (copy_to_user(user_chpd, chpd, sizeof(*chpd)))
 		ret = -EFAULT;
 out_free:
 	kfree(chpd);
+	free_page((unsigned long)scpd_area);
 	return ret;
 }
 
@@ -740,33 +876,89 @@ out_free:
 static long chsc_ioctl(struct file *filp, unsigned int cmd,
 		       unsigned long arg)
 {
+	void __user *argp;
+
 	CHSC_MSG(2, "chsc_ioctl called, cmd=%x\n", cmd);
+	if (is_compat_task())
+		argp = compat_ptr(arg);
+	else
+		argp = (void __user *)arg;
 	switch (cmd) {
 	case CHSC_START:
-		return chsc_ioctl_start((void __user *)arg);
+		return chsc_ioctl_start(argp);
+	case CHSC_START_SYNC:
+		return chsc_ioctl_start_sync(argp);
 	case CHSC_INFO_CHANNEL_PATH:
-		return chsc_ioctl_info_channel_path((void __user *)arg);
+		return chsc_ioctl_info_channel_path(argp);
 	case CHSC_INFO_CU:
-		return chsc_ioctl_info_cu((void __user *)arg);
+		return chsc_ioctl_info_cu(argp);
 	case CHSC_INFO_SCH_CU:
-		return chsc_ioctl_info_sch_cu((void __user *)arg);
+		return chsc_ioctl_info_sch_cu(argp);
 	case CHSC_INFO_CI:
-		return chsc_ioctl_conf_info((void __user *)arg);
+		return chsc_ioctl_conf_info(argp);
 	case CHSC_INFO_CCL:
-		return chsc_ioctl_conf_comp_list((void __user *)arg);
+		return chsc_ioctl_conf_comp_list(argp);
 	case CHSC_INFO_CPD:
-		return chsc_ioctl_chpd((void __user *)arg);
+		return chsc_ioctl_chpd(argp);
 	case CHSC_INFO_DCAL:
-		return chsc_ioctl_dcal((void __user *)arg);
+		return chsc_ioctl_dcal(argp);
+	case CHSC_ON_CLOSE_SET:
+		return chsc_ioctl_on_close_set(argp);
+	case CHSC_ON_CLOSE_REMOVE:
+		return chsc_ioctl_on_close_remove();
 	default: /* unknown ioctl number */
 		return -ENOIOCTLCMD;
 	}
 }
 
+static atomic_t chsc_ready_for_use = ATOMIC_INIT(1);
+
+static int chsc_open(struct inode *inode, struct file *file)
+{
+	if (!atomic_dec_and_test(&chsc_ready_for_use)) {
+		atomic_inc(&chsc_ready_for_use);
+		return -EBUSY;
+	}
+	return nonseekable_open(inode, file);
+}
+
+static int chsc_release(struct inode *inode, struct file *filp)
+{
+	char dbf[13];
+	int ret;
+
+	mutex_lock(&on_close_mutex);
+	if (!on_close_chsc_area)
+		goto out_unlock;
+	init_completion(&on_close_request->completion);
+	CHSC_LOG(0, "on_close");
+	chsc_log_command(on_close_chsc_area);
+	spin_lock_irq(&chsc_lock);
+	ret = chsc_async(on_close_chsc_area, on_close_request);
+	spin_unlock_irq(&chsc_lock);
+	if (ret == -EINPROGRESS) {
+		wait_for_completion(&on_close_request->completion);
+		ret = chsc_examine_irb(on_close_request);
+	}
+	snprintf(dbf, sizeof(dbf), "relret:%d", ret);
+	CHSC_LOG(0, dbf);
+	free_page((unsigned long)on_close_chsc_area);
+	on_close_chsc_area = NULL;
+	kfree(on_close_request);
+	on_close_request = NULL;
+out_unlock:
+	mutex_unlock(&on_close_mutex);
+	atomic_inc(&chsc_ready_for_use);
+	return 0;
+}
+
 static const struct file_operations chsc_fops = {
 	.owner = THIS_MODULE,
+	.open = chsc_open,
+	.release = chsc_release,
 	.unlocked_ioctl = chsc_ioctl,
 	.compat_ioctl = chsc_ioctl,
+	.llseek = no_llseek,
 };
 
 static struct miscdevice chsc_misc_device = {

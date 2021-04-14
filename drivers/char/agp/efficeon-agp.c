@@ -28,6 +28,7 @@
 #include <linux/page-flags.h>
 #include <linux/mm.h>
 #include "agp.h"
+#include "intel-agp.h"
 
 /*
  * The real differences to the generic AGP code is
@@ -65,8 +66,9 @@ static const struct gatt_mask efficeon_generic_masks[] =
 };
 
 /* This function does the same thing as mask_memory() for this chipset... */
-static inline unsigned long efficeon_mask_memory(unsigned long addr)
+static inline unsigned long efficeon_mask_memory(struct page *page)
 {
+	unsigned long addr = page_to_phys(page);
 	return addr | 0x00000001;
 }
 
@@ -126,7 +128,6 @@ static void efficeon_cleanup(void)
 
 static int efficeon_configure(void)
 {
-	u32 temp;
 	u16 temp2;
 	struct aper_size_info_lvl2 *current_size;
 
@@ -139,8 +140,8 @@ static int efficeon_configure(void)
 			      current_size->size_value);
 
 	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
-	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+	agp_bridge->gart_bus_addr = pci_bus_address(agp_bridge->dev,
+						    AGP_APERTURE_BAR);
 
 	/* agpctrl */
 	pci_write_config_dword(agp_bridge->dev, INTEL_AGPCTRL, 0x2280);
@@ -162,7 +163,6 @@ static int efficeon_free_gatt_table(struct agp_bridge_data *bridge)
 		unsigned long page = efficeon_private.l1_table[index];
 		if (page) {
 			efficeon_private.l1_table[index] = 0;
-			ClearPageReserved(virt_to_page((char *)page));
 			free_page(page);
 			freed++;
 		}
@@ -218,14 +218,13 @@ static int efficeon_create_gatt_table(struct agp_bridge_data *bridge)
 			efficeon_free_gatt_table(agp_bridge);
 			return -ENOMEM;
 		}
-		SetPageReserved(virt_to_page((char *)page));
 
 		for (offset = 0; offset < PAGE_SIZE; offset += clflush_chunk)
 			clflush((char *)page+offset);
 
 		efficeon_private.l1_table[index] = page;
 
-		value = virt_to_gart((unsigned long *)page) | pati | present | index;
+		value = virt_to_phys((unsigned long *)page) | pati | present | index;
 
 		pci_write_config_dword(agp_bridge->dev,
 			EFFICEON_ATTPAGE, value);
@@ -257,7 +256,7 @@ static int efficeon_insert_memory(struct agp_memory * mem, off_t pg_start, int t
 	last_page = NULL;
 	for (i = 0; i < count; i++) {
 		int index = pg_start + i;
-		unsigned long insert = efficeon_mask_memory(mem->memory[i]);
+		unsigned long insert = efficeon_mask_memory(mem->pages[i]);
 
 		page = (unsigned int *) efficeon_private.l1_table[index >> 10];
 
@@ -335,12 +334,14 @@ static const struct agp_bridge_driver efficeon_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages	= agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages	= agp_generic_destroy_pages,
 	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-static int __devinit agp_efficeon_probe(struct pci_dev *pdev,
-				     const struct pci_device_id *ent)
+static int agp_efficeon_probe(struct pci_dev *pdev,
+			      const struct pci_device_id *ent)
 {
 	struct agp_bridge_data *bridge;
 	u8 cap_ptr;
@@ -368,6 +369,17 @@ static int __devinit agp_efficeon_probe(struct pci_dev *pdev,
 	bridge->capndx = cap_ptr;
 
 	/*
+	* If the device has not been properly setup, the following will catch
+	* the problem and should stop the system from crashing.
+	* 20030610 - hamish@zot.org
+	*/
+	if (pci_enable_device(pdev)) {
+		printk(KERN_ERR PFX "Unable to Enable PCI device\n");
+		agp_put_bridge(bridge);
+		return -ENODEV;
+	}
+
+	/*
 	* The following fixes the case where the BIOS has "forgotten" to
 	* provide an address range for the GART.
 	* 20030610 - hamish@zot.org
@@ -381,17 +393,6 @@ static int __devinit agp_efficeon_probe(struct pci_dev *pdev,
 		}
 	}
 
-	/*
-	* If the device has not been properly setup, the following will catch
-	* the problem and should stop the system from crashing.
-	* 20030610 - hamish@zot.org
-	*/
-	if (pci_enable_device(pdev)) {
-		printk(KERN_ERR PFX "Unable to Enable PCI device\n");
-		agp_put_bridge(bridge);
-		return -ENODEV;
-	}
-
 	/* Fill in the mode register */
 	if (cap_ptr) {
 		pci_read_config_dword(pdev,
@@ -403,7 +404,7 @@ static int __devinit agp_efficeon_probe(struct pci_dev *pdev,
 	return agp_add_bridge(bridge);
 }
 
-static void __devexit agp_efficeon_remove(struct pci_dev *pdev)
+static void agp_efficeon_remove(struct pci_dev *pdev)
 {
 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
 
@@ -424,7 +425,7 @@ static int agp_efficeon_resume(struct pci_dev *pdev)
 }
 #endif
 
-static struct pci_device_id agp_efficeon_pci_table[] = {
+static const struct pci_device_id agp_efficeon_pci_table[] = {
 	{
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,

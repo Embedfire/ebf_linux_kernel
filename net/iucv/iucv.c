@@ -1,7 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * IUCV base infrastructure.
  *
- * Copyright 2001, 2006 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ * Copyright IBM Corp. 2001, 2009
+ *
  * Author(s):
  *    Original source:
  *	Alan Altmark (Alan_Altmark@us.ibm.com)	Sept. 2000
@@ -10,26 +12,18 @@
  *	Fritz Elfert (elfert@de.ibm.com, felfert@millenux.com)
  *    Rewritten for af_iucv:
  *	Martin Schwidefsky <schwidefsky@de.ibm.com>
+ *    PM functions:
+ *	Ursula Braun (ursula.braun@de.ibm.com)
  *
  * Documentation used:
  *    The original source
  *    CP Programming Service, IBM document # SC24-5760
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#define KMSG_COMPONENT "iucv"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
+#include <linux/kernel_stat.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/spinlock.h>
@@ -42,12 +36,12 @@
 #include <linux/err.h>
 #include <linux/device.h>
 #include <linux/cpu.h>
+#include <linux/reboot.h>
 #include <net/iucv/iucv.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/ebcdic.h>
 #include <asm/io.h>
-#include <asm/s390_ext.h>
-#include <asm/s390_rdev.h>
+#include <asm/irq.h>
 #include <asm/smp.h>
 
 /*
@@ -98,8 +92,8 @@ struct iucv_irq_list {
 };
 
 static struct iucv_irq_data *iucv_irq_data[NR_CPUS];
-static cpumask_t iucv_buffer_cpumask = CPU_MASK_NONE;
-static cpumask_t iucv_irq_cpumask = CPU_MASK_NONE;
+static cpumask_t iucv_buffer_cpumask = { CPU_BITS_NONE };
+static cpumask_t iucv_irq_cpumask = { CPU_BITS_NONE };
 
 /*
  * Queue of interrupt buffers lock for delivery via the tasklet
@@ -111,7 +105,7 @@ static LIST_HEAD(iucv_task_queue);
  * The tasklet for fast delivery of iucv interrupts.
  */
 static void iucv_tasklet_fn(unsigned long);
-static DECLARE_TASKLET(iucv_tasklet, iucv_tasklet_fn,0);
+static DECLARE_TASKLET_OLD(iucv_tasklet, iucv_tasklet_fn);
 
 /*
  * Queue of interrupt buffers for delivery via a work queue
@@ -145,6 +139,7 @@ enum iucv_command_codes {
 	IUCV_RESUME = 14,
 	IUCV_SEVER = 15,
 	IUCV_SETMASK = 16,
+	IUCV_SETCONTROLMASK = 17,
 };
 
 /*
@@ -278,6 +273,7 @@ union iucv_param {
  * Anchor for per-cpu IUCV command parameter block.
  */
 static union iucv_param *iucv_param[NR_CPUS];
+static union iucv_param *iucv_param_irq[NR_CPUS];
 
 /**
  * iucv_call_b2f0
@@ -288,21 +284,29 @@ static union iucv_param *iucv_param[NR_CPUS];
  *
  * Returns the result of the CP IUCV call.
  */
-static inline int iucv_call_b2f0(int command, union iucv_param *parm)
+static inline int __iucv_call_b2f0(int command, union iucv_param *parm)
 {
 	register unsigned long reg0 asm ("0");
 	register unsigned long reg1 asm ("1");
 	int ccode;
 
 	reg0 = command;
-	reg1 = virt_to_phys(parm);
+	reg1 = (unsigned long)parm;
 	asm volatile(
 		"	.long 0xb2f01000\n"
 		"	ipm	%0\n"
 		"	srl	%0,28\n"
 		: "=d" (ccode), "=m" (*parm), "+d" (reg0), "+a" (reg1)
 		:  "m" (*parm) : "cc");
-	return (ccode == 1) ? parm->ctrl.iprcode : ccode;
+	return ccode;
+}
+
+static inline int iucv_call_b2f0(int command, union iucv_param *parm)
+{
+	int ccode;
+
+	ccode = __iucv_call_b2f0(command, parm);
+	return ccode == 1 ? parm->ctrl.iprcode : ccode;
 }
 
 /**
@@ -313,16 +317,12 @@ static inline int iucv_call_b2f0(int command, union iucv_param *parm)
  * Returns the maximum number of connections or -EPERM is IUCV is not
  * available.
  */
-static int iucv_query_maxconn(void)
+static int __iucv_query_maxconn(void *param, unsigned long *max_pathid)
 {
 	register unsigned long reg0 asm ("0");
 	register unsigned long reg1 asm ("1");
-	void *param;
 	int ccode;
 
-	param = kzalloc(sizeof(union iucv_param), GFP_KERNEL|GFP_DMA);
-	if (!param)
-		return -ENOMEM;
 	reg0 = IUCV_QUERY;
 	reg1 = (unsigned long) param;
 	asm volatile (
@@ -330,8 +330,22 @@ static int iucv_query_maxconn(void)
 		"	ipm	%0\n"
 		"	srl	%0,28\n"
 		: "=d" (ccode), "+d" (reg0), "+d" (reg1) : : "cc");
+	*max_pathid = reg1;
+	return ccode;
+}
+
+static int iucv_query_maxconn(void)
+{
+	unsigned long max_pathid;
+	void *param;
+	int ccode;
+
+	param = kzalloc(sizeof(union iucv_param), GFP_KERNEL | GFP_DMA);
+	if (!param)
+		return -ENOMEM;
+	ccode = __iucv_query_maxconn(param, &max_pathid);
 	if (ccode == 0)
-		iucv_max_pathid = reg0;
+		iucv_max_pathid = max_pathid;
 	kfree(param);
 	return ccode ? -EPERM : 0;
 }
@@ -356,13 +370,25 @@ static void iucv_allow_cpu(void *data)
 	 *	0x10 - Flag to allow priority message completion interrupts
 	 *	0x08 - Flag to allow IUCV control interrupts
 	 */
-	parm = iucv_param[cpu];
+	parm = iucv_param_irq[cpu];
 	memset(parm, 0, sizeof(union iucv_param));
 	parm->set_mask.ipmask = 0xf8;
 	iucv_call_b2f0(IUCV_SETMASK, parm);
 
+	/*
+	 * Enable all iucv control interrupts.
+	 * ipmask contains bits for the different interrupts
+	 *	0x80 - Flag to allow pending connections interrupts
+	 *	0x40 - Flag to allow connection complete interrupts
+	 *	0x20 - Flag to allow connection severed interrupts
+	 *	0x10 - Flag to allow connection quiesced interrupts
+	 *	0x08 - Flag to allow connection resumed interrupts
+	 */
+	memset(parm, 0, sizeof(union iucv_param));
+	parm->set_mask.ipmask = 0xf8;
+	iucv_call_b2f0(IUCV_SETCONTROLMASK, parm);
 	/* Set indication that iucv interrupts are allowed for this cpu. */
-	cpu_set(cpu, iucv_irq_cpumask);
+	cpumask_set_cpu(cpu, &iucv_irq_cpumask);
 }
 
 /**
@@ -377,12 +403,12 @@ static void iucv_block_cpu(void *data)
 	union iucv_param *parm;
 
 	/* Disable all iucv interrupts. */
-	parm = iucv_param[cpu];
+	parm = iucv_param_irq[cpu];
 	memset(parm, 0, sizeof(union iucv_param));
 	iucv_call_b2f0(IUCV_SETMASK, parm);
 
 	/* Clear indication that iucv interrupts are allowed for this cpu. */
-	cpu_clear(cpu, iucv_irq_cpumask);
+	cpumask_clear_cpu(cpu, &iucv_irq_cpumask);
 }
 
 /**
@@ -397,11 +423,11 @@ static void iucv_declare_cpu(void *data)
 	union iucv_param *parm;
 	int rc;
 
-	if (cpu_isset(cpu, iucv_buffer_cpumask))
+	if (cpumask_test_cpu(cpu, &iucv_buffer_cpumask))
 		return;
 
 	/* Declare interrupt buffer. */
-	parm = iucv_param[cpu];
+	parm = iucv_param_irq[cpu];
 	memset(parm, 0, sizeof(union iucv_param));
 	parm->db.ipbfadr1 = virt_to_phys(iucv_irq_data[cpu]);
 	rc = iucv_call_b2f0(IUCV_DECLARE_BUFFER, parm);
@@ -424,15 +450,15 @@ static void iucv_declare_cpu(void *data)
 			err = "Paging or storage error";
 			break;
 		}
-		printk(KERN_WARNING "iucv_register: iucv_declare_buffer "
-		       "on cpu %i returned error 0x%02x (%s)\n", cpu, rc, err);
+		pr_warn("Defining an interrupt buffer on CPU %i failed with 0x%02x (%s)\n",
+			cpu, rc, err);
 		return;
 	}
 
 	/* Set indication that an iucv buffer exists for this cpu. */
-	cpu_set(cpu, iucv_buffer_cpumask);
+	cpumask_set_cpu(cpu, &iucv_buffer_cpumask);
 
-	if (iucv_nonsmp_handler == 0 || cpus_empty(iucv_irq_cpumask))
+	if (iucv_nonsmp_handler == 0 || cpumask_empty(&iucv_irq_cpumask))
 		/* Enable iucv interrupts on this cpu. */
 		iucv_allow_cpu(NULL);
 	else
@@ -451,18 +477,18 @@ static void iucv_retrieve_cpu(void *data)
 	int cpu = smp_processor_id();
 	union iucv_param *parm;
 
-	if (!cpu_isset(cpu, iucv_buffer_cpumask))
+	if (!cpumask_test_cpu(cpu, &iucv_buffer_cpumask))
 		return;
 
 	/* Block iucv interrupts. */
 	iucv_block_cpu(NULL);
 
 	/* Retrieve interrupt buffer. */
-	parm = iucv_param[cpu];
+	parm = iucv_param_irq[cpu];
 	iucv_call_b2f0(IUCV_RETRIEVE_BUFFER, parm);
 
 	/* Clear indication that an iucv buffer exists for this cpu. */
-	cpu_clear(cpu, iucv_buffer_cpumask);
+	cpumask_clear_cpu(cpu, &iucv_buffer_cpumask);
 }
 
 /**
@@ -477,8 +503,8 @@ static void iucv_setmask_mp(void)
 	get_online_cpus();
 	for_each_online_cpu(cpu)
 		/* Enable all cpus with a declared buffer. */
-		if (cpu_isset(cpu, iucv_buffer_cpumask) &&
-		    !cpu_isset(cpu, iucv_irq_cpumask))
+		if (cpumask_test_cpu(cpu, &iucv_buffer_cpumask) &&
+		    !cpumask_test_cpu(cpu, &iucv_irq_cpumask))
 			smp_call_function_single(cpu, iucv_allow_cpu,
 						 NULL, 1);
 	put_online_cpus();
@@ -495,9 +521,9 @@ static void iucv_setmask_up(void)
 	int cpu;
 
 	/* Disable all cpu but the first in cpu_irq_cpumask. */
-	cpumask = iucv_irq_cpumask;
-	cpu_clear(first_cpu(iucv_irq_cpumask), cpumask);
-	for_each_cpu_mask_nr(cpu, cpumask)
+	cpumask_copy(&cpumask, &iucv_irq_cpumask);
+	cpumask_clear_cpu(cpumask_first(&iucv_irq_cpumask), &cpumask);
+	for_each_cpu(cpu, &cpumask)
 		smp_call_function_single(cpu, iucv_block_cpu, NULL, 1);
 }
 
@@ -514,6 +540,7 @@ static int iucv_enable(void)
 	size_t alloc_size;
 	int cpu, rc;
 
+	get_online_cpus();
 	rc = -ENOMEM;
 	alloc_size = iucv_max_pathid * sizeof(struct iucv_path);
 	iucv_path_table = kzalloc(alloc_size, GFP_KERNEL);
@@ -521,20 +548,17 @@ static int iucv_enable(void)
 		goto out;
 	/* Declare per cpu buffers. */
 	rc = -EIO;
-	get_online_cpus();
 	for_each_online_cpu(cpu)
 		smp_call_function_single(cpu, iucv_declare_cpu, NULL, 1);
-	preempt_enable();
-	if (cpus_empty(iucv_buffer_cpumask))
+	if (cpumask_empty(&iucv_buffer_cpumask))
 		/* No cpu could declare an iucv buffer. */
-		goto out_path;
+		goto out;
 	put_online_cpus();
 	return 0;
-
-out_path:
-	put_online_cpus();
-	kfree(iucv_path_table);
 out:
+	kfree(iucv_path_table);
+	iucv_path_table = NULL;
+	put_online_cpus();
 	return rc;
 }
 
@@ -547,65 +571,78 @@ out:
  */
 static void iucv_disable(void)
 {
+	get_online_cpus();
 	on_each_cpu(iucv_retrieve_cpu, NULL, 1);
 	kfree(iucv_path_table);
+	iucv_path_table = NULL;
+	put_online_cpus();
 }
 
-static int __cpuinit iucv_cpu_notify(struct notifier_block *self,
-				     unsigned long action, void *hcpu)
+static int iucv_cpu_dead(unsigned int cpu)
+{
+	kfree(iucv_param_irq[cpu]);
+	iucv_param_irq[cpu] = NULL;
+	kfree(iucv_param[cpu]);
+	iucv_param[cpu] = NULL;
+	kfree(iucv_irq_data[cpu]);
+	iucv_irq_data[cpu] = NULL;
+	return 0;
+}
+
+static int iucv_cpu_prepare(unsigned int cpu)
+{
+	/* Note: GFP_DMA used to get memory below 2G */
+	iucv_irq_data[cpu] = kmalloc_node(sizeof(struct iucv_irq_data),
+			     GFP_KERNEL|GFP_DMA, cpu_to_node(cpu));
+	if (!iucv_irq_data[cpu])
+		goto out_free;
+
+	/* Allocate parameter blocks. */
+	iucv_param[cpu] = kmalloc_node(sizeof(union iucv_param),
+			  GFP_KERNEL|GFP_DMA, cpu_to_node(cpu));
+	if (!iucv_param[cpu])
+		goto out_free;
+
+	iucv_param_irq[cpu] = kmalloc_node(sizeof(union iucv_param),
+			  GFP_KERNEL|GFP_DMA, cpu_to_node(cpu));
+	if (!iucv_param_irq[cpu])
+		goto out_free;
+
+	return 0;
+
+out_free:
+	iucv_cpu_dead(cpu);
+	return -ENOMEM;
+}
+
+static int iucv_cpu_online(unsigned int cpu)
+{
+	if (!iucv_path_table)
+		return 0;
+	iucv_declare_cpu(NULL);
+	return 0;
+}
+
+static int iucv_cpu_down_prep(unsigned int cpu)
 {
 	cpumask_t cpumask;
-	long cpu = (long) hcpu;
 
-	switch (action) {
-	case CPU_UP_PREPARE:
-	case CPU_UP_PREPARE_FROZEN:
-		iucv_irq_data[cpu] = kmalloc_node(sizeof(struct iucv_irq_data),
-					GFP_KERNEL|GFP_DMA, cpu_to_node(cpu));
-		if (!iucv_irq_data[cpu])
-			return NOTIFY_BAD;
-		iucv_param[cpu] = kmalloc_node(sizeof(union iucv_param),
-				     GFP_KERNEL|GFP_DMA, cpu_to_node(cpu));
-		if (!iucv_param[cpu]) {
-			kfree(iucv_irq_data[cpu]);
-			iucv_irq_data[cpu] = NULL;
-			return NOTIFY_BAD;
-		}
-		break;
-	case CPU_UP_CANCELED:
-	case CPU_UP_CANCELED_FROZEN:
-	case CPU_DEAD:
-	case CPU_DEAD_FROZEN:
-		kfree(iucv_param[cpu]);
-		iucv_param[cpu] = NULL;
-		kfree(iucv_irq_data[cpu]);
-		iucv_irq_data[cpu] = NULL;
-		break;
-	case CPU_ONLINE:
-	case CPU_ONLINE_FROZEN:
-	case CPU_DOWN_FAILED:
-	case CPU_DOWN_FAILED_FROZEN:
-		smp_call_function_single(cpu, iucv_declare_cpu, NULL, 1);
-		break;
-	case CPU_DOWN_PREPARE:
-	case CPU_DOWN_PREPARE_FROZEN:
-		cpumask = iucv_buffer_cpumask;
-		cpu_clear(cpu, cpumask);
-		if (cpus_empty(cpumask))
-			/* Can't offline last IUCV enabled cpu. */
-			return NOTIFY_BAD;
-		smp_call_function_single(cpu, iucv_retrieve_cpu, NULL, 1);
-		if (cpus_empty(iucv_irq_cpumask))
-			smp_call_function_single(first_cpu(iucv_buffer_cpumask),
-						 iucv_allow_cpu, NULL, 1);
-		break;
-	}
-	return NOTIFY_OK;
+	if (!iucv_path_table)
+		return 0;
+
+	cpumask_copy(&cpumask, &iucv_buffer_cpumask);
+	cpumask_clear_cpu(cpu, &cpumask);
+	if (cpumask_empty(&cpumask))
+		/* Can't offline last IUCV enabled cpu. */
+		return -EINVAL;
+
+	iucv_retrieve_cpu(NULL);
+	if (!cpumask_empty(&iucv_irq_cpumask))
+		return 0;
+	smp_call_function_single(cpumask_first(&iucv_buffer_cpumask),
+				 iucv_allow_cpu, NULL, 1);
+	return 0;
 }
-
-static struct notifier_block __refdata iucv_cpu_notifier = {
-	.notifier_call = iucv_cpu_notify,
-};
 
 /**
  * iucv_sever_pathid
@@ -614,11 +651,11 @@ static struct notifier_block __refdata iucv_cpu_notifier = {
  *
  * Sever an iucv path to free up the pathid. Used internally.
  */
-static int iucv_sever_pathid(u16 pathid, u8 userdata[16])
+static int iucv_sever_pathid(u16 pathid, u8 *userdata)
 {
 	union iucv_param *parm;
 
-	parm = iucv_param[smp_processor_id()];
+	parm = iucv_param_irq[smp_processor_id()];
 	memset(parm, 0, sizeof(union iucv_param));
 	if (userdata)
 		memcpy(parm->ctrl.ipuser, userdata, sizeof(parm->ctrl.ipuser));
@@ -649,7 +686,7 @@ static void iucv_cleanup_queue(void)
 	struct iucv_irq_list *p, *n;
 
 	/*
-	 * When a path is severed, the pathid can be reused immediatly
+	 * When a path is severed, the pathid can be reused immediately
 	 * on a iucv connect or a connection pending interrupt. Remove
 	 * all entries from the task queue that refer to a stale pathid
 	 * (iucv_path_table[ix] == NULL). Only then do the iucv connect
@@ -721,7 +758,7 @@ void iucv_unregister(struct iucv_handler *handler, int smp)
 	spin_lock_bh(&iucv_table_lock);
 	/* Remove handler from the iucv_handler_list. */
 	list_del_init(&handler->list);
-	/* Sever all pathids still refering to the handler. */
+	/* Sever all pathids still referring to the handler. */
 	list_for_each_entry_safe(p, n, &handler->paths, list) {
 		iucv_sever_pathid(p->pathid, NULL);
 		iucv_path_table[p->pathid] = NULL;
@@ -739,6 +776,31 @@ void iucv_unregister(struct iucv_handler *handler, int smp)
 }
 EXPORT_SYMBOL(iucv_unregister);
 
+static int iucv_reboot_event(struct notifier_block *this,
+			     unsigned long event, void *ptr)
+{
+	int i;
+
+	if (cpumask_empty(&iucv_irq_cpumask))
+		return NOTIFY_DONE;
+
+	get_online_cpus();
+	on_each_cpu_mask(&iucv_irq_cpumask, iucv_block_cpu, NULL, 1);
+	preempt_disable();
+	for (i = 0; i < iucv_max_pathid; i++) {
+		if (iucv_path_table[i])
+			iucv_sever_pathid(i, NULL);
+	}
+	preempt_enable();
+	put_online_cpus();
+	iucv_disable();
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block iucv_reboot_notifier = {
+	.notifier_call = iucv_reboot_event,
+};
+
 /**
  * iucv_path_accept
  * @path: address of iucv path structure
@@ -752,12 +814,16 @@ EXPORT_SYMBOL(iucv_unregister);
  * Returns the result of the CP IUCV call.
  */
 int iucv_path_accept(struct iucv_path *path, struct iucv_handler *handler,
-		     u8 userdata[16], void *private)
+		     u8 *userdata, void *private)
 {
 	union iucv_param *parm;
 	int rc;
 
 	local_bh_disable();
+	if (cpumask_empty(&iucv_buffer_cpumask)) {
+		rc = -EIO;
+		goto out;
+	}
 	/* Prepare parameter block. */
 	parm = iucv_param[smp_processor_id()];
 	memset(parm, 0, sizeof(union iucv_param));
@@ -773,6 +839,7 @@ int iucv_path_accept(struct iucv_path *path, struct iucv_handler *handler,
 		path->msglim = parm->ctrl.ipmsglim;
 		path->flags = parm->ctrl.ipflags1;
 	}
+out:
 	local_bh_enable();
 	return rc;
 }
@@ -794,7 +861,7 @@ EXPORT_SYMBOL(iucv_path_accept);
  * Returns the result of the CP IUCV call.
  */
 int iucv_path_connect(struct iucv_path *path, struct iucv_handler *handler,
-		      u8 userid[8], u8 system[8], u8 userdata[16],
+		      u8 *userid, u8 *system, u8 *userdata,
 		      void *private)
 {
 	union iucv_param *parm;
@@ -802,6 +869,10 @@ int iucv_path_connect(struct iucv_path *path, struct iucv_handler *handler,
 
 	spin_lock_bh(&iucv_table_lock);
 	iucv_cleanup_queue();
+	if (cpumask_empty(&iucv_buffer_cpumask)) {
+		rc = -EIO;
+		goto out;
+	}
 	parm = iucv_param[smp_processor_id()];
 	memset(parm, 0, sizeof(union iucv_param));
 	parm->ctrl.ipmsglim = path->msglim;
@@ -836,6 +907,7 @@ int iucv_path_connect(struct iucv_path *path, struct iucv_handler *handler,
 			rc = -EIO;
 		}
 	}
+out:
 	spin_unlock_bh(&iucv_table_lock);
 	return rc;
 }
@@ -851,18 +923,23 @@ EXPORT_SYMBOL(iucv_path_connect);
  *
  * Returns the result from the CP IUCV call.
  */
-int iucv_path_quiesce(struct iucv_path *path, u8 userdata[16])
+int iucv_path_quiesce(struct iucv_path *path, u8 *userdata)
 {
 	union iucv_param *parm;
 	int rc;
 
 	local_bh_disable();
+	if (cpumask_empty(&iucv_buffer_cpumask)) {
+		rc = -EIO;
+		goto out;
+	}
 	parm = iucv_param[smp_processor_id()];
 	memset(parm, 0, sizeof(union iucv_param));
 	if (userdata)
 		memcpy(parm->ctrl.ipuser, userdata, sizeof(parm->ctrl.ipuser));
 	parm->ctrl.ippathid = path->pathid;
 	rc = iucv_call_b2f0(IUCV_QUIESCE, parm);
+out:
 	local_bh_enable();
 	return rc;
 }
@@ -878,18 +955,23 @@ EXPORT_SYMBOL(iucv_path_quiesce);
  *
  * Returns the result from the CP IUCV call.
  */
-int iucv_path_resume(struct iucv_path *path, u8 userdata[16])
+int iucv_path_resume(struct iucv_path *path, u8 *userdata)
 {
 	union iucv_param *parm;
 	int rc;
 
 	local_bh_disable();
+	if (cpumask_empty(&iucv_buffer_cpumask)) {
+		rc = -EIO;
+		goto out;
+	}
 	parm = iucv_param[smp_processor_id()];
 	memset(parm, 0, sizeof(union iucv_param));
 	if (userdata)
 		memcpy(parm->ctrl.ipuser, userdata, sizeof(parm->ctrl.ipuser));
 	parm->ctrl.ippathid = path->pathid;
 	rc = iucv_call_b2f0(IUCV_RESUME, parm);
+out:
 	local_bh_enable();
 	return rc;
 }
@@ -903,20 +985,23 @@ int iucv_path_resume(struct iucv_path *path, u8 userdata[16])
  *
  * Returns the result from the CP IUCV call.
  */
-int iucv_path_sever(struct iucv_path *path, u8 userdata[16])
+int iucv_path_sever(struct iucv_path *path, u8 *userdata)
 {
 	int rc;
 
 	preempt_disable();
+	if (cpumask_empty(&iucv_buffer_cpumask)) {
+		rc = -EIO;
+		goto out;
+	}
 	if (iucv_active_cpu != smp_processor_id())
 		spin_lock_bh(&iucv_table_lock);
 	rc = iucv_sever_pathid(path->pathid, userdata);
-	if (!rc) {
-		iucv_path_table[path->pathid] = NULL;
-		list_del_init(&path->list);
-	}
+	iucv_path_table[path->pathid] = NULL;
+	list_del_init(&path->list);
 	if (iucv_active_cpu != smp_processor_id())
 		spin_unlock_bh(&iucv_table_lock);
+out:
 	preempt_enable();
 	return rc;
 }
@@ -939,6 +1024,10 @@ int iucv_message_purge(struct iucv_path *path, struct iucv_message *msg,
 	int rc;
 
 	local_bh_disable();
+	if (cpumask_empty(&iucv_buffer_cpumask)) {
+		rc = -EIO;
+		goto out;
+	}
 	parm = iucv_param[smp_processor_id()];
 	memset(parm, 0, sizeof(union iucv_param));
 	parm->purge.ippathid = path->pathid;
@@ -950,13 +1039,59 @@ int iucv_message_purge(struct iucv_path *path, struct iucv_message *msg,
 		msg->audit = (*(u32 *) &parm->purge.ipaudit) >> 8;
 		msg->tag = parm->purge.ipmsgtag;
 	}
+out:
 	local_bh_enable();
 	return rc;
 }
 EXPORT_SYMBOL(iucv_message_purge);
 
 /**
- * iucv_message_receive
+ * iucv_message_receive_iprmdata
+ * @path: address of iucv path structure
+ * @msg: address of iucv msg structure
+ * @flags: how the message is received (IUCV_IPBUFLST)
+ * @buffer: address of data buffer or address of struct iucv_array
+ * @size: length of data buffer
+ * @residual:
+ *
+ * Internal function used by iucv_message_receive and __iucv_message_receive
+ * to receive RMDATA data stored in struct iucv_message.
+ */
+static int iucv_message_receive_iprmdata(struct iucv_path *path,
+					 struct iucv_message *msg,
+					 u8 flags, void *buffer,
+					 size_t size, size_t *residual)
+{
+	struct iucv_array *array;
+	u8 *rmmsg;
+	size_t copy;
+
+	/*
+	 * Message is 8 bytes long and has been stored to the
+	 * message descriptor itself.
+	 */
+	if (residual)
+		*residual = abs(size - 8);
+	rmmsg = msg->rmmsg;
+	if (flags & IUCV_IPBUFLST) {
+		/* Copy to struct iucv_array. */
+		size = (size < 8) ? size : 8;
+		for (array = buffer; size > 0; array++) {
+			copy = min_t(size_t, size, array->length);
+			memcpy((u8 *)(addr_t) array->address,
+				rmmsg, copy);
+			rmmsg += copy;
+			size -= copy;
+		}
+	} else {
+		/* Copy to direct buffer. */
+		memcpy(buffer, rmmsg, min_t(size_t, size, 8));
+	}
+	return 0;
+}
+
+/**
+ * __iucv_message_receive
  * @path: address of iucv path structure
  * @msg: address of iucv msg structure
  * @flags: how the message is received (IUCV_IPBUFLST)
@@ -968,44 +1103,22 @@ EXPORT_SYMBOL(iucv_message_purge);
  * established paths. This function will deal with RMDATA messages
  * embedded in struct iucv_message as well.
  *
+ * Locking:	no locking
+ *
  * Returns the result from the CP IUCV call.
  */
-int iucv_message_receive(struct iucv_path *path, struct iucv_message *msg,
-			 u8 flags, void *buffer, size_t size, size_t *residual)
+int __iucv_message_receive(struct iucv_path *path, struct iucv_message *msg,
+			   u8 flags, void *buffer, size_t size, size_t *residual)
 {
 	union iucv_param *parm;
-	struct iucv_array *array;
-	u8 *rmmsg;
-	size_t copy;
 	int rc;
 
-	if (msg->flags & IUCV_IPRMDATA) {
-		/*
-		 * Message is 8 bytes long and has been stored to the
-		 * message descriptor itself.
-		 */
-		rc = (size < 8) ? 5 : 0;
-		if (residual)
-			*residual = abs(size - 8);
-		rmmsg = msg->rmmsg;
-		if (flags & IUCV_IPBUFLST) {
-			/* Copy to struct iucv_array. */
-			size = (size < 8) ? size : 8;
-			for (array = buffer; size > 0; array++) {
-				copy = min_t(size_t, size, array->length);
-				memcpy((u8 *)(addr_t) array->address,
-				       rmmsg, copy);
-				rmmsg += copy;
-				size -= copy;
-			}
-		} else {
-			/* Copy to direct buffer. */
-			memcpy(buffer, rmmsg, min_t(size_t, size, 8));
-		}
-		return 0;
-	}
+	if (msg->flags & IUCV_IPRMDATA)
+		return iucv_message_receive_iprmdata(path, msg, flags,
+						     buffer, size, residual);
+	if (cpumask_empty(&iucv_buffer_cpumask))
+		return -EIO;
 
-	local_bh_disable();
 	parm = iucv_param[smp_processor_id()];
 	memset(parm, 0, sizeof(union iucv_param));
 	parm->db.ipbfadr1 = (u32)(addr_t) buffer;
@@ -1021,6 +1134,37 @@ int iucv_message_receive(struct iucv_path *path, struct iucv_message *msg,
 		if (residual)
 			*residual = parm->db.ipbfln1f;
 	}
+	return rc;
+}
+EXPORT_SYMBOL(__iucv_message_receive);
+
+/**
+ * iucv_message_receive
+ * @path: address of iucv path structure
+ * @msg: address of iucv msg structure
+ * @flags: how the message is received (IUCV_IPBUFLST)
+ * @buffer: address of data buffer or address of struct iucv_array
+ * @size: length of data buffer
+ * @residual:
+ *
+ * This function receives messages that are being sent to you over
+ * established paths. This function will deal with RMDATA messages
+ * embedded in struct iucv_message as well.
+ *
+ * Locking:	local_bh_enable/local_bh_disable
+ *
+ * Returns the result from the CP IUCV call.
+ */
+int iucv_message_receive(struct iucv_path *path, struct iucv_message *msg,
+			 u8 flags, void *buffer, size_t size, size_t *residual)
+{
+	int rc;
+
+	if (msg->flags & IUCV_IPRMDATA)
+		return iucv_message_receive_iprmdata(path, msg, flags,
+						     buffer, size, residual);
+	local_bh_disable();
+	rc = __iucv_message_receive(path, msg, flags, buffer, size, residual);
 	local_bh_enable();
 	return rc;
 }
@@ -1043,6 +1187,10 @@ int iucv_message_reject(struct iucv_path *path, struct iucv_message *msg)
 	int rc;
 
 	local_bh_disable();
+	if (cpumask_empty(&iucv_buffer_cpumask)) {
+		rc = -EIO;
+		goto out;
+	}
 	parm = iucv_param[smp_processor_id()];
 	memset(parm, 0, sizeof(union iucv_param));
 	parm->db.ippathid = path->pathid;
@@ -1050,6 +1198,7 @@ int iucv_message_reject(struct iucv_path *path, struct iucv_message *msg)
 	parm->db.iptrgcls = msg->class;
 	parm->db.ipflags1 = (IUCV_IPTRGCLS | IUCV_IPFGMID | IUCV_IPFGPID);
 	rc = iucv_call_b2f0(IUCV_REJECT, parm);
+out:
 	local_bh_enable();
 	return rc;
 }
@@ -1077,6 +1226,10 @@ int iucv_message_reply(struct iucv_path *path, struct iucv_message *msg,
 	int rc;
 
 	local_bh_disable();
+	if (cpumask_empty(&iucv_buffer_cpumask)) {
+		rc = -EIO;
+		goto out;
+	}
 	parm = iucv_param[smp_processor_id()];
 	memset(parm, 0, sizeof(union iucv_param));
 	if (flags & IUCV_IPRMDATA) {
@@ -1094,13 +1247,14 @@ int iucv_message_reply(struct iucv_path *path, struct iucv_message *msg,
 		parm->db.iptrgcls = msg->class;
 	}
 	rc = iucv_call_b2f0(IUCV_REPLY, parm);
+out:
 	local_bh_enable();
 	return rc;
 }
 EXPORT_SYMBOL(iucv_message_reply);
 
 /**
- * iucv_message_send
+ * __iucv_message_send
  * @path: address of iucv path structure
  * @msg: address of iucv msg structure
  * @flags: how the message is sent (IUCV_IPRMDATA, IUCV_IPPRTY, IUCV_IPBUFLST)
@@ -1112,15 +1266,20 @@ EXPORT_SYMBOL(iucv_message_reply);
  * transmitted is in a buffer and this is a one-way message and the
  * receiver will not reply to the message.
  *
+ * Locking:	no locking
+ *
  * Returns the result from the CP IUCV call.
  */
-int iucv_message_send(struct iucv_path *path, struct iucv_message *msg,
+int __iucv_message_send(struct iucv_path *path, struct iucv_message *msg,
 		      u8 flags, u32 srccls, void *buffer, size_t size)
 {
 	union iucv_param *parm;
 	int rc;
 
-	local_bh_disable();
+	if (cpumask_empty(&iucv_buffer_cpumask)) {
+		rc = -EIO;
+		goto out;
+	}
 	parm = iucv_param[smp_processor_id()];
 	memset(parm, 0, sizeof(union iucv_param));
 	if (flags & IUCV_IPRMDATA) {
@@ -1143,6 +1302,35 @@ int iucv_message_send(struct iucv_path *path, struct iucv_message *msg,
 	rc = iucv_call_b2f0(IUCV_SEND, parm);
 	if (!rc)
 		msg->id = parm->db.ipmsgid;
+out:
+	return rc;
+}
+EXPORT_SYMBOL(__iucv_message_send);
+
+/**
+ * iucv_message_send
+ * @path: address of iucv path structure
+ * @msg: address of iucv msg structure
+ * @flags: how the message is sent (IUCV_IPRMDATA, IUCV_IPPRTY, IUCV_IPBUFLST)
+ * @srccls: source class of message
+ * @buffer: address of send buffer or address of struct iucv_array
+ * @size: length of send buffer
+ *
+ * This function transmits data to another application. Data to be
+ * transmitted is in a buffer and this is a one-way message and the
+ * receiver will not reply to the message.
+ *
+ * Locking:	local_bh_enable/local_bh_disable
+ *
+ * Returns the result from the CP IUCV call.
+ */
+int iucv_message_send(struct iucv_path *path, struct iucv_message *msg,
+		      u8 flags, u32 srccls, void *buffer, size_t size)
+{
+	int rc;
+
+	local_bh_disable();
+	rc = __iucv_message_send(path, msg, flags, srccls, buffer, size);
 	local_bh_enable();
 	return rc;
 }
@@ -1175,6 +1363,10 @@ int iucv_message_send2way(struct iucv_path *path, struct iucv_message *msg,
 	int rc;
 
 	local_bh_disable();
+	if (cpumask_empty(&iucv_buffer_cpumask)) {
+		rc = -EIO;
+		goto out;
+	}
 	parm = iucv_param[smp_processor_id()];
 	memset(parm, 0, sizeof(union iucv_param));
 	if (flags & IUCV_IPRMDATA) {
@@ -1200,6 +1392,7 @@ int iucv_message_send2way(struct iucv_path *path, struct iucv_message *msg,
 	rc = iucv_call_b2f0(IUCV_SEND, parm);
 	if (!rc)
 		msg->id = parm->db.ipmsgid;
+out:
 	local_bh_enable();
 	return rc;
 }
@@ -1223,7 +1416,7 @@ struct iucv_path_pending {
 	u32 res3;
 	u8  ippollfg;
 	u8  res4[3];
-} __attribute__ ((packed));
+} __packed;
 
 static void iucv_path_pending(struct iucv_irq_data *data)
 {
@@ -1284,13 +1477,15 @@ struct iucv_path_complete {
 	u32 res3;
 	u8  ippollfg;
 	u8  res4[3];
-} __attribute__ ((packed));
+} __packed;
 
 static void iucv_path_complete(struct iucv_irq_data *data)
 {
 	struct iucv_path_complete *ipc = (void *) data;
 	struct iucv_path *path = iucv_path_table[ipc->ippathid];
 
+	if (path)
+		path->flags = ipc->ipflags1;
 	if (path && path->handler && path->handler->path_complete)
 		path->handler->path_complete(path, ipc->ipuser);
 }
@@ -1312,7 +1507,7 @@ struct iucv_path_severed {
 	u32 res4;
 	u8  ippollfg;
 	u8  res5[3];
-} __attribute__ ((packed));
+} __packed;
 
 static void iucv_path_severed(struct iucv_irq_data *data)
 {
@@ -1326,7 +1521,7 @@ static void iucv_path_severed(struct iucv_irq_data *data)
 	else {
 		iucv_sever_pathid(path->pathid, NULL);
 		iucv_path_table[path->pathid] = NULL;
-		list_del_init(&path->list);
+		list_del(&path->list);
 		iucv_path_free(path);
 	}
 }
@@ -1348,7 +1543,7 @@ struct iucv_path_quiesced {
 	u32 res4;
 	u8  ippollfg;
 	u8  res5[3];
-} __attribute__ ((packed));
+} __packed;
 
 static void iucv_path_quiesced(struct iucv_irq_data *data)
 {
@@ -1376,7 +1571,7 @@ struct iucv_path_resumed {
 	u32 res4;
 	u8  ippollfg;
 	u8  res5[3];
-} __attribute__ ((packed));
+} __packed;
 
 static void iucv_path_resumed(struct iucv_irq_data *data)
 {
@@ -1407,7 +1602,7 @@ struct iucv_message_complete {
 	u32 ipbfln2f;
 	u8  ippollfg;
 	u8  res2[3];
-} __attribute__ ((packed));
+} __packed;
 
 static void iucv_message_complete(struct iucv_irq_data *data)
 {
@@ -1452,7 +1647,7 @@ struct iucv_message_pending {
 	u32 ipbfln2f;
 	u8  ippollfg;
 	u8  res2[3];
-} __attribute__ ((packed));
+} __packed;
 
 static void iucv_message_pending(struct iucv_irq_data *data)
 {
@@ -1527,7 +1722,6 @@ static void iucv_tasklet_fn(unsigned long ignored)
  */
 static void iucv_work_fn(struct work_struct *work)
 {
-	typedef void iucv_irq_fn(struct iucv_irq_data *);
 	LIST_HEAD(work_queue);
 	struct iucv_irq_list *p, *n;
 
@@ -1557,11 +1751,13 @@ static void iucv_work_fn(struct work_struct *work)
  * Handles external interrupts coming in from CP.
  * Places the interrupt buffer on a queue and schedules iucv_tasklet_fn().
  */
-static void iucv_external_interrupt(u16 code)
+static void iucv_external_interrupt(struct ext_code ext_code,
+				    unsigned int param32, unsigned long param64)
 {
 	struct iucv_irq_data *p;
 	struct iucv_irq_list *work;
 
+	inc_irq_stat(IRQEXT_IUC);
 	p = iucv_irq_data[smp_processor_id()];
 	if (p->ippathid >= iucv_max_pathid) {
 		WARN_ON(p->ippathid >= iucv_max_pathid);
@@ -1571,7 +1767,7 @@ static void iucv_external_interrupt(u16 code)
 	BUG_ON(p->iptype  < 0x01 || p->iptype > 0x09);
 	work = kmalloc(sizeof(struct iucv_irq_list), GFP_ATOMIC);
 	if (!work) {
-		printk(KERN_WARNING "iucv_external_interrupt: out of memory\n");
+		pr_warn("iucv_external_interrupt: out of memory\n");
 		return;
 	}
 	memcpy(&work->data, p, sizeof(work->data));
@@ -1588,6 +1784,28 @@ static void iucv_external_interrupt(u16 code)
 	spin_unlock(&iucv_queue_lock);
 }
 
+struct iucv_interface iucv_if = {
+	.message_receive = iucv_message_receive,
+	.__message_receive = __iucv_message_receive,
+	.message_reply = iucv_message_reply,
+	.message_reject = iucv_message_reject,
+	.message_send = iucv_message_send,
+	.__message_send = __iucv_message_send,
+	.message_send2way = iucv_message_send2way,
+	.message_purge = iucv_message_purge,
+	.path_accept = iucv_path_accept,
+	.path_connect = iucv_path_connect,
+	.path_quiesce = iucv_path_quiesce,
+	.path_resume = iucv_path_resume,
+	.path_sever = iucv_path_sever,
+	.iucv_register = iucv_register,
+	.iucv_unregister = iucv_unregister,
+	.bus = NULL,
+	.root = NULL,
+};
+EXPORT_SYMBOL(iucv_if);
+
+static enum cpuhp_state iucv_online;
 /**
  * iucv_init
  *
@@ -1596,65 +1814,60 @@ static void iucv_external_interrupt(u16 code)
 static int __init iucv_init(void)
 {
 	int rc;
-	int cpu;
 
 	if (!MACHINE_IS_VM) {
 		rc = -EPROTONOSUPPORT;
 		goto out;
 	}
+	ctl_set_bit(0, 1);
 	rc = iucv_query_maxconn();
 	if (rc)
-		goto out;
-	rc = register_external_interrupt(0x4000, iucv_external_interrupt);
+		goto out_ctl;
+	rc = register_external_irq(EXT_IRQ_IUCV, iucv_external_interrupt);
 	if (rc)
-		goto out;
-	iucv_root = s390_root_dev_register("iucv");
+		goto out_ctl;
+	iucv_root = root_device_register("iucv");
 	if (IS_ERR(iucv_root)) {
 		rc = PTR_ERR(iucv_root);
 		goto out_int;
 	}
 
-	for_each_online_cpu(cpu) {
-		/* Note: GFP_DMA used to get memory below 2G */
-		iucv_irq_data[cpu] = kmalloc_node(sizeof(struct iucv_irq_data),
-				     GFP_KERNEL|GFP_DMA, cpu_to_node(cpu));
-		if (!iucv_irq_data[cpu]) {
-			rc = -ENOMEM;
-			goto out_free;
-		}
-
-		/* Allocate parameter blocks. */
-		iucv_param[cpu] = kmalloc_node(sizeof(union iucv_param),
-				  GFP_KERNEL|GFP_DMA, cpu_to_node(cpu));
-		if (!iucv_param[cpu]) {
-			rc = -ENOMEM;
-			goto out_free;
-		}
-	}
-	rc = register_hotcpu_notifier(&iucv_cpu_notifier);
+	rc = cpuhp_setup_state(CPUHP_NET_IUCV_PREPARE, "net/iucv:prepare",
+			       iucv_cpu_prepare, iucv_cpu_dead);
 	if (rc)
-		goto out_free;
+		goto out_dev;
+	rc = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "net/iucv:online",
+			       iucv_cpu_online, iucv_cpu_down_prep);
+	if (rc < 0)
+		goto out_prep;
+	iucv_online = rc;
+
+	rc = register_reboot_notifier(&iucv_reboot_notifier);
+	if (rc)
+		goto out_remove_hp;
 	ASCEBC(iucv_error_no_listener, 16);
 	ASCEBC(iucv_error_no_memory, 16);
 	ASCEBC(iucv_error_pathid, 16);
 	iucv_available = 1;
 	rc = bus_register(&iucv_bus);
 	if (rc)
-		goto out_cpu;
+		goto out_reboot;
+	iucv_if.root = iucv_root;
+	iucv_if.bus = &iucv_bus;
 	return 0;
 
-out_cpu:
-	unregister_hotcpu_notifier(&iucv_cpu_notifier);
-out_free:
-	for_each_possible_cpu(cpu) {
-		kfree(iucv_param[cpu]);
-		iucv_param[cpu] = NULL;
-		kfree(iucv_irq_data[cpu]);
-		iucv_irq_data[cpu] = NULL;
-	}
-	s390_root_dev_unregister(iucv_root);
+out_reboot:
+	unregister_reboot_notifier(&iucv_reboot_notifier);
+out_remove_hp:
+	cpuhp_remove_state(iucv_online);
+out_prep:
+	cpuhp_remove_state(CPUHP_NET_IUCV_PREPARE);
+out_dev:
+	root_device_unregister(iucv_root);
 out_int:
-	unregister_external_interrupt(0x4000, iucv_external_interrupt);
+	unregister_external_irq(EXT_IRQ_IUCV, iucv_external_interrupt);
+out_ctl:
+	ctl_clear_bit(0, 1);
 out:
 	return rc;
 }
@@ -1667,7 +1880,6 @@ out:
 static void __exit iucv_exit(void)
 {
 	struct iucv_irq_list *p, *n;
-	int cpu;
 
 	spin_lock_irq(&iucv_queue_lock);
 	list_for_each_entry_safe(p, n, &iucv_task_queue, list)
@@ -1675,16 +1887,13 @@ static void __exit iucv_exit(void)
 	list_for_each_entry_safe(p, n, &iucv_work_queue, list)
 		kfree(p);
 	spin_unlock_irq(&iucv_queue_lock);
-	unregister_hotcpu_notifier(&iucv_cpu_notifier);
-	for_each_possible_cpu(cpu) {
-		kfree(iucv_param[cpu]);
-		iucv_param[cpu] = NULL;
-		kfree(iucv_irq_data[cpu]);
-		iucv_irq_data[cpu] = NULL;
-	}
-	s390_root_dev_unregister(iucv_root);
+	unregister_reboot_notifier(&iucv_reboot_notifier);
+
+	cpuhp_remove_state_nocalls(iucv_online);
+	cpuhp_remove_state(CPUHP_NET_IUCV_PREPARE);
+	root_device_unregister(iucv_root);
 	bus_unregister(&iucv_bus);
-	unregister_external_interrupt(0x4000, iucv_external_interrupt);
+	unregister_external_irq(EXT_IRQ_IUCV, iucv_external_interrupt);
 }
 
 subsys_initcall(iucv_init);

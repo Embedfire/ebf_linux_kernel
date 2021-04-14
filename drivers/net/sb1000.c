@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* sb1000.c: A General Instruments SB1000 driver for linux. */
 /*
 	Written 1998 by Franco Venturi.
@@ -11,11 +12,6 @@
 
 	The author may be reached as fventuri@mediaone.net
 
-	This program is free software; you can redistribute it
-	and/or  modify it under  the terms of  the GNU General
-	Public  License as  published  by  the  Free  Software
-	Foundation;  either  version 2 of the License, or  (at
-	your option) any later version.
 
 	Changes:
 
@@ -36,12 +32,12 @@ static char version[] = "sb1000.c:v1.1.2 6/01/98 (fventuri@mediaone.net)\n";
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/interrupt.h>
 #include <linux/errno.h>
 #include <linux/if_cablemodem.h> /* for SIOGCM/SIOSCM stuff */
 #include <linux/in.h>
-#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
@@ -51,10 +47,11 @@ static char version[] = "sb1000.c:v1.1.2 6/01/98 (fventuri@mediaone.net)\n";
 #include <linux/pnp.h>
 #include <linux/init.h>
 #include <linux/bitops.h>
+#include <linux/gfp.h>
 
 #include <asm/io.h>
 #include <asm/processor.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #ifdef SB1000_DEBUG
 static int sb1000_debug = SB1000_DEBUG;
@@ -82,7 +79,8 @@ struct sb1000_private {
 extern int sb1000_probe(struct net_device *dev);
 static int sb1000_open(struct net_device *dev);
 static int sb1000_dev_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd);
-static int sb1000_start_xmit(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t sb1000_start_xmit(struct sk_buff *skb,
+				     struct net_device *dev);
 static irqreturn_t sb1000_interrupt(int irq, void *dev_id);
 static int sb1000_close(struct net_device *dev);
 
@@ -133,6 +131,15 @@ static const struct pnp_device_id sb1000_pnp_ids[] = {
 	{ "", 0 }
 };
 MODULE_DEVICE_TABLE(pnp, sb1000_pnp_ids);
+
+static const struct net_device_ops sb1000_netdev_ops = {
+	.ndo_open		= sb1000_open,
+	.ndo_start_xmit		= sb1000_start_xmit,
+	.ndo_do_ioctl		= sb1000_dev_ioctl,
+	.ndo_stop		= sb1000_close,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
 
 static int
 sb1000_probe_one(struct pnp_dev *pdev, const struct pnp_device_id *id)
@@ -192,11 +199,7 @@ sb1000_probe_one(struct pnp_dev *pdev, const struct pnp_device_id *id)
 	if (sb1000_debug > 0)
 		printk(KERN_NOTICE "%s", version);
 
-	/* The SB1000-specific entries in the device structure. */
-	dev->open		= sb1000_open;
-	dev->do_ioctl		= sb1000_dev_ioctl;
-	dev->hard_start_xmit	= sb1000_start_xmit;
-	dev->stop		= sb1000_close;
+	dev->netdev_ops	= &sb1000_netdev_ops;
 
 	/* hardware address is 0:0:serial_number */
 	dev->dev_addr[2]	= serial_number >> 24 & 0xff;
@@ -309,7 +312,7 @@ static int
 card_send_command(const int ioaddr[], const char* name,
 	const unsigned char out[], unsigned char in[])
 {
-	int status, x;
+	int status;
 
 	if ((status = card_wait_for_busy_clear(ioaddr, name)))
 		return status;
@@ -338,9 +341,7 @@ card_send_command(const int ioaddr[], const char* name,
 				out[0], out[1], out[2], out[3], out[4], out[5]);
 	}
 
-	if (out[1] == 0x1b) {
-		x = (out[2] == 0x02);
-	} else {
+	if (out[1] != 0x1b) {
 		if (out[0] >= 0x80 && in[0] != (out[1] | 0x80))
 			return -EIO;
 	}
@@ -418,7 +419,6 @@ sb1000_send_command(const int ioaddr[], const char* name,
 	if (sb1000_debug > 3)
 		printk(KERN_DEBUG "%s: sb1000_send_command out: %02x%02x%02x%02x"
 			"%02x%02x\n", name, out[0], out[1], out[2], out[3], out[4], out[5]);
-	return;
 }
 
 /* Card Read Status (to be used during frame rx) */
@@ -430,7 +430,6 @@ sb1000_read_status(const int ioaddr[], unsigned char in[])
 	in[3] = inb(ioaddr[0] + 3);
 	in[4] = inb(ioaddr[0] + 4);
 	in[0] = inb(ioaddr[0] + 5);
-	return;
 }
 
 /* Issue Read Command (to be used during frame rx) */
@@ -442,7 +441,6 @@ sb1000_issue_read_command(const int ioaddr[], const char* name)
 	sb1000_wait_for_ready_clear(ioaddr, name);
 	outb(0xa0, ioaddr[0] + 6);
 	sb1000_send_command(ioaddr, name, Command0);
-	return;
 }
 
 
@@ -486,14 +484,13 @@ sb1000_check_CRC(const int ioaddr[], const char* name)
 	static const unsigned char Command0[6] = {0x80, 0x1f, 0x00, 0x00, 0x00, 0x00};
 
 	unsigned char st[7];
-	int crc, status;
+	int status;
 
 	/* check CRC */
 	if ((status = card_send_command(ioaddr, name, Command0, st)))
 		return status;
 	if (st[1] != st[3] || st[2] != st[4])
 		return -EIO;
-	crc = st[1] << 8 | st[2];
 	return 0;
 }
 
@@ -531,17 +528,20 @@ sb1000_activate(const int ioaddr[], const char* name)
 	int status;
 
 	ssleep(1);
-	if ((status = card_send_command(ioaddr, name, Command0, st)))
+	status = card_send_command(ioaddr, name, Command0, st);
+	if (status)
 		return status;
-	if ((status = card_send_command(ioaddr, name, Command1, st)))
+	status = card_send_command(ioaddr, name, Command1, st);
+	if (status)
 		return status;
 	if (st[3] != 0xf1) {
-    	if ((status = sb1000_start_get_set_command(ioaddr, name)))
+		status = sb1000_start_get_set_command(ioaddr, name);
+		if (status)
 			return status;
 		return -EIO;
 	}
 	udelay(1000);
-    return sb1000_start_get_set_command(ioaddr, name);
+	return sb1000_start_get_set_command(ioaddr, name);
 }
 
 /* get SB1000 firmware version */
@@ -725,7 +725,6 @@ sb1000_print_status_buffer(const char* name, unsigned char st[],
 			printk("\n");
 		}
 	}
-	return;
 }
 
 /*
@@ -869,7 +868,6 @@ printk("cm0: IP identification: %02x%02x  fragment offset: %02x%02x\n", buffer[3
 	/* datagram completed: send to upper level */
 	skb_trim(skb, dlen);
 	netif_rx(skb);
-	dev->last_rx = jiffies;
 	stats->rx_bytes+=dlen;
 	stats->rx_packets++;
 	lp->rx_skb[ns] = NULL;
@@ -919,7 +917,6 @@ sb1000_error_dpc(struct net_device *dev)
 	sb1000_read_status(ioaddr, st);
 	if (st[1] & 0x10)
 		lp->rx_error_dpc_count = ErrorDpcCounterInitialize;
-	return;
 }
 
 
@@ -959,14 +956,14 @@ sb1000_open(struct net_device *dev)
 	lp->rx_error_count = 0;
 	lp->rx_error_dpc_count = 0;
 	lp->rx_session_id[0] = 0x50;
-	lp->rx_session_id[0] = 0x48;
-	lp->rx_session_id[0] = 0x44;
-	lp->rx_session_id[0] = 0x42;
+	lp->rx_session_id[1] = 0x48;
+	lp->rx_session_id[2] = 0x44;
+	lp->rx_session_id[3] = 0x42;
 	lp->rx_frame_id[0] = 0;
 	lp->rx_frame_id[1] = 0;
 	lp->rx_frame_id[2] = 0;
 	lp->rx_frame_id[3] = 0;
-	if (request_irq(dev->irq, &sb1000_interrupt, 0, "sb1000", dev)) {
+	if (request_irq(dev->irq, sb1000_interrupt, 0, "sb1000", dev)) {
 		return -EAGAIN;
 	}
 
@@ -1075,13 +1072,13 @@ static int sb1000_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 }
 
 /* transmit function: do nothing since SB1000 can't send anything out */
-static int
+static netdev_tx_t
 sb1000_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	printk(KERN_WARNING "%s: trying to transmit!!!\n", dev->name);
 	/* sb1000 can't xmit datagrams */
 	dev_kfree_skb(skb);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* SB1000 interrupt handler. */
@@ -1173,17 +1170,4 @@ MODULE_AUTHOR("Franco Venturi <fventuri@mediaone.net>");
 MODULE_DESCRIPTION("General Instruments SB1000 driver");
 MODULE_LICENSE("GPL");
 
-static int __init
-sb1000_init(void)
-{
-	return pnp_register_driver(&sb1000_driver);
-}
-
-static void __exit
-sb1000_exit(void)
-{
-	pnp_unregister_driver(&sb1000_driver);
-}
-
-module_init(sb1000_init);
-module_exit(sb1000_exit);
+module_pnp_driver(sb1000_driver);

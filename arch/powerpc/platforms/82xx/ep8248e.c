@@ -1,19 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Embedded Planet EP8248E support
  *
  * Copyright 2007 Freescale Semiconductor, Inc.
  * Author: Scott Wood <scottwood@freescale.com>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/fsl_devices.h>
 #include <linux/mdio-bitbang.h>
+#include <linux/of_mdio.h>
+#include <linux/slab.h>
 #include <linux/of_platform.h>
 
 #include <asm/io.h>
@@ -109,20 +107,19 @@ static struct mdiobb_ctrl ep8248e_mdio_ctrl = {
 	.ops = &ep8248e_mdio_ops,
 };
 
-static int __devinit ep8248e_mdio_probe(struct of_device *ofdev,
-                                        const struct of_device_id *match)
+static int ep8248e_mdio_probe(struct platform_device *ofdev)
 {
 	struct mii_bus *bus;
 	struct resource res;
 	struct device_node *node;
-	int ret, i;
+	int ret;
 
-	node = of_get_parent(ofdev->node);
+	node = of_get_parent(ofdev->dev.of_node);
 	of_node_put(node);
 	if (node != ep8248e_bcsr_node)
 		return -ENODEV;
 
-	ret = of_address_to_resource(ofdev->node, 0, &res);
+	ret = of_address_to_resource(ofdev->dev.of_node, 0, &res);
 	if (ret)
 		return ret;
 
@@ -130,20 +127,21 @@ static int __devinit ep8248e_mdio_probe(struct of_device *ofdev,
 	if (!bus)
 		return -ENOMEM;
 
-	bus->phy_mask = 0;
-	bus->irq = kmalloc(sizeof(int) * PHY_MAX_ADDR, GFP_KERNEL);
-
-	for (i = 0; i < PHY_MAX_ADDR; i++)
-		bus->irq[i] = -1;
-
 	bus->name = "ep8248e-mdio-bitbang";
-	bus->dev = &ofdev->dev;
+	bus->parent = &ofdev->dev;
 	snprintf(bus->id, MII_BUS_ID_SIZE, "%x", res.start);
 
-	return mdiobus_register(bus);
+	ret = of_mdiobus_register(bus, ofdev->dev.of_node);
+	if (ret)
+		goto err_free_bus;
+
+	return 0;
+err_free_bus:
+	free_mdio_bitbang(bus);
+	return ret;
 }
 
-static int ep8248e_mdio_remove(struct of_device *ofdev)
+static int ep8248e_mdio_remove(struct platform_device *ofdev)
 {
 	BUG();
 	return 0;
@@ -156,11 +154,11 @@ static const struct of_device_id ep8248e_mdio_match[] = {
 	{},
 };
 
-static struct of_platform_driver ep8248e_mdio_driver = {
+static struct platform_driver ep8248e_mdio_driver = {
 	.driver = {
 		.name = "ep8248e-mdio-bitbang",
+		.of_match_table = ep8248e_mdio_match,
 	},
-	.match_table = ep8248e_mdio_match,
 	.probe = ep8248e_mdio_probe,
 	.remove = ep8248e_mdio_remove,
 };
@@ -287,7 +285,7 @@ static void __init ep8248e_setup_arch(void)
 		ppc_md.progress("ep8248e_setup_arch(), finish", 0);
 }
 
-static  __initdata struct of_device_id of_bus_ids[] = {
+static const struct of_device_id of_bus_ids[] __initconst = {
 	{ .compatible = "simple-bus", },
 	{ .compatible = "fsl,ep8248e-bcsr", },
 	{},
@@ -296,7 +294,9 @@ static  __initdata struct of_device_id of_bus_ids[] = {
 static int __init declare_of_platform_devices(void)
 {
 	of_platform_bus_probe(NULL, of_bus_ids, NULL);
-	of_register_platform_driver(&ep8248e_mdio_driver);
+
+	if (IS_ENABLED(CONFIG_MDIO_BITBANG))
+		platform_driver_register(&ep8248e_mdio_driver);
 
 	return 0;
 }
@@ -307,8 +307,7 @@ machine_device_initcall(ep8248e, declare_of_platform_devices);
  */
 static int __init ep8248e_probe(void)
 {
-	unsigned long root = of_get_flat_dt_root();
-	return of_flat_dt_is_compatible(root, "fsl,ep8248e");
+	return of_machine_is_compatible("fsl,ep8248e");
 }
 
 define_machine(ep8248e)

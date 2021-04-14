@@ -1,6 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- *	drivers/s390/net/ctcm_main.h
- *
  *	Copyright IBM Corp. 2001, 2007
  *	Authors:	Fritz Elfert (felfert@millenux.com)
  *			Peter Tiedemann (ptiedem@de.ibm.com)
@@ -16,7 +15,6 @@
 #include <linux/netdevice.h>
 
 #include "fsm.h"
-#include "cu3088.h"
 #include "ctcm_dbug.h"
 #include "ctcm_mpc.h"
 
@@ -41,12 +39,6 @@
 #define LOG_FLAG_NOMEM		8
 
 #define ctcm_pr_debug(fmt, arg...) printk(KERN_DEBUG fmt, ##arg)
-#define ctcm_pr_info(fmt, arg...) printk(KERN_INFO fmt, ##arg)
-#define ctcm_pr_notice(fmt, arg...) printk(KERN_NOTICE fmt, ##arg)
-#define ctcm_pr_warn(fmt, arg...) printk(KERN_WARNING fmt, ##arg)
-#define ctcm_pr_emerg(fmt, arg...) printk(KERN_EMERG fmt, ##arg)
-#define ctcm_pr_err(fmt, arg...) printk(KERN_ERR fmt, ##arg)
-#define ctcm_pr_crit(fmt, arg...) printk(KERN_CRIT fmt, ##arg)
 
 #define CTCM_PR_DEBUG(fmt, arg...) \
 	do { \
@@ -71,6 +63,23 @@
 		if (do_debug_ccw) \
 			ctcmpc_dumpit(buf, len); \
 	} while (0)
+
+/**
+ * Enum for classifying detected devices
+ */
+enum ctcm_channel_types {
+	/* Device is not a channel  */
+	ctcm_channel_type_none,
+
+	/* Device is a CTC/A */
+	ctcm_channel_type_parallel,
+
+	/* Device is a FICON channel */
+	ctcm_channel_type_ficon,
+
+	/* Device is a ESCON channel */
+	ctcm_channel_type_escon
+};
 
 /*
  * CCW commands, used in this driver.
@@ -101,10 +110,10 @@
 
 #define CTCM_INITIAL_BLOCKLEN	2
 
-#define READ			0
-#define WRITE			1
+#define CTCM_READ		0
+#define CTCM_WRITE		1
 
-#define CTCM_ID_SIZE		BUS_ID_SIZE+3
+#define CTCM_ID_SIZE		20+3
 
 struct ctcm_profile {
 	unsigned long maxmulti;
@@ -113,7 +122,7 @@ struct ctcm_profile {
 	unsigned long doios_multi;
 	unsigned long txlen;
 	unsigned long tx_time;
-	struct timespec send_stamp;
+	unsigned long send_stamp;
 };
 
 /*
@@ -127,7 +136,7 @@ struct channel {
 	 * Type of this channel.
 	 * CTC/A or Escon for valid channels.
 	 */
-	enum channel_types type;
+	enum ctcm_channel_types type;
 	/*
 	 * Misc. flags. See CHANNEL_FLAGS_... below
 	 */
@@ -215,13 +224,7 @@ struct ctcm_priv {
 int ctcm_open(struct net_device *dev);
 int ctcm_close(struct net_device *dev);
 
-/*
- * prototypes for non-static sysfs functions
- */
-int ctcm_add_attributes(struct device *dev);
-void ctcm_remove_attributes(struct device *dev);
-int ctcm_add_files(struct device *dev);
-void ctcm_remove_files(struct device *dev);
+extern const struct attribute_group *ctcm_attr_groups[];
 
 /*
  * Compatibility macros for busy handling

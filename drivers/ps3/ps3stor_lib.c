@@ -1,28 +1,76 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * PS3 Storage Library
  *
  * Copyright (C) 2007 Sony Computer Entertainment Inc.
  * Copyright 2007 Sony Corp.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published
- * by the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include <linux/dma-mapping.h>
+#include <linux/module.h>
 
 #include <asm/lv1call.h>
 #include <asm/ps3stor.h>
 
+/*
+ * A workaround for flash memory I/O errors when the internal hard disk
+ * has not been formatted for OtherOS use.  Delay disk close until flash
+ * memory is closed.
+ */
+
+static struct ps3_flash_workaround {
+	int flash_open;
+	int disk_open;
+	struct ps3_system_bus_device *disk_sbd;
+} ps3_flash_workaround;
+
+static int ps3stor_open_hv_device(struct ps3_system_bus_device *sbd)
+{
+	int error = ps3_open_hv_device(sbd);
+
+	if (error)
+		return error;
+
+	if (sbd->match_id == PS3_MATCH_ID_STOR_FLASH)
+		ps3_flash_workaround.flash_open = 1;
+
+	if (sbd->match_id == PS3_MATCH_ID_STOR_DISK)
+		ps3_flash_workaround.disk_open = 1;
+
+	return 0;
+}
+
+static int ps3stor_close_hv_device(struct ps3_system_bus_device *sbd)
+{
+	int error;
+
+	if (sbd->match_id == PS3_MATCH_ID_STOR_DISK
+		&& ps3_flash_workaround.disk_open
+		&& ps3_flash_workaround.flash_open) {
+		ps3_flash_workaround.disk_sbd = sbd;
+		return 0;
+	}
+
+	error = ps3_close_hv_device(sbd);
+
+	if (error)
+		return error;
+
+	if (sbd->match_id == PS3_MATCH_ID_STOR_DISK)
+		ps3_flash_workaround.disk_open = 0;
+
+	if (sbd->match_id == PS3_MATCH_ID_STOR_FLASH) {
+		ps3_flash_workaround.flash_open = 0;
+
+		if (ps3_flash_workaround.disk_sbd) {
+			ps3_close_hv_device(ps3_flash_workaround.disk_sbd);
+			ps3_flash_workaround.disk_open = 0;
+			ps3_flash_workaround.disk_sbd = NULL;
+		}
+	}
+
+	return 0;
+}
 
 static int ps3stor_probe_access(struct ps3_storage_device *dev)
 {
@@ -70,7 +118,7 @@ static int ps3stor_probe_access(struct ps3_storage_device *dev)
 			 __func__, __LINE__, n);
 	dev->region_idx = __ffs(dev->accessible_regions);
 	dev_info(&dev->sbd.core,
-		 "First accessible region has index %u start %lu size %lu\n",
+		 "First accessible region has index %u start %llu size %llu\n",
 		 dev->region_idx, dev->regions[dev->region_idx].start,
 		 dev->regions[dev->region_idx].size);
 
@@ -90,7 +138,7 @@ int ps3stor_setup(struct ps3_storage_device *dev, irq_handler_t handler)
 	int error, res, alignment;
 	enum ps3_dma_page_size page_size;
 
-	error = ps3_open_hv_device(&dev->sbd);
+	error = ps3stor_open_hv_device(&dev->sbd);
 	if (error) {
 		dev_err(&dev->sbd.core,
 			"%s:%u: ps3_open_hv_device failed %d\n", __func__,
@@ -107,7 +155,7 @@ int ps3stor_setup(struct ps3_storage_device *dev, irq_handler_t handler)
 		goto fail_close_device;
 	}
 
-	error = request_irq(dev->irq, handler, IRQF_DISABLED,
+	error = request_irq(dev->irq, handler, 0,
 			    dev->sbd.core.driver->name, dev);
 	if (error) {
 		dev_err(&dev->sbd.core, "%s:%u: request_irq failed %d\n",
@@ -141,7 +189,7 @@ int ps3stor_setup(struct ps3_storage_device *dev, irq_handler_t handler)
 	dev->bounce_lpar = ps3_mm_phys_to_lpar(__pa(dev->bounce_buf));
 	dev->bounce_dma = dma_map_single(&dev->sbd.core, dev->bounce_buf,
 					 dev->bounce_size, DMA_BIDIRECTIONAL);
-	if (!dev->bounce_dma) {
+	if (dma_mapping_error(&dev->sbd.core, dev->bounce_dma)) {
 		dev_err(&dev->sbd.core, "%s:%u: map DMA region failed\n",
 			__func__, __LINE__);
 		error = -ENODEV;
@@ -166,7 +214,7 @@ fail_free_irq:
 fail_sb_event_receive_port_destroy:
 	ps3_sb_event_receive_port_destroy(&dev->sbd, dev->irq);
 fail_close_device:
-	ps3_close_hv_device(&dev->sbd);
+	ps3stor_close_hv_device(&dev->sbd);
 fail:
 	return error;
 }
@@ -193,7 +241,7 @@ void ps3stor_teardown(struct ps3_storage_device *dev)
 			"%s:%u: destroy event receive port failed %d\n",
 			__func__, __LINE__, error);
 
-	error = ps3_close_hv_device(&dev->sbd);
+	error = ps3stor_close_hv_device(&dev->sbd);
 	if (error)
 		dev_err(&dev->sbd.core,
 			"%s:%u: ps3_close_hv_device failed %d\n", __func__,
@@ -220,7 +268,7 @@ u64 ps3stor_read_write_sectors(struct ps3_storage_device *dev, u64 lpar,
 	const char *op = write ? "write" : "read";
 	int res;
 
-	dev_dbg(&dev->sbd.core, "%s:%u: %s %lu sectors starting at %lu\n",
+	dev_dbg(&dev->sbd.core, "%s:%u: %s %llu sectors starting at %llu\n",
 		__func__, __LINE__, op, sectors, start_sector);
 
 	init_completion(&dev->done);
@@ -238,7 +286,7 @@ u64 ps3stor_read_write_sectors(struct ps3_storage_device *dev, u64 lpar,
 
 	wait_for_completion(&dev->done);
 	if (dev->lv1_status) {
-		dev_dbg(&dev->sbd.core, "%s:%u: %s failed 0x%lx\n", __func__,
+		dev_dbg(&dev->sbd.core, "%s:%u: %s failed 0x%llx\n", __func__,
 			__LINE__, op, dev->lv1_status);
 		return dev->lv1_status;
 	}
@@ -268,7 +316,7 @@ u64 ps3stor_send_command(struct ps3_storage_device *dev, u64 cmd, u64 arg1,
 {
 	int res;
 
-	dev_dbg(&dev->sbd.core, "%s:%u: send device command 0x%lx\n", __func__,
+	dev_dbg(&dev->sbd.core, "%s:%u: send device command 0x%llx\n", __func__,
 		__LINE__, cmd);
 
 	init_completion(&dev->done);
@@ -277,19 +325,19 @@ u64 ps3stor_send_command(struct ps3_storage_device *dev, u64 cmd, u64 arg1,
 					      arg2, arg3, arg4, &dev->tag);
 	if (res) {
 		dev_err(&dev->sbd.core,
-			"%s:%u: send_device_command 0x%lx failed %d\n",
+			"%s:%u: send_device_command 0x%llx failed %d\n",
 			__func__, __LINE__, cmd, res);
 		return -1;
 	}
 
 	wait_for_completion(&dev->done);
 	if (dev->lv1_status) {
-		dev_dbg(&dev->sbd.core, "%s:%u: command 0x%lx failed 0x%lx\n",
+		dev_dbg(&dev->sbd.core, "%s:%u: command 0x%llx failed 0x%llx\n",
 			__func__, __LINE__, cmd, dev->lv1_status);
 		return dev->lv1_status;
 	}
 
-	dev_dbg(&dev->sbd.core, "%s:%u: command 0x%lx completed\n", __func__,
+	dev_dbg(&dev->sbd.core, "%s:%u: command 0x%llx completed\n", __func__,
 		__LINE__, cmd);
 
 	return 0;

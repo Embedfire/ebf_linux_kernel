@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  linux/arch/arm/mm/proc-arm1022.S: MMU functions for ARM1022E
  *
@@ -5,22 +6,16 @@
  *  Copyright (C) 2000 Deep Blue Solutions Ltd.
  *  hacked for non-paged-MM by Hyok S. Choi, 2003.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- *
  * These are the low level assembler for performing cache and TLB
  * functions on the ARM1022E.
  */
 #include <linux/linkage.h>
 #include <linux/init.h>
+#include <linux/pgtable.h>
 #include <asm/assembler.h>
 #include <asm/asm-offsets.h>
-#include <asm/elf.h>
+#include <asm/hwcap.h>
 #include <asm/pgtable-hwdef.h>
-#include <asm/pgtable.h>
 #include <asm/ptrace.h>
 
 #include "proc-macros.S"
@@ -53,7 +48,7 @@
 /*
  * This is the size at which it becomes more efficient to
  * clean the whole cache, rather than using the individual
- * cache line maintainence instructions.
+ * cache line maintenance instructions.
  */
 #define CACHE_DLIMIT	32768
 
@@ -62,21 +57,17 @@
  * cpu_arm1022_proc_init()
  */
 ENTRY(cpu_arm1022_proc_init)
-	mov	pc, lr
+	ret	lr
 
 /*
  * cpu_arm1022_proc_fin()
  */
 ENTRY(cpu_arm1022_proc_fin)
-	stmfd	sp!, {lr}
-	mov	ip, #PSR_F_BIT | PSR_I_BIT | SVC_MODE
-	msr	cpsr_c, ip
-	bl	arm1022_flush_kern_cache_all
 	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
 	bic	r0, r0, #0x1000 		@ ...i............
 	bic	r0, r0, #0x000e 		@ ............wca.
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
-	ldmfd	sp!, {pc}
+	ret	lr
 
 /*
  * cpu_arm1022_reset(loc)
@@ -88,6 +79,7 @@ ENTRY(cpu_arm1022_proc_fin)
  * loc: location to jump to for soft reset
  */
 	.align	5
+	.pushsection	.idmap.text, "ax"
 ENTRY(cpu_arm1022_reset)
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c7, 0		@ invalidate I,D caches
@@ -99,7 +91,9 @@ ENTRY(cpu_arm1022_reset)
 	bic	ip, ip, #0x000f 		@ ............wcam
 	bic	ip, ip, #0x1100 		@ ...i...s........
 	mcr	p15, 0, ip, c1, c0, 0		@ ctrl register
-	mov	pc, r0
+	ret	r0
+ENDPROC(cpu_arm1022_reset)
+	.popsection
 
 /*
  * cpu_arm1022_do_idle()
@@ -107,11 +101,25 @@ ENTRY(cpu_arm1022_reset)
 	.align	5
 ENTRY(cpu_arm1022_do_idle)
 	mcr	p15, 0, r0, c7, c0, 4		@ Wait for interrupt
-	mov	pc, lr
+	ret	lr
 
 /* ================================= CACHE ================================ */
 
 	.align	5
+
+/*
+ *	flush_icache_all()
+ *
+ *	Unconditionally clean and invalidate the entire icache.
+ */
+ENTRY(arm1022_flush_icache_all)
+#ifndef CONFIG_CPU_ICACHE_DISABLE
+	mov	r0, #0
+	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
+#endif
+	ret	lr
+ENDPROC(arm1022_flush_icache_all)
+
 /*
  *	flush_user_cache_all()
  *
@@ -143,7 +151,7 @@ __flush_whole_cache:
 	mcrne	p15, 0, ip, c7, c5, 0		@ invalidate I cache
 #endif
 	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
 
 /*
  *	flush_user_cache_range(start, end, flags)
@@ -172,7 +180,7 @@ ENTRY(arm1022_flush_user_cache_range)
 	mcrne	p15, 0, ip, c7, c5, 0		@ invalidate I cache
 #endif
 	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
 
 /*
  *	coherent_kern_range(start, end)
@@ -211,27 +219,29 @@ ENTRY(arm1022_coherent_user_range)
 	cmp	r0, r1
 	blo	1b
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	mov	r0, #0
+	ret	lr
 
 /*
- *	flush_kern_dcache_page(void *page)
+ *	flush_kern_dcache_area(void *addr, size_t size)
  *
  *	Ensure no D cache aliasing occurs, either with itself or
  *	the I cache
  *
- *	- page	- page aligned address
+ *	- addr	- kernel address
+ *	- size	- region size
  */
-ENTRY(arm1022_flush_kern_dcache_page)
+ENTRY(arm1022_flush_kern_dcache_area)
 	mov	ip, #0
 #ifndef CONFIG_CPU_DCACHE_DISABLE
-	add	r1, r0, #PAGE_SZ
+	add	r1, r0, r1
 1:	mcr	p15, 0, r0, c7, c14, 1		@ clean+invalidate D entry
 	add	r0, r0, #CACHE_DLINESIZE
 	cmp	r0, r1
 	blo	1b
 #endif
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
 
 /*
  *	dma_inv_range(start, end)
@@ -246,7 +256,7 @@ ENTRY(arm1022_flush_kern_dcache_page)
  *
  * (same as v4wb)
  */
-ENTRY(arm1022_dma_inv_range)
+arm1022_dma_inv_range:
 	mov	ip, #0
 #ifndef CONFIG_CPU_DCACHE_DISABLE
 	tst	r0, #CACHE_DLINESIZE - 1
@@ -260,7 +270,7 @@ ENTRY(arm1022_dma_inv_range)
 	blo	1b
 #endif
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
 
 /*
  *	dma_clean_range(start, end)
@@ -272,7 +282,7 @@ ENTRY(arm1022_dma_inv_range)
  *
  * (same as v4wb)
  */
-ENTRY(arm1022_dma_clean_range)
+arm1022_dma_clean_range:
 	mov	ip, #0
 #ifndef CONFIG_CPU_DCACHE_DISABLE
 	bic	r0, r0, #CACHE_DLINESIZE - 1
@@ -282,7 +292,7 @@ ENTRY(arm1022_dma_clean_range)
 	blo	1b
 #endif
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
 
 /*
  *	dma_flush_range(start, end)
@@ -302,18 +312,37 @@ ENTRY(arm1022_dma_flush_range)
 	blo	1b
 #endif
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
 
-ENTRY(arm1022_cache_fns)
-	.long	arm1022_flush_kern_cache_all
-	.long	arm1022_flush_user_cache_all
-	.long	arm1022_flush_user_cache_range
-	.long	arm1022_coherent_kern_range
-	.long	arm1022_coherent_user_range
-	.long	arm1022_flush_kern_dcache_page
-	.long	arm1022_dma_inv_range
-	.long	arm1022_dma_clean_range
-	.long	arm1022_dma_flush_range
+/*
+ *	dma_map_area(start, size, dir)
+ *	- start	- kernel virtual start address
+ *	- size	- size of region
+ *	- dir	- DMA direction
+ */
+ENTRY(arm1022_dma_map_area)
+	add	r1, r1, r0
+	cmp	r2, #DMA_TO_DEVICE
+	beq	arm1022_dma_clean_range
+	bcs	arm1022_dma_inv_range
+	b	arm1022_dma_flush_range
+ENDPROC(arm1022_dma_map_area)
+
+/*
+ *	dma_unmap_area(start, size, dir)
+ *	- start	- kernel virtual start address
+ *	- size	- size of region
+ *	- dir	- DMA direction
+ */
+ENTRY(arm1022_dma_unmap_area)
+	ret	lr
+ENDPROC(arm1022_dma_unmap_area)
+
+	.globl	arm1022_flush_kern_cache_louis
+	.equ	arm1022_flush_kern_cache_louis, arm1022_flush_kern_cache_all
+
+	@ define struct cpu_cache_fns (see <asm/cacheflush.h> and proc-macros.S)
+	define_cache_functions arm1022
 
 	.align	5
 ENTRY(cpu_arm1022_dcache_clean_area)
@@ -324,7 +353,7 @@ ENTRY(cpu_arm1022_dcache_clean_area)
 	subs	r1, r1, #CACHE_DLINESIZE
 	bhi	1b
 #endif
-	mov	pc, lr
+	ret	lr
 
 /* =============================== PageTable ============================== */
 
@@ -355,7 +384,7 @@ ENTRY(cpu_arm1022_switch_mm)
 	mcr	p15, 0, r0, c2, c0, 0		@ load page table pointer
 	mcr	p15, 0, r1, c8, c7, 0		@ invalidate I & D TLBs
 #endif
-	mov	pc, lr
+	ret	lr
         
 /*
  * cpu_arm1022_set_pte_ext(ptep, pte, ext)
@@ -365,37 +394,13 @@ ENTRY(cpu_arm1022_switch_mm)
 	.align	5
 ENTRY(cpu_arm1022_set_pte_ext)
 #ifdef CONFIG_MMU
-	str	r1, [r0], #-2048		@ linux version
-
-	eor	r1, r1, #L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_WRITE | L_PTE_DIRTY
-
-	bic	r2, r1, #PTE_SMALL_AP_MASK
-	bic	r2, r2, #PTE_TYPE_MASK
-	orr	r2, r2, #PTE_TYPE_SMALL
-
-	tst	r1, #L_PTE_USER			@ User?
-	orrne	r2, r2, #PTE_SMALL_AP_URO_SRW
-
-	tst	r1, #L_PTE_WRITE | L_PTE_DIRTY	@ Write and Dirty?
-	orreq	r2, r2, #PTE_SMALL_AP_UNO_SRW
-
-	tst	r1, #L_PTE_PRESENT | L_PTE_YOUNG	@ Present and Young?
-	movne	r2, #0
-
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
-	eor	r3, r1, #0x0a			@ C & small page?
-	tst	r3, #0x0b
-	biceq	r2, r2, #4
-#endif
-	str	r2, [r0]			@ hardware version
+	armv3_set_pte_ext
 	mov	r0, r0
 #ifndef CONFIG_CPU_DCACHE_DISABLE
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 #endif
 #endif /* CONFIG_MMU */
-	mov	pc, lr
-
-	__INIT
+	ret	lr
 
 	.type	__arm1022_setup, #function
 __arm1022_setup:
@@ -413,7 +418,7 @@ __arm1022_setup:
 #ifdef CONFIG_CPU_CACHE_ROUND_ROBIN
 	orr	r0, r0, #0x4000 		@ .R..............
 #endif
-	mov	pc, lr
+	ret	lr
 	.size	__arm1022_setup, . - __arm1022_setup
 
 	/*
@@ -427,44 +432,18 @@ arm1022_crval:
 	crval	clear=0x00007f3f, mmuset=0x00003935, ucset=0x00001930
 
 	__INITDATA
-
-/*
- * Purpose : Function pointers used to access above functions - all calls
- *	     come through these
- */
-	.type	arm1022_processor_functions, #object
-arm1022_processor_functions:
-	.word	v4t_early_abort
-	.word	pabort_noifar
-	.word	cpu_arm1022_proc_init
-	.word	cpu_arm1022_proc_fin
-	.word	cpu_arm1022_reset
-	.word	cpu_arm1022_do_idle
-	.word	cpu_arm1022_dcache_clean_area
-	.word	cpu_arm1022_switch_mm
-	.word	cpu_arm1022_set_pte_ext
-	.size	arm1022_processor_functions, . - arm1022_processor_functions
+	@ define struct processor (see <asm/proc-fns.h> and proc-macros.S)
+	define_processor_functions arm1022, dabort=v4t_early_abort, pabort=legacy_pabort
 
 	.section ".rodata"
 
-	.type	cpu_arch_name, #object
-cpu_arch_name:
-	.asciz	"armv5te"
-	.size	cpu_arch_name, . - cpu_arch_name
-
-	.type	cpu_elf_name, #object
-cpu_elf_name:
-	.asciz	"v5"
-	.size	cpu_elf_name, . - cpu_elf_name
-
-	.type	cpu_arm1022_name, #object
-cpu_arm1022_name:
-	.asciz	"ARM1022"
-	.size	cpu_arm1022_name, . - cpu_arm1022_name
+	string	cpu_arch_name, "armv5te"
+	string	cpu_elf_name, "v5"
+	string	cpu_arm1022_name, "ARM1022"
 
 	.align
 
-	.section ".proc.info.init", #alloc, #execinstr
+	.section ".proc.info.init", "a"
 
 	.type	__arm1022_proc_info,#object
 __arm1022_proc_info:
@@ -478,7 +457,7 @@ __arm1022_proc_info:
 		PMD_BIT4 | \
 		PMD_SECT_AP_WRITE | \
 		PMD_SECT_AP_READ
-	b	__arm1022_setup
+	initfn	__arm1022_setup, __arm1022_proc_info
 	.long	cpu_arch_name
 	.long	cpu_elf_name
 	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB | HWCAP_EDSP

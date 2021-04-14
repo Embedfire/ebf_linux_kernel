@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* spitfire.h: SpitFire/BlackBird/Cheetah inline MMU operations.
  *
  * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
@@ -5,6 +6,8 @@
 
 #ifndef _SPARC64_SPITFIRE_H
 #define _SPARC64_SPITFIRE_H
+
+#ifdef CONFIG_SPARC64
 
 #include <asm/asi.h>
 
@@ -40,7 +43,30 @@
 #define SUN4V_CHIP_INVALID	0x00
 #define SUN4V_CHIP_NIAGARA1	0x01
 #define SUN4V_CHIP_NIAGARA2	0x02
+#define SUN4V_CHIP_NIAGARA3	0x03
+#define SUN4V_CHIP_NIAGARA4	0x04
+#define SUN4V_CHIP_NIAGARA5	0x05
+#define SUN4V_CHIP_SPARC_M6	0x06
+#define SUN4V_CHIP_SPARC_M7	0x07
+#define SUN4V_CHIP_SPARC_M8	0x08
+#define SUN4V_CHIP_SPARC64X	0x8a
+#define SUN4V_CHIP_SPARC_SN	0x8b
 #define SUN4V_CHIP_UNKNOWN	0xff
+
+/*
+ * The following CPU_ID_xxx constants are used
+ * to identify the CPU type in the setup phase
+ * (see head_64.S)
+ */
+#define CPU_ID_NIAGARA1		('1')
+#define CPU_ID_NIAGARA2		('2')
+#define CPU_ID_NIAGARA3		('3')
+#define CPU_ID_NIAGARA4		('4')
+#define CPU_ID_NIAGARA5		('5')
+#define CPU_ID_M6		('6')
+#define CPU_ID_M7		('7')
+#define CPU_ID_M8		('8')
+#define CPU_ID_SONOMA1		('N')
 
 #ifndef __ASSEMBLY__
 
@@ -56,7 +82,7 @@ extern enum ultra_tlb_layout tlb_type;
 extern int sun4v_chip_type;
 
 extern int cheetah_pcache_forced_on;
-extern void cheetah_enable_pcache(void);
+void cheetah_enable_pcache(void);
 
 #define sparc64_highest_locked_tlbent()	\
 	(tlb_type == spitfire ? \
@@ -338,5 +364,5 @@ static inline void cheetah_put_itlb_data(int entry, unsigned long data)
 }
 
 #endif /* !(__ASSEMBLY__) */
-
+#endif /* CONFIG_SPARC64 */
 #endif /* !(_SPARC64_SPITFIRE_H) */

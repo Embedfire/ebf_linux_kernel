@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  arch/arm/include/asm/tlb.h
  *
  *  Copyright (C) 2002 Russell King
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  Experimentation shows that on a StrongARM, it appears to be faster
  *  to use the "invalidate whole tlb" rather than "invalidate single
@@ -18,77 +15,54 @@
 #define __ASMARM_TLB_H
 
 #include <asm/cacheflush.h>
-#include <asm/tlbflush.h>
 
 #ifndef CONFIG_MMU
 
 #include <linux/pagemap.h>
+
+#define tlb_flush(tlb)	((void) tlb)
+
 #include <asm-generic/tlb.h>
 
 #else /* !CONFIG_MMU */
 
-#include <asm/pgalloc.h>
+#include <linux/swap.h>
+#include <asm/tlbflush.h>
 
-/*
- * TLB handling.  This allows us to remove pages from the page
- * tables, and efficiently handle the TLB issues.
- */
-struct mmu_gather {
-	struct mm_struct	*mm;
-	unsigned int		fullmm;
-};
-
-DECLARE_PER_CPU(struct mmu_gather, mmu_gathers);
-
-static inline struct mmu_gather *
-tlb_gather_mmu(struct mm_struct *mm, unsigned int full_mm_flush)
+static inline void __tlb_remove_table(void *_table)
 {
-	struct mmu_gather *tlb = &get_cpu_var(mmu_gathers);
+	free_page_and_swap_cache((struct page *)_table);
+}
 
-	tlb->mm = mm;
-	tlb->fullmm = full_mm_flush;
+#include <asm-generic/tlb.h>
 
-	return tlb;
+static inline void
+__pte_free_tlb(struct mmu_gather *tlb, pgtable_t pte, unsigned long addr)
+{
+	pgtable_pte_page_dtor(pte);
+
+#ifndef CONFIG_ARM_LPAE
+	/*
+	 * With the classic ARM MMU, a pte page has two corresponding pmd
+	 * entries, each covering 1MB.
+	 */
+	addr = (addr & PMD_MASK) + SZ_1M;
+	__tlb_adjust_range(tlb, addr - PAGE_SIZE, 2 * PAGE_SIZE);
+#endif
+
+	tlb_remove_table(tlb, pte);
 }
 
 static inline void
-tlb_finish_mmu(struct mmu_gather *tlb, unsigned long start, unsigned long end)
+__pmd_free_tlb(struct mmu_gather *tlb, pmd_t *pmdp, unsigned long addr)
 {
-	if (tlb->fullmm)
-		flush_tlb_mm(tlb->mm);
+#ifdef CONFIG_ARM_LPAE
+	struct page *page = virt_to_page(pmdp);
 
-	/* keep the page table cache within bounds */
-	check_pgt_cache();
-
-	put_cpu_var(mmu_gathers);
+	pgtable_pmd_page_dtor(page);
+	tlb_remove_table(tlb, page);
+#endif
 }
-
-#define tlb_remove_tlb_entry(tlb,ptep,address)	do { } while (0)
-
-/*
- * In the case of tlb vma handling, we can optimise these away in the
- * case where we're doing a full MM flush.  When we're doing a munmap,
- * the vmas are adjusted to only cover the region to be torn down.
- */
-static inline void
-tlb_start_vma(struct mmu_gather *tlb, struct vm_area_struct *vma)
-{
-	if (!tlb->fullmm)
-		flush_cache_range(vma, vma->vm_start, vma->vm_end);
-}
-
-static inline void
-tlb_end_vma(struct mmu_gather *tlb, struct vm_area_struct *vma)
-{
-	if (!tlb->fullmm)
-		flush_tlb_range(vma, vma->vm_start, vma->vm_end);
-}
-
-#define tlb_remove_page(tlb,page)	free_page_and_swap_cache(page)
-#define pte_free_tlb(tlb, ptep)		pte_free((tlb)->mm, ptep)
-#define pmd_free_tlb(tlb, pmdp)		pmd_free((tlb)->mm, pmdp)
-
-#define tlb_migrate_finish(mm)		do { } while (0)
 
 #endif /* CONFIG_MMU */
 #endif

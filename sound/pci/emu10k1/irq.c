@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *                   Creative Labs, Inc.
@@ -8,21 +9,6 @@
  *
  *  TODO:
  *    --
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <linux/time.h>
@@ -41,11 +27,12 @@ irqreturn_t snd_emu10k1_interrupt(int irq, void *dev_id)
 		orig_status = status;
 		handled = 1;
 		if ((status & 0xffffffff) == 0xffffffff) {
-			snd_printk(KERN_INFO "snd-emu10k1: Suspected sound card removal\n");
+			dev_info(emu->card->dev,
+				 "Suspected sound card removal\n");
 			break;
 		}
 		if (status & IPR_PCIERROR) {
-			snd_printk(KERN_ERR "interrupt: PCI error\n");
+			dev_err(emu->card->dev, "interrupt: PCI error\n");
 			snd_emu10k1_intr_disable(emu, INTE_PCIERRORENABLE);
 			status &= ~IPR_PCIERROR;
 		}
@@ -157,19 +144,22 @@ irqreturn_t snd_emu10k1_interrupt(int irq, void *dev_id)
 				struct snd_emu10k1_voice *pvoice = &(emu->p16v_voices[0]);
 				struct snd_emu10k1_voice *cvoice = &(emu->p16v_capture_voice);
 
-				//printk(KERN_INFO "status2=0x%x\n", status2);
+				/* dev_dbg(emu->card->dev, "status2=0x%x\n", status2); */
 				orig_status2 = status2;
 				if(status2 & mask) {
 					if(pvoice->use) {
 						snd_pcm_period_elapsed(pvoice->epcm->substream);
 					} else { 
-						snd_printk(KERN_ERR "p16v: status: 0x%08x, mask=0x%08x, pvoice=%p, use=%d\n", status2, mask, pvoice, pvoice->use);
+						dev_err(emu->card->dev,
+							"p16v: status: 0x%08x, mask=0x%08x, pvoice=%p, use=%d\n",
+							status2, mask, pvoice,
+							pvoice->use);
 					}
 				}
 				if(status2 & 0x110000) {
-					//printk(KERN_INFO "capture int found\n");
+					/* dev_info(emu->card->dev, "capture int found\n"); */
 					if(cvoice->use) {
-						//printk(KERN_INFO "capture period_elapsed\n");
+						/* dev_info(emu->card->dev, "capture period_elapsed\n"); */
 						snd_pcm_period_elapsed(cvoice->epcm->substream);
 					}
 				}
@@ -180,7 +170,8 @@ irqreturn_t snd_emu10k1_interrupt(int irq, void *dev_id)
 
 		if (status) {
 			unsigned int bits;
-			snd_printk(KERN_ERR "emu10k1: unhandled interrupt: 0x%08x\n", status);
+			dev_err(emu->card->dev,
+				"unhandled interrupt: 0x%08x\n", status);
 			//make sure any interrupts we don't handle are disabled:
 			bits = INTE_FXDSPENABLE |
 				INTE_PCIERRORENABLE |
@@ -202,7 +193,7 @@ irqreturn_t snd_emu10k1_interrupt(int irq, void *dev_id)
 		outl(orig_status, emu->port + IPR); /* ack all */
 	}
 	if (timeout == 1000)
-		snd_printk(KERN_INFO "emu10k1 irq routine failure\n");
+		dev_info(emu->card->dev, "emu10k1 irq routine failure\n");
 
 	return IRQ_RETVAL(handled);
 }

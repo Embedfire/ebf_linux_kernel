@@ -1,14 +1,11 @@
-/*
- * Serial Sound Interface (I2S) support for SH7760/SH7780
- *
- * Copyright (c) 2007 Manuel Lauss <mano@roarinelk.homelinux.net>
- *
- *  licensed under the terms outlined in the file COPYING at the root
- *  of the linux kernel sources.
- *
- * dont forget to set IPSEL/OMSEL register bits (in your board code) to
- * enable SSI output pins!
- */
+// SPDX-License-Identifier: GPL-2.0
+//
+// Serial Sound Interface (I2S) support for SH7760/SH7780
+//
+// Copyright (c) 2007 Manuel Lauss <mano@roarinelk.homelinux.net>
+//
+// dont forget to set IPSEL/OMSEL register bits (in your board code) to
+// enable SSI output pins!
 
 /*
  * LIMITATIONS:
@@ -89,10 +86,10 @@ struct ssi_priv {
  * track usage of the SSI; it is simplex-only so prevent attempts of
  * concurrent playback + capture. FIXME: any locking required?
  */
-static int ssi_startup(struct snd_pcm_substream *substream)
+static int ssi_startup(struct snd_pcm_substream *substream,
+		       struct snd_soc_dai *dai)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct ssi_priv *ssi = &ssi_cpu_data[rtd->dai->cpu_dai->id];
+	struct ssi_priv *ssi = &ssi_cpu_data[dai->id];
 	if (ssi->inuse) {
 		pr_debug("ssi: already in use!\n");
 		return -EBUSY;
@@ -101,18 +98,18 @@ static int ssi_startup(struct snd_pcm_substream *substream)
 	return 0;
 }
 
-static void ssi_shutdown(struct snd_pcm_substream *substream)
+static void ssi_shutdown(struct snd_pcm_substream *substream,
+			 struct snd_soc_dai *dai)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct ssi_priv *ssi = &ssi_cpu_data[rtd->dai->cpu_dai->id];
+	struct ssi_priv *ssi = &ssi_cpu_data[dai->id];
 
 	ssi->inuse = 0;
 }
 
-static int ssi_trigger(struct snd_pcm_substream *substream, int cmd)
+static int ssi_trigger(struct snd_pcm_substream *substream, int cmd,
+		       struct snd_soc_dai *dai)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct ssi_priv *ssi = &ssi_cpu_data[rtd->dai->cpu_dai->id];
+	struct ssi_priv *ssi = &ssi_cpu_data[dai->id];
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
@@ -129,10 +126,10 @@ static int ssi_trigger(struct snd_pcm_substream *substream, int cmd)
 }
 
 static int ssi_hw_params(struct snd_pcm_substream *substream,
-			 struct snd_pcm_hw_params *params)
+			 struct snd_pcm_hw_params *params,
+			 struct snd_soc_dai *dai)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct ssi_priv *ssi = &ssi_cpu_data[rtd->dai->cpu_dai->id];
+	struct ssi_priv *ssi = &ssi_cpu_data[dai->id];
 	unsigned long ssicr = SSIREG(SSICR);
 	unsigned int bits, channels, swl, recv, i;
 
@@ -141,7 +138,7 @@ static int ssi_hw_params(struct snd_pcm_substream *substream,
 	recv = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) ? 0 : 1;
 
 	pr_debug("ssi_hw_params() enter\nssicr was    %08lx\n", ssicr);
-	pr_debug("bits: %d channels: %d\n", bits, channels);
+	pr_debug("bits: %u channels: %u\n", bits, channels);
 
 	ssicr &= ~(CR_TRMD | CR_CHNL_MASK | CR_DWL_MASK | CR_PDTA |
 		   CR_SWL_MASK);
@@ -307,7 +304,7 @@ static int ssi_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 		ssicr |= CR_SWS_MASTER | CR_SCK_MASTER;
 		break;
 	default:
-		pr_debug("ssi: invalid master/slave configuration\n");
+		pr_debug("ssi: invalid master/secondary configuration\n");
 		return -EINVAL;
 	}
 
@@ -332,11 +329,19 @@ static int ssi_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	 SNDRV_PCM_FMTBIT_S24_3LE | SNDRV_PCM_FMTBIT_U24_3LE |	\
 	 SNDRV_PCM_FMTBIT_S32_LE  | SNDRV_PCM_FMTBIT_U32_LE)
 
-struct snd_soc_dai sh4_ssi_dai[] = {
+static const struct snd_soc_dai_ops ssi_dai_ops = {
+	.startup	= ssi_startup,
+	.shutdown	= ssi_shutdown,
+	.trigger	= ssi_trigger,
+	.hw_params	= ssi_hw_params,
+	.set_sysclk	= ssi_set_sysclk,
+	.set_clkdiv	= ssi_set_clkdiv,
+	.set_fmt	= ssi_set_fmt,
+};
+
+static struct snd_soc_dai_driver sh4_ssi_dai[] = {
 {
-	.name			= "SSI0",
-	.id			= 0,
-	.type			= SND_SOC_DAI_I2S,
+	.name			= "ssi-dai.0",
 	.playback = {
 		.rates		= SSI_RATES,
 		.formats	= SSI_FMTS,
@@ -349,23 +354,11 @@ struct snd_soc_dai sh4_ssi_dai[] = {
 		.channels_min	= 2,
 		.channels_max	= 8,
 	},
-	.ops = {
-		.startup	= ssi_startup,
-		.shutdown	= ssi_shutdown,
-		.trigger	= ssi_trigger,
-		.hw_params	= ssi_hw_params,
-	},
-	.dai_ops = {
-		.set_sysclk	= ssi_set_sysclk,
-		.set_clkdiv	= ssi_set_clkdiv,
-		.set_fmt	= ssi_set_fmt,
-	},
+	.ops = &ssi_dai_ops,
 },
 #ifdef CONFIG_CPU_SUBTYPE_SH7760
 {
-	.name			= "SSI1",
-	.id			= 1,
-	.type			= SND_SOC_DAI_I2S,
+	.name			= "ssi-dai.1",
 	.playback = {
 		.rates		= SSI_RATES,
 		.formats	= SSI_FMTS,
@@ -378,22 +371,32 @@ struct snd_soc_dai sh4_ssi_dai[] = {
 		.channels_min	= 2,
 		.channels_max	= 8,
 	},
-	.ops = {
-		.startup	= ssi_startup,
-		.shutdown	= ssi_shutdown,
-		.trigger	= ssi_trigger,
-		.hw_params	= ssi_hw_params,
-	},
-	.dai_ops = {
-		.set_sysclk	= ssi_set_sysclk,
-		.set_clkdiv	= ssi_set_clkdiv,
-		.set_fmt	= ssi_set_fmt,
-	},
+	.ops = &ssi_dai_ops,
 },
 #endif
 };
-EXPORT_SYMBOL_GPL(sh4_ssi_dai);
 
-MODULE_LICENSE("GPL");
+static const struct snd_soc_component_driver sh4_ssi_component = {
+	.name		= "sh4-ssi",
+};
+
+static int sh4_soc_dai_probe(struct platform_device *pdev)
+{
+	return devm_snd_soc_register_component(&pdev->dev, &sh4_ssi_component,
+					       sh4_ssi_dai,
+					       ARRAY_SIZE(sh4_ssi_dai));
+}
+
+static struct platform_driver sh4_ssi_driver = {
+	.driver = {
+			.name = "sh4-ssi-dai",
+	},
+
+	.probe = sh4_soc_dai_probe,
+};
+
+module_platform_driver(sh4_ssi_driver);
+
+MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("SuperH onchip SSI (I2S) audio driver");
 MODULE_AUTHOR("Manuel Lauss <mano@roarinelk.homelinux.net>");

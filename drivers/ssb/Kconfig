@@ -1,11 +1,10 @@
-menu "Sonics Silicon Backplane"
-
+# SPDX-License-Identifier: GPL-2.0-only
 config SSB_POSSIBLE
 	bool
 	depends on HAS_IOMEM && HAS_DMA
 	default y
 
-config SSB
+menuconfig SSB
 	tristate "Sonics Silicon Backplane support"
 	depends on SSB_POSSIBLE
 	help
@@ -20,6 +19,8 @@ config SSB
 
 	  If unsure, say N.
 
+if SSB
+
 # Common SPROM support routines
 config SSB_SPROM
 	bool
@@ -31,7 +32,7 @@ config SSB_BLOCKIO
 
 config SSB_PCIHOST_POSSIBLE
 	bool
-	depends on SSB && (PCI = y || PCI = SSB)
+	depends on SSB && (PCI = y || PCI = SSB) && (PCI_DRIVERS_LEGACY || !MIPS)
 	default y
 
 config SSB_PCIHOST
@@ -52,11 +53,11 @@ config SSB_B43_PCI_BRIDGE
 
 config SSB_PCMCIAHOST_POSSIBLE
 	bool
-	depends on SSB && (PCMCIA = y || PCMCIA = SSB) && EXPERIMENTAL
+	depends on SSB && (PCMCIA = y || PCMCIA = SSB)
 	default y
 
 config SSB_PCMCIAHOST
-	bool "Support for SSB on PCMCIA-bus host (EXPERIMENTAL)"
+	bool "Support for SSB on PCMCIA-bus host"
 	depends on SSB_PCMCIAHOST_POSSIBLE
 	select SSB_SPROM
 	help
@@ -65,24 +66,27 @@ config SSB_PCMCIAHOST
 
 	  If unsure, say N
 
-config SSB_SILENT
-	bool "No SSB kernel messages"
-	depends on SSB && EMBEDDED
-	help
-	  This option turns off all Sonics Silicon Backplane printks.
-	  Note that you won't be able to identify problems, once
-	  messages are turned off.
-	  This might only be desired for production kernels on
-	  embedded devices to reduce the kernel size.
+config SSB_SDIOHOST_POSSIBLE
+	bool
+	depends on SSB && (MMC = y || MMC = SSB)
+	default y
 
-	  Say N
-
-config SSB_DEBUG
-	bool "SSB debugging"
-	depends on SSB && !SSB_SILENT
+config SSB_SDIOHOST
+	bool "Support for SSB on SDIO-bus host"
+	depends on SSB_SDIOHOST_POSSIBLE
 	help
-	  This turns on additional runtime checks and debugging
-	  messages. Turn this on for SSB troubleshooting.
+	  Support for a Sonics Silicon Backplane on top
+	  of a SDIO device.
+
+	  If unsure, say N
+
+config SSB_HOST_SOC
+	bool "Support for SSB bus on SoC"
+	depends on SSB && BCM47XX_NVRAM
+	select SSB_SPROM
+	help
+	  Host interface for a SSB directly mapped into memory. This is
+	  for some Broadcom SoCs from the BCM47xx and BCM53xx lines.
 
 	  If unsure, say N
 
@@ -106,30 +110,36 @@ config SSB_DRIVER_PCICORE
 	  If unsure, say Y
 
 config SSB_PCICORE_HOSTMODE
-	bool "Hostmode support for SSB PCI core (EXPERIMENTAL)"
-	depends on SSB_DRIVER_PCICORE && SSB_DRIVER_MIPS && EXPERIMENTAL
+	bool "Hostmode support for SSB PCI core"
+	depends on SSB_DRIVER_PCICORE && SSB_DRIVER_MIPS && SSB = y
 	help
 	  PCIcore hostmode operation (external PCI bus).
 
 config SSB_DRIVER_MIPS
-	bool "SSB Broadcom MIPS core driver (EXPERIMENTAL)"
-	depends on SSB && MIPS && EXPERIMENTAL
+	bool "SSB Broadcom MIPS core driver"
+	depends on SSB && MIPS
 	select SSB_SERIAL
+	select SSB_SFLASH
 	help
 	  Driver for the Sonics Silicon Backplane attached
 	  Broadcom MIPS core.
 
 	  If unsure, say N
 
-# Assumption: We are on embedded, if we compile the MIPS core.
-config SSB_EMBEDDED
-	bool
+config SSB_SFLASH
+	bool "SSB serial flash support"
 	depends on SSB_DRIVER_MIPS
 	default y
 
+# Assumption: We are on embedded, if we compile the MIPS core.
+config SSB_EMBEDDED
+	bool
+	depends on SSB_DRIVER_MIPS && SSB_PCICORE_HOSTMODE
+	default y
+
 config SSB_DRIVER_EXTIF
-	bool "SSB Broadcom EXTIF core driver (EXPERIMENTAL)"
-	depends on SSB_DRIVER_MIPS && EXPERIMENTAL
+	bool "SSB Broadcom EXTIF core driver"
+	depends on SSB_DRIVER_MIPS
 	help
 	  Driver for the Sonics Silicon Backplane attached
 	  Broadcom EXTIF core.
@@ -145,4 +155,13 @@ config SSB_DRIVER_GIGE
 
 	  If unsure, say N
 
-endmenu
+config SSB_DRIVER_GPIO
+	bool "SSB GPIO driver"
+	depends on SSB && GPIOLIB
+	select IRQ_DOMAIN if SSB_EMBEDDED
+	help
+	  Driver to provide access to the GPIO pins on the bus.
+
+	  If unsure, say N
+
+endif # SSB

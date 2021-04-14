@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/boards/landisk/setup.c
  *
@@ -7,10 +8,6 @@
  * Copyright (C) 2002 Paul Mundt
  * Copylight (C) 2002 Atom Create Engineering Co., Ltd.
  * Copyright (C) 2005-2007 kogiidena
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/platform_device.h>
@@ -21,11 +18,9 @@
 #include <mach-landisk/mach/iodata_landisk.h>
 #include <asm/io.h>
 
-void init_landisk_IRQ(void);
-
 static void landisk_power_off(void)
 {
-        ctrl_outb(0x01, PA_SHUTDOWN);
+	__raw_writeb(0x01, PA_SHUTDOWN);
 }
 
 static struct resource cf_ide_resources[3];
@@ -63,7 +58,7 @@ static int __init landisk_devices_setup(void)
 	/* open I/O area window */
 	paddrbase = virt_to_phys((void *)PA_AREA5_IO);
 	prot = PAGE_KERNEL_PCC(1, _PAGE_PCC_IO16);
-	cf_ide_base = p3_ioremap(paddrbase, PAGE_SIZE, prot.pgprot);
+	cf_ide_base = ioremap_prot(paddrbase, PAGE_SIZE, pgprot_val(prot));
 	if (!cf_ide_base) {
 		printk("allocate_cf_area : can't open CF I/O window!\n");
 		return -ENOMEM;
@@ -83,12 +78,15 @@ static int __init landisk_devices_setup(void)
 				    ARRAY_SIZE(landisk_devices));
 }
 
-__initcall(landisk_devices_setup);
+device_initcall(landisk_devices_setup);
 
 static void __init landisk_setup(char **cmdline_p)
 {
-        /* LED ON */
-	ctrl_outb(ctrl_inb(PA_LED) | 0x03, PA_LED);
+	/* I/O port identity mapping */
+	__set_io_port_base(0);
+
+	/* LED ON */
+	__raw_writeb(__raw_readb(PA_LED) | 0x03, PA_LED);
 
 	printk(KERN_INFO "I-O DATA DEVICE, INC. \"LANDISK Series\" support.\n");
 	pm_power_off = landisk_power_off;
@@ -99,7 +97,6 @@ static void __init landisk_setup(char **cmdline_p)
  */
 static struct sh_machine_vector mv_landisk __initmv = {
 	.mv_name = "LANDISK",
-	.mv_nr_irqs = 72,
 	.mv_setup = landisk_setup,
 	.mv_init_irq = init_landisk_IRQ,
 };

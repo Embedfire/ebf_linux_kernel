@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * PC-Speaker driver for Linux
  *
@@ -10,13 +11,8 @@
 #define __PCSP_H__
 
 #include <linux/hrtimer.h>
-#if defined(CONFIG_MIPS) || defined(CONFIG_X86)
-/* Use the global PIT lock ! */
-#include <asm/i8253.h>
-#else
-#include <asm/8253pit.h>
-static DEFINE_SPINLOCK(i8253_lock);
-#endif
+#include <linux/i8253.h>
+#include <linux/timex.h>
 
 #define PCSP_SOUND_VERSION 0x400	/* read 4.00 */
 #define PCSP_DEBUG 0
@@ -62,6 +58,8 @@ struct snd_pcsp {
 	unsigned short port, irq, dma;
 	spinlock_t substream_lock;
 	struct snd_pcm_substream *playback_substream;
+	unsigned int fmt_size;
+	unsigned int is_signed;
 	size_t playback_ptr;
 	size_t period_ptr;
 	atomic_t timer_active;
@@ -77,8 +75,9 @@ struct snd_pcsp {
 extern struct snd_pcsp pcsp_chip;
 
 extern enum hrtimer_restart pcsp_do_timer(struct hrtimer *handle);
+extern void pcsp_sync_stop(struct snd_pcsp *chip);
 
 extern int snd_pcsp_new_pcm(struct snd_pcsp *chip);
-extern int snd_pcsp_new_mixer(struct snd_pcsp *chip);
+extern int snd_pcsp_new_mixer(struct snd_pcsp *chip, int nopcm);
 
 #endif

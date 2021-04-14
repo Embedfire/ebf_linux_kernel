@@ -16,14 +16,13 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <scsi/scsi_host.h>
 #include <linux/libata.h>
 
 #define DRV_NAME	"pata_hpt3x3"
-#define DRV_VERSION	"0.5.3"
+#define DRV_VERSION	"0.6.1"
 
 /**
  *	hpt3x3_set_piomode		-	PIO setup
@@ -80,14 +79,48 @@ static void hpt3x3_set_dmamode(struct ata_port *ap, struct ata_device *adev)
 	r2 &= ~(0x11 << dn);	/* Clear MWDMA and UDMA bits */
 
 	if (adev->dma_mode >= XFER_UDMA_0)
-		r2 |= (0x10 << dn);	/* Ultra mode */
+		r2 |= (0x01 << dn);	/* Ultra mode */
 	else
-		r2 |= (0x01 << dn);	/* MWDMA */
+		r2 |= (0x10 << dn);	/* MWDMA */
 
 	pci_write_config_dword(pdev, 0x44, r1);
 	pci_write_config_dword(pdev, 0x48, r2);
 }
-#endif /* CONFIG_PATA_HPT3X3_DMA */
+
+/**
+ *	hpt3x3_freeze		-	DMA workaround
+ *	@ap: port to freeze
+ *
+ *	When freezing an HPT3x3 we must stop any pending DMA before
+ *	writing to the control register or the chip will hang
+ */
+
+static void hpt3x3_freeze(struct ata_port *ap)
+{
+	void __iomem *mmio = ap->ioaddr.bmdma_addr;
+
+	iowrite8(ioread8(mmio + ATA_DMA_CMD) & ~ ATA_DMA_START,
+			mmio + ATA_DMA_CMD);
+	ata_sff_dma_pause(ap);
+	ata_sff_freeze(ap);
+}
+
+/**
+ *	hpt3x3_bmdma_setup	-	DMA workaround
+ *	@qc: Queued command
+ *
+ *	When issuing BMDMA we must clean up the error/active bits in
+ *	software on this device
+ */
+
+static void hpt3x3_bmdma_setup(struct ata_queued_cmd *qc)
+{
+	struct ata_port *ap = qc->ap;
+	u8 r = ioread8(ap->ioaddr.bmdma_addr + ATA_DMA_STATUS);
+	r |= ATA_DMA_INTR | ATA_DMA_ERR;
+	iowrite8(r, ap->ioaddr.bmdma_addr + ATA_DMA_STATUS);
+	return ata_bmdma_setup(qc);
+}
 
 /**
  *	hpt3x3_atapi_dma	-	ATAPI DMA check
@@ -101,18 +134,23 @@ static int hpt3x3_atapi_dma(struct ata_queued_cmd *qc)
 	return 1;
 }
 
+#endif /* CONFIG_PATA_HPT3X3_DMA */
+
 static struct scsi_host_template hpt3x3_sht = {
 	ATA_BMDMA_SHT(DRV_NAME),
 };
 
 static struct ata_port_operations hpt3x3_port_ops = {
 	.inherits	= &ata_bmdma_port_ops,
-	.check_atapi_dma= hpt3x3_atapi_dma,
 	.cable_detect	= ata_cable_40wire,
 	.set_piomode	= hpt3x3_set_piomode,
 #if defined(CONFIG_PATA_HPT3X3_DMA)
 	.set_dmamode	= hpt3x3_set_dmamode,
+	.bmdma_setup	= hpt3x3_bmdma_setup,
+	.check_atapi_dma= hpt3x3_atapi_dma,
+	.freeze		= hpt3x3_freeze,
 #endif
+
 };
 
 /**
@@ -141,19 +179,18 @@ static void hpt3x3_init_chipset(struct pci_dev *dev)
  *	@id: Entry in match table
  *
  *	Perform basic initialisation. We set the device up so we access all
- *	ports via BAR4. This is neccessary to work around errata.
+ *	ports via BAR4. This is necessary to work around errata.
  */
 
 static int hpt3x3_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 {
-	static int printed_version;
 	static const struct ata_port_info info = {
 		.flags = ATA_FLAG_SLAVE_POSS,
-		.pio_mask = 0x1f,
+		.pio_mask = ATA_PIO4,
 #if defined(CONFIG_PATA_HPT3X3_DMA)
 		/* Further debug needed */
-		.mwdma_mask = 0x07,
-		.udma_mask = 0x07,
+		.mwdma_mask = ATA_MWDMA2,
+		.udma_mask = ATA_UDMA2,
 #endif
 		.port_ops = &hpt3x3_port_ops
 	};
@@ -167,8 +204,7 @@ static int hpt3x3_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	hpt3x3_init_chipset(pdev);
 
-	if (!printed_version++)
-		dev_printk(KERN_DEBUG, &pdev->dev, "version " DRV_VERSION "\n");
+	ata_print_version_once(&pdev->dev, DRV_VERSION);
 
 	host = ata_host_alloc_pinfo(&pdev->dev, ppi, 2);
 	if (!host)
@@ -185,10 +221,7 @@ static int hpt3x3_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (rc)
 		return rc;
 	host->iomap = pcim_iomap_table(pdev);
-	rc = pci_set_dma_mask(pdev, ATA_DMA_MASK);
-	if (rc)
-		return rc;
-	rc = pci_set_consistent_dma_mask(pdev, ATA_DMA_MASK);
+	rc = dma_set_mask_and_coherent(&pdev->dev, ATA_DMA_MASK);
 	if (rc)
 		return rc;
 
@@ -209,15 +242,24 @@ static int hpt3x3_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 		ata_port_pbar_desc(ap, 4, offset_cmd[i], "cmd");
 	}
 	pci_set_master(pdev);
-	return ata_host_activate(host, pdev->irq, ata_sff_interrupt,
+	return ata_host_activate(host, pdev->irq, ata_bmdma_interrupt,
 				 IRQF_SHARED, &hpt3x3_sht);
 }
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 static int hpt3x3_reinit_one(struct pci_dev *dev)
 {
+	struct ata_host *host = pci_get_drvdata(dev);
+	int rc;
+
+	rc = ata_pci_device_do_resume(dev);
+	if (rc)
+		return rc;
+
 	hpt3x3_init_chipset(dev);
-	return ata_pci_device_resume(dev);
+
+	ata_host_resume(host);
+	return 0;
 }
 #endif
 
@@ -232,29 +274,16 @@ static struct pci_driver hpt3x3_pci_driver = {
 	.id_table	= hpt3x3,
 	.probe 		= hpt3x3_init_one,
 	.remove		= ata_pci_remove_one,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	.suspend	= ata_pci_device_suspend,
 	.resume		= hpt3x3_reinit_one,
 #endif
 };
 
-static int __init hpt3x3_init(void)
-{
-	return pci_register_driver(&hpt3x3_pci_driver);
-}
-
-
-static void __exit hpt3x3_exit(void)
-{
-	pci_unregister_driver(&hpt3x3_pci_driver);
-}
-
+module_pci_driver(hpt3x3_pci_driver);
 
 MODULE_AUTHOR("Alan Cox");
 MODULE_DESCRIPTION("low-level driver for the Highpoint HPT343/363");
 MODULE_LICENSE("GPL");
 MODULE_DEVICE_TABLE(pci, hpt3x3);
 MODULE_VERSION(DRV_VERSION);
-
-module_init(hpt3x3_init);
-module_exit(hpt3x3_exit);

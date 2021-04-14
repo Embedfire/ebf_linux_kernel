@@ -50,13 +50,9 @@ struct path_selector_type {
 	/*
 	 * Chooses a path for this io, if no paths are available then
 	 * NULL will be returned.
-	 *
-	 * repeat_count is the number of times to use the path before
-	 * calling the function again.  0 means don't call it again unless
-	 * the path fails.
 	 */
 	struct dm_path *(*select_path) (struct path_selector *ps,
-				     unsigned *repeat_count);
+					size_t nr_bytes);
 
 	/*
 	 * Notify the selector that a path has failed.
@@ -75,7 +71,10 @@ struct path_selector_type {
 	int (*status) (struct path_selector *ps, struct dm_path *path,
 		       status_type_t type, char *result, unsigned int maxlen);
 
-	int (*end_io) (struct path_selector *ps, struct dm_path *path);
+	int (*start_io) (struct path_selector *ps, struct dm_path *path,
+			 size_t nr_bytes);
+	int (*end_io) (struct path_selector *ps, struct dm_path *path,
+		       size_t nr_bytes, u64 start_time);
 };
 
 /* Register a path selector */

@@ -1,36 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  cmu.c, Clock Mask Unit routines for the NEC VR4100 series.
  *
  *  Copyright (C) 2001-2002  MontaVista Software Inc.
- *    Author: Yoichi Yuasa <yyuasa@mvista.com or source@mvista.com>
- *  Copuright (C) 2003-2005  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *    Author: Yoichi Yuasa <source@mvista.com>
+ *  Copyright (C) 2003-2005  Yoichi Yuasa <yuasa@linux-mips.org>
  */
 /*
  * Changes:
- *  MontaVista Software Inc. <yyuasa@mvista.com> or <source@mvista.com>
+ *  MontaVista Software Inc. <source@mvista.com>
  *  - New creation, NEC VR4122 and VR4131 are supported.
  *  - Added support for NEC VR4111 and VR4121.
  *
- *  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
+ *  Yoichi Yuasa <yuasa@linux-mips.org>
  *  - Added support for NEC VR4133.
  */
+#include <linux/export.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
-#include <linux/module.h>
 #include <linux/smp.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -217,24 +204,24 @@ static int __init vr41xx_cmu_init(void)
 	unsigned long start, size;
 
 	switch (current_cpu_type()) {
-        case CPU_VR4111:
-        case CPU_VR4121:
+	case CPU_VR4111:
+	case CPU_VR4121:
 		start = CMU_TYPE1_BASE;
 		size = CMU_TYPE1_SIZE;
-                break;
-        case CPU_VR4122:
-        case CPU_VR4131:
+		break;
+	case CPU_VR4122:
+	case CPU_VR4131:
 		start = CMU_TYPE2_BASE;
 		size = CMU_TYPE2_SIZE;
 		break;
-        case CPU_VR4133:
+	case CPU_VR4133:
 		start = CMU_TYPE3_BASE;
 		size = CMU_TYPE3_SIZE;
-                break;
+		break;
 	default:
 		panic("Unexpected CPU of NEC VR4100 series");
 		break;
-        }
+	}
 
 	if (request_mem_region(start, size, "CMU") == NULL)
 		return -EBUSY;

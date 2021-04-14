@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* IP tables module for matching IPsec policy
  *
  * Copyright (c) 2004,2005 Patrick McHardy, <kaber@trash.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
-
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/skbuff.h>
@@ -26,9 +23,9 @@ xt_addr_cmp(const union nf_inet_addr *a1, const union nf_inet_addr *m,
 	    const union nf_inet_addr *a2, unsigned short family)
 {
 	switch (family) {
-	case AF_INET:
+	case NFPROTO_IPV4:
 		return ((a1->ip ^ a2->ip) & m->ip) == 0;
-	case AF_INET6:
+	case NFPROTO_IPV6:
 		return ipv6_masked_addr_cmp(&a1->in6, &m->in6, &a2->in6) == 0;
 	}
 	return false;
@@ -56,7 +53,7 @@ match_policy_in(const struct sk_buff *skb, const struct xt_policy_info *info,
 		unsigned short family)
 {
 	const struct xt_policy_elem *e;
-	const struct sec_path *sp = skb->sp;
+	const struct sec_path *sp = skb_sec_path(skb);
 	int strict = info->flags & XT_POLICY_MATCH_STRICT;
 	int i, pos;
 
@@ -86,14 +83,15 @@ match_policy_out(const struct sk_buff *skb, const struct xt_policy_info *info,
 		 unsigned short family)
 {
 	const struct xt_policy_elem *e;
-	const struct dst_entry *dst = skb->dst;
+	const struct dst_entry *dst = skb_dst(skb);
 	int strict = info->flags & XT_POLICY_MATCH_STRICT;
 	int i, pos;
 
 	if (dst->xfrm == NULL)
 		return -1;
 
-	for (i = 0; dst && dst->xfrm; dst = dst->child, i++) {
+	for (i = 0; dst && dst->xfrm;
+	     dst = ((struct xfrm_dst *)dst)->child, i++) {
 		pos = strict ? i : 0;
 		if (pos >= info->len)
 			return 0;
@@ -110,18 +108,15 @@ match_policy_out(const struct sk_buff *skb, const struct xt_policy_info *info,
 }
 
 static bool
-policy_mt(const struct sk_buff *skb, const struct net_device *in,
-          const struct net_device *out, const struct xt_match *match,
-          const void *matchinfo, int offset, unsigned int protoff,
-          bool *hotdrop)
+policy_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
-	const struct xt_policy_info *info = matchinfo;
+	const struct xt_policy_info *info = par->matchinfo;
 	int ret;
 
 	if (info->flags & XT_POLICY_MATCH_IN)
-		ret = match_policy_in(skb, info, match->family);
+		ret = match_policy_in(skb, info, xt_family(par));
 	else
-		ret = match_policy_out(skb, info, match->family);
+		ret = match_policy_out(skb, info, xt_family(par));
 
 	if (ret < 0)
 		ret = info->flags & XT_POLICY_MATCH_NONE ? true : false;
@@ -131,41 +126,38 @@ policy_mt(const struct sk_buff *skb, const struct net_device *in,
 	return ret;
 }
 
-static bool
-policy_mt_check(const char *tablename, const void *ip_void,
-                const struct xt_match *match, void *matchinfo,
-                unsigned int hook_mask)
+static int policy_mt_check(const struct xt_mtchk_param *par)
 {
-	const struct xt_policy_info *info = matchinfo;
+	const struct xt_policy_info *info = par->matchinfo;
+	const char *errmsg = "neither incoming nor outgoing policy selected";
 
-	if (!(info->flags & (XT_POLICY_MATCH_IN|XT_POLICY_MATCH_OUT))) {
-		printk(KERN_ERR "xt_policy: neither incoming nor "
-				"outgoing policy selected\n");
-		return false;
+	if (!(info->flags & (XT_POLICY_MATCH_IN|XT_POLICY_MATCH_OUT)))
+		goto err;
+
+	if (par->hook_mask & ((1 << NF_INET_PRE_ROUTING) |
+	    (1 << NF_INET_LOCAL_IN)) && info->flags & XT_POLICY_MATCH_OUT) {
+		errmsg = "output policy not valid in PREROUTING and INPUT";
+		goto err;
 	}
-	if (hook_mask & (1 << NF_INET_PRE_ROUTING | 1 << NF_INET_LOCAL_IN)
-	    && info->flags & XT_POLICY_MATCH_OUT) {
-		printk(KERN_ERR "xt_policy: output policy not valid in "
-				"PRE_ROUTING and INPUT\n");
-		return false;
-	}
-	if (hook_mask & (1 << NF_INET_POST_ROUTING | 1 << NF_INET_LOCAL_OUT)
-	    && info->flags & XT_POLICY_MATCH_IN) {
-		printk(KERN_ERR "xt_policy: input policy not valid in "
-				"POST_ROUTING and OUTPUT\n");
-		return false;
+	if (par->hook_mask & ((1 << NF_INET_POST_ROUTING) |
+	    (1 << NF_INET_LOCAL_OUT)) && info->flags & XT_POLICY_MATCH_IN) {
+		errmsg = "input policy not valid in POSTROUTING and OUTPUT";
+		goto err;
 	}
 	if (info->len > XT_POLICY_MAX_ELEM) {
-		printk(KERN_ERR "xt_policy: too many policy elements\n");
-		return false;
+		errmsg = "too many policy elements";
+		goto err;
 	}
-	return true;
+	return 0;
+err:
+	pr_info_ratelimited("%s\n", errmsg);
+	return -EINVAL;
 }
 
 static struct xt_match policy_mt_reg[] __read_mostly = {
 	{
 		.name		= "policy",
-		.family		= AF_INET,
+		.family		= NFPROTO_IPV4,
 		.checkentry 	= policy_mt_check,
 		.match		= policy_mt,
 		.matchsize	= sizeof(struct xt_policy_info),
@@ -173,7 +165,7 @@ static struct xt_match policy_mt_reg[] __read_mostly = {
 	},
 	{
 		.name		= "policy",
-		.family		= AF_INET6,
+		.family		= NFPROTO_IPV6,
 		.checkentry	= policy_mt_check,
 		.match		= policy_mt,
 		.matchsize	= sizeof(struct xt_policy_info),

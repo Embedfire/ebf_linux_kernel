@@ -1,12 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
- * Licensed under the GPL
  */
 
 #ifndef __DAEMON_H__
 #define __DAEMON_H__
 
-#include "net_user.h"
+#include <net_user.h>
 
 #define SWITCH_VERSION 3
 

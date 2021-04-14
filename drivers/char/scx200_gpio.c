@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* linux/drivers/char/scx200_gpio.c
 
    National Semiconductor SCx200 GPIO driver.  Allows a user space
@@ -12,8 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
-#include <linux/smp_lock.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/io.h>
 
 #include <linux/types.h>
@@ -52,7 +52,6 @@ static int scx200_gpio_open(struct inode *inode, struct file *file)
 	unsigned m = iminor(inode);
 	file->private_data = &scx200_gpio_ops;
 
-	cycle_kernel_lock();
 	if (m >= MAX_PINS)
 		return -EINVAL;
 	return nonseekable_open(inode, file);
@@ -69,6 +68,7 @@ static const struct file_operations scx200_gpio_fileops = {
 	.read    = nsc_gpio_read,
 	.open    = scx200_gpio_open,
 	.release = scx200_gpio_release,
+	.llseek  = no_llseek,
 };
 
 static struct cdev scx200_gpio_cdev;  /* use 1 cdev for all pins */

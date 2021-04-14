@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * raid_class.c - implementation of a simple raid visualisation class
  *
  * Copyright (c) 2005 - James Bottomley <James.Bottomley@steeleye.com>
- *
- * This file is licensed under GPLv2
  *
  * This class is designed to allow raid attributes to be visualised and
  * manipulated in a form independent of the underlying raid.  Ultimately this
@@ -63,7 +62,7 @@ static int raid_match(struct attribute_container *cont, struct device *dev)
 	 * emulated RAID devices, so start with SCSI */
 	struct raid_internal *i = ac_to_raid_internal(cont);
 
-	if (scsi_is_sdev_device(dev)) {
+	if (IS_ENABLED(CONFIG_SCSI) && scsi_is_sdev_device(dev)) {
 		struct scsi_device *sdev = to_scsi_device(dev);
 
 		if (i->f->cookie != sdev->host->hostt)
@@ -149,11 +148,13 @@ static struct {
 	{ RAID_LEVEL_0, "raid0" },
 	{ RAID_LEVEL_1, "raid1" },
 	{ RAID_LEVEL_10, "raid10" },
+	{ RAID_LEVEL_1E, "raid1e" },
 	{ RAID_LEVEL_3, "raid3" },
 	{ RAID_LEVEL_4, "raid4" },
 	{ RAID_LEVEL_5, "raid5" },
 	{ RAID_LEVEL_50, "raid50" },
 	{ RAID_LEVEL_6, "raid6" },
+	{ RAID_LEVEL_JBOD, "jbod" },
 };
 
 static const char *raid_level_name(enum raid_level level)
@@ -237,8 +238,7 @@ int raid_component_add(struct raid_template *r,struct device *raid_dev,
 	rc->dev.parent = get_device(component_dev);
 	rc->num = rd->component_count++;
 
-	snprintf(rc->dev.bus_id, sizeof(rc->dev.bus_id),
-		 "component-%d", rc->num);
+	dev_set_name(&rc->dev, "component-%d", rc->num);
 	list_add_tail(&rc->node, &rd->component_list);
 	rc->dev.class = &raid_class.class;
 	err = device_add(&rc->dev);

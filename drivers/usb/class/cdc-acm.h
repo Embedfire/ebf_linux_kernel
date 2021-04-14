@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *
  * Includes for cdc-acm.c
@@ -19,7 +20,7 @@
  */
 
 #define ACM_TTY_MAJOR		166
-#define ACM_TTY_MINORS		32
+#define ACM_TTY_MINORS		256
 
 /*
  * Requests.
@@ -52,7 +53,7 @@
  */
 
 /*
- * The only reason to have several buffers is to accomodate assumptions
+ * The only reason to have several buffers is to accommodate assumptions
  * in line disciplines. They ask for empty space amount, receive our URB size,
  * and proceed to issue several 1-character writes, assuming they will fit.
  * The very first write takes a complete URB. Fortunately, this only happens
@@ -63,25 +64,19 @@
 #define ACM_NR  16
 
 struct acm_wb {
-	unsigned char *buf;
+	u8 *buf;
 	dma_addr_t dmah;
-	int len;
-	int use;
+	unsigned int len;
 	struct urb		*urb;
 	struct acm		*instance;
+	bool use;
 };
 
 struct acm_rb {
-	struct list_head	list;
 	int			size;
 	unsigned char		*base;
 	dma_addr_t		dma;
-};
-
-struct acm_ru {
-	struct list_head	list;
-	struct acm_rb		*buffer;
-	struct urb		*urb;
+	int			index;
 	struct acm		*instance;
 };
 
@@ -89,48 +84,58 @@ struct acm {
 	struct usb_device *dev;				/* the corresponding usb device */
 	struct usb_interface *control;			/* control interface */
 	struct usb_interface *data;			/* data interface */
-	struct tty_struct *tty;				/* the corresponding tty */
-	struct urb *ctrlurb;			/* urbs */
+	unsigned in, out;				/* i/o pipes */
+	struct tty_port port;			 	/* our tty port data */
+	struct urb *ctrlurb;				/* urbs */
 	u8 *ctrl_buffer;				/* buffers of urbs */
 	dma_addr_t ctrl_dma;				/* dma handles of buffers */
 	u8 *country_codes;				/* country codes from device */
 	unsigned int country_code_size;			/* size of this buffer */
 	unsigned int country_rel_date;			/* release date of version */
 	struct acm_wb wb[ACM_NW];
-	struct acm_ru ru[ACM_NR];
-	struct acm_rb rb[ACM_NR];
+	unsigned long read_urbs_free;
+	struct urb *read_urbs[ACM_NR];
+	struct acm_rb read_buffers[ACM_NR];
 	int rx_buflimit;
-	int rx_endpoint;
 	spinlock_t read_lock;
-	struct list_head spare_read_urbs;
-	struct list_head spare_read_bufs;
-	struct list_head filled_read_bufs;
-	int write_used;					/* number of non-empty write buffers */
-	int processing;
+	u8 *notification_buffer;			/* to reassemble fragmented notifications */
+	unsigned int nb_index;
+	unsigned int nb_size;
 	int transmitting;
 	spinlock_t write_lock;
 	struct mutex mutex;
+	bool disconnected;
+	unsigned long flags;
+#		define EVENT_TTY_WAKEUP	0
+#		define EVENT_RX_STALL	1
+#		define ACM_THROTTLED	2
+#		define ACM_ERROR_DELAY	3
+	unsigned long urbs_in_error_delay;		/* these need to be restarted after a delay */
 	struct usb_cdc_line_coding line;		/* bits, stop, parity */
-	struct work_struct work;			/* work queue entry for line discipline waking up */
-	struct work_struct waker;
-	wait_queue_head_t drain_wait;			/* close processing */
-	struct tasklet_struct urb_task;                 /* rx processing */
-	spinlock_t throttle_lock;			/* synchronize throtteling and read callback */
+	struct delayed_work dwork;		        /* work queue entry for various purposes */
 	unsigned int ctrlin;				/* input control lines (DCD, DSR, RI, break, overruns) */
 	unsigned int ctrlout;				/* output control lines (DTR, RTS) */
+	struct async_icount iocount;			/* counters for control line changes */
+	struct async_icount oldcount;			/* for comparison of counter */
+	wait_queue_head_t wioctl;			/* for ioctl */
 	unsigned int writesize;				/* max packet size for the output bulk endpoint */
 	unsigned int readsize,ctrlsize;			/* buffer sizes for freeing */
-	unsigned int used;				/* someone has this acm's device open */
 	unsigned int minor;				/* acm minor number */
-	unsigned char throttle;				/* throttled by tty layer */
 	unsigned char clocal;				/* termios CLOCAL */
 	unsigned int ctrl_caps;				/* control capabilities from the class specific header */
 	unsigned int susp_count;			/* number of suspended interfaces */
-	struct acm_wb *delayed_wb;			/* write queued for a device about to be woken */
+	unsigned int combined_interfaces:1;		/* control and data collapsed */
+	u8 bInterval;
+	struct usb_anchor delayed;			/* writes queued for a device about to be woken */
+	unsigned long quirks;
 };
 
-#define CDC_DATA_INTERFACE_TYPE	0x0a
-
 /* constants describing various quirks and errors */
-#define NO_UNION_NORMAL			1
-#define SINGLE_RX_URB			2
+#define NO_UNION_NORMAL			BIT(0)
+#define SINGLE_RX_URB			BIT(1)
+#define NO_CAP_LINE			BIT(2)
+#define IGNORE_DEVICE			BIT(3)
+#define QUIRK_CONTROL_LINE_STATE	BIT(4)
+#define CLEAR_HALT_CONDITIONS		BIT(5)
+#define SEND_ZERO_PACKET		BIT(6)
+#define DISABLE_ECHO			BIT(7)

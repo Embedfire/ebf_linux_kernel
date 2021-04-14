@@ -1,26 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  ALSA sequencer main module
  *  Copyright (c) 1998-1999 by Frank van de Pol <fvdpol@coil.demon.nl>
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <linux/init.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
+#include <linux/device.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 
@@ -32,6 +18,7 @@
 #include "seq_timer.h"
 #include "seq_system.h"
 #include "seq_info.h"
+#include <sound/minors.h>
 #include <sound/seq_device.h>
 
 #if defined(CONFIG_SND_SEQ_DUMMY_MODULE)
@@ -43,8 +30,8 @@ int seq_default_timer_class = SNDRV_TIMER_CLASS_GLOBAL;
 int seq_default_timer_sclass = SNDRV_TIMER_SCLASS_NONE;
 int seq_default_timer_card = -1;
 int seq_default_timer_device =
-#ifdef CONFIG_SND_SEQ_RTCTIMER_DEFAULT
-	SNDRV_TIMER_GLOBAL_RTC
+#ifdef CONFIG_SND_SEQ_HRTIMER_DEFAULT
+	SNDRV_TIMER_GLOBAL_HRTIMER
 #else
 	SNDRV_TIMER_GLOBAL_SYSTEM
 #endif
@@ -71,6 +58,9 @@ MODULE_PARM_DESC(seq_default_timer_subdevice, "The default timer subdevice numbe
 module_param(seq_default_timer_resolution, int, 0644);
 MODULE_PARM_DESC(seq_default_timer_resolution, "The default timer resolution in Hz.");
 
+MODULE_ALIAS_CHARDEV(CONFIG_SND_MAJOR, SNDRV_MINOR_SEQUENCER);
+MODULE_ALIAS("devname:snd/seq");
+
 /*
  *  INIT PART
  */
@@ -79,32 +69,33 @@ static int __init alsa_seq_init(void)
 {
 	int err;
 
-	snd_seq_autoload_lock();
-	if ((err = client_init_data()) < 0)
-		goto error;
-
-	/* init memory, room for selected events */
-	if ((err = snd_sequencer_memory_init()) < 0)
-		goto error;
-
-	/* init event queues */
-	if ((err = snd_seq_queues_init()) < 0)
+	err = client_init_data();
+	if (err < 0)
 		goto error;
 
 	/* register sequencer device */
-	if ((err = snd_sequencer_device_init()) < 0)
+	err = snd_sequencer_device_init();
+	if (err < 0)
 		goto error;
 
 	/* register proc interface */
-	if ((err = snd_seq_info_init()) < 0)
-		goto error;
+	err = snd_seq_info_init();
+	if (err < 0)
+		goto error_device;
 
 	/* register our internal client */
-	if ((err = snd_seq_system_client_init()) < 0)
-		goto error;
+	err = snd_seq_system_client_init();
+	if (err < 0)
+		goto error_info;
 
+	snd_seq_autoload_init();
+	return 0;
+
+ error_info:
+	snd_seq_info_done();
+ error_device:
+	snd_sequencer_device_done();
  error:
-	snd_seq_autoload_unlock();
 	return err;
 }
 
@@ -122,8 +113,7 @@ static void __exit alsa_seq_exit(void)
 	/* unregister sequencer device */
 	snd_sequencer_device_done();
 
-	/* release event memory */
-	snd_sequencer_memory_done();
+	snd_seq_autoload_exit();
 }
 
 module_init(alsa_seq_init)

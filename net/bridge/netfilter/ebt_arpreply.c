@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  ebt_arpreply
  *
@@ -8,18 +9,17 @@
  *  August, 2003
  *
  */
-
-#include <linux/netfilter_bridge/ebtables.h>
-#include <linux/netfilter_bridge/ebt_arpreply.h>
 #include <linux/if_arp.h>
 #include <net/arp.h>
 #include <linux/module.h>
+#include <linux/netfilter/x_tables.h>
+#include <linux/netfilter_bridge/ebtables.h>
+#include <linux/netfilter_bridge/ebt_arpreply.h>
 
-static int ebt_target_reply(struct sk_buff *skb, unsigned int hooknr,
-   const struct net_device *in, const struct net_device *out,
-   const void *data, unsigned int datalen)
+static unsigned int
+ebt_arpreply_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
-	struct ebt_arpreply_info *info = (void *)data;
+	const struct ebt_arpreply_info *info = par->targinfo;
 	const __be32 *siptr, *diptr;
 	__be32 _sip, _dip;
 	const struct arphdr *ap;
@@ -52,45 +52,49 @@ static int ebt_target_reply(struct sk_buff *skb, unsigned int hooknr,
 	if (diptr == NULL)
 		return EBT_DROP;
 
-	arp_send(ARPOP_REPLY, ETH_P_ARP, *siptr, (struct net_device *)in,
+	arp_send(ARPOP_REPLY, ETH_P_ARP, *siptr,
+		 (struct net_device *)xt_in(par),
 		 *diptr, shp, info->mac, shp);
 
 	return info->target;
 }
 
-static int ebt_target_reply_check(const char *tablename, unsigned int hookmask,
-   const struct ebt_entry *e, void *data, unsigned int datalen)
+static int ebt_arpreply_tg_check(const struct xt_tgchk_param *par)
 {
-	const struct ebt_arpreply_info *info = data;
+	const struct ebt_arpreply_info *info = par->targinfo;
+	const struct ebt_entry *e = par->entryinfo;
 
-	if (datalen != EBT_ALIGN(sizeof(struct ebt_arpreply_info)))
-		return -EINVAL;
 	if (BASE_CHAIN && info->target == EBT_RETURN)
 		return -EINVAL;
 	if (e->ethproto != htons(ETH_P_ARP) ||
 	    e->invflags & EBT_IPROTO)
 		return -EINVAL;
-	CLEAR_BASE_CHAIN_BIT;
-	if (strcmp(tablename, "nat") || hookmask & ~(1 << NF_BR_PRE_ROUTING))
+	if (ebt_invalid_target(info->target))
 		return -EINVAL;
+
 	return 0;
 }
 
-static struct ebt_target reply_target __read_mostly = {
-	.name		= EBT_ARPREPLY_TARGET,
-	.target		= ebt_target_reply,
-	.check		= ebt_target_reply_check,
+static struct xt_target ebt_arpreply_tg_reg __read_mostly = {
+	.name		= "arpreply",
+	.revision	= 0,
+	.family		= NFPROTO_BRIDGE,
+	.table		= "nat",
+	.hooks		= (1 << NF_BR_NUMHOOKS) | (1 << NF_BR_PRE_ROUTING),
+	.target		= ebt_arpreply_tg,
+	.checkentry	= ebt_arpreply_tg_check,
+	.targetsize	= sizeof(struct ebt_arpreply_info),
 	.me		= THIS_MODULE,
 };
 
 static int __init ebt_arpreply_init(void)
 {
-	return ebt_register_target(&reply_target);
+	return xt_register_target(&ebt_arpreply_tg_reg);
 }
 
 static void __exit ebt_arpreply_fini(void)
 {
-	ebt_unregister_target(&reply_target);
+	xt_unregister_target(&ebt_arpreply_tg_reg);
 }
 
 module_init(ebt_arpreply_init);

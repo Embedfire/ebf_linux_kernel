@@ -1,8 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __WL3501_H__
 #define __WL3501_H__
 
 #include <linux/spinlock.h>
-#include <net/ieee80211.h>
+#include <linux/ieee80211.h>
 
 /* define for WLA 2.0 */
 #define WL3501_BLKSZ 256
@@ -230,13 +231,13 @@ struct iw_mgmt_info_element {
 	u8 id; /* one of enum iw_mgmt_info_element_ids,
 		  but sizeof(enum) > sizeof(u8) :-( */
 	u8 len;
-	u8 data[0];
-} __attribute__ ((packed));
+	u8 data[];
+} __packed;
 
 struct iw_mgmt_essid_pset {
 	struct iw_mgmt_info_element el;
 	u8 			    essid[IW_ESSID_MAX_SIZE];
-} __attribute__ ((packed));
+} __packed;
 
 /*
  * According to 802.11 Wireless Netowors, the definitive guide - O'Reilly
@@ -247,12 +248,12 @@ struct iw_mgmt_essid_pset {
 struct iw_mgmt_data_rset {
 	struct iw_mgmt_info_element el;
 	u8 			    data_rate_labels[IW_DATA_RATE_MAX_LABELS];
-} __attribute__ ((packed));
+} __packed;
 
 struct iw_mgmt_ds_pset {
 	struct iw_mgmt_info_element el;
 	u8 			    chan;
-} __attribute__ ((packed));
+} __packed;
 
 struct iw_mgmt_cf_pset {
 	struct iw_mgmt_info_element el;
@@ -260,12 +261,12 @@ struct iw_mgmt_cf_pset {
 	u8 			    cfp_period;
 	u16 			    cfp_max_duration;
 	u16 			    cfp_dur_remaining;
-} __attribute__ ((packed));
+} __packed;
 
 struct iw_mgmt_ibss_pset {
 	struct iw_mgmt_info_element el;
 	u16 			    atim_window;
-} __attribute__ ((packed));
+} __packed;
 
 struct wl3501_tx_hdr {
 	u16	tx_cnt;
@@ -544,12 +545,12 @@ struct wl3501_80211_tx_plcp_hdr {
 	u8	service;
 	u16	len;
 	u16	crc16;
-} __attribute__ ((packed));
+} __packed;
 
 struct wl3501_80211_tx_hdr {
 	struct wl3501_80211_tx_plcp_hdr	pclp_hdr;
-	struct ieee80211_hdr_4addr		mac_hdr;
-} __attribute__ ((packed));
+	struct ieee80211_hdr		mac_hdr;
+} __packed;
 
 /*
    Reserve the beginning Tx space for descriptor use.
@@ -606,11 +607,10 @@ struct wl3501_card {
 	u8				reg_domain;
 	u8				version[2];
 	struct wl3501_scan_confirm	bss_set[20];
-	struct net_device_stats 	stats;
+
 	struct iw_statistics		wstats;
 	struct iw_spy_data		spy_data;
 	struct iw_public_data		wireless_data;
-	struct dev_node_t		node;
 	struct pcmcia_device		*p_dev;
 };
 #endif

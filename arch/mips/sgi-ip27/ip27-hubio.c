@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 1992-1997, 2000-2003 Silicon Graphics, Inc.
  * Copyright (C) 2004 Christoph Hellwig.
- *	Released under GPL v2.
  *
  * Support functions for the HUB ASIC - mostly PIO mapping related.
  */
@@ -11,25 +11,25 @@
 #include <linux/mmzone.h>
 #include <asm/sn/addrs.h>
 #include <asm/sn/arch.h>
-#include <asm/sn/hub.h>
+#include <asm/sn/agent.h>
+#include <asm/sn/io.h>
+#include <asm/xtalk/xtalk.h>
 
 
 static int force_fire_and_forget = 1;
 
 /**
- * hub_pio_map  -  establish a HUB PIO mapping
+ * hub_pio_map	-  establish a HUB PIO mapping
  *
  * @hub:	hub to perform PIO mapping on
  * @widget:	widget ID to perform PIO mapping for
- * @xtalk_addr:	xtalk_address that needs to be mapped
+ * @xtalk_addr: xtalk_address that needs to be mapped
  * @size:	size of the PIO mapping
  *
  **/
-unsigned long hub_pio_map(cnodeid_t cnode, xwidgetnum_t widget,
+unsigned long hub_pio_map(nasid_t nasid, xwidgetnum_t widget,
 			  unsigned long xtalk_addr, size_t size)
 {
-	nasid_t nasid = COMPACT_TO_NASID_NODEID(cnode);
-	volatile hubreg_t junk;
 	unsigned i;
 
 	/* use small-window mapping if possible */
@@ -45,7 +45,7 @@ unsigned long hub_pio_map(cnodeid_t cnode, xwidgetnum_t widget,
 
 	xtalk_addr &= ~(BWIN_SIZE-1);
 	for (i = 0; i < HUB_NUM_BIG_WINDOW; i++) {
-		if (test_and_set_bit(i, hub_data(cnode)->h_bigwin_used))
+		if (test_and_set_bit(i, hub_data(nasid)->h_bigwin_used))
 			continue;
 
 		/*
@@ -64,7 +64,7 @@ unsigned long hub_pio_map(cnodeid_t cnode, xwidgetnum_t widget,
 		 * after we write it.
 		 */
 		IIO_ITTE_PUT(nasid, i, HUB_PIO_MAP_TO_MEM, widget, xtalk_addr);
-		junk = HUB_L(IIO_ITTE_GET(nasid, i));
+		__raw_readq(IIO_ITTE_GET(nasid, i));
 
 		return NODE_BWIN_BASE(nasid, widget) + (xtalk_addr % BWIN_SIZE);
 	}
@@ -79,12 +79,12 @@ unsigned long hub_pio_map(cnodeid_t cnode, xwidgetnum_t widget,
 /*
  * hub_setup_prb(nasid, prbnum, credits, conveyor)
  *
- * 	Put a PRB into fire-and-forget mode if conveyor isn't set.  Otherwise,
- * 	put it into conveyor belt mode with the specified number of credits.
+ *	Put a PRB into fire-and-forget mode if conveyor isn't set.  Otherwise,
+ *	put it into conveyor belt mode with the specified number of credits.
  */
 static void hub_setup_prb(nasid_t nasid, int prbnum, int credits)
 {
-	iprb_t prb;
+	union iprb_u prb;
 	int prb_offset;
 
 	/*
@@ -106,7 +106,7 @@ static void hub_setup_prb(nasid_t nasid, int prbnum, int credits)
 	prb.iprb_ff = force_fire_and_forget ? 1 : 0;
 
 	/*
-	 * Set the appropriate number of PIO cresits for the widget.
+	 * Set the appropriate number of PIO credits for the widget.
 	 */
 	prb.iprb_xtalkctr = credits;
 
@@ -126,18 +126,18 @@ static void hub_setup_prb(nasid_t nasid, int prbnum, int credits)
  * so we turn off access to all widgets for the duration of the function.
  *
  * XXX - This code should really check what kind of widget we're talking
- * to.  Bridges can only handle three requests, but XG will do more.
+ * to.	Bridges can only handle three requests, but XG will do more.
  * How many can crossbow handle to widget 0?  We're assuming 1.
  *
  * XXX - There is a bug in the crossbow that link reset PIOs do not
  * return write responses.  The easiest solution to this problem is to
- * leave widget 0 (xbow) in fire-and-forget mode at all times.  This
+ * leave widget 0 (xbow) in fire-and-forget mode at all times.	This
  * only affects pio's to xbow registers, which should be rare.
  **/
 static void hub_set_piomode(nasid_t nasid)
 {
-	hubreg_t ii_iowa;
-	hubii_wcr_t ii_wcr;
+	u64 ii_iowa;
+	union hubii_wcr_u ii_wcr;
 	unsigned i;
 
 	ii_iowa = REMOTE_HUB_L(nasid, IIO_OUTWIDGET_ACCESS);
@@ -168,17 +168,16 @@ static void hub_set_piomode(nasid_t nasid)
 }
 
 /*
- * hub_pio_init  -  PIO-related hub initialization
+ * hub_pio_init	 -  PIO-related hub initialization
  *
  * @hub:	hubinfo structure for our hub
  */
-void hub_pio_init(cnodeid_t cnode)
+void hub_pio_init(nasid_t nasid)
 {
-	nasid_t nasid = COMPACT_TO_NASID_NODEID(cnode);
 	unsigned i;
 
 	/* initialize big window piomaps for this hub */
-	bitmap_zero(hub_data(cnode)->h_bigwin_used, HUB_NUM_BIG_WINDOW);
+	bitmap_zero(hub_data(nasid)->h_bigwin_used, HUB_NUM_BIG_WINDOW);
 	for (i = 0; i < HUB_NUM_BIG_WINDOW; i++)
 		IIO_ITTE_DISABLE(nasid, i);
 

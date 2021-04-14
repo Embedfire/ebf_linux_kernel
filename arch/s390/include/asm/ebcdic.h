@@ -1,18 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- *  include/asm-s390/ebcdic.h
  *    EBCDIC -> ASCII, ASCII -> EBCDIC conversion routines.
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 1999
  *    Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
 #ifndef _EBCDIC_H
 #define _EBCDIC_H
 
-#ifndef _S390_TYPES_H
-#include <types.h>
-#endif
+#include <linux/types.h>
 
 extern __u8 _ascebc_500[256];   /* ASCII -> EBCDIC 500 conversion table */
 extern __u8 _ebcasc_500[256];   /* EBCDIC 500 -> ASCII conversion table */
@@ -22,7 +20,7 @@ extern __u8 _ebc_tolower[256]; /* EBCDIC -> lowercase */
 extern __u8 _ebc_toupper[256]; /* EBCDIC -> uppercase */
 
 static inline void
-codepage_convert(const __u8 *codepage, volatile __u8 * addr, unsigned long nr)
+codepage_convert(const __u8 *codepage, volatile char *addr, unsigned long nr)
 {
 	if (nr-- <= 0)
 		return;

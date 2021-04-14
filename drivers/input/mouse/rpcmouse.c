@@ -1,15 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Acorn RiscPC mouse driver for Linux/ARM
  *
  *  Copyright (c) 2000-2002 Vojtech Pavlik
  *  Copyright (C) 1996-2002 Russell King
- *
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  *
  * This handles the Acorn RiscPCs mouse.  We basically have a couple of
  * hardware registers that track the sensor count for the X-Y movement and
@@ -22,10 +19,10 @@
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/input.h>
+#include <linux/io.h>
 
 #include <mach/hardware.h>
 #include <asm/irq.h>
-#include <asm/io.h>
 #include <asm/hardware/iomd.h>
 
 MODULE_AUTHOR("Vojtech Pavlik, Russell King");
@@ -42,7 +39,7 @@ static irqreturn_t rpcmouse_irq(int irq, void *dev_id)
 
 	x = (short) iomd_readl(IOMD_MOUSEX);
 	y = (short) iomd_readl(IOMD_MOUSEY);
-	b = (short) (__raw_readl(0xe0310000) ^ 0x70);
+	b = (short) (__raw_readl(IOMEM(0xe0310000)) ^ 0x70);
 
 	dx = x - rpcmouse_lastx;
 	dy = y - rpcmouse_lasty;

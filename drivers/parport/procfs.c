@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* Sysctl interface for parport devices.
  * 
  * Authors: David Campbell
@@ -21,8 +22,9 @@
 #include <linux/parport.h>
 #include <linux/ctype.h>
 #include <linux/sysctl.h>
+#include <linux/device.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #if defined(CONFIG_SYSCTL) && defined(CONFIG_PROC_FS)
 
@@ -31,8 +33,8 @@
 #define PARPORT_MIN_SPINTIME_VALUE 1
 #define PARPORT_MAX_SPINTIME_VALUE 1000
 
-static int do_active_device(ctl_table *table, int write, struct file *filp,
-		      void __user *result, size_t *lenp, loff_t *ppos)
+static int do_active_device(struct ctl_table *table, int write,
+		      void *result, size_t *lenp, loff_t *ppos)
 {
 	struct parport *port = (struct parport *)table->extra1;
 	char buffer[256];
@@ -63,13 +65,13 @@ static int do_active_device(ctl_table *table, int write, struct file *filp,
 		*lenp = len;
 
 	*ppos += len;
-
-	return copy_to_user(result, buffer, len) ? -EFAULT : 0;
+	memcpy(result, buffer, len);
+	return 0;
 }
 
 #ifdef CONFIG_PARPORT_1284
-static int do_autoprobe(ctl_table *table, int write, struct file *filp,
-			void __user *result, size_t *lenp, loff_t *ppos)
+static int do_autoprobe(struct ctl_table *table, int write,
+			void *result, size_t *lenp, loff_t *ppos)
 {
 	struct parport_device_info *info = table->extra2;
 	const char *str;
@@ -106,13 +108,13 @@ static int do_autoprobe(ctl_table *table, int write, struct file *filp,
 
 	*ppos += len;
 
-	return copy_to_user (result, buffer, len) ? -EFAULT : 0;
+	memcpy(result, buffer, len);
+	return 0;
 }
 #endif /* IEEE1284.3 support. */
 
-static int do_hardware_base_addr (ctl_table *table, int write,
-				  struct file *filp, void __user *result,
-				  size_t *lenp, loff_t *ppos)
+static int do_hardware_base_addr(struct ctl_table *table, int write,
+				 void *result, size_t *lenp, loff_t *ppos)
 {
 	struct parport *port = (struct parport *)table->extra1;
 	char buffer[20];
@@ -134,13 +136,12 @@ static int do_hardware_base_addr (ctl_table *table, int write,
 		*lenp = len;
 
 	*ppos += len;
-
-	return copy_to_user(result, buffer, len) ? -EFAULT : 0;
+	memcpy(result, buffer, len);
+	return 0;
 }
 
-static int do_hardware_irq (ctl_table *table, int write,
-			    struct file *filp, void __user *result,
-			    size_t *lenp, loff_t *ppos)
+static int do_hardware_irq(struct ctl_table *table, int write,
+			   void *result, size_t *lenp, loff_t *ppos)
 {
 	struct parport *port = (struct parport *)table->extra1;
 	char buffer[20];
@@ -162,13 +163,12 @@ static int do_hardware_irq (ctl_table *table, int write,
 		*lenp = len;
 
 	*ppos += len;
-
-	return copy_to_user(result, buffer, len) ? -EFAULT : 0;
+	memcpy(result, buffer, len);
+	return 0;
 }
 
-static int do_hardware_dma (ctl_table *table, int write,
-			    struct file *filp, void __user *result,
-			    size_t *lenp, loff_t *ppos)
+static int do_hardware_dma(struct ctl_table *table, int write,
+			   void *result, size_t *lenp, loff_t *ppos)
 {
 	struct parport *port = (struct parport *)table->extra1;
 	char buffer[20];
@@ -190,13 +190,12 @@ static int do_hardware_dma (ctl_table *table, int write,
 		*lenp = len;
 
 	*ppos += len;
-
-	return copy_to_user(result, buffer, len) ? -EFAULT : 0;
+	memcpy(result, buffer, len);
+	return 0;
 }
 
-static int do_hardware_modes (ctl_table *table, int write,
-			      struct file *filp, void __user *result,
-			      size_t *lenp, loff_t *ppos)
+static int do_hardware_modes(struct ctl_table *table, int write,
+			     void *result, size_t *lenp, loff_t *ppos)
 {
 	struct parport *port = (struct parport *)table->extra1;
 	char buffer[40];
@@ -211,7 +210,11 @@ static int do_hardware_modes (ctl_table *table, int write,
 		return -EACCES;
 
 	{
-#define printmode(x) {if(port->modes&PARPORT_MODE_##x){len+=sprintf(buffer+len,"%s%s",f?",":"",#x);f++;}}
+#define printmode(x)							\
+do {									\
+	if (port->modes & PARPORT_MODE_##x)				\
+		len += sprintf(buffer + len, "%s%s", f++ ? "," : "", #x); \
+} while (0)
 		int f = 0;
 		printmode(PCSPP);
 		printmode(TRISTATE);
@@ -229,14 +232,14 @@ static int do_hardware_modes (ctl_table *table, int write,
 		*lenp = len;
 
 	*ppos += len;
-
-	return copy_to_user(result, buffer, len) ? -EFAULT : 0;
+	memcpy(result, buffer, len);
+	return 0;
 }
 
-#define PARPORT_PORT_DIR(CHILD) { .ctl_name = 0, .procname = NULL, .mode = 0555, .child = CHILD }
-#define PARPORT_PARPORT_DIR(CHILD) { .ctl_name = DEV_PARPORT, .procname = "parport", \
+#define PARPORT_PORT_DIR(CHILD) { .procname = NULL, .mode = 0555, .child = CHILD }
+#define PARPORT_PARPORT_DIR(CHILD) { .procname = "parport", \
                                      .mode = 0555, .child = CHILD }
-#define PARPORT_DEV_DIR(CHILD) { .ctl_name = CTL_DEV, .procname = "dev", .mode = 0555, .child = CHILD }
+#define PARPORT_DEV_DIR(CHILD) { .procname = "dev", .mode = 0555, .child = CHILD }
 #define PARPORT_DEVICES_ROOT_DIR  {  .procname = "devices", \
                                     .mode = 0555, .child = NULL }
 
@@ -255,11 +258,11 @@ PARPORT_MAX_SPINTIME_VALUE;
 
 struct parport_sysctl_table {
 	struct ctl_table_header *sysctl_header;
-	ctl_table vars[12];
-	ctl_table device_dir[2];
-	ctl_table port_dir[2];
-	ctl_table parport_dir[2];
-	ctl_table dev_dir[2];
+	struct ctl_table vars[12];
+	struct ctl_table device_dir[2];
+	struct ctl_table port_dir[2];
+	struct ctl_table parport_dir[2];
+	struct ctl_table dev_dir[2];
 };
 
 static const struct parport_sysctl_table parport_sysctl_template = {
@@ -270,7 +273,7 @@ static const struct parport_sysctl_table parport_sysctl_template = {
 			.data		= NULL,
 			.maxlen		= sizeof(int),
 			.mode		= 0644,
-			.proc_handler	= &proc_dointvec_minmax,
+			.proc_handler	= proc_dointvec_minmax,
 			.extra1		= (void*) &parport_min_spintime_value,
 			.extra2		= (void*) &parport_max_spintime_value
 		},
@@ -279,28 +282,28 @@ static const struct parport_sysctl_table parport_sysctl_template = {
 			.data		= NULL,
 			.maxlen		= 0,
 			.mode		= 0444,
-			.proc_handler	= &do_hardware_base_addr
+			.proc_handler	= do_hardware_base_addr
 		},
 		{
 			.procname	= "irq",
 			.data		= NULL,
 			.maxlen		= 0,
 			.mode		= 0444,
-			.proc_handler	= &do_hardware_irq
+			.proc_handler	= do_hardware_irq
 		},
 		{
 			.procname	= "dma",
 			.data		= NULL,
 			.maxlen		= 0,
 			.mode		= 0444,
-			.proc_handler	= &do_hardware_dma
+			.proc_handler	= do_hardware_dma
 		},
 		{
 			.procname	= "modes",
 			.data		= NULL,
 			.maxlen		= 0,
 			.mode		= 0444,
-			.proc_handler	= &do_hardware_modes
+			.proc_handler	= do_hardware_modes
 		},
 		PARPORT_DEVICES_ROOT_DIR,
 #ifdef CONFIG_PARPORT_1284
@@ -309,35 +312,35 @@ static const struct parport_sysctl_table parport_sysctl_template = {
 			.data		= NULL,
 			.maxlen		= 0,
 			.mode		= 0444,
-			.proc_handler	= &do_autoprobe
+			.proc_handler	= do_autoprobe
 		},
 		{
 			.procname	= "autoprobe0",
 			.data		= NULL,
 			.maxlen		= 0,
 			.mode		= 0444,
-			.proc_handler	=  &do_autoprobe
+			.proc_handler	= do_autoprobe
 		},
 		{
 			.procname	= "autoprobe1",
 			.data		= NULL,
 			.maxlen		= 0,
 			.mode		= 0444,
-			.proc_handler	= &do_autoprobe
+			.proc_handler	= do_autoprobe
 		},
 		{
 			.procname	= "autoprobe2",
 			.data		= NULL,
 			.maxlen		= 0,
 			.mode		= 0444,
-			.proc_handler	= &do_autoprobe
+			.proc_handler	= do_autoprobe
 		},
 		{
 			.procname	= "autoprobe3",
 			.data		= NULL,
 			.maxlen		= 0,
 			.mode		= 0444,
-			.proc_handler	= &do_autoprobe
+			.proc_handler	= do_autoprobe
 		},
 #endif /* IEEE 1284 support */
 		{}
@@ -348,7 +351,7 @@ static const struct parport_sysctl_table parport_sysctl_template = {
 			.data		= NULL,
 			.maxlen		= 0,
 			.mode		= 0444,
-			.proc_handler	= &do_active_device
+			.proc_handler	= do_active_device
 		},
 		{}
 	},
@@ -369,12 +372,12 @@ static const struct parport_sysctl_table parport_sysctl_template = {
 struct parport_device_sysctl_table
 {
 	struct ctl_table_header *sysctl_header;
-	ctl_table vars[2];
-	ctl_table device_dir[2];
-	ctl_table devices_root_dir[2];
-	ctl_table port_dir[2];
-	ctl_table parport_dir[2];
-	ctl_table dev_dir[2];
+	struct ctl_table vars[2];
+	struct ctl_table device_dir[2];
+	struct ctl_table devices_root_dir[2];
+	struct ctl_table port_dir[2];
+	struct ctl_table parport_dir[2];
+	struct ctl_table dev_dir[2];
 };
 
 static const struct parport_device_sysctl_table
@@ -386,14 +389,13 @@ parport_device_sysctl_template = {
 			.data		= NULL,
 			.maxlen		= sizeof(unsigned long),
 			.mode		= 0644,
-			.proc_handler	= &proc_doulongvec_ms_jiffies_minmax,
+			.proc_handler	= proc_doulongvec_ms_jiffies_minmax,
 			.extra1		= (void*) &parport_min_timeslice_value,
 			.extra2		= (void*) &parport_max_timeslice_value
 		},
 	},
 	{
 		{
-			.ctl_name	= 0,
 			.procname	= NULL,
 			.data		= NULL,
 			.maxlen		= 0,
@@ -423,10 +425,10 @@ parport_device_sysctl_template = {
 struct parport_default_sysctl_table
 {
 	struct ctl_table_header *sysctl_header;
-	ctl_table vars[3];
-        ctl_table default_dir[2];
-	ctl_table parport_dir[2];
-	ctl_table dev_dir[2];
+	struct ctl_table vars[3];
+	struct ctl_table default_dir[2];
+	struct ctl_table parport_dir[2];
+	struct ctl_table dev_dir[2];
 };
 
 static struct parport_default_sysctl_table
@@ -438,7 +440,7 @@ parport_default_sysctl_table = {
 			.data		= &parport_default_timeslice,
 			.maxlen		= sizeof(parport_default_timeslice),
 			.mode		= 0644,
-			.proc_handler	= &proc_doulongvec_ms_jiffies_minmax,
+			.proc_handler	= proc_doulongvec_ms_jiffies_minmax,
 			.extra1		= (void*) &parport_min_timeslice_value,
 			.extra2		= (void*) &parport_max_timeslice_value
 		},
@@ -447,7 +449,7 @@ parport_default_sysctl_table = {
 			.data		= &parport_default_spintime,
 			.maxlen		= sizeof(parport_default_spintime),
 			.mode		= 0644,
-			.proc_handler	= &proc_dointvec_minmax,
+			.proc_handler	= proc_dointvec_minmax,
 			.extra1		= (void*) &parport_min_spintime_value,
 			.extra2		= (void*) &parport_max_spintime_value
 		},
@@ -455,7 +457,6 @@ parport_default_sysctl_table = {
 	},
 	{
 		{
-			.ctl_name	= DEV_PARPORT_DEFAULT,
 			.procname	= "default",
 			.mode		= 0555,
 			.child		= parport_default_sysctl_table.vars
@@ -478,10 +479,9 @@ int parport_proc_register(struct parport *port)
 	struct parport_sysctl_table *t;
 	int i;
 
-	t = kmalloc(sizeof(*t), GFP_KERNEL);
+	t = kmemdup(&parport_sysctl_template, sizeof(*t), GFP_KERNEL);
 	if (t == NULL)
 		return -ENOMEM;
-	memcpy(t, &parport_sysctl_template, sizeof(*t));
 
 	t->device_dir[0].extra1 = port;
 
@@ -495,7 +495,6 @@ int parport_proc_register(struct parport *port)
 		t->vars[6 + i].extra2 = &port->probe_info[i];
 
 	t->port_dir[0].procname = port->name;
-	t->port_dir[0].ctl_name = 0;
 
 	t->port_dir[0].child = t->vars;
 	t->parport_dir[0].child = t->port_dir;
@@ -526,19 +525,16 @@ int parport_device_proc_register(struct pardevice *device)
 	struct parport_device_sysctl_table *t;
 	struct parport * port = device->port;
 	
-	t = kmalloc(sizeof(*t), GFP_KERNEL);
+	t = kmemdup(&parport_device_sysctl_template, sizeof(*t), GFP_KERNEL);
 	if (t == NULL)
 		return -ENOMEM;
-	memcpy(t, &parport_device_sysctl_template, sizeof(*t));
 
 	t->dev_dir[0].child = t->parport_dir;
 	t->parport_dir[0].child = t->port_dir;
 	t->port_dir[0].procname = port->name;
-	t->port_dir[0].ctl_name = 0;
 	t->port_dir[0].child = t->devices_root_dir;
 	t->devices_root_dir[0].child = t->device_dir;
 
-	t->device_dir[0].ctl_name = 0;
 	t->device_dir[0].procname = device->name;
 	t->device_dir[0].child = t->vars;
 	t->vars[0].data = &device->timeslice;
@@ -565,8 +561,18 @@ int parport_device_proc_unregister(struct pardevice *device)
 
 static int __init parport_default_proc_register(void)
 {
+	int ret;
+
 	parport_default_sysctl_table.sysctl_header =
 		register_sysctl_table(parport_default_sysctl_table.dev_dir);
+	if (!parport_default_sysctl_table.sysctl_header)
+		return -ENOMEM;
+	ret = parport_bus_init();
+	if (ret) {
+		unregister_sysctl_table(parport_default_sysctl_table.
+					sysctl_header);
+		return ret;
+	}
 	return 0;
 }
 
@@ -577,6 +583,7 @@ static void __exit parport_default_proc_unregister(void)
 					sysctl_header);
 		parport_default_sysctl_table.sysctl_header = NULL;
 	}
+	parport_bus_exit();
 }
 
 #else /* no sysctl or no procfs*/
@@ -603,13 +610,14 @@ int parport_device_proc_unregister(struct pardevice *device)
 
 static int __init parport_default_proc_register (void)
 {
-	return 0;
+	return parport_bus_init();
 }
 
 static void __exit parport_default_proc_unregister (void)
 {
+	parport_bus_exit();
 }
 #endif
 
-module_init(parport_default_proc_register)
+subsys_initcall(parport_default_proc_register)
 module_exit(parport_default_proc_unregister)

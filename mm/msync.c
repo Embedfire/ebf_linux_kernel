@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/mm/msync.c
  *
@@ -28,7 +29,7 @@
  * So by _not_ starting I/O in MS_ASYNC we provide complete flexibility to
  * applications.
  */
-asmlinkage long sys_msync(unsigned long start, size_t len, int flags)
+SYSCALL_DEFINE3(msync, unsigned long, start, size_t, len, int, flags)
 {
 	unsigned long end;
 	struct mm_struct *mm = current->mm;
@@ -36,9 +37,11 @@ asmlinkage long sys_msync(unsigned long start, size_t len, int flags)
 	int unmapped_error = 0;
 	int error = -EINVAL;
 
+	start = untagged_addr(start);
+
 	if (flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC))
 		goto out;
-	if (start & ~PAGE_MASK)
+	if (offset_in_page(start))
 		goto out;
 	if ((flags & MS_ASYNC) && (flags & MS_SYNC))
 		goto out;
@@ -54,10 +57,11 @@ asmlinkage long sys_msync(unsigned long start, size_t len, int flags)
 	 * If the interval [start,end) covers some unmapped address ranges,
 	 * just ignore them, but return -ENOMEM at the end.
 	 */
-	down_read(&mm->mmap_sem);
+	mmap_read_lock(mm);
 	vma = find_vma(mm, start);
 	for (;;) {
 		struct file *file;
+		loff_t fstart, fend;
 
 		/* Still start < end. */
 		error = -ENOMEM;
@@ -77,16 +81,19 @@ asmlinkage long sys_msync(unsigned long start, size_t len, int flags)
 			goto out_unlock;
 		}
 		file = vma->vm_file;
+		fstart = (start - vma->vm_start) +
+			 ((loff_t)vma->vm_pgoff << PAGE_SHIFT);
+		fend = fstart + (min(end, vma->vm_end) - start) - 1;
 		start = vma->vm_end;
 		if ((flags & MS_SYNC) && file &&
 				(vma->vm_flags & VM_SHARED)) {
 			get_file(file);
-			up_read(&mm->mmap_sem);
-			error = do_fsync(file, 0);
+			mmap_read_unlock(mm);
+			error = vfs_fsync_range(file, fstart, fend, 1);
 			fput(file);
 			if (error || start >= end)
 				goto out;
-			down_read(&mm->mmap_sem);
+			mmap_read_lock(mm);
 			vma = find_vma(mm, start);
 		} else {
 			if (start >= end) {
@@ -97,7 +104,7 @@ asmlinkage long sys_msync(unsigned long start, size_t len, int flags)
 		}
 	}
 out_unlock:
-	up_read(&mm->mmap_sem);
+	mmap_read_unlock(mm);
 out:
 	return error ? : unmapped_error;
 }

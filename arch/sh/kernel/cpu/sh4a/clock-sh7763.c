@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/kernel/cpu/sh4a/clock-sh7763.c
  *
@@ -5,86 +6,77 @@
  *
  *  Copyright (C) 2005  Paul Mundt
  *  Copyright (C) 2007  Yoshihiro Shimoda
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/io.h>
+#include <linux/clkdev.h>
 #include <asm/clock.h>
 #include <asm/freq.h>
 #include <asm/io.h>
 
 static int bfc_divisors[] = { 1, 1, 1, 8, 1, 1, 1, 1 };
 static int p0fc_divisors[] = { 1, 1, 1, 8, 1, 1, 1, 1 };
-static int p1fc_divisors[] = { 1, 1, 1, 16, 1, 1, 1, 1 };
 static int cfc_divisors[] = { 1, 1, 4, 1, 1, 1, 1, 1 };
 
 static void master_clk_init(struct clk *clk)
 {
-	clk->rate *= p0fc_divisors[(ctrl_inl(FRQCR) >> 4) & 0x07];
+	clk->rate *= p0fc_divisors[(__raw_readl(FRQCR) >> 4) & 0x07];
 }
 
-static struct clk_ops sh7763_master_clk_ops = {
+static struct sh_clk_ops sh7763_master_clk_ops = {
 	.init		= master_clk_init,
 };
 
-static void module_clk_recalc(struct clk *clk)
+static unsigned long module_clk_recalc(struct clk *clk)
 {
-	int idx = ((ctrl_inl(FRQCR) >> 4) & 0x07);
-	clk->rate = clk->parent->rate / p0fc_divisors[idx];
+	int idx = ((__raw_readl(FRQCR) >> 4) & 0x07);
+	return clk->parent->rate / p0fc_divisors[idx];
 }
 
-static struct clk_ops sh7763_module_clk_ops = {
+static struct sh_clk_ops sh7763_module_clk_ops = {
 	.recalc		= module_clk_recalc,
 };
 
-static void bus_clk_recalc(struct clk *clk)
+static unsigned long bus_clk_recalc(struct clk *clk)
 {
-	int idx = ((ctrl_inl(FRQCR) >> 16) & 0x07);
-	clk->rate = clk->parent->rate / bfc_divisors[idx];
+	int idx = ((__raw_readl(FRQCR) >> 16) & 0x07);
+	return clk->parent->rate / bfc_divisors[idx];
 }
 
-static struct clk_ops sh7763_bus_clk_ops = {
+static struct sh_clk_ops sh7763_bus_clk_ops = {
 	.recalc		= bus_clk_recalc,
 };
 
-static void cpu_clk_recalc(struct clk *clk)
-{
-	clk->rate = clk->parent->rate;
-}
-
-static struct clk_ops sh7763_cpu_clk_ops = {
-	.recalc		= cpu_clk_recalc,
+static struct sh_clk_ops sh7763_cpu_clk_ops = {
+	.recalc		= followparent_recalc,
 };
 
-static struct clk_ops *sh7763_clk_ops[] = {
+static struct sh_clk_ops *sh7763_clk_ops[] = {
 	&sh7763_master_clk_ops,
 	&sh7763_module_clk_ops,
 	&sh7763_bus_clk_ops,
 	&sh7763_cpu_clk_ops,
 };
 
-void __init arch_init_clk_ops(struct clk_ops **ops, int idx)
+void __init arch_init_clk_ops(struct sh_clk_ops **ops, int idx)
 {
 	if (idx < ARRAY_SIZE(sh7763_clk_ops))
 		*ops = sh7763_clk_ops[idx];
 }
 
-static void shyway_clk_recalc(struct clk *clk)
+static unsigned long shyway_clk_recalc(struct clk *clk)
 {
-	int idx = ((ctrl_inl(FRQCR) >> 20) & 0x07);
-	clk->rate = clk->parent->rate / cfc_divisors[idx];
+	int idx = ((__raw_readl(FRQCR) >> 20) & 0x07);
+	return clk->parent->rate / cfc_divisors[idx];
 }
 
-static struct clk_ops sh7763_shyway_clk_ops = {
+static struct sh_clk_ops sh7763_shyway_clk_ops = {
 	.recalc		= shyway_clk_recalc,
 };
 
 static struct clk sh7763_shyway_clk = {
-	.name		= "shyway_clk",
-	.flags		= CLK_ALWAYS_ENABLED,
+	.flags		= CLK_ENABLE_ON_INIT,
 	.ops		= &sh7763_shyway_clk_ops,
 };
 
@@ -96,31 +88,29 @@ static struct clk *sh7763_onchip_clocks[] = {
 	&sh7763_shyway_clk,
 };
 
-static int __init sh7763_clk_init(void)
-{
-	struct clk *clk = clk_get(NULL, "master_clk");
-	int i;
+static struct clk_lookup lookups[] = {
+	/* main clocks */
+	CLKDEV_CON_ID("shyway_clk", &sh7763_shyway_clk),
+};
 
+int __init arch_clk_init(void)
+{
+	struct clk *clk;
+	int i, ret = 0;
+
+	cpg_clk_init();
+
+	clk = clk_get(NULL, "master_clk");
 	for (i = 0; i < ARRAY_SIZE(sh7763_onchip_clocks); i++) {
 		struct clk *clkp = sh7763_onchip_clocks[i];
 
 		clkp->parent = clk;
-		clk_register(clkp);
-		clk_enable(clkp);
+		ret |= clk_register(clkp);
 	}
-
-	/*
-	 * Now that we have the rest of the clocks registered, we need to
-	 * force the parent clock to propagate so that these clocks will
-	 * automatically figure out their rate. We cheat by handing the
-	 * parent clock its current rate and forcing child propagation.
-	 */
-	clk_set_rate(clk, clk_get_rate(clk));
 
 	clk_put(clk);
 
-	return 0;
+	clkdev_add_table(lookups, ARRAY_SIZE(lookups));
+
+	return ret;
 }
-
-arch_initcall(sh7763_clk_init);
-

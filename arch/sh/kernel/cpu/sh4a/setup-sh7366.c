@@ -1,20 +1,41 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * SH7366 Setup
  *
  *  Copyright (C) 2008 Renesas Solutions
  *
  * Based on linux/arch/sh/kernel/cpu/sh4a/setup-sh7722.c
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/platform_device.h>
 #include <linux/init.h>
 #include <linux/serial.h>
 #include <linux/serial_sci.h>
 #include <linux/uio_driver.h>
+#include <linux/sh_timer.h>
+#include <linux/sh_intc.h>
+#include <linux/usb/r8a66597.h>
 #include <asm/clock.h>
+#include <asm/platform_early.h>
+
+static struct plat_sci_port scif0_platform_data = {
+	.scscr		= SCSCR_REIE,
+	.type		= PORT_SCIF,
+};
+
+static struct resource scif0_resources[] = {
+	DEFINE_RES_MEM(0xffe00000, 0x100),
+	DEFINE_RES_IRQ(evt2irq(0xc00)),
+};
+
+static struct platform_device scif0_device = {
+	.name		= "sh-sci",
+	.id		= 0,
+	.resource	= scif0_resources,
+	.num_resources	= ARRAY_SIZE(scif0_resources),
+	.dev		= {
+		.platform_data	= &scif0_platform_data,
+	},
+};
 
 static struct resource iic_resources[] = {
 	[0] = {
@@ -24,22 +45,52 @@ static struct resource iic_resources[] = {
 		.flags  = IORESOURCE_MEM,
 	},
 	[1] = {
-		.start  = 96,
-		.end    = 99,
+		.start  = evt2irq(0xe00),
+		.end    = evt2irq(0xe60),
 		.flags  = IORESOURCE_IRQ,
        },
 };
 
 static struct platform_device iic_device = {
 	.name           = "i2c-sh_mobile",
+	.id             = 0, /* "i2c0" clock */
 	.num_resources  = ARRAY_SIZE(iic_resources),
 	.resource       = iic_resources,
+};
+
+static struct r8a66597_platdata r8a66597_data = {
+	.on_chip = 1,
+};
+
+static struct resource usb_host_resources[] = {
+	[0] = {
+		.start  = 0xa4d80000,
+		.end    = 0xa4d800ff,
+		.flags  = IORESOURCE_MEM,
+	},
+	[1] = {
+		.start  = evt2irq(0xa20),
+		.end    = evt2irq(0xa20),
+		.flags	= IORESOURCE_IRQ | IRQF_TRIGGER_LOW,
+	},
+};
+
+static struct platform_device usb_host_device = {
+	.name	= "r8a66597_hcd",
+	.id	= -1,
+	.dev = {
+		.dma_mask		= NULL,
+		.coherent_dma_mask	= 0xffffffff,
+		.platform_data		= &r8a66597_data,
+	},
+	.num_resources	= ARRAY_SIZE(usb_host_resources),
+	.resource	= usb_host_resources,
 };
 
 static struct uio_info vpu_platform_data = {
 	.name = "VPU5",
 	.version = "0",
-	.irq = 60,
+	.irq = evt2irq(0x980),
 };
 
 static struct resource vpu_resources[] = {
@@ -67,7 +118,7 @@ static struct platform_device vpu_device = {
 static struct uio_info veu0_platform_data = {
 	.name = "VEU",
 	.version = "0",
-	.irq = 54,
+	.irq = evt2irq(0x8c0),
 };
 
 static struct resource veu0_resources[] = {
@@ -95,7 +146,7 @@ static struct platform_device veu0_device = {
 static struct uio_info veu1_platform_data = {
 	.name = "VEU",
 	.version = "0",
-	.irq = 27,
+	.irq = evt2irq(0x560),
 };
 
 static struct resource veu1_resources[] = {
@@ -120,28 +171,52 @@ static struct platform_device veu1_device = {
 	.num_resources	= ARRAY_SIZE(veu1_resources),
 };
 
-static struct plat_sci_port sci_platform_data[] = {
-	{
-		.mapbase	= 0xffe00000,
-		.flags		= UPF_BOOT_AUTOCONF,
-		.type		= PORT_SCIF,
-		.irqs		= { 80, 80, 80, 80 },
-	}, {
-		.flags = 0,
-	}
+static struct sh_timer_config cmt_platform_data = {
+	.channels_mask = 0x20,
 };
 
-static struct platform_device sci_device = {
-	.name		= "sh-sci",
-	.id		= -1,
-	.dev		= {
-		.platform_data	= sci_platform_data,
+static struct resource cmt_resources[] = {
+	DEFINE_RES_MEM(0x044a0000, 0x70),
+	DEFINE_RES_IRQ(evt2irq(0xf00)),
+};
+
+static struct platform_device cmt_device = {
+	.name		= "sh-cmt-32",
+	.id		= 0,
+	.dev = {
+		.platform_data	= &cmt_platform_data,
 	},
+	.resource	= cmt_resources,
+	.num_resources	= ARRAY_SIZE(cmt_resources),
+};
+
+static struct sh_timer_config tmu0_platform_data = {
+	.channels_mask = 7,
+};
+
+static struct resource tmu0_resources[] = {
+	DEFINE_RES_MEM(0xffd80000, 0x2c),
+	DEFINE_RES_IRQ(evt2irq(0x400)),
+	DEFINE_RES_IRQ(evt2irq(0x420)),
+	DEFINE_RES_IRQ(evt2irq(0x440)),
+};
+
+static struct platform_device tmu0_device = {
+	.name		= "sh-tmu",
+	.id		= 0,
+	.dev = {
+		.platform_data	= &tmu0_platform_data,
+	},
+	.resource	= tmu0_resources,
+	.num_resources	= ARRAY_SIZE(tmu0_resources),
 };
 
 static struct platform_device *sh7366_devices[] __initdata = {
+	&scif0_device,
+	&cmt_device,
+	&tmu0_device,
 	&iic_device,
-	&sci_device,
+	&usb_host_device,
 	&vpu_device,
 	&veu0_device,
 	&veu1_device,
@@ -149,19 +224,6 @@ static struct platform_device *sh7366_devices[] __initdata = {
 
 static int __init sh7366_devices_setup(void)
 {
-	clk_always_enable("mstp031"); /* TLB */
-	clk_always_enable("mstp030"); /* IC */
-	clk_always_enable("mstp029"); /* OC */
-	clk_always_enable("mstp028"); /* RSMEM */
-	clk_always_enable("mstp026"); /* XYMEM */
-	clk_always_enable("mstp023"); /* INTC3 */
-	clk_always_enable("mstp022"); /* INTC */
-	clk_always_enable("mstp020"); /* SuperHyway */
-	clk_always_enable("mstp109"); /* I2C */
-	clk_always_enable("mstp207"); /* VEU-2 */
-	clk_always_enable("mstp202"); /* VEU-1 */
-	clk_always_enable("mstp201"); /* VPU */
-
 	platform_resource_setup_memory(&vpu_device, "vpu", 2 << 20);
 	platform_resource_setup_memory(&veu0_device, "veu0", 2 << 20);
 	platform_resource_setup_memory(&veu1_device, "veu1", 2 << 20);
@@ -169,10 +231,24 @@ static int __init sh7366_devices_setup(void)
 	return platform_add_devices(sh7366_devices,
 				    ARRAY_SIZE(sh7366_devices));
 }
-__initcall(sh7366_devices_setup);
+arch_initcall(sh7366_devices_setup);
+
+static struct platform_device *sh7366_early_devices[] __initdata = {
+	&scif0_device,
+	&cmt_device,
+	&tmu0_device,
+};
+
+void __init plat_early_device_setup(void)
+{
+	sh_early_platform_add_devices(sh7366_early_devices,
+				   ARRAY_SIZE(sh7366_early_devices));
+}
 
 enum {
 	UNUSED=0,
+	ENABLED,
+	DISABLED,
 
 	/* interrupt sources */
 	IRQ0, IRQ1, IRQ2, IRQ3, IRQ4, IRQ5, IRQ6, IRQ7,
@@ -186,14 +262,13 @@ enum {
 	DENC, MSIOF,
 	FLCTL_FLSTEI, FLCTL_FLENDI, FLCTL_FLTREQ0I, FLCTL_FLTREQ1I,
 	I2C_ALI, I2C_TACKI, I2C_WAITI, I2C_DTEI,
-	SDHI0, SDHI1, SDHI2, SDHI3,
-	CMT, TSIF, SIU,
+	SDHI, CMT, TSIF, SIU,
 	TMU0, TMU1, TMU2,
 	VEU2, LCDC,
 
 	/* interrupt groups */
 
-	DMAC0123, VIOVOU, MMC, DMAC45, FLCTL, I2C, SDHI,
+	DMAC0123, VIOVOU, MMC, DMAC45, FLCTL, I2C,
 };
 
 static struct intc_vect vectors[] __initdata = {
@@ -218,8 +293,8 @@ static struct intc_vect vectors[] __initdata = {
 	INTC_VECT(FLCTL_FLTREQ0I, 0xdc0), INTC_VECT(FLCTL_FLTREQ1I, 0xde0),
 	INTC_VECT(I2C_ALI, 0xe00), INTC_VECT(I2C_TACKI, 0xe20),
 	INTC_VECT(I2C_WAITI, 0xe40), INTC_VECT(I2C_DTEI, 0xe60),
-	INTC_VECT(SDHI0, 0xe80), INTC_VECT(SDHI1, 0xea0),
-	INTC_VECT(SDHI2, 0xec0), INTC_VECT(SDHI3, 0xee0),
+	INTC_VECT(SDHI, 0xe80), INTC_VECT(SDHI, 0xea0),
+	INTC_VECT(SDHI, 0xec0), INTC_VECT(SDHI, 0xee0),
 	INTC_VECT(CMT, 0xf00), INTC_VECT(TSIF, 0xf20),
 	INTC_VECT(SIU, 0xf80),
 	INTC_VECT(TMU0, 0x400), INTC_VECT(TMU1, 0x420),
@@ -235,7 +310,6 @@ static struct intc_group groups[] __initdata = {
 	INTC_GROUP(FLCTL, FLCTL_FLSTEI, FLCTL_FLENDI,
 		   FLCTL_FLTREQ0I, FLCTL_FLTREQ1I),
 	INTC_GROUP(I2C, I2C_ALI, I2C_TACKI, I2C_WAITI, I2C_DTEI),
-	INTC_GROUP(SDHI, SDHI0, SDHI1, SDHI2, SDHI3),
 };
 
 static struct intc_mask_reg mask_registers[] __initdata = {
@@ -257,7 +331,7 @@ static struct intc_mask_reg mask_registers[] __initdata = {
 	  { I2C_DTEI, I2C_WAITI, I2C_TACKI, I2C_ALI,
 	    FLCTL_FLTREQ1I, FLCTL_FLTREQ0I, FLCTL_FLENDI, FLCTL_FLSTEI } },
 	{ 0xa40800a0, 0xa40800e0, 8, /* IMR8 / IMCR8 */
-	  { SDHI3, SDHI2, SDHI1, SDHI0, 0, 0, 0, SIU } },
+	  { DISABLED, ENABLED, ENABLED, ENABLED, 0, 0, 0, SIU } },
 	{ 0xa40800a4, 0xa40800e4, 8, /* IMR9 / IMCR9 */
 	  { 0, 0, 0, CMT, 0, USB, } },
 	{ 0xa40800a8, 0xa40800e8, 8, /* IMR10 / IMCR10 */
@@ -295,9 +369,13 @@ static struct intc_mask_reg ack_registers[] __initdata = {
 	  { IRQ0, IRQ1, IRQ2, IRQ3, IRQ4, IRQ5, IRQ6, IRQ7 } },
 };
 
-static DECLARE_INTC_DESC_ACK(intc_desc, "sh7366", vectors, groups,
-			     mask_registers, prio_registers, sense_registers,
-			     ack_registers);
+static struct intc_desc intc_desc __initdata = {
+	.name = "sh7366",
+	.force_enable = ENABLED,
+	.force_disable = DISABLED,
+	.hw = INTC_HW_DESC(vectors, groups, mask_registers,
+			   prio_registers, sense_registers, ack_registers),
+};
 
 void __init plat_irq_setup(void)
 {

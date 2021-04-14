@@ -1,20 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * (c) Copyright 2006 Benjamin Herrenschmidt, IBM Corp.
  *                    <benh@kernel.crashing.org>
- *
- *   This program is free software;  you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY;  without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
- *   the GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program;  if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #ifndef _ASM_POWERPC_DCR_NATIVE_H
@@ -23,6 +10,9 @@
 #ifndef __ASSEMBLY__
 
 #include <linux/spinlock.h>
+#include <asm/cputable.h>
+#include <asm/cpu_has_feature.h>
+#include <linux/stringify.h>
 
 typedef struct {
 	unsigned int base;
@@ -30,7 +20,7 @@ typedef struct {
 
 static inline bool dcr_map_ok_native(dcr_host_native_t host)
 {
-	return 1;
+	return true;
 }
 
 #define dcr_map_native(dev, dcr_n, dcr_c) \
@@ -39,23 +29,45 @@ static inline bool dcr_map_ok_native(dcr_host_native_t host)
 #define dcr_read_native(host, dcr_n)		mfdcr(dcr_n + host.base)
 #define dcr_write_native(host, dcr_n, value)	mtdcr(dcr_n + host.base, value)
 
-/* Device Control Registers */
-void __mtdcr(int reg, unsigned int val);
-unsigned int __mfdcr(int reg);
+/* Table based DCR accessors */
+extern void __mtdcr(unsigned int reg, unsigned int val);
+extern unsigned int __mfdcr(unsigned int reg);
+
+/* mfdcrx/mtdcrx instruction based accessors. We hand code
+ * the opcodes in order not to depend on newer binutils
+ */
+static inline unsigned int mfdcrx(unsigned int reg)
+{
+	unsigned int ret;
+	asm volatile(".long 0x7c000206 | (%0 << 21) | (%1 << 16)"
+		     : "=r" (ret) : "r" (reg));
+	return ret;
+}
+
+static inline void mtdcrx(unsigned int reg, unsigned int val)
+{
+	asm volatile(".long 0x7c000306 | (%0 << 21) | (%1 << 16)"
+		     : : "r" (val), "r" (reg));
+}
+
 #define mfdcr(rn)						\
 	({unsigned int rval;					\
-	if (__builtin_constant_p(rn))				\
+	if (__builtin_constant_p(rn) && rn < 1024)		\
 		asm volatile("mfdcr %0," __stringify(rn)	\
 		              : "=r" (rval));			\
+	else if (likely(cpu_has_feature(CPU_FTR_INDEXED_DCR)))	\
+		rval = mfdcrx(rn);				\
 	else							\
 		rval = __mfdcr(rn);				\
 	rval;})
 
 #define mtdcr(rn, v)						\
 do {								\
-	if (__builtin_constant_p(rn))				\
+	if (__builtin_constant_p(rn) && rn < 1024)		\
 		asm volatile("mtdcr " __stringify(rn) ",%0"	\
 			      : : "r" (v)); 			\
+	else if (likely(cpu_has_feature(CPU_FTR_INDEXED_DCR)))	\
+		mtdcrx(rn, v);					\
 	else							\
 		__mtdcr(rn, v);					\
 } while (0)
@@ -69,8 +81,13 @@ static inline unsigned __mfdcri(int base_addr, int base_data, int reg)
 	unsigned int val;
 
 	spin_lock_irqsave(&dcr_ind_lock, flags);
-	__mtdcr(base_addr, reg);
-	val = __mfdcr(base_data);
+	if (cpu_has_feature(CPU_FTR_INDEXED_DCR)) {
+		mtdcrx(base_addr, reg);
+		val = mfdcrx(base_data);
+	} else {
+		__mtdcr(base_addr, reg);
+		val = __mfdcr(base_data);
+	}
 	spin_unlock_irqrestore(&dcr_ind_lock, flags);
 	return val;
 }
@@ -81,8 +98,13 @@ static inline void __mtdcri(int base_addr, int base_data, int reg,
 	unsigned long flags;
 
 	spin_lock_irqsave(&dcr_ind_lock, flags);
-	__mtdcr(base_addr, reg);
-	__mtdcr(base_data, val);
+	if (cpu_has_feature(CPU_FTR_INDEXED_DCR)) {
+		mtdcrx(base_addr, reg);
+		mtdcrx(base_data, val);
+	} else {
+		__mtdcr(base_addr, reg);
+		__mtdcr(base_data, val);
+	}
 	spin_unlock_irqrestore(&dcr_ind_lock, flags);
 }
 
@@ -93,9 +115,15 @@ static inline void __dcri_clrset(int base_addr, int base_data, int reg,
 	unsigned int val;
 
 	spin_lock_irqsave(&dcr_ind_lock, flags);
-	__mtdcr(base_addr, reg);
-	val = (__mfdcr(base_data) & ~clr) | set;
-	__mtdcr(base_data, val);
+	if (cpu_has_feature(CPU_FTR_INDEXED_DCR)) {
+		mtdcrx(base_addr, reg);
+		val = (mfdcrx(base_data) & ~clr) | set;
+		mtdcrx(base_data, val);
+	} else {
+		__mtdcr(base_addr, reg);
+		val = (__mfdcr(base_data) & ~clr) | set;
+		__mtdcr(base_data, val);
+	}
 	spin_unlock_irqrestore(&dcr_ind_lock, flags);
 }
 

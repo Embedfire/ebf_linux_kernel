@@ -1,14 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
- * Licensed under the GPL.
  */
 
 #include <linux/if_arp.h>
-#include "linux/init.h"
+#include <linux/init.h>
 #include <linux/netdevice.h>
 #include <linux/string.h>
-#include "net_kern.h"
-#include "net_user.h"
+#include <net_kern.h>
+#include <net_user.h>
 #include "slirp.h"
 
 struct slirp_init {
@@ -22,7 +22,7 @@ void slirp_init(struct net_device *dev, void *data)
 	struct slirp_init *init = data;
 	int i;
 
-	private = dev->priv;
+	private = netdev_priv(dev);
 	spri = (struct slirp_data *) private->user;
 
 	spri->argw = init->argw;
@@ -32,7 +32,6 @@ void slirp_init(struct net_device *dev, void *data)
 
 	slip_proto_init(&spri->slip);
 
-	dev->init = NULL;
 	dev->hard_header_len = 0;
 	dev->header_ops = NULL;
 	dev->addr_len = 0;

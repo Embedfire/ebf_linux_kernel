@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2004 IBM Corporation
  *
@@ -11,15 +12,10 @@
  *
  * Device driver for TCG/TCPA TPM (trusted platform module).
  * Specifications at www.trustedcomputinggroup.org	 
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
- * 
  */
 
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 #include "tpm.h"
 
 /* National definitions */
@@ -63,15 +59,21 @@ enum tpm_nsc_cmd_mode {
 	NSC_COMMAND_EOC = 0x03,
 	NSC_COMMAND_CANCEL = 0x22
 };
+
+struct tpm_nsc_priv {
+	unsigned long base;
+};
+
 /*
  * Wait for a certain status to appear
  */
 static int wait_for_stat(struct tpm_chip *chip, u8 mask, u8 val, u8 * data)
 {
+	struct tpm_nsc_priv *priv = dev_get_drvdata(&chip->dev);
 	unsigned long stop;
 
 	/* status immediately available check */
-	*data = inb(chip->vendor.base + NSC_STATUS);
+	*data = inb(priv->base + NSC_STATUS);
 	if ((*data & mask) == val)
 		return 0;
 
@@ -79,7 +81,7 @@ static int wait_for_stat(struct tpm_chip *chip, u8 mask, u8 val, u8 * data)
 	stop = jiffies + 10 * HZ;
 	do {
 		msleep(TPM_TIMEOUT);
-		*data = inb(chip->vendor.base + 1);
+		*data = inb(priv->base + 1);
 		if ((*data & mask) == val)
 			return 0;
 	}
@@ -90,13 +92,14 @@ static int wait_for_stat(struct tpm_chip *chip, u8 mask, u8 val, u8 * data)
 
 static int nsc_wait_for_ready(struct tpm_chip *chip)
 {
+	struct tpm_nsc_priv *priv = dev_get_drvdata(&chip->dev);
 	int status;
 	unsigned long stop;
 
 	/* status immediately available check */
-	status = inb(chip->vendor.base + NSC_STATUS);
+	status = inb(priv->base + NSC_STATUS);
 	if (status & NSC_STATUS_OBF)
-		status = inb(chip->vendor.base + NSC_DATA);
+		status = inb(priv->base + NSC_DATA);
 	if (status & NSC_STATUS_RDY)
 		return 0;
 
@@ -104,21 +107,22 @@ static int nsc_wait_for_ready(struct tpm_chip *chip)
 	stop = jiffies + 100;
 	do {
 		msleep(TPM_TIMEOUT);
-		status = inb(chip->vendor.base + NSC_STATUS);
+		status = inb(priv->base + NSC_STATUS);
 		if (status & NSC_STATUS_OBF)
-			status = inb(chip->vendor.base + NSC_DATA);
+			status = inb(priv->base + NSC_DATA);
 		if (status & NSC_STATUS_RDY)
 			return 0;
 	}
 	while (time_before(jiffies, stop));
 
-	dev_info(chip->dev, "wait for ready failed\n");
+	dev_info(&chip->dev, "wait for ready failed\n");
 	return -EBUSY;
 }
 
 
 static int tpm_nsc_recv(struct tpm_chip *chip, u8 * buf, size_t count)
 {
+	struct tpm_nsc_priv *priv = dev_get_drvdata(&chip->dev);
 	u8 *buffer = buf;
 	u8 data, *p;
 	u32 size;
@@ -128,12 +132,13 @@ static int tpm_nsc_recv(struct tpm_chip *chip, u8 * buf, size_t count)
 		return -EIO;
 
 	if (wait_for_stat(chip, NSC_STATUS_F0, NSC_STATUS_F0, &data) < 0) {
-		dev_err(chip->dev, "F0 timeout\n");
+		dev_err(&chip->dev, "F0 timeout\n");
 		return -EIO;
 	}
-	if ((data =
-	     inb(chip->vendor.base + NSC_DATA)) != NSC_COMMAND_NORMAL) {
-		dev_err(chip->dev, "not in normal mode (0x%x)\n",
+
+	data = inb(priv->base + NSC_DATA);
+	if (data != NSC_COMMAND_NORMAL) {
+		dev_err(&chip->dev, "not in normal mode (0x%x)\n",
 			data);
 		return -EIO;
 	}
@@ -142,22 +147,24 @@ static int tpm_nsc_recv(struct tpm_chip *chip, u8 * buf, size_t count)
 	for (p = buffer; p < &buffer[count]; p++) {
 		if (wait_for_stat
 		    (chip, NSC_STATUS_OBF, NSC_STATUS_OBF, &data) < 0) {
-			dev_err(chip->dev,
+			dev_err(&chip->dev,
 				"OBF timeout (while reading data)\n");
 			return -EIO;
 		}
 		if (data & NSC_STATUS_F0)
 			break;
-		*p = inb(chip->vendor.base + NSC_DATA);
+		*p = inb(priv->base + NSC_DATA);
 	}
 
 	if ((data & NSC_STATUS_F0) == 0 &&
 	(wait_for_stat(chip, NSC_STATUS_F0, NSC_STATUS_F0, &data) < 0)) {
-		dev_err(chip->dev, "F0 not set\n");
+		dev_err(&chip->dev, "F0 not set\n");
 		return -EIO;
 	}
-	if ((data = inb(chip->vendor.base + NSC_DATA)) != NSC_COMMAND_EOC) {
-		dev_err(chip->dev,
+
+	data = inb(priv->base + NSC_DATA);
+	if (data != NSC_COMMAND_EOC) {
+		dev_err(&chip->dev,
 			"expected end of command(0x%x)\n", data);
 		return -EIO;
 	}
@@ -173,6 +180,7 @@ static int tpm_nsc_recv(struct tpm_chip *chip, u8 * buf, size_t count)
 
 static int tpm_nsc_send(struct tpm_chip *chip, u8 * buf, size_t count)
 {
+	struct tpm_nsc_priv *priv = dev_get_drvdata(&chip->dev);
 	u8 data;
 	int i;
 
@@ -182,84 +190,67 @@ static int tpm_nsc_send(struct tpm_chip *chip, u8 * buf, size_t count)
 	 * fix it. Not sure why this is needed, we followed the flow
 	 * chart in the manual to the letter.
 	 */
-	outb(NSC_COMMAND_CANCEL, chip->vendor.base + NSC_COMMAND);
+	outb(NSC_COMMAND_CANCEL, priv->base + NSC_COMMAND);
 
 	if (nsc_wait_for_ready(chip) != 0)
 		return -EIO;
 
 	if (wait_for_stat(chip, NSC_STATUS_IBF, 0, &data) < 0) {
-		dev_err(chip->dev, "IBF timeout\n");
+		dev_err(&chip->dev, "IBF timeout\n");
 		return -EIO;
 	}
 
-	outb(NSC_COMMAND_NORMAL, chip->vendor.base + NSC_COMMAND);
+	outb(NSC_COMMAND_NORMAL, priv->base + NSC_COMMAND);
 	if (wait_for_stat(chip, NSC_STATUS_IBR, NSC_STATUS_IBR, &data) < 0) {
-		dev_err(chip->dev, "IBR timeout\n");
+		dev_err(&chip->dev, "IBR timeout\n");
 		return -EIO;
 	}
 
 	for (i = 0; i < count; i++) {
 		if (wait_for_stat(chip, NSC_STATUS_IBF, 0, &data) < 0) {
-			dev_err(chip->dev,
+			dev_err(&chip->dev,
 				"IBF timeout (while writing data)\n");
 			return -EIO;
 		}
-		outb(buf[i], chip->vendor.base + NSC_DATA);
+		outb(buf[i], priv->base + NSC_DATA);
 	}
 
 	if (wait_for_stat(chip, NSC_STATUS_IBF, 0, &data) < 0) {
-		dev_err(chip->dev, "IBF timeout\n");
+		dev_err(&chip->dev, "IBF timeout\n");
 		return -EIO;
 	}
-	outb(NSC_COMMAND_EOC, chip->vendor.base + NSC_COMMAND);
+	outb(NSC_COMMAND_EOC, priv->base + NSC_COMMAND);
 
-	return count;
+	return 0;
 }
 
 static void tpm_nsc_cancel(struct tpm_chip *chip)
 {
-	outb(NSC_COMMAND_CANCEL, chip->vendor.base + NSC_COMMAND);
+	struct tpm_nsc_priv *priv = dev_get_drvdata(&chip->dev);
+
+	outb(NSC_COMMAND_CANCEL, priv->base + NSC_COMMAND);
 }
 
 static u8 tpm_nsc_status(struct tpm_chip *chip)
 {
-	return inb(chip->vendor.base + NSC_STATUS);
+	struct tpm_nsc_priv *priv = dev_get_drvdata(&chip->dev);
+
+	return inb(priv->base + NSC_STATUS);
 }
 
-static const struct file_operations nsc_ops = {
-	.owner = THIS_MODULE,
-	.llseek = no_llseek,
-	.open = tpm_open,
-	.read = tpm_read,
-	.write = tpm_write,
-	.release = tpm_release,
-};
+static bool tpm_nsc_req_canceled(struct tpm_chip *chip, u8 status)
+{
+	return (status == NSC_STATUS_RDY);
+}
 
-static DEVICE_ATTR(pubek, S_IRUGO, tpm_show_pubek, NULL);
-static DEVICE_ATTR(pcrs, S_IRUGO, tpm_show_pcrs, NULL);
-static DEVICE_ATTR(caps, S_IRUGO, tpm_show_caps, NULL);
-static DEVICE_ATTR(cancel, S_IWUSR|S_IWGRP, NULL, tpm_store_cancel);
-
-static struct attribute * nsc_attrs[] = {
-	&dev_attr_pubek.attr,
-	&dev_attr_pcrs.attr,
-	&dev_attr_caps.attr,
-	&dev_attr_cancel.attr,
-	NULL,
-};
-
-static struct attribute_group nsc_attr_grp = { .attrs = nsc_attrs };
-
-static const struct tpm_vendor_specific tpm_nsc = {
+static const struct tpm_class_ops tpm_nsc = {
 	.recv = tpm_nsc_recv,
 	.send = tpm_nsc_send,
 	.cancel = tpm_nsc_cancel,
 	.status = tpm_nsc_status,
 	.req_complete_mask = NSC_STATUS_OBF,
 	.req_complete_val = NSC_STATUS_OBF,
-	.req_canceled = NSC_STATUS_RDY,
-	.attr_group = &nsc_attr_grp,
-	.miscdev = { .fops = &nsc_ops, },
+	.req_canceled = tpm_nsc_req_canceled,
 };
 
 static struct platform_device *pdev = NULL;
@@ -267,19 +258,32 @@ static struct platform_device *pdev = NULL;
 static void tpm_nsc_remove(struct device *dev)
 {
 	struct tpm_chip *chip = dev_get_drvdata(dev);
-	if ( chip ) {
-		release_region(chip->vendor.base, 2);
-		tpm_remove_hardware(chip->dev);
-	}
+	struct tpm_nsc_priv *priv = dev_get_drvdata(&chip->dev);
+
+	tpm_chip_unregister(chip);
+	release_region(priv->base, 2);
 }
 
-static struct device_driver nsc_drv = {
-	.name = "tpm_nsc",
-	.bus = &platform_bus_type,
-	.owner = THIS_MODULE,
-	.suspend = tpm_pm_suspend,
-	.resume = tpm_pm_resume,
+static SIMPLE_DEV_PM_OPS(tpm_nsc_pm, tpm_pm_suspend, tpm_pm_resume);
+
+static struct platform_driver nsc_drv = {
+	.driver          = {
+		.name    = "tpm_nsc",
+		.pm      = &tpm_nsc_pm,
+	},
 };
+
+static inline int tpm_read_index(int base, int index)
+{
+	outb(index, base);
+	return inb(base+1) & 0xFF;
+}
+
+static inline void tpm_write_index(int base, int index, int value)
+{
+	outb(index, base);
+	outb(value & 0xFF, base+1);
+}
 
 static int __init init_nsc(void)
 {
@@ -288,6 +292,7 @@ static int __init init_nsc(void)
 	int nscAddrBase = TPM_ADDR;
 	struct tpm_chip *chip;
 	unsigned long base;
+	struct tpm_nsc_priv *priv;
 
 	/* verify that it is a National part (SID) */
 	if (tpm_read_index(TPM_ADDR, NSC_SID_INDEX) != 0xEF) {
@@ -297,7 +302,7 @@ static int __init init_nsc(void)
 			return -ENODEV;
 	}
 
-	err = driver_register(&nsc_drv);
+	err = platform_driver_register(&nsc_drv);
 	if (err)
 		return err;
 
@@ -308,30 +313,43 @@ static int __init init_nsc(void)
 	/* enable the DPM module */
 	tpm_write_index(nscAddrBase, NSC_LDC_INDEX, 0x01);
 
-	pdev = kzalloc(sizeof(struct platform_device), GFP_KERNEL);
+	pdev = platform_device_alloc("tpm_nscl0", -1);
 	if (!pdev) {
 		rc = -ENOMEM;
 		goto err_unreg_drv;
 	}
 
-	pdev->name = "tpm_nscl0";
-	pdev->id = -1;
 	pdev->num_resources = 0;
+	pdev->dev.driver = &nsc_drv.driver;
 	pdev->dev.release = tpm_nsc_remove;
-	pdev->dev.driver = &nsc_drv;
 
-	if ((rc = platform_device_register(pdev)) < 0)
-		goto err_free_dev;
+	if ((rc = platform_device_add(pdev)) < 0)
+		goto err_put_dev;
+
+	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv) {
+		rc = -ENOMEM;
+		goto err_del_dev;
+	}
+
+	priv->base = base;
 
 	if (request_region(base, 2, "tpm_nsc0") == NULL ) {
 		rc = -EBUSY;
-		goto err_unreg_dev;
+		goto err_del_dev;
 	}
 
-	if (!(chip = tpm_register_hardware(&pdev->dev, &tpm_nsc))) {
+	chip = tpmm_chip_alloc(&pdev->dev, &tpm_nsc);
+	if (IS_ERR(chip)) {
 		rc = -ENODEV;
 		goto err_rel_reg;
 	}
+
+	dev_set_drvdata(&chip->dev, priv);
+
+	rc = tpm_chip_register(chip);
+	if (rc)
+		goto err_rel_reg;
 
 	dev_dbg(&pdev->dev, "NSC TPM detected\n");
 	dev_dbg(&pdev->dev,
@@ -366,18 +384,16 @@ static int __init init_nsc(void)
 		 "NSC TPM revision %d\n",
 		 tpm_read_index(nscAddrBase, 0x27) & 0x1F);
 
-	chip->vendor.base = base;
-
 	return 0;
 
 err_rel_reg:
 	release_region(base, 2);
-err_unreg_dev:
-	platform_device_unregister(pdev);
-err_free_dev:
-	kfree(pdev);
+err_del_dev:
+	platform_device_del(pdev);
+err_put_dev:
+	platform_device_put(pdev);
 err_unreg_drv:
-	driver_unregister(&nsc_drv);
+	platform_driver_unregister(&nsc_drv);
 	return rc;
 }
 
@@ -386,11 +402,9 @@ static void __exit cleanup_nsc(void)
 	if (pdev) {
 		tpm_nsc_remove(&pdev->dev);
 		platform_device_unregister(pdev);
-		kfree(pdev);
-		pdev = NULL;
 	}
 
-	driver_unregister(&nsc_drv);
+	platform_driver_unregister(&nsc_drv);
 }
 
 module_init(init_nsc);

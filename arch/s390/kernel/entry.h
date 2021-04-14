@@ -1,60 +1,93 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ENTRY_H
 #define _ENTRY_H
 
+#include <linux/percpu.h>
 #include <linux/types.h>
 #include <linux/signal.h>
 #include <asm/ptrace.h>
+#include <asm/idle.h>
 
-typedef void pgm_check_handler_t(struct pt_regs *, long);
-extern pgm_check_handler_t *pgm_check_table[128];
-pgm_check_handler_t do_protection_exception;
-pgm_check_handler_t do_dat_exception;
+extern void *restart_stack;
 
-extern int sysctl_userprocess_debug;
+void system_call(void);
+void pgm_check_handler(void);
+void ext_int_handler(void);
+void io_int_handler(void);
+void mcck_int_handler(void);
+void restart_int_handler(void);
 
-void do_single_step(struct pt_regs *regs);
+asmlinkage long do_syscall_trace_enter(struct pt_regs *regs);
+asmlinkage void do_syscall_trace_exit(struct pt_regs *regs);
+
+void do_protection_exception(struct pt_regs *regs);
+void do_dat_exception(struct pt_regs *regs);
+void do_secure_storage_access(struct pt_regs *regs);
+void do_non_secure_storage_access(struct pt_regs *regs);
+void do_secure_storage_violation(struct pt_regs *regs);
+
+void addressing_exception(struct pt_regs *regs);
+void data_exception(struct pt_regs *regs);
+void default_trap_handler(struct pt_regs *regs);
+void divide_exception(struct pt_regs *regs);
+void execute_exception(struct pt_regs *regs);
+void hfp_divide_exception(struct pt_regs *regs);
+void hfp_overflow_exception(struct pt_regs *regs);
+void hfp_significance_exception(struct pt_regs *regs);
+void hfp_sqrt_exception(struct pt_regs *regs);
+void hfp_underflow_exception(struct pt_regs *regs);
+void illegal_op(struct pt_regs *regs);
+void operand_exception(struct pt_regs *regs);
+void overflow_exception(struct pt_regs *regs);
+void privileged_op(struct pt_regs *regs);
+void space_switch_exception(struct pt_regs *regs);
+void special_op_exception(struct pt_regs *regs);
+void specification_exception(struct pt_regs *regs);
+void transaction_exception(struct pt_regs *regs);
+void translation_exception(struct pt_regs *regs);
+void vector_exception(struct pt_regs *regs);
+void monitor_event_exception(struct pt_regs *regs);
+
+void do_per_trap(struct pt_regs *regs);
+void do_report_trap(struct pt_regs *regs, int si_signo, int si_code, char *str);
 void syscall_trace(struct pt_regs *regs, int entryexit);
 void kernel_stack_overflow(struct pt_regs * regs);
 void do_signal(struct pt_regs *regs);
-int handle_signal32(unsigned long sig, struct k_sigaction *ka,
-		    siginfo_t *info, sigset_t *oldset, struct pt_regs *regs);
+void handle_signal32(struct ksignal *ksig, sigset_t *oldset,
+		     struct pt_regs *regs);
+void do_notify_resume(struct pt_regs *regs);
 
-void do_extint(struct pt_regs *regs, unsigned short code);
-int __cpuinit start_secondary(void *cpuvoid);
+void __init init_IRQ(void);
+void do_IRQ(struct pt_regs *regs, int irq);
+void do_restart(void);
 void __init startup_init(void);
-void die(const char * str, struct pt_regs * regs, long err);
+void die(struct pt_regs *regs, const char *str);
+int setup_profiling_timer(unsigned int multiplier);
+void __init time_init(void);
+unsigned long prepare_ftrace_return(unsigned long parent, unsigned long sp, unsigned long ip);
 
-struct new_utsname;
-struct mmap_arg_struct;
+struct s390_mmap_arg_struct;
 struct fadvise64_64_args;
 struct old_sigaction;
-struct sel_arg_struct;
 
-long sys_pipe(unsigned long __user *fildes);
-long sys_mmap2(struct mmap_arg_struct __user  *arg);
-long old_mmap(struct mmap_arg_struct __user *arg);
-long sys_ipc(uint call, int first, unsigned long second,
-	     unsigned long third, void __user *ptr);
-long s390x_newuname(struct new_utsname __user *name);
-long s390x_personality(unsigned long personality);
-long s390_fadvise64(int fd, u32 offset_high, u32 offset_low,
-		    size_t len, int advice);
-long s390_fadvise64_64(struct fadvise64_64_args __user *args);
-long s390_fallocate(int fd, int mode, loff_t offset, u32 len_high, u32 len_low);
-long sys_fork(void);
-long sys_clone(void);
-long sys_vfork(void);
-void execve_tail(void);
-long sys_execve(void);
-int sys_sigsuspend(int history0, int history1, old_sigset_t mask);
-long sys_sigaction(int sig, const struct old_sigaction __user *act,
-		   struct old_sigaction __user *oact);
-long sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss);
-long sys_sigreturn(void);
 long sys_rt_sigreturn(void);
-long sys32_sigreturn(void);
-long sys32_rt_sigreturn(void);
-long old_select(struct sel_arg_struct __user *arg);
-long sys_ptrace(long request, long pid, long addr, long data);
+long sys_sigreturn(void);
+
+long sys_s390_personality(unsigned int personality);
+long sys_s390_runtime_instr(int command, int signum);
+long sys_s390_guarded_storage(int command, struct gs_cb __user *);
+long sys_s390_pci_mmio_write(unsigned long, const void __user *, size_t);
+long sys_s390_pci_mmio_read(unsigned long, void __user *, size_t);
+long sys_s390_sthyi(unsigned long function_code, void __user *buffer, u64 __user *return_code, unsigned long flags);
+
+DECLARE_PER_CPU(u64, mt_cycles[8]);
+
+void gs_load_bc_cb(struct pt_regs *regs);
+void set_fs_fixup(void);
+
+unsigned long stack_alloc(void);
+void stack_free(unsigned long stack);
+
+extern char kprobes_insn_page[];
 
 #endif /* _ENTRY_H */

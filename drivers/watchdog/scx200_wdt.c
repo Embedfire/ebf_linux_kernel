@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* drivers/char/watchdog/scx200_wdt.c
 
    National Semiconductor SCx200 Watchdog support
@@ -8,14 +9,12 @@
    National Semiconductor PC87307/PC97307 (ala SC1200) WDT driver
    (c) Copyright 2002 Zwane Mwaikambo <zwane@commfireservices.com>
 
-   This program is free software; you can redistribute it and/or
-   modify it under the terms of the GNU General Public License as
-   published by the Free Software Foundation; either version 2 of the
-   License, or (at your option) any later version.
 
    The author(s) of this software shall not be held liable for damages
    of any nature resulting due to the use of this software. This
    software is provided AS-IS with no warranties. */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -30,19 +29,18 @@
 #include <linux/uaccess.h>
 #include <linux/io.h>
 
-#define NAME "scx200_wdt"
+#define DEBUG
 
 MODULE_AUTHOR("Christer Weinigel <wingel@nano-system.com>");
 MODULE_DESCRIPTION("NatSemi SCx200 Watchdog Driver");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
 
 static int margin = 60;		/* in seconds */
 module_param(margin, int, 0);
 MODULE_PARM_DESC(margin, "Watchdog margin in seconds");
 
-static int nowayout = WATCHDOG_NOWAYOUT;
-module_param(nowayout, int, 0);
+static bool nowayout = WATCHDOG_NOWAYOUT;
+module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Disable watchdog shutdown on close");
 
 static u16 wdto_restart;
@@ -66,14 +64,13 @@ static void scx200_wdt_ping(void)
 
 static void scx200_wdt_update_margin(void)
 {
-	printk(KERN_INFO NAME ": timer margin %d seconds\n", margin);
+	pr_info("timer margin %d seconds\n", margin);
 	wdto_restart = margin * W_SCALE;
 }
 
 static void scx200_wdt_enable(void)
 {
-	printk(KERN_DEBUG NAME ": enabling watchdog timer, wdto_restart = %d\n",
-	       wdto_restart);
+	pr_debug("enabling watchdog timer, wdto_restart = %d\n", wdto_restart);
 
 	spin_lock(&scx_lock);
 	outw(0, scx200_cb_base + SCx200_WDT_WDTO);
@@ -86,7 +83,7 @@ static void scx200_wdt_enable(void)
 
 static void scx200_wdt_disable(void)
 {
-	printk(KERN_DEBUG NAME ": disabling watchdog timer\n");
+	pr_debug("disabling watchdog timer\n");
 
 	spin_lock(&scx_lock);
 	outw(0, scx200_cb_base + SCx200_WDT_WDTO);
@@ -102,13 +99,13 @@ static int scx200_wdt_open(struct inode *inode, struct file *file)
 		return -EBUSY;
 	scx200_wdt_enable();
 
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int scx200_wdt_release(struct inode *inode, struct file *file)
 {
 	if (expect_close != 42)
-		printk(KERN_WARNING NAME ": watchdog device closed unexpectedly, will not disable the watchdog timer\n");
+		pr_warn("watchdog device closed unexpectedly, will not disable the watchdog timer\n");
 	else if (!nowayout)
 		scx200_wdt_disable();
 	expect_close = 0;
@@ -163,7 +160,8 @@ static long scx200_wdt_ioctl(struct file *file, unsigned int cmd,
 	static const struct watchdog_info ident = {
 		.identity = "NatSemi SCx200 Watchdog",
 		.firmware_version = 1,
-		.options = WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING,
+		.options = WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING |
+						WDIOF_MAGICCLOSE,
 	};
 	int new_margin;
 
@@ -188,6 +186,7 @@ static long scx200_wdt_ioctl(struct file *file, unsigned int cmd,
 		margin = new_margin;
 		scx200_wdt_update_margin();
 		scx200_wdt_ping();
+		fallthrough;
 	case WDIOC_GETTIMEOUT:
 		if (put_user(margin, p))
 			return -EFAULT;
@@ -202,6 +201,7 @@ static const struct file_operations scx200_wdt_fops = {
 	.llseek = no_llseek,
 	.write = scx200_wdt_write,
 	.unlocked_ioctl = scx200_wdt_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open = scx200_wdt_open,
 	.release = scx200_wdt_release,
 };
@@ -216,7 +216,7 @@ static int __init scx200_wdt_init(void)
 {
 	int r;
 
-	printk(KERN_DEBUG NAME ": NatSemi SCx200 Watchdog Driver\n");
+	pr_debug("NatSemi SCx200 Watchdog Driver\n");
 
 	/* check that we have found the configuration block */
 	if (!scx200_cb_present())
@@ -225,7 +225,7 @@ static int __init scx200_wdt_init(void)
 	if (!request_region(scx200_cb_base + SCx200_WDT_OFFSET,
 			    SCx200_WDT_SIZE,
 			    "NatSemi SCx200 Watchdog")) {
-		printk(KERN_WARNING NAME ": watchdog I/O region busy\n");
+		pr_warn("watchdog I/O region busy\n");
 		return -EBUSY;
 	}
 
@@ -234,7 +234,7 @@ static int __init scx200_wdt_init(void)
 
 	r = register_reboot_notifier(&scx200_wdt_notifier);
 	if (r) {
-		printk(KERN_ERR NAME ": unable to register reboot notifier");
+		pr_err("unable to register reboot notifier\n");
 		release_region(scx200_cb_base + SCx200_WDT_OFFSET,
 				SCx200_WDT_SIZE);
 		return r;
@@ -261,10 +261,3 @@ static void __exit scx200_wdt_cleanup(void)
 
 module_init(scx200_wdt_init);
 module_exit(scx200_wdt_cleanup);
-
-/*
-    Local variables:
-	compile-command: "make -k -C ../.. SUBDIRS=drivers/char modules"
-	c-basic-offset: 8
-    End:
-*/

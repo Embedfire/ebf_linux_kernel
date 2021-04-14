@@ -3,6 +3,7 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
+ * (C) Copyright 2020 Hewlett Packard Enterprise Development LP
  * Copyright (C) 2004-2008 Silicon Graphics, Inc. All rights reserved.
  */
 
@@ -15,31 +16,8 @@
 
 #include <linux/mutex.h>
 
-#ifdef CONFIG_IA64
-#include <asm/system.h>
-#include <asm/sn/arch.h>	/* defines is_shub1() and is_shub2() */
-#define is_shub()	ia64_platform_is("sn2")
-#define is_uv()		ia64_platform_is("uv")
-#endif
-#ifdef CONFIG_X86_64
-#include <asm/genapic.h>
-#define is_uv()		is_uv_system()
-#endif
-
-#ifndef is_shub1
-#define is_shub1()	0
-#endif
-
-#ifndef is_shub2
-#define is_shub2()	0
-#endif
-
-#ifndef is_shub
-#define is_shub()	0
-#endif
-
-#ifndef is_uv
-#define is_uv()		0
+#if defined CONFIG_X86_UV || defined CONFIG_IA64_SGI_UV
+#include <asm/uv/uv.h>
 #endif
 
 #ifdef USE_DBUG_ON
@@ -97,7 +75,7 @@
 
 #define XPC_MSG_SIZE(_payload_size) \
 				ALIGN(XPC_MSG_HDR_MAX_SIZE + (_payload_size), \
-				      is_uv() ? 64 : 128)
+				      is_uv_system() ? 64 : 128)
 
 
 /*
@@ -190,9 +168,10 @@ enum xp_retval {
 	xpGruSendMqError,	/* 59: gru send message queue related error */
 
 	xpBadChannelNumber,	/* 60: invalid channel number */
-	xpBadMsgType,		/* 60: invalid message type */
+	xpBadMsgType,		/* 61: invalid message type */
+	xpBiosError,		/* 62: BIOS error */
 
-	xpUnknownReason		/* 61: unknown reason - must be last in enum */
+	xpUnknownReason		/* 63: unknown reason - must be last in enum */
 };
 
 /*
@@ -309,6 +288,9 @@ static inline enum xp_retval
 xpc_send(short partid, int ch_number, u32 flags, void *payload,
 	 u16 payload_size)
 {
+	if (!xpc_interface.send)
+		return xpNotLoaded;
+
 	return xpc_interface.send(partid, ch_number, flags, payload,
 				  payload_size);
 }
@@ -317,6 +299,9 @@ static inline enum xp_retval
 xpc_send_notify(short partid, int ch_number, u32 flags, void *payload,
 		u16 payload_size, xpc_notify_func func, void *key)
 {
+	if (!xpc_interface.send_notify)
+		return xpNotLoaded;
+
 	return xpc_interface.send_notify(partid, ch_number, flags, payload,
 					 payload_size, func, key);
 }
@@ -324,12 +309,16 @@ xpc_send_notify(short partid, int ch_number, u32 flags, void *payload,
 static inline void
 xpc_received(short partid, int ch_number, void *payload)
 {
-	return xpc_interface.received(partid, ch_number, payload);
+	if (xpc_interface.received)
+		xpc_interface.received(partid, ch_number, payload);
 }
 
 static inline enum xp_retval
 xpc_partid_to_nasids(short partid, void *nasids)
 {
+	if (!xpc_interface.partid_to_nasids)
+		return xpNotLoaded;
+
 	return xpc_interface.partid_to_nasids(partid, nasids);
 }
 
@@ -338,18 +327,19 @@ extern short xp_partition_id;
 extern u8 xp_region_size;
 
 extern unsigned long (*xp_pa) (void *);
+extern unsigned long (*xp_socket_pa) (unsigned long);
 extern enum xp_retval (*xp_remote_memcpy) (unsigned long, const unsigned long,
 		       size_t);
 extern int (*xp_cpu_to_nasid) (int);
+extern enum xp_retval (*xp_expand_memprotect) (unsigned long, unsigned long);
+extern enum xp_retval (*xp_restrict_memprotect) (unsigned long, unsigned long);
 
 extern u64 xp_nofault_PIOR_target;
 extern int xp_nofault_PIOR(void *);
 extern int xp_error_PIOR(void);
 
 extern struct device *xp;
-extern enum xp_retval xp_init_sn2(void);
 extern enum xp_retval xp_init_uv(void);
-extern void xp_exit_sn2(void);
 extern void xp_exit_uv(void);
 
 #endif /* _DRIVERS_MISC_SGIXP_XP_H */

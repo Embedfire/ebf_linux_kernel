@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * include/asm-alpha/cache.h
  */
@@ -17,7 +18,6 @@
 # define L1_CACHE_SHIFT     5
 #endif
 
-#define L1_CACHE_ALIGN(x)  (((x)+(L1_CACHE_BYTES-1))&~(L1_CACHE_BYTES-1))
 #define SMP_CACHE_BYTES    L1_CACHE_BYTES
 
 #endif

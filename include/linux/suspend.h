@@ -1,28 +1,29 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_SUSPEND_H
 #define _LINUX_SUSPEND_H
 
-#if defined(CONFIG_X86) || defined(CONFIG_FRV) || defined(CONFIG_PPC32) || defined(CONFIG_PPC64)
-#include <asm/suspend.h>
-#endif
 #include <linux/swap.h>
 #include <linux/notifier.h>
 #include <linux/init.h>
 #include <linux/pm.h>
 #include <linux/mm.h>
+#include <linux/freezer.h>
 #include <asm/errno.h>
 
-#if defined(CONFIG_PM_SLEEP) && defined(CONFIG_VT) && defined(CONFIG_VT_CONSOLE)
+#ifdef CONFIG_VT
 extern void pm_set_vt_switch(int);
-extern int pm_prepare_console(void);
-extern void pm_restore_console(void);
 #else
 static inline void pm_set_vt_switch(int do_switch)
 {
 }
+#endif
 
-static inline int pm_prepare_console(void)
+#ifdef CONFIG_VT_CONSOLE_SLEEP
+extern void pm_prepare_console(void);
+extern void pm_restore_console(void);
+#else
+static inline void pm_prepare_console(void)
 {
-	return 0;
 }
 
 static inline void pm_restore_console(void)
@@ -33,9 +34,67 @@ static inline void pm_restore_console(void)
 typedef int __bitwise suspend_state_t;
 
 #define PM_SUSPEND_ON		((__force suspend_state_t) 0)
-#define PM_SUSPEND_STANDBY	((__force suspend_state_t) 1)
+#define PM_SUSPEND_TO_IDLE	((__force suspend_state_t) 1)
+#define PM_SUSPEND_STANDBY	((__force suspend_state_t) 2)
 #define PM_SUSPEND_MEM		((__force suspend_state_t) 3)
+#define PM_SUSPEND_MIN		PM_SUSPEND_TO_IDLE
 #define PM_SUSPEND_MAX		((__force suspend_state_t) 4)
+
+enum suspend_stat_step {
+	SUSPEND_FREEZE = 1,
+	SUSPEND_PREPARE,
+	SUSPEND_SUSPEND,
+	SUSPEND_SUSPEND_LATE,
+	SUSPEND_SUSPEND_NOIRQ,
+	SUSPEND_RESUME_NOIRQ,
+	SUSPEND_RESUME_EARLY,
+	SUSPEND_RESUME
+};
+
+struct suspend_stats {
+	int	success;
+	int	fail;
+	int	failed_freeze;
+	int	failed_prepare;
+	int	failed_suspend;
+	int	failed_suspend_late;
+	int	failed_suspend_noirq;
+	int	failed_resume;
+	int	failed_resume_early;
+	int	failed_resume_noirq;
+#define	REC_FAILED_NUM	2
+	int	last_failed_dev;
+	char	failed_devs[REC_FAILED_NUM][40];
+	int	last_failed_errno;
+	int	errno[REC_FAILED_NUM];
+	int	last_failed_step;
+	enum suspend_stat_step	failed_steps[REC_FAILED_NUM];
+};
+
+extern struct suspend_stats suspend_stats;
+
+static inline void dpm_save_failed_dev(const char *name)
+{
+	strlcpy(suspend_stats.failed_devs[suspend_stats.last_failed_dev],
+		name,
+		sizeof(suspend_stats.failed_devs[0]));
+	suspend_stats.last_failed_dev++;
+	suspend_stats.last_failed_dev %= REC_FAILED_NUM;
+}
+
+static inline void dpm_save_failed_errno(int err)
+{
+	suspend_stats.errno[suspend_stats.last_failed_errno] = err;
+	suspend_stats.last_failed_errno++;
+	suspend_stats.last_failed_errno %= REC_FAILED_NUM;
+}
+
+static inline void dpm_save_failed_step(enum suspend_stat_step step)
+{
+	suspend_stats.failed_steps[suspend_stats.last_failed_step] = step;
+	suspend_stats.last_failed_step++;
+	suspend_stats.last_failed_step %= REC_FAILED_NUM;
+}
 
 /**
  * struct platform_suspend_ops - Callbacks for managing platform dependent
@@ -61,10 +120,18 @@ typedef int __bitwise suspend_state_t;
  *	by @begin().
  *	@prepare() is called right after devices have been suspended (ie. the
  *	appropriate .suspend() method has been executed for each device) and
- *	before the nonboot CPUs are disabled (it is executed with IRQs enabled).
- *	This callback is optional.  It returns 0 on success or a negative
- *	error code otherwise, in which case the system cannot enter the desired
- *	sleep state (@enter() and @finish() will not be called in that case).
+ *	before device drivers' late suspend callbacks are executed.  It returns
+ *	0 on success or a negative error code otherwise, in which case the
+ *	system cannot enter the desired sleep state (@prepare_late(), @enter(),
+ *	and @wake() will not be called in that case).
+ *
+ * @prepare_late: Finish preparing the platform for entering the system sleep
+ *	state indicated by @begin().
+ *	@prepare_late is called before disabling nonboot CPUs and after
+ *	device drivers' late suspend callbacks have been executed.  It returns
+ *	0 on success or a negative error code otherwise, in which case the
+ *	system cannot enter the desired sleep state (@enter() will not be
+ *	executed).
  *
  * @enter: Enter the system sleep state indicated by @begin() or represented by
  *	the argument if @begin() is not implemented.
@@ -72,19 +139,34 @@ typedef int __bitwise suspend_state_t;
  *	error code otherwise, in which case the system cannot enter the desired
  *	sleep state.
  *
- * @finish: Called when the system has just left a sleep state, right after
- *	the nonboot CPUs have been enabled and before devices are resumed (it is
- *	executed with IRQs enabled).
+ * @wake: Called when the system has just left a sleep state, right after
+ *	the nonboot CPUs have been enabled and before device drivers' early
+ *	resume callbacks are executed.
+ *	This callback is optional, but should be implemented by the platforms
+ *	that implement @prepare_late().  If implemented, it is always called
+ *	after @prepare_late and @enter(), even if one of them fails.
+ *
+ * @finish: Finish wake-up of the platform.
+ *	@finish is called right prior to calling device drivers' regular suspend
+ *	callbacks.
  *	This callback is optional, but should be implemented by the platforms
  *	that implement @prepare().  If implemented, it is always called after
- *	@enter() (even if @enter() fails).
+ *	@enter() and @wake(), even if any of them fails.  It is executed after
+ *	a failing @prepare.
+ *
+ * @suspend_again: Returns whether the system should suspend again (true) or
+ *	not (false). If the platform wants to poll sensors or execute some
+ *	code during suspended without invoking userspace and most of devices,
+ *	suspend_again callback is the place assuming that periodic-wakeup or
+ *	alarm-wakeup is already setup. This allows to execute some codes while
+ *	being kept suspended in the view of userland and devices.
  *
  * @end: Called by the PM core right after resuming devices, to indicate to
  *	the platform that the system has returned to the working state or
  *	the transition to the sleep state has been aborted.
  *	This callback is optional, but should be implemented by the platforms
- *	that implement @begin(), but platforms implementing @begin() should
- *	also provide a @end() which cleans up transitions aborted before
+ *	that implement @begin().  Accordingly, platforms implementing @begin()
+ *	should also provide a @end() which cleans up transitions aborted before
  *	@enter().
  *
  * @recover: Recover the platform from a suspend failure.
@@ -96,19 +178,137 @@ struct platform_suspend_ops {
 	int (*valid)(suspend_state_t state);
 	int (*begin)(suspend_state_t state);
 	int (*prepare)(void);
+	int (*prepare_late)(void);
 	int (*enter)(suspend_state_t state);
+	void (*wake)(void);
 	void (*finish)(void);
+	bool (*suspend_again)(void);
 	void (*end)(void);
 	void (*recover)(void);
 };
 
+struct platform_s2idle_ops {
+	int (*begin)(void);
+	int (*prepare)(void);
+	int (*prepare_late)(void);
+	bool (*wake)(void);
+	void (*restore_early)(void);
+	void (*restore)(void);
+	void (*end)(void);
+};
+
 #ifdef CONFIG_SUSPEND
+extern suspend_state_t mem_sleep_current;
+extern suspend_state_t mem_sleep_default;
+
 /**
  * suspend_set_ops - set platform dependent suspend operations
  * @ops: The new suspend operations to set.
  */
-extern void suspend_set_ops(struct platform_suspend_ops *ops);
+extern void suspend_set_ops(const struct platform_suspend_ops *ops);
 extern int suspend_valid_only_mem(suspend_state_t state);
+
+extern unsigned int pm_suspend_global_flags;
+
+#define PM_SUSPEND_FLAG_FW_SUSPEND	BIT(0)
+#define PM_SUSPEND_FLAG_FW_RESUME	BIT(1)
+#define PM_SUSPEND_FLAG_NO_PLATFORM	BIT(2)
+
+static inline void pm_suspend_clear_flags(void)
+{
+	pm_suspend_global_flags = 0;
+}
+
+static inline void pm_set_suspend_via_firmware(void)
+{
+	pm_suspend_global_flags |= PM_SUSPEND_FLAG_FW_SUSPEND;
+}
+
+static inline void pm_set_resume_via_firmware(void)
+{
+	pm_suspend_global_flags |= PM_SUSPEND_FLAG_FW_RESUME;
+}
+
+static inline void pm_set_suspend_no_platform(void)
+{
+	pm_suspend_global_flags |= PM_SUSPEND_FLAG_NO_PLATFORM;
+}
+
+/**
+ * pm_suspend_via_firmware - Check if platform firmware will suspend the system.
+ *
+ * To be called during system-wide power management transitions to sleep states
+ * or during the subsequent system-wide transitions back to the working state.
+ *
+ * Return 'true' if the platform firmware is going to be invoked at the end of
+ * the system-wide power management transition (to a sleep state) in progress in
+ * order to complete it, or if the platform firmware has been invoked in order
+ * to complete the last (or preceding) transition of the system to a sleep
+ * state.
+ *
+ * This matters if the caller needs or wants to carry out some special actions
+ * depending on whether or not control will be passed to the platform firmware
+ * subsequently (for example, the device may need to be reset before letting the
+ * platform firmware manipulate it, which is not necessary when the platform
+ * firmware is not going to be invoked) or when such special actions may have
+ * been carried out during the preceding transition of the system to a sleep
+ * state (as they may need to be taken into account).
+ */
+static inline bool pm_suspend_via_firmware(void)
+{
+	return !!(pm_suspend_global_flags & PM_SUSPEND_FLAG_FW_SUSPEND);
+}
+
+/**
+ * pm_resume_via_firmware - Check if platform firmware has woken up the system.
+ *
+ * To be called during system-wide power management transitions from sleep
+ * states.
+ *
+ * Return 'true' if the platform firmware has passed control to the kernel at
+ * the beginning of the system-wide power management transition in progress, so
+ * the event that woke up the system from sleep has been handled by the platform
+ * firmware.
+ */
+static inline bool pm_resume_via_firmware(void)
+{
+	return !!(pm_suspend_global_flags & PM_SUSPEND_FLAG_FW_RESUME);
+}
+
+/**
+ * pm_suspend_no_platform - Check if platform may change device power states.
+ *
+ * To be called during system-wide power management transitions to sleep states
+ * or during the subsequent system-wide transitions back to the working state.
+ *
+ * Return 'true' if the power states of devices remain under full control of the
+ * kernel throughout the system-wide suspend and resume cycle in progress (that
+ * is, if a device is put into a certain power state during suspend, it can be
+ * expected to remain in that state during resume).
+ */
+static inline bool pm_suspend_no_platform(void)
+{
+	return !!(pm_suspend_global_flags & PM_SUSPEND_FLAG_NO_PLATFORM);
+}
+
+/* Suspend-to-idle state machnine. */
+enum s2idle_states {
+	S2IDLE_STATE_NONE,      /* Not suspended/suspending. */
+	S2IDLE_STATE_ENTER,     /* Enter suspend-to-idle. */
+	S2IDLE_STATE_WAKE,      /* Wake up from suspend-to-idle. */
+};
+
+extern enum s2idle_states __read_mostly s2idle_state;
+
+static inline bool idle_should_enter_s2idle(void)
+{
+	return unlikely(s2idle_state == S2IDLE_STATE_ENTER);
+}
+
+extern bool pm_suspend_default_s2idle(void);
+extern void __init pm_states_init(void);
+extern void s2idle_set_ops(const struct platform_s2idle_ops *ops);
+extern void s2idle_wake(void);
 
 /**
  * arch_suspend_disable_irqs - disable IRQs for suspend
@@ -129,11 +329,25 @@ extern void arch_suspend_disable_irqs(void);
 extern void arch_suspend_enable_irqs(void);
 
 extern int pm_suspend(suspend_state_t state);
+extern bool sync_on_suspend_enabled;
 #else /* !CONFIG_SUSPEND */
 #define suspend_valid_only_mem	NULL
 
-static inline void suspend_set_ops(struct platform_suspend_ops *ops) {}
+static inline void pm_suspend_clear_flags(void) {}
+static inline void pm_set_suspend_via_firmware(void) {}
+static inline void pm_set_resume_via_firmware(void) {}
+static inline bool pm_suspend_via_firmware(void) { return false; }
+static inline bool pm_resume_via_firmware(void) { return false; }
+static inline bool pm_suspend_no_platform(void) { return false; }
+static inline bool pm_suspend_default_s2idle(void) { return false; }
+
+static inline void suspend_set_ops(const struct platform_suspend_ops *ops) {}
 static inline int pm_suspend(suspend_state_t state) { return -ENOSYS; }
+static inline bool sync_on_suspend_enabled(void) { return true; }
+static inline bool idle_should_enter_s2idle(void) { return false; }
+static inline void __init pm_states_init(void) {}
+static inline void s2idle_set_ops(const struct platform_s2idle_ops *ops) {}
+static inline void s2idle_wake(void) {}
 #endif /* !CONFIG_SUSPEND */
 
 /* struct pbe is used for creating lists of pages that should be restored
@@ -202,7 +416,7 @@ extern void mark_free_pages(struct zone *zone);
  *	platforms which require special recovery actions in that situation.
  */
 struct platform_hibernation_ops {
-	int (*begin)(void);
+	int (*begin)(pm_message_t stage);
 	void (*end)(void);
 	int (*pre_snapshot)(void);
 	void (*finish)(void);
@@ -229,17 +443,50 @@ extern int swsusp_page_is_forbidden(struct page *);
 extern void swsusp_set_page_free(struct page *);
 extern void swsusp_unset_page_free(struct page *);
 extern unsigned long get_safe_page(gfp_t gfp_mask);
+extern asmlinkage int swsusp_arch_suspend(void);
+extern asmlinkage int swsusp_arch_resume(void);
 
-extern void hibernation_set_ops(struct platform_hibernation_ops *ops);
+extern void hibernation_set_ops(const struct platform_hibernation_ops *ops);
 extern int hibernate(void);
+extern bool system_entering_hibernation(void);
+extern bool hibernation_available(void);
+asmlinkage int swsusp_save(void);
+extern struct pbe *restore_pblist;
+int pfn_is_nosave(unsigned long pfn);
+
+int hibernate_quiet_exec(int (*func)(void *data), void *data);
 #else /* CONFIG_HIBERNATION */
+static inline void register_nosave_region(unsigned long b, unsigned long e) {}
+static inline void register_nosave_region_late(unsigned long b, unsigned long e) {}
 static inline int swsusp_page_is_forbidden(struct page *p) { return 0; }
 static inline void swsusp_set_page_free(struct page *p) {}
 static inline void swsusp_unset_page_free(struct page *p) {}
 
-static inline void hibernation_set_ops(struct platform_hibernation_ops *ops) {}
+static inline void hibernation_set_ops(const struct platform_hibernation_ops *ops) {}
 static inline int hibernate(void) { return -ENOSYS; }
+static inline bool system_entering_hibernation(void) { return false; }
+static inline bool hibernation_available(void) { return false; }
+
+static inline int hibernate_quiet_exec(int (*func)(void *data), void *data) {
+	return -ENOTSUPP;
+}
 #endif /* CONFIG_HIBERNATION */
+
+#ifdef CONFIG_HIBERNATION_SNAPSHOT_DEV
+int is_hibernate_resume_dev(dev_t dev);
+#else
+static inline int is_hibernate_resume_dev(dev_t dev) { return 0; }
+#endif
+
+/* Hibernation and suspend events */
+#define PM_HIBERNATION_PREPARE	0x0001 /* Going to hibernate */
+#define PM_POST_HIBERNATION	0x0002 /* Hibernation finished */
+#define PM_SUSPEND_PREPARE	0x0003 /* Going to suspend the system */
+#define PM_POST_SUSPEND		0x0004 /* Suspend finished */
+#define PM_RESTORE_PREPARE	0x0005 /* Going to restore a saved image */
+#define PM_POST_RESTORE		0x0006 /* Restore failed */
+
+extern struct mutex system_transition_mutex;
 
 #ifdef CONFIG_PM_SLEEP
 void save_processor_state(void);
@@ -248,12 +495,32 @@ void restore_processor_state(void);
 /* kernel/power/main.c */
 extern int register_pm_notifier(struct notifier_block *nb);
 extern int unregister_pm_notifier(struct notifier_block *nb);
+extern void ksys_sync_helper(void);
 
 #define pm_notifier(fn, pri) {				\
 	static struct notifier_block fn##_nb =			\
 		{ .notifier_call = fn, .priority = pri };	\
 	register_pm_notifier(&fn##_nb);			\
 }
+
+/* drivers/base/power/wakeup.c */
+extern bool events_check_enabled;
+extern unsigned int pm_wakeup_irq;
+extern suspend_state_t pm_suspend_target_state;
+
+extern bool pm_wakeup_pending(void);
+extern void pm_system_wakeup(void);
+extern void pm_system_cancel_wakeup(void);
+extern void pm_wakeup_clear(bool reset);
+extern void pm_system_irq_wakeup(unsigned int irq_number);
+extern bool pm_get_wakeup_count(unsigned int *count, bool block);
+extern bool pm_save_wakeup_count(unsigned int count);
+extern void pm_wakep_autosleep_enabled(bool set);
+extern void pm_print_active_wakeup_sources(void);
+
+extern void lock_system_sleep(void);
+extern void unlock_system_sleep(void);
+
 #else /* !CONFIG_PM_SLEEP */
 
 static inline int register_pm_notifier(struct notifier_block *nb)
@@ -266,18 +533,49 @@ static inline int unregister_pm_notifier(struct notifier_block *nb)
 	return 0;
 }
 
+static inline void ksys_sync_helper(void) {}
+
 #define pm_notifier(fn, pri)	do { (void)(fn); } while (0)
+
+static inline bool pm_wakeup_pending(void) { return false; }
+static inline void pm_system_wakeup(void) {}
+static inline void pm_wakeup_clear(bool reset) {}
+static inline void pm_system_irq_wakeup(unsigned int irq_number) {}
+
+static inline void lock_system_sleep(void) {}
+static inline void unlock_system_sleep(void) {}
+
 #endif /* !CONFIG_PM_SLEEP */
 
-#ifndef CONFIG_HIBERNATION
-static inline void register_nosave_region(unsigned long b, unsigned long e)
-{
-}
-static inline void register_nosave_region_late(unsigned long b, unsigned long e)
-{
-}
+#ifdef CONFIG_PM_SLEEP_DEBUG
+extern bool pm_print_times_enabled;
+extern bool pm_debug_messages_on;
+extern __printf(2, 3) void __pm_pr_dbg(bool defer, const char *fmt, ...);
+#else
+#define pm_print_times_enabled	(false)
+#define pm_debug_messages_on	(false)
+
+#include <linux/printk.h>
+
+#define __pm_pr_dbg(defer, fmt, ...) \
+	no_printk(KERN_DEBUG fmt, ##__VA_ARGS__)
 #endif
 
-extern struct mutex pm_mutex;
+#define pm_pr_dbg(fmt, ...) \
+	__pm_pr_dbg(false, fmt, ##__VA_ARGS__)
+
+#define pm_deferred_pr_dbg(fmt, ...) \
+	__pm_pr_dbg(true, fmt, ##__VA_ARGS__)
+
+#ifdef CONFIG_PM_AUTOSLEEP
+
+/* kernel/power/autosleep.c */
+void queue_up_suspend_work(void);
+
+#else /* !CONFIG_PM_AUTOSLEEP */
+
+static inline void queue_up_suspend_work(void) {}
+
+#endif /* !CONFIG_PM_AUTOSLEEP */
 
 #endif /* _LINUX_SUSPEND_H */

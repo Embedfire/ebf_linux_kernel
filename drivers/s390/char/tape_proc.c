@@ -1,15 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *  drivers/s390/char/tape.c
  *    tape device driver for S/390 and zSeries tapes.
  *
  *  S390 and zSeries version
- *    Copyright (C) 2001 IBM Corporation
+ *    Copyright IBM Corp. 2001
  *    Author(s): Carsten Otte <cotte@de.ibm.com>
  *		 Michael Holzheu <holzheu@de.ibm.com>
  *		 Tuan Ngo-Anh <ngoanh@de.ibm.com>
  *
  * PROCFS Functions
  */
+
+#define KMSG_COMPONENT "tape"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
 #include <linux/module.h>
 #include <linux/vmalloc.h>
@@ -19,8 +22,6 @@
 #define TAPE_DBF_AREA	tape_core_dbf
 
 #include "tape.h"
-
-#define PRINTK_HEADER "TAPE_PROC: "
 
 static const char *tape_med_st_verbose[MS_SIZE] =
 {
@@ -47,12 +48,12 @@ static int tape_proc_show(struct seq_file *m, void *v)
 		seq_printf(m, "TapeNo\tBusID      CuType/Model\t"
 			"DevType/Model\tBlkSize\tState\tOp\tMedState\n");
 	}
-	device = tape_get_device(n);
+	device = tape_find_device(n);
 	if (IS_ERR(device))
 		return 0;
 	spin_lock_irq(get_ccwdev_lock(device->cdev));
 	seq_printf(m, "%d\t", (int) n);
-	seq_printf(m, "%-10.10s ", device->cdev->dev.bus_id);
+	seq_printf(m, "%-10.10s ", dev_name(&device->cdev->dev));
 	seq_printf(m, "%04X/", device->cdev->id.cu_type);
 	seq_printf(m, "%02X\t", device->cdev->id.cu_model);
 	seq_printf(m, "%04X/", device->cdev->id.dev_type);
@@ -104,33 +105,14 @@ static const struct seq_operations tape_proc_seq = {
 	.show		= tape_proc_show,
 };
 
-static int tape_proc_open(struct inode *inode, struct file *file)
-{
-	return seq_open(file, &tape_proc_seq);
-}
-
-static const struct file_operations tape_proc_ops =
-{
-	.owner		= THIS_MODULE,
-	.open		= tape_proc_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release,
-};
-
 /*
  * Initialize procfs stuff on startup
  */
 void
 tape_proc_init(void)
 {
-	tape_proc_devices =
-		proc_create("tapedevices", S_IFREG | S_IRUGO | S_IWUSR, NULL,
-			    &tape_proc_ops);
-	if (tape_proc_devices == NULL) {
-		PRINT_WARN("tape: Cannot register procfs entry tapedevices\n");
-		return;
-	}
+	tape_proc_devices = proc_create_seq("tapedevices", 0444, NULL,
+					    &tape_proc_seq);
 }
 
 /*

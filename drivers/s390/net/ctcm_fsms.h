@@ -1,6 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- * drivers/s390/net/ctcm_fsms.h
- *
  * Copyright IBM Corp. 2001, 2007
  * Authors: 	Fritz Elfert (felfert@millenux.com)
  * 		Peter Tiedemann (ptiedem@de.ibm.com)
@@ -39,7 +38,6 @@
 #include <asm/idals.h>
 
 #include "fsm.h"
-#include "cu3088.h"
 #include "ctcm_main.h"
 
 /*
@@ -161,7 +159,6 @@ extern const char *ctc_ch_state_names[];
 
 void ctcm_ccw_check_rc(struct channel *ch, int rc, char *msg);
 void ctcm_purge_skb_queue(struct sk_buff_head *q);
-void fsm_action_nop(fsm_instance *fi, int event, void *arg);
 
 /*
  * ----- non-static actions for ctcm channel statemachine -----

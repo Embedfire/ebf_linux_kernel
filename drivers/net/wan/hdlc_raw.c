@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Generic HDLC support routines for Linux
  * HDLC support
  *
  * Copyright (C) 1999 - 2006 Krzysztof Halasa <khc@pm.waw.pl>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License
- * as published by the Free Software Foundation.
  */
 
 #include <linux/errno.h>
@@ -20,17 +17,14 @@
 #include <linux/poll.h>
 #include <linux/rtnetlink.h>
 #include <linux/skbuff.h>
-#include <linux/slab.h>
 
 
 static int raw_ioctl(struct net_device *dev, struct ifreq *ifr);
 
 static __be16 raw_type_trans(struct sk_buff *skb, struct net_device *dev)
 {
-	return __constant_htons(ETH_P_IP);
+	return cpu_to_be16(ETH_P_IP);
 }
-
-
 
 static struct hdlc_proto proto = {
 	.type_trans	= raw_type_trans,
@@ -86,8 +80,8 @@ static int raw_ioctl(struct net_device *dev, struct ifreq *ifr)
 		if (result)
 			return result;
 		memcpy(hdlc->state, &new_settings, size);
-		dev->hard_start_xmit = hdlc->xmit;
 		dev->type = ARPHRD_RAWHDLC;
+		call_netdevice_notifiers(NETDEV_POST_TYPE_CHANGE, dev);
 		netif_dormant_off(dev);
 		return 0;
 	}

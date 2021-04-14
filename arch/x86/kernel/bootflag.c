@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	Implement 'Simple Boot Flag Specification 2.0'
  */
@@ -5,7 +6,6 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/string.h>
-#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/acpi.h>
 #include <asm/io.h>
@@ -99,4 +99,4 @@ static int __init sbf_init(void)
 
 	return 0;
 }
-module_init(sbf_init);
+arch_initcall(sbf_init);

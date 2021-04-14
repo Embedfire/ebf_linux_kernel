@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * MPC8349E-mITX Device Tree Source
  *
  * Copyright 2006 Freescale Semiconductor Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
  */
 
 /dts-v1/;
@@ -63,6 +59,24 @@
 			reg = <0x200 0x100>;
 		};
 
+		gpio1: gpio-controller@c00 {
+			#gpio-cells = <2>;
+			compatible = "fsl,mpc8349-gpio";
+			reg = <0xc00 0x100>;
+			interrupts = <74 0x8>;
+			interrupt-parent = <&ipic>;
+			gpio-controller;
+		};
+
+		gpio2: gpio-controller@d00 {
+			#gpio-cells = <2>;
+			compatible = "fsl,mpc8349-gpio";
+			reg = <0xd00 0x100>;
+			interrupts = <75 0x8>;
+			interrupt-parent = <&ipic>;
+			gpio-controller;
+		};
+
 		i2c@3000 {
 			#address-cells = <1>;
 			#size-cells = <0>;
@@ -72,6 +86,12 @@
 			interrupts = <14 0x8>;
 			interrupt-parent = <&ipic>;
 			dfsrr;
+
+			eeprom: at24@50 {
+				compatible = "st,24c256", "atmel,24c256";
+				reg = <0x50>;
+			};
+
 		};
 
 		i2c@3100 {
@@ -83,6 +103,40 @@
 			interrupts = <15 0x8>;
 			interrupt-parent = <&ipic>;
 			dfsrr;
+
+			rtc@68 {
+				compatible = "dallas,ds1339";
+				reg = <0x68>;
+				interrupts = <18 0x8>;
+				interrupt-parent = <&ipic>;
+			};
+
+			pcf1: iexp@38 {
+				#gpio-cells = <2>;
+				compatible = "ti,pcf8574a";
+				reg = <0x38>;
+				gpio-controller;
+			};
+
+			pcf2: iexp@39 {
+				#gpio-cells = <2>;
+				compatible = "ti,pcf8574a";
+				reg = <0x39>;
+				gpio-controller;
+			};
+
+			spd: at24@51 {
+				compatible = "atmel,spd";
+				reg = <0x51>;
+			};
+
+			mcu_pio: mcu@a {
+				#gpio-cells = <2>;
+				compatible = "fsl,mc9s08qg8-mpc8349emitx",
+					     "fsl,mcu-mpc8349emitx";
+				reg = <0x0a>;
+				gpio-controller;
+			};
 		};
 
 		spi@7000 {
@@ -106,24 +160,28 @@
 			dma-channel@0 {
 				compatible = "fsl,mpc8349-dma-channel", "fsl,elo-dma-channel";
 				reg = <0 0x80>;
+				cell-index = <0>;
 				interrupt-parent = <&ipic>;
 				interrupts = <71 8>;
 			};
 			dma-channel@80 {
 				compatible = "fsl,mpc8349-dma-channel", "fsl,elo-dma-channel";
 				reg = <0x80 0x80>;
+				cell-index = <1>;
 				interrupt-parent = <&ipic>;
 				interrupts = <71 8>;
 			};
 			dma-channel@100 {
 				compatible = "fsl,mpc8349-dma-channel", "fsl,elo-dma-channel";
 				reg = <0x100 0x80>;
+				cell-index = <2>;
 				interrupt-parent = <&ipic>;
 				interrupts = <71 8>;
 			};
 			dma-channel@180 {
 				compatible = "fsl,mpc8349-dma-channel", "fsl,elo-dma-channel";
 				reg = <0x180 0x28>;
+				cell-index = <3>;
 				interrupt-parent = <&ipic>;
 				interrupts = <71 8>;
 			};
@@ -137,7 +195,7 @@
 			interrupt-parent = <&ipic>;
 			interrupts = <39 0x8>;
 			phy_type = "ulpi";
-			port1;
+			port0;
 		};
 
 		usb@23000 {
@@ -151,52 +209,76 @@
 			phy_type = "ulpi";
 		};
 
-		mdio@24520 {
-			#address-cells = <1>;
-			#size-cells = <0>;
-			compatible = "fsl,gianfar-mdio";
-			reg = <0x24520 0x20>;
-
-			/* Vitesse 8201 */
-			phy1c: ethernet-phy@1c {
-				interrupt-parent = <&ipic>;
-				interrupts = <18 0x8>;
-				reg = <0x1c>;
-				device_type = "ethernet-phy";
-			};
-		};
-
 		enet0: ethernet@24000 {
+			#address-cells = <1>;
+			#size-cells = <1>;
 			cell-index = <0>;
 			device_type = "network";
 			model = "TSEC";
 			compatible = "gianfar";
 			reg = <0x24000 0x1000>;
+			ranges = <0x0 0x24000 0x1000>;
 			local-mac-address = [ 00 00 00 00 00 00 ];
 			interrupts = <32 0x8 33 0x8 34 0x8>;
 			interrupt-parent = <&ipic>;
+			tbi-handle = <&tbi0>;
 			phy-handle = <&phy1c>;
 			linux,network-index = <0>;
+
+			mdio@520 {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				compatible = "fsl,gianfar-mdio";
+				reg = <0x520 0x20>;
+
+				/* Vitesse 8201 */
+				phy1c: ethernet-phy@1c {
+					interrupt-parent = <&ipic>;
+					interrupts = <18 0x8>;
+					reg = <0x1c>;
+				};
+
+				tbi0: tbi-phy@11 {
+					reg = <0x11>;
+					device_type = "tbi-phy";
+				};
+			};
 		};
 
 		enet1: ethernet@25000 {
+			#address-cells = <1>;
+			#size-cells = <1>;
 			cell-index = <1>;
 			device_type = "network";
 			model = "TSEC";
 			compatible = "gianfar";
 			reg = <0x25000 0x1000>;
+			ranges = <0x0 0x25000 0x1000>;
 			local-mac-address = [ 00 00 00 00 00 00 ];
 			interrupts = <35 0x8 36 0x8 37 0x8>;
 			interrupt-parent = <&ipic>;
 			/* Vitesse 7385 isn't on the MDIO bus */
 			fixed-link = <1 1 1000 0 0>;
 			linux,network-index = <1>;
+			tbi-handle = <&tbi1>;
+
+			mdio@520 {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				compatible = "fsl,gianfar-tbi";
+				reg = <0x520 0x20>;
+
+				tbi1: tbi-phy@11 {
+					reg = <0x11>;
+					device_type = "tbi-phy";
+				};
+			};
 		};
 
 		serial0: serial@4500 {
 			cell-index = <0>;
 			device_type = "serial";
-			compatible = "ns16550";
+			compatible = "fsl,ns16550", "ns16550";
 			reg = <0x4500 0x100>;
 			clock-frequency = <0>;		// from bootloader
 			interrupts = <9 0x8>;
@@ -206,7 +288,7 @@
 		serial1: serial@4600 {
 			cell-index = <1>;
 			device_type = "serial";
-			compatible = "ns16550";
+			compatible = "fsl,ns16550", "ns16550";
 			reg = <0x4600 0x100>;
 			clock-frequency = <0>;		// from bootloader
 			interrupts = <10 0x8>;
@@ -231,10 +313,27 @@
 			reg = <0x700 0x100>;
 			device_type = "ipic";
 		};
+
+		gpio-leds {
+			compatible = "gpio-leds";
+
+			green {
+				label = "Green";
+				gpios = <&pcf1 0 1>;
+				linux,default-trigger = "heartbeat";
+			};
+
+			yellow {
+				label = "Yellow";
+				gpios = <&pcf1 1 1>;
+				/* linux,default-trigger = "heartbeat"; */
+				default-state = "on";
+			};
+		};
+
 	};
 
 	pci0: pci@e0008500 {
-		cell-index = <1>;
 		interrupt-map-mask = <0xf800 0x0 0x0 0x7>;
 		interrupt-map = <
 				/* IDSEL 0x10 - SATA */
@@ -250,13 +349,13 @@
 		#interrupt-cells = <1>;
 		#size-cells = <2>;
 		#address-cells = <3>;
-		reg = <0xe0008500 0x100>;
+		reg = <0xe0008500 0x100		/* internal registers */
+		       0xe0008300 0x8>;		/* config space access registers */
 		compatible = "fsl,mpc8349-pci";
 		device_type = "pci";
 	};
 
 	pci1: pci@e0008600 {
-		cell-index = <2>;
 		interrupt-map-mask = <0xf800 0x0 0x0 0x7>;
 		interrupt-map = <
 				/* IDSEL 0x0E - MiniPCI Slot */
@@ -276,7 +375,8 @@
 		#interrupt-cells = <1>;
 		#size-cells = <2>;
 		#address-cells = <3>;
-		reg = <0xe0008600 0x100>;
+		reg = <0xe0008600 0x100		/* internal registers */
+		       0xe0008380 0x8>;		/* config space access registers */
 		compatible = "fsl,mpc8349-pci";
 		device_type = "pci";
 	};
@@ -285,9 +385,29 @@
 		#address-cells = <2>;
 		#size-cells = <1>;
 		compatible = "fsl,mpc8349e-localbus",
-			     "fsl,pq2pro-localbus";
+			     "fsl,pq2pro-localbus",
+			     "simple-bus";
 		reg = <0xe0005000 0xd8>;
-		ranges = <0x3 0x0 0xf0000000 0x210>;
+		ranges = <0x0 0x0 0xfe000000 0x1000000	/* flash */
+			  0x1 0x0 0xf8000000 0x20000	/* VSC 7385 */
+			  0x2 0x0 0xf9000000 0x200000	/* exp slot */
+			  0x3 0x0 0xf0000000 0x210>;	/* CF slot */
+
+		flash@0,0 {
+			compatible = "cfi-flash";
+			reg = <0x0      0x0 0x800000>;
+			bank-width = <2>;
+			device-width = <1>;
+		};
+
+		flash@0,800000 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			compatible = "cfi-flash";
+			reg = <0x0 0x800000 0x800000>;
+			bank-width = <2>;
+			device-width = <1>;
+		};
 
 		pata@3,0 {
 			compatible = "fsl,mpc8349emitx-pata", "ata-generic";

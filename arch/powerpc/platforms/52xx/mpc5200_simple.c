@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Support for 'mpc5200-simple-platform' compatible boards.
  *
  * Written by Marian Balakowicz <m8@semihalf.com>
  * Copyright (C) 2007 Semihalf
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  *
  * Description:
  * This code implements support for a simple MPC52xx based boards which
@@ -49,9 +45,17 @@ static void __init mpc5200_simple_setup_arch(void)
 }
 
 /* list of the supported boards */
-static char *board[] __initdata = {
-	"promess,motionpro",
+static const char *board[] __initdata = {
+	"anonymous,a3m071",
+	"anonymous,a4m072",
+	"anon,charon",
+	"ifm,o2d",
+	"intercontrol,digsy-mtc",
+	"manroland,mucmc52",
+	"manroland,uc101",
 	"phytec,pcm030",
+	"phytec,pcm032",
+	"promess,motionpro",
 	"schindler,cm5200",
 	"tqc,tqm5200",
 	NULL
@@ -62,16 +66,7 @@ static char *board[] __initdata = {
  */
 static int __init mpc5200_simple_probe(void)
 {
-	unsigned long node = of_get_flat_dt_root();
-	int i = 0;
-
-	while (board[i]) {
-		if (of_flat_dt_is_compatible(node, board[i]))
-			break;
-		i++;
-	}
-	
-	return (board[i] != NULL);
+	return of_device_compatible_match(of_root, board);
 }
 
 define_machine(mpc5200_simple_platform) {

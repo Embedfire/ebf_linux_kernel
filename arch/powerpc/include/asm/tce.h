@@ -1,21 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (C) 2001 Mike Corrigan & Dave Engebretsen, IBM Corporation
  * Rewrite, cleanup:
  * Copyright (C) 2004 Olof Johansson <olof@lixom.net>, IBM Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef _ASM_POWERPC_TCE_H
@@ -26,10 +13,11 @@
 
 /*
  * Tces come in two formats, one for the virtual bus and a different
- * format for PCI
+ * format for PCI.  PCI TCEs can have hardware or software maintianed
+ * coherency.
  */
-#define TCE_VB  0
-#define TCE_PCI 1
+#define TCE_VB			0
+#define TCE_PCI			1
 
 /* TCE page size is 4096 bytes (1 << 12) */
 

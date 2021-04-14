@@ -1,19 +1,24 @@
-#ifndef _ASM_GENERIC_BITOPS_H_
-#define _ASM_GENERIC_BITOPS_H_
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef __ASM_GENERIC_BITOPS_H
+#define __ASM_GENERIC_BITOPS_H
 
 /*
  * For the benefit of those who are trying to port Linux to another
- * architecture, here are some C-language equivalents.  You should
- * recode these in the native assembly language, if at all possible.
- * 
+ * architecture, here are some C-language equivalents.  They should
+ * generate reasonable code, so take a look at what your compiler spits
+ * out before rolling your own buggy implementation in assembly language.
+ *
  * C language equivalents written by Theodore Ts'o, 9/26/92
  */
 
-#include <asm-generic/bitops/atomic.h>
-#include <asm-generic/bitops/non-atomic.h>
+#include <linux/irqflags.h>
+#include <linux/compiler.h>
+#include <asm/barrier.h>
+
 #include <asm-generic/bitops/__ffs.h>
 #include <asm-generic/bitops/ffz.h>
 #include <asm-generic/bitops/fls.h>
+#include <asm-generic/bitops/__fls.h>
 #include <asm-generic/bitops/fls64.h>
 #include <asm-generic/bitops/find.h>
 
@@ -26,8 +31,9 @@
 #include <asm-generic/bitops/hweight.h>
 #include <asm-generic/bitops/lock.h>
 
-#include <asm-generic/bitops/ext2-non-atomic.h>
+#include <asm-generic/bitops/atomic.h>
+#include <asm-generic/bitops/non-atomic.h>
+#include <asm-generic/bitops/le.h>
 #include <asm-generic/bitops/ext2-atomic.h>
-#include <asm-generic/bitops/minix.h>
 
-#endif /* _ASM_GENERIC_BITOPS_H */
+#endif /* __ASM_GENERIC_BITOPS_H */

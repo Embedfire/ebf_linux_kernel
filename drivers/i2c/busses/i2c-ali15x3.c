@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
     Copyright (c) 1999  Frodo Looijaard <frodol@dds.nl> and
     Philip Edelbrock <phil@netroedge.com> and
     Mark D. Studebaker <mdsxyz123@yahoo.com>
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
 /*
@@ -65,9 +53,8 @@
 #include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
-#include <linux/init.h>
 #include <linux/acpi.h>
-#include <asm/io.h>
+#include <linux/io.h>
 
 /* ALI15X3 SMBus address offsets */
 #define SMBHSTSTS	(0 + ali15x3_smba)
@@ -124,7 +111,7 @@
 /* If force_addr is set to anything different from 0, we forcibly enable
    the device at the given address. */
 static u16 force_addr;
-module_param(force_addr, ushort, 0);
+module_param_hw(force_addr, ushort, ioport, 0);
 MODULE_PARM_DESC(force_addr,
 		 "Initialize the base address of the i2c controller");
 
@@ -306,7 +293,7 @@ static int ali15x3_transaction(struct i2c_adapter *adap)
 		 && (timeout++ < MAX_TIMEOUT));
 
 	/* If the SMBus is still busy, we give up */
-	if (timeout >= MAX_TIMEOUT) {
+	if (timeout > MAX_TIMEOUT) {
 		result = -ETIMEDOUT;
 		dev_err(&adap->dev, "SMBus Timeout!\n");
 	}
@@ -318,7 +305,7 @@ static int ali15x3_transaction(struct i2c_adapter *adap)
 
 	/*
 	  Unfortunately the ALI SMB controller maps "no response" and "bus
-	  collision" into a single bit. No reponse is the usual case so don't
+	  collision" into a single bit. No response is the usual case so don't
 	  do a printk.
 	  This means that bus collisions go unreported.
 	*/
@@ -473,19 +460,18 @@ static const struct i2c_algorithm smbus_algorithm = {
 
 static struct i2c_adapter ali15x3_adapter = {
 	.owner		= THIS_MODULE,
-	.id		= I2C_HW_SMBUS_ALI15X3,
 	.class          = I2C_CLASS_HWMON | I2C_CLASS_SPD,
 	.algo		= &smbus_algorithm,
 };
 
-static struct pci_device_id ali15x3_ids[] = {
+static const struct pci_device_id ali15x3_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_AL, PCI_DEVICE_ID_AL_M7101) },
 	{ 0, }
 };
 
 MODULE_DEVICE_TABLE (pci, ali15x3_ids);
 
-static int __devinit ali15x3_probe(struct pci_dev *dev, const struct pci_device_id *id)
+static int ali15x3_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	if (ali15x3_setup(dev)) {
 		dev_err(&dev->dev,
@@ -501,7 +487,7 @@ static int __devinit ali15x3_probe(struct pci_dev *dev, const struct pci_device_
 	return i2c_add_adapter(&ali15x3_adapter);
 }
 
-static void __devexit ali15x3_remove(struct pci_dev *dev)
+static void ali15x3_remove(struct pci_dev *dev)
 {
 	i2c_del_adapter(&ali15x3_adapter);
 	release_region(ali15x3_smba, ALI15X3_SMB_IOSIZE);
@@ -511,24 +497,13 @@ static struct pci_driver ali15x3_driver = {
 	.name		= "ali15x3_smbus",
 	.id_table	= ali15x3_ids,
 	.probe		= ali15x3_probe,
-	.remove		= __devexit_p(ali15x3_remove),
+	.remove		= ali15x3_remove,
 };
 
-static int __init i2c_ali15x3_init(void)
-{
-	return pci_register_driver(&ali15x3_driver);
-}
+module_pci_driver(ali15x3_driver);
 
-static void __exit i2c_ali15x3_exit(void)
-{
-	pci_unregister_driver(&ali15x3_driver);
-}
-
-MODULE_AUTHOR ("Frodo Looijaard <frodol@dds.nl>, "
-		"Philip Edelbrock <phil@netroedge.com>, "
-		"and Mark D. Studebaker <mdsxyz123@yahoo.com>");
+MODULE_AUTHOR("Frodo Looijaard <frodol@dds.nl>");
+MODULE_AUTHOR("Philip Edelbrock <phil@netroedge.com>");
+MODULE_AUTHOR("Mark D. Studebaker <mdsxyz123@yahoo.com>");
 MODULE_DESCRIPTION("ALI15X3 SMBus driver");
 MODULE_LICENSE("GPL");
-
-module_init(i2c_ali15x3_init);
-module_exit(i2c_ali15x3_exit);

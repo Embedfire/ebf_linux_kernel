@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * card.c - contains functions for managing groups of PnP devices
  *
@@ -5,6 +6,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/ctype.h>
 #include <linux/slab.h>
 #include <linux/pnp.h>
@@ -165,10 +167,9 @@ struct pnp_card *pnp_alloc_card(struct pnp_protocol *protocol, int id, char *pnp
 	card->number = id;
 
 	card->dev.parent = &card->protocol->dev;
-	sprintf(card->dev.bus_id, "%02x:%02x", card->protocol->number,
-		card->number);
+	dev_set_name(&card->dev, "%02x:%02x", card->protocol->number, card->number);
 
-	card->dev.coherent_dma_mask = DMA_24BIT_MASK;
+	card->dev.coherent_dma_mask = DMA_BIT_MASK(24);
 	card->dev.dma_mask = &card->dev.coherent_dma_mask;
 
 	dev_id = pnp_add_card_id(card, pnpid);
@@ -240,14 +241,15 @@ int pnp_add_card(struct pnp_card *card)
 	error = device_register(&card->dev);
 	if (error) {
 		dev_err(&card->dev, "could not register (err=%d)\n", error);
+		put_device(&card->dev);
 		return error;
 	}
 
 	pnp_interface_attach_card(card);
-	spin_lock(&pnp_lock);
+	mutex_lock(&pnp_lock);
 	list_add_tail(&card->global_list, &pnp_cards);
 	list_add_tail(&card->protocol_list, &card->protocol->cards);
-	spin_unlock(&pnp_lock);
+	mutex_unlock(&pnp_lock);
 
 	/* we wait until now to add devices in order to ensure the drivers
 	 * will be able to use all of the related devices on the card
@@ -276,10 +278,10 @@ void pnp_remove_card(struct pnp_card *card)
 	struct list_head *pos, *temp;
 
 	device_unregister(&card->dev);
-	spin_lock(&pnp_lock);
+	mutex_lock(&pnp_lock);
 	list_del(&card->global_list);
 	list_del(&card->protocol_list);
-	spin_unlock(&pnp_lock);
+	mutex_unlock(&pnp_lock);
 	list_for_each_safe(pos, temp, &card->devices) {
 		struct pnp_dev *dev = card_to_pnp_dev(pos);
 		pnp_remove_card_device(dev);
@@ -295,12 +297,12 @@ int pnp_add_card_device(struct pnp_card *card, struct pnp_dev *dev)
 {
 	dev->dev.parent = &card->dev;
 	dev->card_link = NULL;
-	snprintf(dev->dev.bus_id, BUS_ID_SIZE, "%02x:%02x.%02x",
-		 dev->protocol->number, card->number, dev->number);
-	spin_lock(&pnp_lock);
+	dev_set_name(&dev->dev, "%02x:%02x.%02x",
+		     dev->protocol->number, card->number, dev->number);
+	mutex_lock(&pnp_lock);
 	dev->card = card;
 	list_add_tail(&dev->card_list, &card->devices);
-	spin_unlock(&pnp_lock);
+	mutex_unlock(&pnp_lock);
 	return 0;
 }
 
@@ -310,10 +312,10 @@ int pnp_add_card_device(struct pnp_card *card, struct pnp_dev *dev)
  */
 void pnp_remove_card_device(struct pnp_dev *dev)
 {
-	spin_lock(&pnp_lock);
+	mutex_lock(&pnp_lock);
 	dev->card = NULL;
 	list_del(&dev->card_list);
-	spin_unlock(&pnp_lock);
+	mutex_unlock(&pnp_lock);
 	__pnp_remove_device(dev);
 }
 
@@ -321,7 +323,7 @@ void pnp_remove_card_device(struct pnp_dev *dev)
  * pnp_request_card_device - Searches for a PnP device under the specified card
  * @clink: pointer to the card link, cannot be NULL
  * @id: pointer to a PnP ID structure that explains the rules for finding the device
- * @from: Starting place to search from. If NULL it will start from the begining.
+ * @from: Starting place to search from. If NULL it will start from the beginning.
  */
 struct pnp_dev *pnp_request_card_device(struct pnp_card_link *clink,
 					const char *id, struct pnp_dev *from)
@@ -370,7 +372,7 @@ err_out:
 
 /**
  * pnp_release_card_device - call this when the driver no longer needs the device
- * @dev: pointer to the PnP device stucture
+ * @dev: pointer to the PnP device structure
  */
 void pnp_release_card_device(struct pnp_dev *dev)
 {
@@ -426,9 +428,9 @@ int pnp_register_card_driver(struct pnp_card_driver *drv)
 	if (error < 0)
 		return error;
 
-	spin_lock(&pnp_lock);
+	mutex_lock(&pnp_lock);
 	list_add_tail(&drv->global_list, &pnp_card_drivers);
-	spin_unlock(&pnp_lock);
+	mutex_unlock(&pnp_lock);
 
 	list_for_each_safe(pos, temp, &pnp_cards) {
 		struct pnp_card *card =
@@ -444,9 +446,9 @@ int pnp_register_card_driver(struct pnp_card_driver *drv)
  */
 void pnp_unregister_card_driver(struct pnp_card_driver *drv)
 {
-	spin_lock(&pnp_lock);
+	mutex_lock(&pnp_lock);
 	list_del(&drv->global_list);
-	spin_unlock(&pnp_lock);
+	mutex_unlock(&pnp_lock);
 	pnp_unregister_driver(&drv->link);
 }
 

@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
@@ -21,8 +18,7 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
+#include <linux/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -190,8 +186,10 @@ const unsigned char *ax25_addr_parse(const unsigned char *buf, int len,
 	digi->ndigi      = 0;
 
 	while (!(buf[-1] & AX25_EBIT)) {
-		if (d >= AX25_MAX_DIGIS)  return NULL;	/* Max of 6 digis */
-		if (len < 7) return NULL;	/* Short packet */
+		if (d >= AX25_MAX_DIGIS)
+			return NULL;
+		if (len < AX25_ADDR_LEN)
+			return NULL;
 
 		memcpy(&digi->calls[d], buf, AX25_ADDR_LEN);
 		digi->ndigi = d + 1;
@@ -303,4 +301,3 @@ void ax25_digi_invert(const ax25_digi *in, ax25_digi *out)
 		}
 	}
 }
-

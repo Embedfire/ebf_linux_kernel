@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_IA64_BITOPS_H
 #define _ASM_IA64_BITOPS_H
 
@@ -16,6 +17,7 @@
 #include <linux/compiler.h>
 #include <linux/types.h>
 #include <asm/intrinsics.h>
+#include <asm/barrier.h>
 
 /**
  * set_bit - Atomically set a bit in memory
@@ -65,12 +67,6 @@ __set_bit (int nr, volatile void *addr)
 	*((__u32 *) addr + (nr >> 5)) |= (1 << (nr & 31));
 }
 
-/*
- * clear_bit() has "acquire" semantics.
- */
-#define smp_mb__before_clear_bit()	smp_mb()
-#define smp_mb__after_clear_bit()	do { /* skip */; } while (0)
-
 /**
  * clear_bit - Clears a bit in memory
  * @nr: Bit to clear
@@ -78,7 +74,7 @@ __set_bit (int nr, volatile void *addr)
  *
  * clear_bit() is atomic and may not be reordered.  However, it does
  * not contain a memory barrier, so if it is used for locking purposes,
- * you should call smp_mb__before_clear_bit() and/or smp_mb__after_clear_bit()
+ * you should call smp_mb__before_atomic() and/or smp_mb__after_atomic()
  * in order to ensure changes are visible on other processors.
  */
 static __inline__ void
@@ -127,7 +123,7 @@ clear_bit_unlock (int nr, volatile void *addr)
  * @addr: Address to start counting from
  *
  * Similarly to clear_bit_unlock, the implementation uses a store
- * with release semantics. See also __raw_spin_unlock().
+ * with release semantics. See also arch_spin_unlock().
  */
 static __inline__ void
 __clear_bit_unlock(int nr, void *addr)
@@ -286,7 +282,7 @@ __test_and_clear_bit(int nr, volatile void * addr)
 {
 	__u32 *p = (__u32 *) addr + (nr >> 5);
 	__u32 m = 1 << (nr & 31);
-	int oldbitset = *p & m;
+	int oldbitset = (*p & m) != 0;
 
 	*p &= ~m;
 	return oldbitset;
@@ -392,8 +388,7 @@ ia64_fls (unsigned long x)
  * Find the last (most significant) bit set.  Returns 0 for x==0 and
  * bits are numbered from 1..32 (e.g., fls(9) == 4).
  */
-static inline int
-fls (int t)
+static inline int fls(unsigned int t)
 {
 	unsigned long x = t & 0xffffffffu;
 
@@ -425,29 +420,24 @@ __fls (unsigned long x)
 
 #include <asm-generic/bitops/fls64.h>
 
-/*
- * ffs: find first bit set. This is defined the same way as the libc and
- * compiler builtin ffs routines, therefore differs in spirit from the above
- * ffz (man ffs): it operates on "int" values only and the result value is the
- * bit number + 1.  ffs(0) is defined to return zero.
- */
-#define ffs(x)	__builtin_ffs(x)
+#include <asm-generic/bitops/builtin-ffs.h>
 
 /*
  * hweightN: returns the hamming weight (i.e. the number
  * of bits set) of a N-bit word
  */
-static __inline__ unsigned long
-hweight64 (unsigned long x)
+static __inline__ unsigned long __arch_hweight64(unsigned long x)
 {
 	unsigned long result;
 	result = ia64_popcnt(x);
 	return result;
 }
 
-#define hweight32(x)	(unsigned int) hweight64((x) & 0xfffffffful)
-#define hweight16(x)	(unsigned int) hweight64((x) & 0xfffful)
-#define hweight8(x)	(unsigned int) hweight64((x) & 0xfful)
+#define __arch_hweight32(x) ((unsigned int) __arch_hweight64((x) & 0xfffffffful))
+#define __arch_hweight16(x) ((unsigned int) __arch_hweight64((x) & 0xfffful))
+#define __arch_hweight8(x)  ((unsigned int) __arch_hweight64((x) & 0xfful))
+
+#include <asm-generic/bitops/const_hweight.h>
 
 #endif /* __KERNEL__ */
 
@@ -455,12 +445,10 @@ hweight64 (unsigned long x)
 
 #ifdef __KERNEL__
 
-#include <asm-generic/bitops/ext2-non-atomic.h>
+#include <asm-generic/bitops/le.h>
 
-#define ext2_set_bit_atomic(l,n,a)	test_and_set_bit(n,a)
-#define ext2_clear_bit_atomic(l,n,a)	test_and_clear_bit(n,a)
+#include <asm-generic/bitops/ext2-atomic-setbit.h>
 
-#include <asm-generic/bitops/minix.h>
 #include <asm-generic/bitops/sched.h>
 
 #endif /* __KERNEL__ */

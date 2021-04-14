@@ -1,16 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Shared SH3 Setup code
  *
  *  Copyright (C) 2008  Magnus Damm
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/io.h>
+#include <asm/platform_early.h>
 
 /* All SH3 devices are equipped with IRQ0->5 (except sh7708) */
 
@@ -58,7 +56,7 @@ static DECLARE_INTC_DESC_ACK(intc_desc_irq45, "sh3-irq45",
 void __init plat_irq_setup_pins(int mode)
 {
 	if (mode == IRQ_MODE_IRQ) {
-		ctrl_outw(ctrl_inw(INTC_ICR1) & ~INTC_ICR1_IRQLVL, INTC_ICR1);
+		__raw_writew(__raw_readw(INTC_ICR1) & ~INTC_ICR1_IRQLVL, INTC_ICR1);
 		register_intc_controller(&intc_desc_irq0123);
 		return;
 	}

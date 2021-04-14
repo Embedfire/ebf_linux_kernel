@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  */
@@ -7,23 +8,6 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
- * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
  */
 
 #include <linux/delay.h>
@@ -35,6 +19,7 @@
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 
 #include <asm/io.h>
 
@@ -110,9 +95,11 @@ static void ct82c710_close(struct serio *serio)
 static int ct82c710_open(struct serio *serio)
 {
 	unsigned char status;
+	int err;
 
-	if (request_irq(CT82C710_IRQ, ct82c710_interrupt, 0, "ct82c710", NULL))
-		return -1;
+	err = request_irq(CT82C710_IRQ, ct82c710_interrupt, 0, "ct82c710", NULL);
+	if (err)
+		return err;
 
 	status = inb_p(CT82C710_STATUS);
 
@@ -130,7 +117,7 @@ static int ct82c710_open(struct serio *serio)
 		status &= ~(CT82C710_ENABLE | CT82C710_INTS_ON);
 		outb_p(status, CT82C710_STATUS);
 		free_irq(CT82C710_IRQ, NULL);
-		return -1;
+		return -EBUSY;
 	}
 
 	return 0;
@@ -172,7 +159,7 @@ static int __init ct82c710_detect(void)
 	return 0;
 }
 
-static int __devinit ct82c710_probe(struct platform_device *dev)
+static int ct82c710_probe(struct platform_device *dev)
 {
 	ct82c710_port = kzalloc(sizeof(struct serio), GFP_KERNEL);
 	if (!ct82c710_port)
@@ -190,10 +177,13 @@ static int __devinit ct82c710_probe(struct platform_device *dev)
 
 	serio_register_port(ct82c710_port);
 
+	printk(KERN_INFO "serio: C&T 82c710 mouse port at %#llx irq %d\n",
+		(unsigned long long)CT82C710_DATA, CT82C710_IRQ);
+
 	return 0;
 }
 
-static int __devexit ct82c710_remove(struct platform_device *dev)
+static int ct82c710_remove(struct platform_device *dev)
 {
 	serio_unregister_port(ct82c710_port);
 
@@ -203,10 +193,9 @@ static int __devexit ct82c710_remove(struct platform_device *dev)
 static struct platform_driver ct82c710_driver = {
 	.driver		= {
 		.name	= "ct82c710",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= ct82c710_probe,
-	.remove		= __devexit_p(ct82c710_remove),
+	.remove		= ct82c710_remove,
 };
 
 
@@ -235,11 +224,6 @@ static int __init ct82c710_init(void)
 	error = platform_device_add(ct82c710_device);
 	if (error)
 		goto err_free_device;
-
-	serio_register_port(ct82c710_port);
-
-	printk(KERN_INFO "serio: C&T 82c710 mouse port at %#llx irq %d\n",
-		(unsigned long long)CT82C710_DATA, CT82C710_IRQ);
 
 	return 0;
 

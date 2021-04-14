@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/alpha/kernel/setup.c
  *
@@ -28,7 +29,7 @@
 #include <linux/string.h>
 #include <linux/ioport.h>
 #include <linux/platform_device.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/pci.h>
 #include <linux/seq_file.h>
 #include <linux/root_dev.h>
@@ -43,6 +44,7 @@
 #include <asm/setup.h>
 #include <asm/io.h>
 #include <linux/log2.h>
+#include <linux/export.h>
 
 extern struct atomic_notifier_head panic_notifier_list;
 static int alpha_panic_event(struct notifier_block *, unsigned long, void *);
@@ -52,9 +54,7 @@ static struct notifier_block alpha_panic_block = {
         INT_MAX /* try to do it first */
 };
 
-#include <asm/uaccess.h>
-#include <asm/pgtable.h>
-#include <asm/system.h>
+#include <linux/uaccess.h>
 #include <asm/hwrpb.h>
 #include <asm/dma.h>
 #include <asm/mmu_context.h>
@@ -77,6 +77,11 @@ int alpha_l3_cacheshape;
 /* 0=minimum, 1=verbose, 2=all */
 /* These can be overridden via the command line, ie "verbose_mcheck=2") */
 unsigned long alpha_verbose_mcheck = CONFIG_VERBOSE_MCHECK_ON;
+#endif
+
+#ifdef CONFIG_NUMA
+struct cpumask node_to_cpumask_map[MAX_NUMNODES] __read_mostly;
+EXPORT_SYMBOL(node_to_cpumask_map);
 #endif
 
 /* Which processor we booted from.  */
@@ -110,8 +115,16 @@ unsigned long alpha_agpgart_size = DEFAULT_AGP_APER_SIZE;
 
 #ifdef CONFIG_ALPHA_GENERIC
 struct alpha_machine_vector alpha_mv;
+EXPORT_SYMBOL(alpha_mv);
+#endif
+
+#ifndef alpha_using_srm
 int alpha_using_srm;
 EXPORT_SYMBOL(alpha_using_srm);
+#endif
+
+#ifndef alpha_using_qemu
+int alpha_using_qemu;
 #endif
 
 static struct alpha_machine_vector *get_sysvec(unsigned long, unsigned long,
@@ -240,16 +253,16 @@ reserve_std_resources(void)
 
 	/* Fix up for the Jensen's queer RTC placement.  */
 	standard_io_resources[0].start = RTC_PORT(0);
-	standard_io_resources[0].end = RTC_PORT(0) + 0x10;
+	standard_io_resources[0].end = RTC_PORT(0) + 0x0f;
 
 	for (i = 0; i < ARRAY_SIZE(standard_io_resources); ++i)
 		request_resource(io, standard_io_resources+i);
 }
 
 #define PFN_MAX		PFN_DOWN(0x80000000)
-#define for_each_mem_cluster(memdesc, cluster, i)		\
-	for ((cluster) = (memdesc)->cluster, (i) = 0;		\
-	     (i) < (memdesc)->numclusters; (i)++, (cluster)++)
+#define for_each_mem_cluster(memdesc, _cluster, i)		\
+	for ((_cluster) = (memdesc)->cluster, (i) = 0;		\
+	     (i) < (memdesc)->numclusters; (i)++, (_cluster)++)
 
 static unsigned long __init
 get_mem_size_limit(char *s)
@@ -279,7 +292,7 @@ move_initrd(unsigned long mem_limit)
 	unsigned long size;
 
 	size = initrd_end - initrd_start;
-	start = __alloc_bootmem(PAGE_ALIGN(size), PAGE_SIZE, 0);
+	start = memblock_alloc(PAGE_ALIGN(size), PAGE_SIZE);
 	if (!start || __pa(start) + size > mem_limit) {
 		initrd_start = initrd_end = 0;
 		return NULL;
@@ -298,9 +311,7 @@ setup_memory(void *kernel_end)
 {
 	struct memclust_struct * cluster;
 	struct memdesc_struct * memdesc;
-	unsigned long start_kernel_pfn, end_kernel_pfn;
-	unsigned long bootmap_size, bootmap_pages, bootmap_start;
-	unsigned long start, end;
+	unsigned long kernel_size;
 	unsigned long i;
 
 	/* Find free clusters, and init and free the bootmem accordingly.  */
@@ -308,6 +319,8 @@ setup_memory(void *kernel_end)
 	  (hwrpb->mddt_offset + (unsigned long) hwrpb);
 
 	for_each_mem_cluster(memdesc, cluster, i) {
+		unsigned long end;
+
 		printk("memcluster %lu, usage %01lx, start %8lu, end %8lu\n",
 		       i, cluster->usage, cluster->start_pfn,
 		       cluster->start_pfn + cluster->numpages);
@@ -321,6 +334,9 @@ setup_memory(void *kernel_end)
 		end = cluster->start_pfn + cluster->numpages;
 		if (end > max_low_pfn)
 			max_low_pfn = end;
+
+		memblock_add(PFN_PHYS(cluster->start_pfn),
+			     cluster->numpages << PAGE_SHIFT);
 	}
 
 	/*
@@ -349,87 +365,9 @@ setup_memory(void *kernel_end)
 		max_low_pfn = mem_size_limit;
 	}
 
-	/* Find the bounds of kernel memory.  */
-	start_kernel_pfn = PFN_DOWN(KERNEL_START_PHYS);
-	end_kernel_pfn = PFN_UP(virt_to_phys(kernel_end));
-	bootmap_start = -1;
-
- try_again:
-	if (max_low_pfn <= end_kernel_pfn)
-		panic("not enough memory to boot");
-
-	/* We need to know how many physically contiguous pages
-	   we'll need for the bootmap.  */
-	bootmap_pages = bootmem_bootmap_pages(max_low_pfn);
-
-	/* Now find a good region where to allocate the bootmap.  */
-	for_each_mem_cluster(memdesc, cluster, i) {
-		if (cluster->usage & 3)
-			continue;
-
-		start = cluster->start_pfn;
-		end = start + cluster->numpages;
-		if (start >= max_low_pfn)
-			continue;
-		if (end > max_low_pfn)
-			end = max_low_pfn;
-		if (start < start_kernel_pfn) {
-			if (end > end_kernel_pfn
-			    && end - end_kernel_pfn >= bootmap_pages) {
-				bootmap_start = end_kernel_pfn;
-				break;
-			} else if (end > start_kernel_pfn)
-				end = start_kernel_pfn;
-		} else if (start < end_kernel_pfn)
-			start = end_kernel_pfn;
-		if (end - start >= bootmap_pages) {
-			bootmap_start = start;
-			break;
-		}
-	}
-
-	if (bootmap_start == ~0UL) {
-		max_low_pfn >>= 1;
-		goto try_again;
-	}
-
-	/* Allocate the bootmap and mark the whole MM as reserved.  */
-	bootmap_size = init_bootmem(bootmap_start, max_low_pfn);
-
-	/* Mark the free regions.  */
-	for_each_mem_cluster(memdesc, cluster, i) {
-		if (cluster->usage & 3)
-			continue;
-
-		start = cluster->start_pfn;
-		end = cluster->start_pfn + cluster->numpages;
-		if (start >= max_low_pfn)
-			continue;
-		if (end > max_low_pfn)
-			end = max_low_pfn;
-		if (start < start_kernel_pfn) {
-			if (end > end_kernel_pfn) {
-				free_bootmem(PFN_PHYS(start),
-					     (PFN_PHYS(start_kernel_pfn)
-					      - PFN_PHYS(start)));
-				printk("freeing pages %ld:%ld\n",
-				       start, start_kernel_pfn);
-				start = end_kernel_pfn;
-			} else if (end > start_kernel_pfn)
-				end = start_kernel_pfn;
-		} else if (start < end_kernel_pfn)
-			start = end_kernel_pfn;
-		if (start >= end)
-			continue;
-
-		free_bootmem(PFN_PHYS(start), PFN_PHYS(end) - PFN_PHYS(start));
-		printk("freeing pages %ld:%ld\n", start, end);
-	}
-
-	/* Reserve the bootmap memory.  */
-	reserve_bootmem(PFN_PHYS(bootmap_start), bootmap_size,
-			BOOTMEM_DEFAULT);
-	printk("reserving pages %ld:%ld\n", bootmap_start, bootmap_start+PFN_UP(bootmap_size));
+	/* Reserve the kernel memory. */
+	kernel_size = virt_to_phys(kernel_end) - KERNEL_START_PHYS;
+	memblock_reserve(KERNEL_START_PHYS, kernel_size);
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	initrd_start = INITRD_START;
@@ -445,8 +383,8 @@ setup_memory(void *kernel_end)
 				       initrd_end,
 				       phys_to_virt(PFN_PHYS(max_low_pfn)));
 		} else {
-			reserve_bootmem(virt_to_phys((void *)initrd_start),
-					INITRD_SIZE, BOOTMEM_DEFAULT);
+			memblock_reserve(virt_to_phys((void *)initrd_start),
+					INITRD_SIZE);
 		}
 	}
 #endif /* CONFIG_BLK_DEV_INITRD */
@@ -491,6 +429,20 @@ register_cpus(void)
 
 arch_initcall(register_cpus);
 
+#ifdef CONFIG_MAGIC_SYSRQ
+static void sysrq_reboot_handler(int unused)
+{
+	machine_halt();
+}
+
+static const struct sysrq_key_op srm_sysrq_reboot_op = {
+	.handler	= sysrq_reboot_handler,
+	.help_msg       = "reboot(b)",
+	.action_msg     = "Resetting",
+	.enable_mask    = SYSRQ_ENABLE_BOOT,
+};
+#endif
+
 void __init
 setup_arch(char **cmdline_p)
 {
@@ -524,10 +476,14 @@ setup_arch(char **cmdline_p)
 	atomic_notifier_chain_register(&panic_notifier_list,
 			&alpha_panic_block);
 
-#ifdef CONFIG_ALPHA_GENERIC
+#ifndef alpha_using_srm
 	/* Assume that we've booted from SRM if we haven't booted from MILO.
 	   Detect the later by looking for "MILO" in the system serial nr.  */
-	alpha_using_srm = strncmp((const char *)hwrpb->ssn, "MILO", 4) != 0;
+	alpha_using_srm = !str_has_prefix((const char *)hwrpb->ssn, "MILO");
+#endif
+#ifndef alpha_using_qemu
+	/* Similarly, look for QEMU.  */
+	alpha_using_qemu = strstr((const char *)hwrpb->ssn, "QEMU") != 0;
 #endif
 
 	/* If we are using SRM, we want to allow callbacks
@@ -607,8 +563,8 @@ setup_arch(char **cmdline_p)
 	/* If we're using SRM, make sysrq-b halt back to the prom,
 	   not auto-reboot.  */
 	if (alpha_using_srm) {
-		struct sysrq_key_op *op = __sysrq_get_key_op('b');
-		op->handler = (void *) machine_halt;
+		unregister_sysrq_key('b', __sysrq_reboot_op);
+		register_sysrq_key('b', &srm_sysrq_reboot_op);
 	}
 #endif
 
@@ -691,6 +647,7 @@ setup_arch(char **cmdline_p)
 
 	/* Find our memory.  */
 	setup_memory(kernel_end);
+	memblock_set_bottom_up(true);
 
 	/* First guess at cpu cache sizes.  Do this before init_arch.  */
 	determine_cpu_caches(cpu->type);
@@ -711,8 +668,6 @@ setup_arch(char **cmdline_p)
 #ifdef CONFIG_VT
 #if defined(CONFIG_VGA_CONSOLE)
 	conswitchp = &vga_con;
-#elif defined(CONFIG_DUMMY_CONSOLE)
-	conswitchp = &dummy_con;
 #endif
 #endif
 
@@ -1077,8 +1032,9 @@ get_sysnames(unsigned long type, unsigned long variation, unsigned long cpu,
 	default: /* default to variation "0" for now */
 		break;
 	case ST_DEC_EB164:
-		if (member < ARRAY_SIZE(eb164_indices))
-			*variation_name = eb164_names[eb164_indices[member]];
+		if (member >= ARRAY_SIZE(eb164_indices))
+			break;
+		*variation_name = eb164_names[eb164_indices[member]];
 		/* PC164 may show as EB164 variation, but with EV56 CPU,
 		   so, since no true EB164 had anything but EV5... */
 		if (eb164_indices[member] == 0 && cpu == EV56_CPU)
@@ -1202,6 +1158,7 @@ show_cpuinfo(struct seq_file *f, void *slot)
 	char *systype_name;
 	char *sysvariation_name;
 	int nr_processors;
+	unsigned long timer_freq;
 
 	cpu_index = (unsigned) (cpu->type - 1);
 	cpu_name = "Unknown";
@@ -1212,6 +1169,12 @@ show_cpuinfo(struct seq_file *f, void *slot)
 		     cpu->type, &systype_name, &sysvariation_name);
 
 	nr_processors = get_nr_processors(cpu, hwrpb->nr_processors);
+
+#if CONFIG_HZ == 1024 || CONFIG_HZ == 1200
+	timer_freq = (100UL * hwrpb->intr_freq) / 4096;
+#else
+	timer_freq = 100UL * CONFIG_HZ;
+#endif
 
 	seq_printf(f, "cpu\t\t\t: Alpha\n"
 		      "cpu model\t\t: %s\n"
@@ -1238,8 +1201,7 @@ show_cpuinfo(struct seq_file *f, void *slot)
 		       (char*)hwrpb->ssn,
 		       est_cycle_freq ? : hwrpb->cycle_freq,
 		       est_cycle_freq ? "est." : "",
-		       hwrpb->intr_freq / 4096,
-		       (100 * hwrpb->intr_freq / 4096) % 100,
+		       timer_freq / 100, timer_freq % 100,
 		       hwrpb->pagesize,
 		       hwrpb->pa_bits,
 		       hwrpb->max_asn,
@@ -1250,9 +1212,9 @@ show_cpuinfo(struct seq_file *f, void *slot)
 		       platform_string(), nr_processors);
 
 #ifdef CONFIG_SMP
-	seq_printf(f, "cpus active\t\t: %d\n"
+	seq_printf(f, "cpus active\t\t: %u\n"
 		      "cpu active mask\t\t: %016lx\n",
-		       num_online_cpus(), cpus_addr(cpu_possible_map)[0]);
+		       num_online_cpus(), cpumask_bits(cpu_possible_mask)[0]);
 #endif
 
 	show_cache_size (f, "L1 Icache", alpha_l1i_cacheshape);
@@ -1399,8 +1361,6 @@ determine_cpu_caches (unsigned int cpu_type)
 	case PCA56_CPU:
 	case PCA57_CPU:
 	  {
-		unsigned long cbox_config, size;
-
 		if (cpu_type == PCA56_CPU) {
 			L1I = CSHAPE(16*1024, 6, 1);
 			L1D = CSHAPE(8*1024, 5, 1);
@@ -1410,10 +1370,12 @@ determine_cpu_caches (unsigned int cpu_type)
 		}
 		L3 = -1;
 
+#if 0
+		unsigned long cbox_config, size;
+
 		cbox_config = *(vulp) phys_to_virt (0xfffff00008UL);
 		size = 512*1024 * (1 << ((cbox_config >> 12) & 3));
 
-#if 0
 		L2 = ((cbox_config >> 31) & 1 ? CSHAPE (size, 6, 1) : -1);
 #else
 		L2 = external_cache_probe(512*1024, 6);
@@ -1463,6 +1425,7 @@ c_start(struct seq_file *f, loff_t *pos)
 static void *
 c_next(struct seq_file *f, void *v, loff_t *pos)
 {
+	(*pos)++;
 	return NULL;
 }
 

@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Routines for Gravis UltraSound soundcards
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <linux/init.h>
@@ -24,6 +9,7 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/ioport.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/gus.h>
 #include <sound/control.h>
@@ -81,7 +67,7 @@ static int snd_gus_joystick_put(struct snd_kcontrol *kcontrol, struct snd_ctl_el
 	return change;
 }
 
-static struct snd_kcontrol_new snd_gus_joystick_control = {
+static const struct snd_kcontrol_new snd_gus_joystick_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_CARD,
 	.name = "Joystick Speed",
 	.info = snd_gus_joystick_info,
@@ -91,8 +77,17 @@ static struct snd_kcontrol_new snd_gus_joystick_control = {
 
 static void snd_gus_init_control(struct snd_gus_card *gus)
 {
-	if (!gus->ace_flag)
-		snd_ctl_add(gus->card, snd_ctl_new1(&snd_gus_joystick_control, gus));
+	int ret;
+
+	if (!gus->ace_flag) {
+		ret =
+			snd_ctl_add(gus->card,
+					snd_ctl_new1(&snd_gus_joystick_control,
+						gus));
+		if (ret)
+			snd_printk(KERN_ERR "gus: snd_ctl_add failed: %d\n",
+					ret);
+	}
 }
 
 /*
@@ -139,7 +134,7 @@ int snd_gus_create(struct snd_card *card,
 {
 	struct snd_gus_card *gus;
 	int err;
-	static struct snd_device_ops ops = {
+	static const struct snd_device_ops ops = {
 		.dev_free =	snd_gus_dev_free,
 	};
 
@@ -180,12 +175,13 @@ int snd_gus_create(struct snd_card *card,
 		snd_gus_free(gus);
 		return -EBUSY;
 	}
-	if (irq >= 0 && request_irq(irq, snd_gus_interrupt, IRQF_DISABLED, "GUS GF1", (void *) gus)) {
+	if (irq >= 0 && request_irq(irq, snd_gus_interrupt, 0, "GUS GF1", (void *) gus)) {
 		snd_printk(KERN_ERR "gus: can't grab irq %d\n", irq);
 		snd_gus_free(gus);
 		return -EBUSY;
 	}
 	gus->gf1.irq = irq;
+	card->sync_irq = irq;
 	if (request_dma(dma1, "GUS - 1")) {
 		snd_printk(KERN_ERR "gus: can't grab DMA1 %d\n", dma1);
 		snd_gus_free(gus);
@@ -271,14 +267,16 @@ static int snd_gus_init_dma_irq(struct snd_gus_card * gus, int latches)
 	struct snd_card *card;
 	unsigned long flags;
 	int irq, dma1, dma2;
-	static unsigned char irqs[16] =
+	static const unsigned char irqs[16] =
 		{0, 0, 1, 3, 0, 2, 0, 4, 0, 1, 0, 5, 6, 0, 0, 7};
-	static unsigned char dmas[8] =
+	static const unsigned char dmas[8] =
 		{6, 1, 0, 2, 0, 3, 4, 5};
 
-	snd_assert(gus != NULL, return -EINVAL);
+	if (snd_BUG_ON(!gus))
+		return -EINVAL;
 	card = gus->card;
-	snd_assert(card != NULL, return -EINVAL);
+	if (snd_BUG_ON(!card))
+		return -EINVAL;
 
 	gus->mix_cntrl_reg &= 0xf8;
 	gus->mix_cntrl_reg |= 0x01;	/* disable MIC, LINE IN, enable LINE OUT */
@@ -462,19 +460,3 @@ EXPORT_SYMBOL(snd_gf1_mem_alloc);
 EXPORT_SYMBOL(snd_gf1_mem_xfree);
 EXPORT_SYMBOL(snd_gf1_mem_free);
 EXPORT_SYMBOL(snd_gf1_mem_lock);
-
-/*
- *  INIT part
- */
-
-static int __init alsa_gus_init(void)
-{
-	return 0;
-}
-
-static void __exit alsa_gus_exit(void)
-{
-}
-
-module_init(alsa_gus_init)
-module_exit(alsa_gus_exit)

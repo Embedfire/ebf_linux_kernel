@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * The USB Monitor, inspired by Dave Harding's USBMon.
  *
@@ -63,20 +64,6 @@ int __init mon_text_init(void);
 void mon_text_exit(void);
 int __init mon_bin_init(void);
 void mon_bin_exit(void);
-
-/*
- * DMA interface.
- *
- * XXX The vectored side needs a serious re-thinking. Abstracting vectors,
- * like in Paolo's original patch, produces a double pkmap. We need an idea.
-*/
-extern char mon_dmapeek(unsigned char *dst, dma_addr_t dma_addr, int len);
-
-struct mon_reader_bin;
-extern void mon_dmapeek_vec(const struct mon_reader_bin *rp,
-    unsigned int offset, dma_addr_t dma_addr, unsigned int len);
-extern unsigned int mon_copy_to_buff(const struct mon_reader_bin *rp,
-    unsigned int offset, const unsigned char *from, unsigned int len);
 
 /*
  */

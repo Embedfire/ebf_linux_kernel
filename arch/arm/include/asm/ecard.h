@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * arch/arm/include/asm/ecard.h
  *
@@ -161,7 +162,6 @@ struct expansion_card {
 
 	/* Private internal data */
 	const char		*card_desc;	/* Card description		*/
-	CONST unsigned int	podaddr;	/* Base Linux address for card	*/
 	CONST loader_t		loader;		/* loader program */
 	u64			dma_mask;
 };

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /******************************************************************************
  *  speedtch.c  -  Alcatel SpeedTouch USB xDSL modem driver
  *
@@ -6,29 +7,12 @@
  *  Copyright (C) 2004, David Woodhouse
  *
  *  Based on "modem_run.c", copyright (C) 2001, Benoit Papillault
- *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms of the GNU General Public License as published by the Free
- *  Software Foundation; either version 2 of the License, or (at your option)
- *  any later version.
- *
- *  This program is distributed in the hope that it will be useful, but WITHOUT
- *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- *  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- *  more details.
- *
- *  You should have received a copy of the GNU General Public License along with
- *  this program; if not, write to the Free Software Foundation, Inc., 59
- *  Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- *
  ******************************************************************************/
 
 #include <asm/page.h>
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/firmware.h>
-#include <linux/gfp.h>
-#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -42,8 +26,7 @@
 #include "usbatm.h"
 
 #define DRIVER_AUTHOR	"Johan Verrept, Duncan Sands <duncan.sands@free.fr>"
-#define DRIVER_VERSION	"1.10"
-#define DRIVER_DESC	"Alcatel SpeedTouch USB driver version " DRIVER_VERSION
+#define DRIVER_DESC	"Alcatel SpeedTouch USB driver"
 
 static const char speedtch_driver_name[] = "speedtch";
 
@@ -74,9 +57,9 @@ static const char speedtch_driver_name[] = "speedtch";
 #define DEFAULT_SW_BUFFERING	0
 
 static unsigned int altsetting = 0; /* zero means: use the default */
-static int dl_512_first = DEFAULT_DL_512_FIRST;
-static int enable_isoc = DEFAULT_ENABLE_ISOC;
-static int sw_buffering = DEFAULT_SW_BUFFERING;
+static bool dl_512_first = DEFAULT_DL_512_FIRST;
+static bool enable_isoc = DEFAULT_ENABLE_ISOC;
+static bool sw_buffering = DEFAULT_SW_BUFFERING;
 
 #define DEFAULT_B_MAX_DSL	8128
 #define DEFAULT_MODEM_MODE	11
@@ -128,8 +111,6 @@ MODULE_PARM_DESC(ModemOption, "default: 0x10,0x00,0x00,0x00,0x20");
 #define ENDPOINT_ISOC_DATA	0x07
 #define ENDPOINT_FIRMWARE	0x05
 
-#define hex2int(c) ( (c >= '0') && (c <= '9') ? (c - '0') : ((c & 0xf) + 9) )
-
 struct speedtch_params {
 	unsigned int altsetting;
 	unsigned int BMaxDSL;
@@ -142,7 +123,8 @@ struct speedtch_instance_data {
 
 	struct speedtch_params params; /* set in probe, constant afterwards */
 
-	struct delayed_work status_checker;
+	struct timer_list status_check_timer;
+	struct work_struct status_check_work;
 
 	unsigned char last_status;
 
@@ -172,7 +154,7 @@ static void speedtch_set_swbuff(struct speedtch_instance_data *instance, int sta
 			 "%sabling SW buffering: usb_control_msg returned %d\n",
 			 state ? "En" : "Dis", ret);
 	else
-		dbg("speedtch_set_swbuff: %sbled SW buffering", state ? "En" : "Dis");
+		usb_dbg(usbatm, "speedtch_set_swbuff: %sbled SW buffering\n", state ? "En" : "Dis");
 }
 
 static void speedtch_test_sequence(struct speedtch_instance_data *instance)
@@ -258,7 +240,8 @@ static int speedtch_upload_firmware(struct speedtch_instance_data *instance,
 
 	usb_dbg(usbatm, "%s entered\n", __func__);
 
-	if (!(buffer = (unsigned char *)__get_free_page(GFP_KERNEL))) {
+	buffer = (unsigned char *)__get_free_page(GFP_KERNEL);
+	if (!buffer) {
 		ret = -ENOMEM;
 		usb_dbg(usbatm, "%s: no memory for buffer!\n", __func__);
 		goto out;
@@ -501,7 +484,7 @@ static void speedtch_check_status(struct work_struct *work)
 {
 	struct speedtch_instance_data *instance =
 		container_of(work, struct speedtch_instance_data,
-			     status_checker.work);
+			     status_check_work);
 	struct usbatm_data *usbatm = instance->usbatm;
 	struct atm_dev *atm_dev = usbatm->atm_dev;
 	unsigned char *buf = instance->scratch_buffer;
@@ -528,7 +511,7 @@ static void speedtch_check_status(struct work_struct *work)
 
 		switch (status) {
 		case 0:
-			atm_dev->signal = ATM_PHY_SIG_LOST;
+			atm_dev_signal_change(atm_dev, ATM_PHY_SIG_LOST);
 			if (instance->last_status)
 				atm_info(usbatm, "ADSL line is down\n");
 			/* It may never resync again unless we ask it to... */
@@ -536,12 +519,12 @@ static void speedtch_check_status(struct work_struct *work)
 			break;
 
 		case 0x08:
-			atm_dev->signal = ATM_PHY_SIG_UNKNOWN;
+			atm_dev_signal_change(atm_dev, ATM_PHY_SIG_UNKNOWN);
 			atm_info(usbatm, "ADSL line is blocked?\n");
 			break;
 
 		case 0x10:
-			atm_dev->signal = ATM_PHY_SIG_LOST;
+			atm_dev_signal_change(atm_dev, ATM_PHY_SIG_LOST);
 			atm_info(usbatm, "ADSL line is synchronising\n");
 			break;
 
@@ -557,7 +540,7 @@ static void speedtch_check_status(struct work_struct *work)
 			}
 
 			atm_dev->link_rate = down_speed * 1000 / 424;
-			atm_dev->signal = ATM_PHY_SIG_FOUND;
+			atm_dev_signal_change(atm_dev, ATM_PHY_SIG_FOUND);
 
 			atm_info(usbatm,
 				 "ADSL line is up (%d kb/s down | %d kb/s up)\n",
@@ -565,7 +548,7 @@ static void speedtch_check_status(struct work_struct *work)
 			break;
 
 		default:
-			atm_dev->signal = ATM_PHY_SIG_UNKNOWN;
+			atm_dev_signal_change(atm_dev, ATM_PHY_SIG_UNKNOWN);
 			atm_info(usbatm, "unknown line state %02x\n", status);
 			break;
 		}
@@ -574,22 +557,24 @@ static void speedtch_check_status(struct work_struct *work)
 	}
 }
 
-static void speedtch_status_poll(unsigned long data)
+static void speedtch_status_poll(struct timer_list *t)
 {
-	struct speedtch_instance_data *instance = (void *)data;
+	struct speedtch_instance_data *instance = from_timer(instance, t,
+						             status_check_timer);
 
-	schedule_delayed_work(&instance->status_checker, 0);
+	schedule_work(&instance->status_check_work);
 
 	/* The following check is racy, but the race is harmless */
 	if (instance->poll_delay < MAX_POLL_DELAY)
-		mod_timer(&instance->status_checker.timer, jiffies + msecs_to_jiffies(instance->poll_delay));
+		mod_timer(&instance->status_check_timer, jiffies + msecs_to_jiffies(instance->poll_delay));
 	else
 		atm_warn(instance->usbatm, "Too many failures - disabling line status polling\n");
 }
 
-static void speedtch_resubmit_int(unsigned long data)
+static void speedtch_resubmit_int(struct timer_list *t)
 {
-	struct speedtch_instance_data *instance = (void *)data;
+	struct speedtch_instance_data *instance = from_timer(instance, t,
+							     resubmit_timer);
 	struct urb *int_urb = instance->int_urb;
 	int ret;
 
@@ -598,7 +583,7 @@ static void speedtch_resubmit_int(unsigned long data)
 	if (int_urb) {
 		ret = usb_submit_urb(int_urb, GFP_ATOMIC);
 		if (!ret)
-			schedule_delayed_work(&instance->status_checker, 0);
+			schedule_work(&instance->status_check_work);
 		else {
 			atm_dbg(instance->usbatm, "%s: usb_submit_urb failed with result %d\n", __func__, ret);
 			mod_timer(&instance->resubmit_timer, jiffies + msecs_to_jiffies(RESUBMIT_DELAY));
@@ -627,7 +612,7 @@ static void speedtch_handle_int(struct urb *int_urb)
 	}
 
 	if ((count == 6) && !memcmp(up_int, instance->int_data, 6)) {
-		del_timer(&instance->status_checker.timer);
+		del_timer(&instance->status_check_timer);
 		atm_info(usbatm, "DSL line goes up\n");
 	} else if ((count == 6) && !memcmp(down_int, instance->int_data, 6)) {
 		atm_info(usbatm, "DSL line goes down\n");
@@ -641,9 +626,10 @@ static void speedtch_handle_int(struct urb *int_urb)
 		goto fail;
 	}
 
-	if ((int_urb = instance->int_urb)) {
+	int_urb = instance->int_urb;
+	if (int_urb) {
 		ret = usb_submit_urb(int_urb, GFP_ATOMIC);
-		schedule_delayed_work(&instance->status_checker, 0);
+		schedule_work(&instance->status_check_work);
 		if (ret < 0) {
 			atm_dbg(usbatm, "%s: usb_submit_urb failed with result %d\n", __func__, ret);
 			goto fail;
@@ -653,7 +639,8 @@ static void speedtch_handle_int(struct urb *int_urb)
 	return;
 
 fail:
-	if ((int_urb = instance->int_urb))
+	int_urb = instance->int_urb;
+	if (int_urb)
 		mod_timer(&instance->resubmit_timer, jiffies + msecs_to_jiffies(RESUBMIT_DELAY));
 }
 
@@ -670,7 +657,8 @@ static int speedtch_atm_start(struct usbatm_data *usbatm, struct atm_dev *atm_de
 	memset(atm_dev->esi, 0, sizeof(atm_dev->esi));
 	if (usb_string(usb_dev, usb_dev->descriptor.iSerialNumber, mac_str, sizeof(mac_str)) == 12) {
 		for (i = 0; i < 6; i++)
-			atm_dev->esi[i] = (hex2int(mac_str[i * 2]) * 16) + (hex2int(mac_str[i * 2 + 1]));
+			atm_dev->esi[i] = (hex_to_bin(mac_str[i * 2]) << 4) +
+				hex_to_bin(mac_str[i * 2 + 1]);
 	}
 
 	/* Start modem synchronisation */
@@ -688,7 +676,7 @@ static int speedtch_atm_start(struct usbatm_data *usbatm, struct atm_dev *atm_de
 	}
 
 	/* Start status polling */
-	mod_timer(&instance->status_checker.timer, jiffies + msecs_to_jiffies(1000));
+	mod_timer(&instance->status_check_timer, jiffies + msecs_to_jiffies(1000));
 
 	return 0;
 }
@@ -700,7 +688,7 @@ static void speedtch_atm_stop(struct usbatm_data *usbatm, struct atm_dev *atm_de
 
 	atm_dbg(usbatm, "%s entered\n", __func__);
 
-	del_timer_sync(&instance->status_checker.timer);
+	del_timer_sync(&instance->status_check_timer);
 
 	/*
 	 * Since resubmit_timer and int_urb can schedule themselves and
@@ -719,7 +707,17 @@ static void speedtch_atm_stop(struct usbatm_data *usbatm, struct atm_dev *atm_de
 	del_timer_sync(&instance->resubmit_timer);
 	usb_free_urb(int_urb);
 
-	flush_scheduled_work();
+	flush_work(&instance->status_check_work);
+}
+
+static int speedtch_pre_reset(struct usb_interface *intf)
+{
+	return 0;
+}
+
+static int speedtch_post_reset(struct usb_interface *intf)
+{
+	return 0;
 }
 
 
@@ -727,7 +725,7 @@ static void speedtch_atm_stop(struct usbatm_data *usbatm, struct atm_dev *atm_de
 **  USB  **
 **********/
 
-static struct usb_device_id speedtch_usb_ids[] = {
+static const struct usb_device_id speedtch_usb_ids[] = {
 	{USB_DEVICE(0x06b9, 0x4061)},
 	{}
 };
@@ -740,18 +738,24 @@ static struct usb_driver speedtch_usb_driver = {
 	.name		= speedtch_driver_name,
 	.probe		= speedtch_usb_probe,
 	.disconnect	= usbatm_usb_disconnect,
+	.pre_reset	= speedtch_pre_reset,
+	.post_reset	= speedtch_post_reset,
 	.id_table	= speedtch_usb_ids
 };
 
-static void speedtch_release_interfaces(struct usb_device *usb_dev, int num_interfaces) {
+static void speedtch_release_interfaces(struct usb_device *usb_dev,
+					int num_interfaces)
+{
 	struct usb_interface *cur_intf;
 	int i;
 
-	for(i = 0; i < num_interfaces; i++)
-		if ((cur_intf = usb_ifnum_to_if(usb_dev, i))) {
+	for (i = 0; i < num_interfaces; i++) {
+		cur_intf = usb_ifnum_to_if(usb_dev, i);
+		if (cur_intf) {
 			usb_set_intfdata(cur_intf, NULL);
 			usb_driver_release_interface(&speedtch_usb_driver, cur_intf);
 		}
+	}
 }
 
 static int speedtch_bind(struct usbatm_data *usbatm,
@@ -775,14 +779,15 @@ static int speedtch_bind(struct usbatm_data *usbatm,
 		return -ENODEV;
 	}
 
-	if (!(data_intf = usb_ifnum_to_if(usb_dev, INTERFACE_DATA))) {
+	data_intf = usb_ifnum_to_if(usb_dev, INTERFACE_DATA);
+	if (!data_intf) {
 		usb_err(usbatm, "%s: data interface not found!\n", __func__);
 		return -ENODEV;
 	}
 
 	/* claim all interfaces */
 
-	for (i=0; i < num_interfaces; i++) {
+	for (i = 0; i < num_interfaces; i++) {
 		cur_intf = usb_ifnum_to_if(usb_dev, i);
 
 		if ((i != ifnum) && cur_intf) {
@@ -799,7 +804,6 @@ static int speedtch_bind(struct usbatm_data *usbatm,
 	instance = kzalloc(sizeof(*instance), GFP_KERNEL);
 
 	if (!instance) {
-		usb_err(usbatm, "%s: no memory for instance data!\n", __func__);
 		ret = -ENOMEM;
 		goto fail_release;
 	}
@@ -832,7 +836,7 @@ static int speedtch_bind(struct usbatm_data *usbatm,
 
 		use_isoc = 0; /* fall back to bulk if endpoint not found */
 
-		for (i=0; i<desc->desc.bNumEndpoints; i++) {
+		for (i = 0; i < desc->desc.bNumEndpoints; i++) {
 			const struct usb_endpoint_descriptor *endpoint_desc = &desc->endpoint[i].desc;
 
 			if ((endpoint_desc->bEndpointAddress == target_address)) {
@@ -857,16 +861,12 @@ static int speedtch_bind(struct usbatm_data *usbatm,
 
 	usbatm->flags |= (use_isoc ? UDSL_USE_ISOC : 0);
 
-	INIT_DELAYED_WORK(&instance->status_checker, speedtch_check_status);
-
-	instance->status_checker.timer.function = speedtch_status_poll;
-	instance->status_checker.timer.data = (unsigned long)instance;
+	INIT_WORK(&instance->status_check_work, speedtch_check_status);
+	timer_setup(&instance->status_check_timer, speedtch_status_poll, 0);
 	instance->last_status = 0xff;
 	instance->poll_delay = MIN_POLL_DELAY;
 
-	init_timer(&instance->resubmit_timer);
-	instance->resubmit_timer.function = speedtch_resubmit_int;
-	instance->resubmit_timer.data = (unsigned long)instance;
+	timer_setup(&instance->resubmit_timer, speedtch_resubmit_int, 0);
 
 	instance->int_urb = usb_alloc_urb(0, GFP_KERNEL);
 
@@ -874,7 +874,7 @@ static int speedtch_bind(struct usbatm_data *usbatm,
 		usb_fill_int_urb(instance->int_urb, usb_dev,
 				 usb_rcvintpipe(usb_dev, ENDPOINT_INT),
 				 instance->int_data, sizeof(instance->int_data),
-				 speedtch_handle_int, instance, 50);
+				 speedtch_handle_int, instance, 16);
 	else
 		usb_dbg(usbatm, "%s: no memory for interrupt urb!\n", __func__);
 
@@ -939,24 +939,8 @@ static int speedtch_usb_probe(struct usb_interface *intf, const struct usb_devic
 	return usbatm_usb_probe(intf, id, &speedtch_usbatm_driver);
 }
 
-static int __init speedtch_usb_init(void)
-{
-	dbg("%s: driver version %s", __func__, DRIVER_VERSION);
-
-	return usb_register(&speedtch_usb_driver);
-}
-
-static void __exit speedtch_usb_cleanup(void)
-{
-	dbg("%s", __func__);
-
-	usb_deregister(&speedtch_usb_driver);
-}
-
-module_init(speedtch_usb_init);
-module_exit(speedtch_usb_cleanup);
+module_usb_driver(speedtch_usb_driver);
 
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
-MODULE_VERSION(DRIVER_VERSION);

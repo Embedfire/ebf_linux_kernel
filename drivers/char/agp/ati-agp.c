@@ -10,9 +10,10 @@
 #include <linux/slab.h>
 #include <linux/agp_backend.h>
 #include <asm/agp.h>
+#include <asm/set_memory.h>
 #include "agp.h"
 
-#define ATI_GART_MMBASE_ADDR	0x14
+#define ATI_GART_MMBASE_BAR	1
 #define ATI_RS100_APSIZE	0xac
 #define ATI_RS100_IG_AGPMODE	0xb0
 #define ATI_RS300_APSIZE	0xf8
@@ -107,7 +108,8 @@ static int ati_create_gatt_pages(int nr_tables)
 	int retval = 0;
 	int i;
 
-	tables = kzalloc((nr_tables + 1) * sizeof(struct ati_page_map *),GFP_KERNEL);
+	tables = kcalloc(nr_tables + 1, sizeof(struct ati_page_map *),
+			 GFP_KERNEL);
 	if (tables == NULL)
 		return -ENOMEM;
 
@@ -196,12 +198,12 @@ static void ati_cleanup(void)
 
 static int ati_configure(void)
 {
+	phys_addr_t reg;
 	u32 temp;
 
 	/* Get the memory mapped registers */
-	pci_read_config_dword(agp_bridge->dev, ATI_GART_MMBASE_ADDR, &temp);
-	temp = (temp & 0xfffff000);
-	ati_generic_private.registers = (volatile u8 __iomem *) ioremap(temp, 4096);
+	reg = pci_resource_start(agp_bridge->dev, ATI_GART_MMBASE_BAR);
+	ati_generic_private.registers = (volatile u8 __iomem *) ioremap(reg, 4096);
 
 	if (!ati_generic_private.registers)
 		return -ENOMEM;
@@ -211,18 +213,18 @@ static int ati_configure(void)
 	else
 		pci_write_config_dword(agp_bridge->dev, ATI_RS300_IG_AGPMODE, 0x20000);
 
-	/* address to map too */
+	/* address to map to */
 	/*
-	pci_read_config_dword(agp_bridge.dev, AGP_APBASE, &temp);
-	agp_bridge.gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+	agp_bridge.gart_bus_addr = pci_bus_address(agp_bridge.dev,
+						   AGP_APERTURE_BAR);
 	printk(KERN_INFO PFX "IGP320 gart_bus_addr: %x\n", agp_bridge.gart_bus_addr);
 	*/
 	writel(0x60000, ati_generic_private.registers+ATI_GART_FEATURE_ID);
 	readl(ati_generic_private.registers+ATI_GART_FEATURE_ID);	/* PCI Posting.*/
 
 	/* SIGNALED_SYSTEM_ERROR @ NB_STATUS */
-	pci_read_config_dword(agp_bridge->dev, 4, &temp);
-	pci_write_config_dword(agp_bridge->dev, 4, temp | (1<<14));
+	pci_read_config_dword(agp_bridge->dev, PCI_COMMAND, &temp);
+	pci_write_config_dword(agp_bridge->dev, PCI_COMMAND, temp | (1<<14));
 
 	/* Write out the address of the gatt table */
 	writel(agp_bridge->gatt_bus_addr, ati_generic_private.registers+ATI_GART_BASE);
@@ -236,14 +238,14 @@ static int ati_configure(void)
 static int agp_ati_suspend(struct pci_dev *dev, pm_message_t state)
 {
 	pci_save_state(dev);
-	pci_set_power_state(dev, 3);
+	pci_set_power_state(dev, PCI_D3hot);
 
 	return 0;
 }
 
 static int agp_ati_resume(struct pci_dev *dev)
 {
-	pci_set_power_state(dev, 0);
+	pci_set_power_state(dev, PCI_D0);
 	pci_restore_state(dev);
 
 	return ati_configure();
@@ -269,11 +271,16 @@ static int ati_insert_memory(struct agp_memory * mem,
 	int i, j, num_entries;
 	unsigned long __iomem *cur_gatt;
 	unsigned long addr;
+	int mask_type;
 
 	num_entries = A_SIZE_LVL2(agp_bridge->current_size)->num_entries;
 
-	if (type != 0 || mem->type != 0)
+	mask_type = agp_generic_type_to_mask_type(mem->bridge, type);
+	if (mask_type != 0 || type != mem->type)
 		return -EINVAL;
+
+	if (mem->page_count == 0)
+		return 0;
 
 	if ((pg_start + mem->page_count) > num_entries)
 		return -EINVAL;
@@ -296,10 +303,12 @@ static int ati_insert_memory(struct agp_memory * mem,
 	for (i = 0, j = pg_start; i < mem->page_count; i++, j++) {
 		addr = (j * PAGE_SIZE) + agp_bridge->gart_bus_addr;
 		cur_gatt = GET_GATT(addr);
-		writel(agp_bridge->driver->mask_memory(agp_bridge,
-			mem->memory[i], mem->type), cur_gatt+GET_GATT_OFF(addr));
-		readl(cur_gatt+GET_GATT_OFF(addr));	/* PCI Posting. */
+		writel(agp_bridge->driver->mask_memory(agp_bridge,	
+						       page_to_phys(mem->pages[i]),
+						       mem->type),
+		       cur_gatt+GET_GATT_OFF(addr));
 	}
+	readl(GET_GATT(agp_bridge->gart_bus_addr)); /* PCI posting */
 	agp_bridge->driver->tlb_flush(mem);
 	return 0;
 }
@@ -310,17 +319,22 @@ static int ati_remove_memory(struct agp_memory * mem, off_t pg_start,
 	int i;
 	unsigned long __iomem *cur_gatt;
 	unsigned long addr;
+	int mask_type;
 
-	if (type != 0 || mem->type != 0)
+	mask_type = agp_generic_type_to_mask_type(mem->bridge, type);
+	if (mask_type != 0 || type != mem->type)
 		return -EINVAL;
+
+	if (mem->page_count == 0)
+		return 0;
 
 	for (i = pg_start; i < (mem->page_count + pg_start); i++) {
 		addr = (i * PAGE_SIZE) + agp_bridge->gart_bus_addr;
 		cur_gatt = GET_GATT(addr);
 		writel(agp_bridge->scratch_page, cur_gatt+GET_GATT_OFF(addr));
-		readl(cur_gatt+GET_GATT_OFF(addr)); /* PCI Posting. */
 	}
 
+	readl(GET_GATT(agp_bridge->gart_bus_addr)); /* PCI posting */
 	agp_bridge->driver->tlb_flush(mem);
 	return 0;
 }
@@ -329,6 +343,7 @@ static int ati_create_gatt_table(struct agp_bridge_data *bridge)
 {
 	struct aper_size_info_lvl2 *value;
 	struct ati_page_map page_dir;
+	unsigned long __iomem *cur_gatt;
 	unsigned long addr;
 	int retval;
 	u32 temp;
@@ -348,7 +363,7 @@ static int ati_create_gatt_table(struct agp_bridge_data *bridge)
 
 	agp_bridge->gatt_table_real = (u32 *)page_dir.real;
 	agp_bridge->gatt_table = (u32 __iomem *) page_dir.remapped;
-	agp_bridge->gatt_bus_addr = virt_to_gart(page_dir.real);
+	agp_bridge->gatt_bus_addr = virt_to_phys(page_dir.real);
 
 	/* Write out the size register */
 	current_size = A_SIZE_LVL2(agp_bridge->current_size);
@@ -372,15 +387,20 @@ static int ati_create_gatt_table(struct agp_bridge_data *bridge)
 	 * This is a bus address even on the alpha, b/c its
 	 * used to program the agp master not the cpu
 	 */
-	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
-	addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+	addr = pci_bus_address(agp_bridge->dev, AGP_APERTURE_BAR);
 	agp_bridge->gart_bus_addr = addr;
 
 	/* Calculate the agp offset */
 	for (i = 0; i < value->num_entries / 1024; i++, addr += 0x00400000) {
-		writel(virt_to_gart(ati_generic_private.gatt_pages[i]->real) | 1,
+		writel(virt_to_phys(ati_generic_private.gatt_pages[i]->real) | 1,
 			page_dir.remapped+GET_PAGE_DIR_OFF(addr));
 		readl(page_dir.remapped+GET_PAGE_DIR_OFF(addr));	/* PCI Posting. */
+	}
+
+	for (i = 0; i < value->num_entries; i++) {
+		addr = (i * PAGE_SIZE) + agp_bridge->gart_bus_addr;
+		cur_gatt = GET_GATT(addr);
+		writel(agp_bridge->scratch_page, cur_gatt+GET_GATT_OFF(addr));
 	}
 
 	return 0;
@@ -403,6 +423,7 @@ static const struct agp_bridge_driver ati_generic_bridge = {
 	.aperture_sizes		= ati_generic_sizes,
 	.size_type		= LVL2_APER_SIZE,
 	.num_aperture_sizes	= 7,
+	.needs_scratch_page	= true,
 	.configure		= ati_configure,
 	.fetch_size		= ati_fetch_size,
 	.cleanup		= ati_cleanup,
@@ -418,12 +439,14 @@ static const struct agp_bridge_driver ati_generic_bridge = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages	= agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages	= agp_generic_destroy_pages,
 	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
 
-static struct agp_device_ids ati_agp_device_ids[] __devinitdata =
+static struct agp_device_ids ati_agp_device_ids[] =
 {
 	{
 		.device_id	= PCI_DEVICE_ID_ATI_RS100,
@@ -468,8 +491,7 @@ static struct agp_device_ids ati_agp_device_ids[] __devinitdata =
 	{ }, /* dummy final entry, always present */
 };
 
-static int __devinit agp_ati_probe(struct pci_dev *pdev,
-				   const struct pci_device_id *ent)
+static int agp_ati_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct agp_device_ids *devs = ati_agp_device_ids;
 	struct agp_bridge_data *bridge;
@@ -511,7 +533,7 @@ found:
 	return agp_add_bridge(bridge);
 }
 
-static void __devexit agp_ati_remove(struct pci_dev *pdev)
+static void agp_ati_remove(struct pci_dev *pdev)
 {
 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
 
@@ -519,7 +541,7 @@ static void __devexit agp_ati_remove(struct pci_dev *pdev)
 	agp_put_bridge(bridge);
 }
 
-static struct pci_device_id agp_ati_pci_table[] = {
+static const struct pci_device_id agp_ati_pci_table[] = {
 	{
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,
@@ -559,6 +581,6 @@ static void __exit agp_ati_cleanup(void)
 module_init(agp_ati_init);
 module_exit(agp_ati_cleanup);
 
-MODULE_AUTHOR("Dave Jones <davej@codemonkey.org.uk>");
+MODULE_AUTHOR("Dave Jones");
 MODULE_LICENSE("GPL and additional rights");
 

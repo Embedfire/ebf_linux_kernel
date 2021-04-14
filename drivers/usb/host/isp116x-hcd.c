@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * ISP116x HCD (Host Controller Driver) for USB.
  *
@@ -60,18 +61,17 @@
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/errno.h>
-#include <linux/init.h>
 #include <linux/list.h>
+#include <linux/slab.h>
 #include <linux/usb.h>
 #include <linux/usb/isp116x.h>
+#include <linux/usb/hcd.h>
 #include <linux/platform_device.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <asm/byteorder.h>
 
-#include "../core/hcd.h"
 #include "isp116x.h"
 
 #define DRIVER_VERSION	"03 Nov 2005"
@@ -501,7 +501,8 @@ static void start_atl_transfers(struct isp116x *isp116x)
 	if (isp116x->periodic_count) {
 		isp116x->fmindex = index =
 		    (isp116x->fmindex + 1) & (PERIODIC_SIZE - 1);
-		if ((load = isp116x->load[index])) {
+		load = isp116x->load[index];
+		if (load) {
 			/* Bring all int transfers for this frame
 			   into the active queue */
 			isp116x->atl_active = last_ep =
@@ -611,6 +612,7 @@ static irqreturn_t isp116x_irq(struct usb_hcd *hcd)
 			/* IRQ's are off, we do no DMA,
 			   perfectly ready to die ... */
 			hcd->state = HC_STATE_HALT;
+			usb_hc_died(hcd);
 			ret = IRQ_HANDLED;
 			goto done;
 		}
@@ -772,7 +774,7 @@ static int isp116x_urb_enqueue(struct usb_hcd *hcd,
 		break;
 	case PIPE_INTERRUPT:
 		urb->interval = ep->period;
-		ep->length = min((int)ep->maxpacket,
+		ep->length = min_t(u32, ep->maxpacket,
 				 urb->transfer_buffer_length);
 
 		/* urb submitted for already existing endpoint */
@@ -943,16 +945,19 @@ static void isp116x_hub_descriptor(struct isp116x *isp116x,
 {
 	u32 reg = isp116x->rhdesca;
 
-	desc->bDescriptorType = 0x29;
+	desc->bDescriptorType = USB_DT_HUB;
 	desc->bDescLength = 9;
 	desc->bHubContrCurrent = 0;
 	desc->bNbrPorts = (u8) (reg & 0x3);
 	/* Power switching, device type, overcurrent. */
-	desc->wHubCharacteristics = cpu_to_le16((u16) ((reg >> 8) & 0x1f));
+	desc->wHubCharacteristics = cpu_to_le16((u16) ((reg >> 8) &
+						       (HUB_CHAR_LPSM |
+							HUB_CHAR_COMPOUND |
+							HUB_CHAR_OCPM)));
 	desc->bPwrOn2PwrGood = (u8) ((reg >> 24) & 0xff);
-	/* two bitmaps:  ports removable, and legacy PortPwrCtrlMask */
-	desc->bitmap[0] = 0;
-	desc->bitmap[1] = ~0;
+	/* ports removable, and legacy PortPwrCtrlMask */
+	desc->u.hs.DeviceRemovable[0] = 0;
+	desc->u.hs.DeviceRemovable[1] = ~0;
 }
 
 /* Perform reset of a given port.
@@ -1014,6 +1019,7 @@ static int isp116x_hub_control(struct usb_hcd *hcd,
 			spin_lock_irqsave(&isp116x->lock, flags);
 			isp116x_write_reg32(isp116x, HCRHSTATUS, RH_HS_OCIC);
 			spin_unlock_irqrestore(&isp116x->lock, flags);
+			fallthrough;
 		case C_HUB_LOCAL_POWER:
 			DBG("C_HUB_LOCAL_POWER\n");
 			break;
@@ -1162,7 +1168,7 @@ static void dump_int(struct seq_file *s, char *label, u32 mask)
 		   mask & HCINT_SF ? " sof" : "", mask & HCINT_SO ? " so" : "");
 }
 
-static int isp116x_show_dbg(struct seq_file *s, void *unused)
+static int isp116x_debug_show(struct seq_file *s, void *unused)
 {
 	struct isp116x *isp116x = s->private;
 
@@ -1190,27 +1196,13 @@ static int isp116x_show_dbg(struct seq_file *s, void *unused)
 
 	return 0;
 }
+DEFINE_SHOW_ATTRIBUTE(isp116x_debug);
 
-static int isp116x_open_seq(struct inode *inode, struct file *file)
-{
-	return single_open(file, isp116x_show_dbg, inode->i_private);
-}
-
-static const struct file_operations isp116x_debug_fops = {
-	.open = isp116x_open_seq,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static int create_debug_file(struct isp116x *isp116x)
+static void create_debug_file(struct isp116x *isp116x)
 {
 	isp116x->dentry = debugfs_create_file(hcd_name,
 					      S_IRUGO, NULL, isp116x,
 					      &isp116x_debug_fops);
-	if (!isp116x->dentry)
-		return -ENOMEM;
-	return 0;
 }
 
 static void remove_debug_file(struct isp116x *isp116x)
@@ -1220,8 +1212,8 @@ static void remove_debug_file(struct isp116x *isp116x)
 
 #else
 
-#define	create_debug_file(d)	0
-#define	remove_debug_file(d)	do{}while(0)
+static inline void create_debug_file(struct isp116x *isp116x) { }
+static inline void remove_debug_file(struct isp116x *isp116x) { }
 
 #endif				/* CONFIG_DEBUG_FS */
 
@@ -1429,8 +1421,10 @@ static int isp116x_bus_suspend(struct usb_hcd *hcd)
 		isp116x_write_reg32(isp116x, HCCONTROL,
 				    (val & ~HCCONTROL_HCFS) |
 				    HCCONTROL_USB_RESET);
+		fallthrough;
 	case HCCONTROL_USB_RESET:
 		ret = -EBUSY;
+		fallthrough;
 	default:		/* HCCONTROL_USB_SUSPEND */
 		spin_unlock_irqrestore(&isp116x->lock, flags);
 		break;
@@ -1487,7 +1481,7 @@ static int isp116x_bus_resume(struct usb_hcd *hcd)
 	spin_unlock_irq(&isp116x->lock);
 
 	hcd->state = HC_STATE_RESUMING;
-	msleep(20);
+	msleep(USB_RESUME_TIMEOUT);
 
 	/* Go operational */
 	spin_lock_irq(&isp116x->lock);
@@ -1507,7 +1501,7 @@ static int isp116x_bus_resume(struct usb_hcd *hcd)
 
 #endif
 
-static struct hc_driver isp116x_hc_driver = {
+static const struct hc_driver isp116x_hc_driver = {
 	.description = hcd_name,
 	.product_desc = "ISP116x Host Controller",
 	.hcd_priv_size = sizeof(struct isp116x),
@@ -1556,17 +1550,19 @@ static int isp116x_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#define resource_len(r) (((r)->end - (r)->start) + 1)
-
-static int __devinit isp116x_probe(struct platform_device *pdev)
+static int isp116x_probe(struct platform_device *pdev)
 {
 	struct usb_hcd *hcd;
 	struct isp116x *isp116x;
-	struct resource *addr, *data;
+	struct resource *addr, *data, *ires;
 	void __iomem *addr_reg;
 	void __iomem *data_reg;
 	int irq;
 	int ret = 0;
+	unsigned long irqflags;
+
+	if (usb_disabled())
+		return -ENODEV;
 
 	if (pdev->num_resources < 3) {
 		ret = -ENODEV;
@@ -1575,23 +1571,21 @@ static int __devinit isp116x_probe(struct platform_device *pdev)
 
 	data = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	addr = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	irq = platform_get_irq(pdev, 0);
-	if (!addr || !data || irq < 0) {
+	ires = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+
+	if (!addr || !data || !ires) {
 		ret = -ENODEV;
 		goto err1;
 	}
 
-	if (pdev->dev.dma_mask) {
-		DBG("DMA not supported\n");
-		ret = -EINVAL;
-		goto err1;
-	}
+	irq = ires->start;
+	irqflags = ires->flags & IRQF_TRIGGER_MASK;
 
 	if (!request_mem_region(addr->start, 2, hcd_name)) {
 		ret = -EBUSY;
 		goto err1;
 	}
-	addr_reg = ioremap(addr->start, resource_len(addr));
+	addr_reg = ioremap(addr->start, resource_size(addr));
 	if (addr_reg == NULL) {
 		ret = -ENOMEM;
 		goto err2;
@@ -1600,7 +1594,7 @@ static int __devinit isp116x_probe(struct platform_device *pdev)
 		ret = -EBUSY;
 		goto err3;
 	}
-	data_reg = ioremap(data->start, resource_len(data));
+	data_reg = ioremap(data->start, resource_size(data));
 	if (data_reg == NULL) {
 		ret = -ENOMEM;
 		goto err4;
@@ -1619,7 +1613,7 @@ static int __devinit isp116x_probe(struct platform_device *pdev)
 	isp116x->addr_reg = addr_reg;
 	spin_lock_init(&isp116x->lock);
 	INIT_LIST_HEAD(&isp116x->async);
-	isp116x->board = pdev->dev.platform_data;
+	isp116x->board = dev_get_platdata(&pdev->dev);
 
 	if (!isp116x->board) {
 		ERR("Platform data structure not initialized\n");
@@ -1634,20 +1628,16 @@ static int __devinit isp116x_probe(struct platform_device *pdev)
 		goto err6;
 	}
 
-	ret = usb_add_hcd(hcd, irq, IRQF_DISABLED);
+	ret = usb_add_hcd(hcd, irq, irqflags);
 	if (ret)
 		goto err6;
 
-	ret = create_debug_file(isp116x);
-	if (ret) {
-		ERR("Couldn't create debugfs entry\n");
-		goto err7;
-	}
+	device_wakeup_enable(hcd->self.controller);
+
+	create_debug_file(isp116x);
 
 	return 0;
 
-      err7:
-	usb_remove_hcd(hcd);
       err6:
 	usb_put_hcd(hcd);
       err5:
@@ -1698,27 +1688,8 @@ static struct platform_driver isp116x_driver = {
 	.suspend = isp116x_suspend,
 	.resume = isp116x_resume,
 	.driver = {
-		.name = (char *)hcd_name,
-		.owner	= THIS_MODULE,
+		.name = hcd_name,
 	},
 };
 
-/*-----------------------------------------------------------------*/
-
-static int __init isp116x_init(void)
-{
-	if (usb_disabled())
-		return -ENODEV;
-
-	INFO("driver %s, %s\n", hcd_name, DRIVER_VERSION);
-	return platform_driver_register(&isp116x_driver);
-}
-
-module_init(isp116x_init);
-
-static void __exit isp116x_cleanup(void)
-{
-	platform_driver_unregister(&isp116x_driver);
-}
-
-module_exit(isp116x_cleanup);
+module_platform_driver(isp116x_driver);

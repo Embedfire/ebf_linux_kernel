@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/sh/boards/se/7721/irq.c
  *
  * Copyright (C) 2008  Renesas Solutions Corp.
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/irq.h>
@@ -38,7 +35,7 @@ static DECLARE_INTC_DESC(intc_desc, "SE7721", vectors,
 void __init init_se7721_IRQ(void)
 {
 	/* PPCR */
-	ctrl_outw(ctrl_inw(0xa4050118) & ~0x00ff, 0xa4050118);
+	__raw_writew(__raw_readw(0xa4050118) & ~0x00ff, 0xa4050118);
 
 	register_intc_controller(&intc_desc);
 	intc_set_priority(MRSHPC_IRQ0, 0xf - MRSHPC_IRQ0);

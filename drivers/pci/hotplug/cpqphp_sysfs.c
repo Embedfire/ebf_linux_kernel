@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Compaq Hot Plug Controller Driver
  *
@@ -7,36 +8,24 @@
  *
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or (at
- * your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- * NON INFRINGEMENT.  See the GNU General Public License for more
- * details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  * Send feedback to <greg@kroah.com>
  *
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/proc_fs.h>
 #include <linux/workqueue.h>
 #include <linux/pci.h>
 #include <linux/pci_hotplug.h>
+#include <linux/mutex.h>
 #include <linux/debugfs.h>
 #include "cpqphp.h"
 
-static int show_ctrl (struct controller *ctrl, char *buf)
+static DEFINE_MUTEX(cpqphp_mutex);
+static int show_ctrl(struct controller *ctrl, char *buf)
 {
 	char *out = buf;
 	int index;
@@ -74,9 +63,9 @@ static int show_ctrl (struct controller *ctrl, char *buf)
 	return out - buf;
 }
 
-static int show_dev (struct controller *ctrl, char *buf)
+static int show_dev(struct controller *ctrl, char *buf)
 {
-	char * out = buf;
+	char *out = buf;
 	int index;
 	struct pci_resource *res;
 	struct pci_func *new_slot;
@@ -116,7 +105,7 @@ static int show_dev (struct controller *ctrl, char *buf)
 			out += sprintf(out, "start = %8.8x, length = %8.8x\n", res->base, res->length);
 			res = res->next;
 		}
-		slot=slot->next;
+		slot = slot->next;
 	}
 
 	return out - buf;
@@ -145,7 +134,7 @@ static int open(struct inode *inode, struct file *file)
 	struct ctrl_dbg *dbg;
 	int retval = -ENOMEM;
 
-	lock_kernel();
+	mutex_lock(&cpqphp_mutex);
 	dbg = kmalloc(sizeof(*dbg), GFP_KERNEL);
 	if (!dbg)
 		goto exit;
@@ -158,32 +147,14 @@ static int open(struct inode *inode, struct file *file)
 	file->private_data = dbg;
 	retval = 0;
 exit:
-	unlock_kernel();
+	mutex_unlock(&cpqphp_mutex);
 	return retval;
 }
 
 static loff_t lseek(struct file *file, loff_t off, int whence)
 {
-	struct ctrl_dbg *dbg;
-	loff_t new = -1;
-
-	lock_kernel();
-	dbg = file->private_data;
-
-	switch (whence) {
-	case 0:
-		new = off;
-		break;
-	case 1:
-		new = file->f_pos + off;
-		break;
-	}
-	if (new < 0 || new > dbg->size) {
-		unlock_kernel();
-		return -EINVAL;
-	}
-	unlock_kernel();
-	return (file->f_pos = new);
+	struct ctrl_dbg *dbg = file->private_data;
+	return fixed_size_llseek(file, off, whence, dbg->size);
 }
 
 static ssize_t read(struct file *file, char __user *buf,
@@ -225,13 +196,13 @@ void cpqhp_shutdown_debugfs(void)
 
 void cpqhp_create_debugfs_files(struct controller *ctrl)
 {
-	ctrl->dentry = debugfs_create_file(ctrl->pci_dev->dev.bus_id, S_IRUGO, root, ctrl, &debug_ops);
+	ctrl->dentry = debugfs_create_file(dev_name(&ctrl->pci_dev->dev),
+					   S_IRUGO, root, ctrl, &debug_ops);
 }
 
 void cpqhp_remove_debugfs_files(struct controller *ctrl)
 {
-	if (ctrl->dentry)
-		debugfs_remove(ctrl->dentry);
+	debugfs_remove(ctrl->dentry);
 	ctrl->dentry = NULL;
 }
 

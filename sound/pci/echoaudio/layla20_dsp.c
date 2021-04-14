@@ -31,8 +31,7 @@
 
 static int read_dsp(struct echoaudio *chip, u32 *data);
 static int set_professional_spdif(struct echoaudio *chip, char prof);
-static int load_asic_generic(struct echoaudio *chip, u32 cmd,
-			     const struct firmware *asic);
+static int load_asic_generic(struct echoaudio *chip, u32 cmd, short asic);
 static int check_asic_status(struct echoaudio *chip);
 static int update_flags(struct echoaudio *chip);
 
@@ -41,19 +40,20 @@ static int init_hw(struct echoaudio *chip, u16 device_id, u16 subdevice_id)
 {
 	int err;
 
-	DE_INIT(("init_hw() - Layla20\n"));
-	snd_assert((subdevice_id & 0xfff0) == LAYLA20, return -ENODEV);
+	if (snd_BUG_ON((subdevice_id & 0xfff0) != LAYLA20))
+		return -ENODEV;
 
 	if ((err = init_dsp_comm_page(chip))) {
-		DE_INIT(("init_hw - could not initialize DSP comm page\n"));
+		dev_err(chip->card->dev,
+			"init_hw - could not initialize DSP comm page\n");
 		return err;
 	}
 
 	chip->device_id = device_id;
 	chip->subdevice_id = subdevice_id;
-	chip->bad_board = TRUE;
-	chip->has_midi = TRUE;
-	chip->dsp_code_to_load = &card_fw[FW_LAYLA20_DSP];
+	chip->bad_board = true;
+	chip->has_midi = true;
+	chip->dsp_code_to_load = FW_LAYLA20_DSP;
 	chip->input_clock_types =
 		ECHO_CLOCK_BIT_INTERNAL | ECHO_CLOCK_BIT_SPDIF |
 		ECHO_CLOCK_BIT_WORD | ECHO_CLOCK_BIT_SUPER;
@@ -62,15 +62,17 @@ static int init_hw(struct echoaudio *chip, u16 device_id, u16 subdevice_id)
 
 	if ((err = load_firmware(chip)) < 0)
 		return err;
-	chip->bad_board = FALSE;
+	chip->bad_board = false;
 
-	if ((err = init_line_levels(chip)) < 0)
-		return err;
-
-	err = set_professional_spdif(chip, TRUE);
-
-	DE_INIT(("init_hw done\n"));
 	return err;
+}
+
+
+
+static int set_mixer_defaults(struct echoaudio *chip)
+{
+	chip->professional_spdif = false;
+	return init_line_levels(chip);
 }
 
 
@@ -111,20 +113,21 @@ static int check_asic_status(struct echoaudio *chip)
 	u32 asic_status;
 	int goodcnt, i;
 
-	chip->asic_loaded = FALSE;
+	chip->asic_loaded = false;
 	for (i = goodcnt = 0; i < 5; i++) {
 		send_vector(chip, DSP_VC_TEST_ASIC);
 
 		/* The DSP will return a value to indicate whether or not
 		   the ASIC is currently loaded */
 		if (read_dsp(chip, &asic_status) < 0) {
-			DE_ACT(("check_asic_status: failed on read_dsp\n"));
+			dev_err(chip->card->dev,
+				"check_asic_status: failed on read_dsp\n");
 			return -EIO;
 		}
 
 		if (asic_status == ASIC_ALREADY_LOADED) {
 			if (++goodcnt == 3) {
-				chip->asic_loaded = TRUE;
+				chip->asic_loaded = true;
 				return 0;
 			}
 		}
@@ -143,7 +146,7 @@ static int load_asic(struct echoaudio *chip)
 		return 0;
 
 	err = load_asic_generic(chip, DSP_FNC_LOAD_LAYLA_ASIC,
-				&card_fw[FW_LAYLA20_ASIC]);
+				FW_LAYLA20_ASIC);
 	if (err < 0)
 		return err;
 
@@ -155,13 +158,14 @@ static int load_asic(struct echoaudio *chip)
 
 static int set_sample_rate(struct echoaudio *chip, u32 rate)
 {
-	snd_assert(rate >= 8000 && rate <= 50000, return -EINVAL);
+	if (snd_BUG_ON(rate < 8000 || rate > 50000))
+		return -EINVAL;
 
 	/* Only set the clock for internal mode. Do not return failure,
 	   simply treat it as a non-event. */
 	if (chip->input_clock != ECHO_CLOCK_INTERNAL) {
-		DE_ACT(("set_sample_rate: Cannot set sample rate - "
-			"clock not set to CLK_CLOCKININTERNAL\n"));
+		dev_warn(chip->card->dev,
+			 "Cannot set sample rate - clock not set to CLK_CLOCKININTERNAL\n");
 		chip->comm_page->sample_rate = cpu_to_le32(rate);
 		chip->sample_rate = rate;
 		return 0;
@@ -170,7 +174,7 @@ static int set_sample_rate(struct echoaudio *chip, u32 rate)
 	if (wait_handshake(chip))
 		return -EIO;
 
-	DE_ACT(("set_sample_rate(%d)\n", rate));
+	dev_dbg(chip->card->dev, "set_sample_rate(%d)\n", rate);
 	chip->sample_rate = rate;
 	chip->comm_page->sample_rate = cpu_to_le32(rate);
 	clear_handshake(chip);
@@ -184,29 +188,25 @@ static int set_input_clock(struct echoaudio *chip, u16 clock_source)
 	u16 clock;
 	u32 rate;
 
-	DE_ACT(("set_input_clock:\n"));
 	rate = 0;
 	switch (clock_source) {
 	case ECHO_CLOCK_INTERNAL:
-		DE_ACT(("Set Layla20 clock to INTERNAL\n"));
 		rate = chip->sample_rate;
 		clock = LAYLA20_CLOCK_INTERNAL;
 		break;
 	case ECHO_CLOCK_SPDIF:
-		DE_ACT(("Set Layla20 clock to SPDIF\n"));
 		clock = LAYLA20_CLOCK_SPDIF;
 		break;
 	case ECHO_CLOCK_WORD:
-		DE_ACT(("Set Layla20 clock to WORD\n"));
 		clock = LAYLA20_CLOCK_WORD;
 		break;
 	case ECHO_CLOCK_SUPER:
-		DE_ACT(("Set Layla20 clock to SUPER\n"));
 		clock = LAYLA20_CLOCK_SUPER;
 		break;
 	default:
-		DE_ACT(("Input clock 0x%x not supported for Layla24\n",
-			clock_source));
+		dev_err(chip->card->dev,
+			"Input clock 0x%x not supported for Layla24\n",
+			clock_source);
 		return -EINVAL;
 	}
 	chip->input_clock = clock_source;
@@ -225,7 +225,6 @@ static int set_input_clock(struct echoaudio *chip, u16 clock_source)
 
 static int set_output_clock(struct echoaudio *chip, u16 clock)
 {
-	DE_ACT(("set_output_clock: %d\n", clock));
 	switch (clock) {
 	case ECHO_CLOCK_SUPER:
 		clock = LAYLA20_OUTPUT_CLOCK_SUPER;
@@ -234,7 +233,7 @@ static int set_output_clock(struct echoaudio *chip, u16 clock)
 		clock = LAYLA20_OUTPUT_CLOCK_WORD;
 		break;
 	default:
-		DE_ACT(("set_output_clock wrong clock\n"));
+		dev_err(chip->card->dev, "set_output_clock wrong clock\n");
 		return -EINVAL;
 	}
 
@@ -252,7 +251,8 @@ static int set_output_clock(struct echoaudio *chip, u16 clock)
 /* Set input bus gain (one unit is 0.5dB !) */
 static int set_input_gain(struct echoaudio *chip, u16 input, int gain)
 {
-	snd_assert(input < num_busses_in(chip), return -EINVAL);
+	if (snd_BUG_ON(input >= num_busses_in(chip)))
+		return -EINVAL;
 
 	if (wait_handshake(chip))
 		return -EIO;
@@ -278,13 +278,12 @@ static int update_flags(struct echoaudio *chip)
 
 static int set_professional_spdif(struct echoaudio *chip, char prof)
 {
-	DE_ACT(("set_professional_spdif %d\n", prof));
 	if (prof)
 		chip->comm_page->flags |=
-			__constant_cpu_to_le32(DSP_FLAG_PROFESSIONAL_SPDIF);
+			cpu_to_le32(DSP_FLAG_PROFESSIONAL_SPDIF);
 	else
 		chip->comm_page->flags &=
-			~__constant_cpu_to_le32(DSP_FLAG_PROFESSIONAL_SPDIF);
+			~cpu_to_le32(DSP_FLAG_PROFESSIONAL_SPDIF);
 	chip->professional_spdif = prof;
 	return update_flags(chip);
 }

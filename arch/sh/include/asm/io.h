@@ -1,145 +1,96 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_SH_IO_H
 #define __ASM_SH_IO_H
 
 /*
  * Convention:
- *    read{b,w,l}/write{b,w,l} are for PCI,
+ *    read{b,w,l,q}/write{b,w,l,q} are for PCI,
  *    while in{b,w,l}/out{b,w,l} are for ISA
- * These may (will) be platform specific function.
+ *
  * In addition we have 'pausing' versions: in{b,w,l}_p/out{b,w,l}_p
  * and 'string' versions: ins{b,w,l}/outs{b,w,l}
- * For read{b,w,l} and write{b,w,l} there are also __raw versions, which
- * do not have a memory barrier after them.
  *
- * In addition, we have
- *   ctrl_in{b,w,l}/ctrl_out{b,w,l} for SuperH specific I/O.
- *   which are processor specific.
+ * While read{b,w,l,q} and write{b,w,l,q} contain memory barriers
+ * automatically, there are also __raw versions, which do not.
  */
-
-/*
- * We follow the Alpha convention here:
- *  __inb expands to an inline function call (which calls via the mv)
- *  _inb  is a real function call (note ___raw fns are _ version of __raw)
- *  inb   by default expands to _inb, but the machine specific code may
- *        define it to __inb if it chooses.
- */
+#include <linux/errno.h>
 #include <asm/cache.h>
-#include <asm/system.h>
 #include <asm/addrspace.h>
 #include <asm/machvec.h>
-#include <asm/pgtable.h>
+#include <asm/page.h>
+#include <linux/pgtable.h>
 #include <asm-generic/iomap.h>
 
-#ifdef __KERNEL__
-
-/*
- * Depending on which platform we are running on, we need different
- * I/O functions.
- */
-#define __IO_PREFIX	generic
+#define __IO_PREFIX     generic
 #include <asm/io_generic.h>
-#include <asm/io_trapped.h>
+#include <asm-generic/pci_iomap.h>
+#include <mach/mangle-port.h>
 
-#define maybebadio(port) \
-  printk(KERN_ERR "bad PC-like io %s:%u for port 0x%lx at 0x%08x\n", \
-	 __FUNCTION__, __LINE__, (port), (u32)__builtin_return_address(0))
+#define __raw_writeb(v,a)	(__chk_io_ptr(a), *(volatile u8  __force *)(a) = (v))
+#define __raw_writew(v,a)	(__chk_io_ptr(a), *(volatile u16 __force *)(a) = (v))
+#define __raw_writel(v,a)	(__chk_io_ptr(a), *(volatile u32 __force *)(a) = (v))
+#define __raw_writeq(v,a)	(__chk_io_ptr(a), *(volatile u64 __force *)(a) = (v))
 
-/*
- * Since boards are able to define their own set of I/O routines through
- * their respective machine vector, we always wrap through the mv.
- *
- * Also, in the event that a board hasn't provided its own definition for
- * a given routine, it will be wrapped to generic code at run-time.
- */
+#define __raw_readb(a)		(__chk_io_ptr(a), *(volatile u8  __force *)(a))
+#define __raw_readw(a)		(__chk_io_ptr(a), *(volatile u16 __force *)(a))
+#define __raw_readl(a)		(__chk_io_ptr(a), *(volatile u32 __force *)(a))
+#define __raw_readq(a)		(__chk_io_ptr(a), *(volatile u64 __force *)(a))
 
-#define __inb(p)	sh_mv.mv_inb((p))
-#define __inw(p)	sh_mv.mv_inw((p))
-#define __inl(p)	sh_mv.mv_inl((p))
-#define __outb(x,p)	sh_mv.mv_outb((x),(p))
-#define __outw(x,p)	sh_mv.mv_outw((x),(p))
-#define __outl(x,p)	sh_mv.mv_outl((x),(p))
+#define readb_relaxed(c)	({ u8  __v = ioswabb(__raw_readb(c)); __v; })
+#define readw_relaxed(c)	({ u16 __v = ioswabw(__raw_readw(c)); __v; })
+#define readl_relaxed(c)	({ u32 __v = ioswabl(__raw_readl(c)); __v; })
+#define readq_relaxed(c)	({ u64 __v = ioswabq(__raw_readq(c)); __v; })
 
-#define __inb_p(p)	sh_mv.mv_inb_p((p))
-#define __inw_p(p)	sh_mv.mv_inw_p((p))
-#define __inl_p(p)	sh_mv.mv_inl_p((p))
-#define __outb_p(x,p)	sh_mv.mv_outb_p((x),(p))
-#define __outw_p(x,p)	sh_mv.mv_outw_p((x),(p))
-#define __outl_p(x,p)	sh_mv.mv_outl_p((x),(p))
+#define writeb_relaxed(v,c)	((void)__raw_writeb((__force  u8)ioswabb(v),c))
+#define writew_relaxed(v,c)	((void)__raw_writew((__force u16)ioswabw(v),c))
+#define writel_relaxed(v,c)	((void)__raw_writel((__force u32)ioswabl(v),c))
+#define writeq_relaxed(v,c)	((void)__raw_writeq((__force u64)ioswabq(v),c))
 
-#define __insb(p,b,c)	sh_mv.mv_insb((p), (b), (c))
-#define __insw(p,b,c)	sh_mv.mv_insw((p), (b), (c))
-#define __insl(p,b,c)	sh_mv.mv_insl((p), (b), (c))
-#define __outsb(p,b,c)	sh_mv.mv_outsb((p), (b), (c))
-#define __outsw(p,b,c)	sh_mv.mv_outsw((p), (b), (c))
-#define __outsl(p,b,c)	sh_mv.mv_outsl((p), (b), (c))
+#define readb(a)		({ u8  r_ = readb_relaxed(a); rmb(); r_; })
+#define readw(a)		({ u16 r_ = readw_relaxed(a); rmb(); r_; })
+#define readl(a)		({ u32 r_ = readl_relaxed(a); rmb(); r_; })
+#define readq(a)		({ u64 r_ = readq_relaxed(a); rmb(); r_; })
 
-#define __readb(a)	sh_mv.mv_readb((a))
-#define __readw(a)	sh_mv.mv_readw((a))
-#define __readl(a)	sh_mv.mv_readl((a))
-#define __writeb(v,a)	sh_mv.mv_writeb((v),(a))
-#define __writew(v,a)	sh_mv.mv_writew((v),(a))
-#define __writel(v,a)	sh_mv.mv_writel((v),(a))
+#define writeb(v,a)		({ wmb(); writeb_relaxed((v),(a)); })
+#define writew(v,a)		({ wmb(); writew_relaxed((v),(a)); })
+#define writel(v,a)		({ wmb(); writel_relaxed((v),(a)); })
+#define writeq(v,a)		({ wmb(); writeq_relaxed((v),(a)); })
 
-#define inb		__inb
-#define inw		__inw
-#define inl		__inl
-#define outb		__outb
-#define outw		__outw
-#define outl		__outl
+#define readsb(p,d,l)		__raw_readsb(p,d,l)
+#define readsw(p,d,l)		__raw_readsw(p,d,l)
+#define readsl(p,d,l)		__raw_readsl(p,d,l)
 
-#define inb_p		__inb_p
-#define inw_p		__inw_p
-#define inl_p		__inl_p
-#define outb_p		__outb_p
-#define outw_p		__outw_p
-#define outl_p		__outl_p
+#define writesb(p,d,l)		__raw_writesb(p,d,l)
+#define writesw(p,d,l)		__raw_writesw(p,d,l)
+#define writesl(p,d,l)		__raw_writesl(p,d,l)
 
-#define insb		__insb
-#define insw		__insw
-#define insl		__insl
-#define outsb		__outsb
-#define outsw		__outsw
-#define outsl		__outsl
-
-#define __raw_readb(a)		__readb((void __iomem *)(a))
-#define __raw_readw(a)		__readw((void __iomem *)(a))
-#define __raw_readl(a)		__readl((void __iomem *)(a))
-#define __raw_writeb(v, a)	__writeb(v, (void __iomem *)(a))
-#define __raw_writew(v, a)	__writew(v, (void __iomem *)(a))
-#define __raw_writel(v, a)	__writel(v, (void __iomem *)(a))
-
-void __raw_writesl(unsigned long addr, const void *data, int longlen);
-void __raw_readsl(unsigned long addr, void *data, int longlen);
-
-/*
- * The platform header files may define some of these macros to use
- * the inlined versions where appropriate.  These macros may also be
- * redefined by userlevel programs.
- */
-#ifdef __readb
-# define readb(a)	({ unsigned int r_ = __raw_readb(a); mb(); r_; })
-#endif
-#ifdef __raw_readw
-# define readw(a)	({ unsigned int r_ = __raw_readw(a); mb(); r_; })
-#endif
-#ifdef __raw_readl
-# define readl(a)	({ unsigned int r_ = __raw_readl(a); mb(); r_; })
-#endif
-
-#ifdef __raw_writeb
-# define writeb(v,a)	({ __raw_writeb((v),(a)); mb(); })
-#endif
-#ifdef __raw_writew
-# define writew(v,a)	({ __raw_writew((v),(a)); mb(); })
-#endif
-#ifdef __raw_writel
-# define writel(v,a)	({ __raw_writel((v),(a)); mb(); })
-#endif
-
-#define __BUILD_MEMORY_STRING(bwlq, type)				\
+#define __BUILD_UNCACHED_IO(bwlq, type)					\
+static inline type read##bwlq##_uncached(unsigned long addr)		\
+{									\
+	type ret;							\
+	jump_to_uncached();						\
+	ret = __raw_read##bwlq(addr);					\
+	back_to_cached();						\
+	return ret;							\
+}									\
 									\
-static inline void writes##bwlq(volatile void __iomem *mem,		\
-				const void *addr, unsigned int count)	\
+static inline void write##bwlq##_uncached(type v, unsigned long addr)	\
+{									\
+	jump_to_uncached();						\
+	__raw_write##bwlq(v, addr);					\
+	back_to_cached();						\
+}
+
+__BUILD_UNCACHED_IO(b, u8)
+__BUILD_UNCACHED_IO(w, u16)
+__BUILD_UNCACHED_IO(l, u32)
+__BUILD_UNCACHED_IO(q, u64)
+
+#define __BUILD_MEMORY_STRING(pfx, bwlq, type)				\
+									\
+static inline void							\
+pfx##writes##bwlq(volatile void __iomem *mem, const void *addr,		\
+		  unsigned int count)					\
 {									\
 	const volatile type *__addr = addr;				\
 									\
@@ -149,8 +100,8 @@ static inline void writes##bwlq(volatile void __iomem *mem,		\
 	}								\
 }									\
 									\
-static inline void reads##bwlq(volatile void __iomem *mem, void *addr,	\
-			       unsigned int count)			\
+static inline void pfx##reads##bwlq(volatile void __iomem *mem,		\
+				    void *addr, unsigned int count)	\
 {									\
 	volatile type *__addr = addr;					\
 									\
@@ -160,108 +111,123 @@ static inline void reads##bwlq(volatile void __iomem *mem, void *addr,	\
 	}								\
 }
 
-__BUILD_MEMORY_STRING(b, u8)
-__BUILD_MEMORY_STRING(w, u16)
-#define writesl __raw_writesl
-#define readsl  __raw_readsl
+__BUILD_MEMORY_STRING(__raw_, b, u8)
+__BUILD_MEMORY_STRING(__raw_, w, u16)
 
-#define readb_relaxed(a) readb(a)
-#define readw_relaxed(a) readw(a)
-#define readl_relaxed(a) readl(a)
+void __raw_writesl(void __iomem *addr, const void *data, int longlen);
+void __raw_readsl(const void __iomem *addr, void *data, int longlen);
 
-/* Simple MMIO */
-#define ioread8(a)		readb(a)
-#define ioread16(a)		readw(a)
-#define ioread16be(a)		be16_to_cpu(__raw_readw((a)))
-#define ioread32(a)		readl(a)
-#define ioread32be(a)		be32_to_cpu(__raw_readl((a)))
+__BUILD_MEMORY_STRING(__raw_, q, u64)
 
-#define iowrite8(v,a)		writeb((v),(a))
-#define iowrite16(v,a)		writew((v),(a))
-#define iowrite16be(v,a)	__raw_writew(cpu_to_be16((v)),(a))
-#define iowrite32(v,a)		writel((v),(a))
-#define iowrite32be(v,a)	__raw_writel(cpu_to_be32((v)),(a))
+#ifdef CONFIG_HAS_IOPORT_MAP
 
-#define ioread8_rep(a, d, c)	readsb((a), (d), (c))
-#define ioread16_rep(a, d, c)	readsw((a), (d), (c))
-#define ioread32_rep(a, d, c)	readsl((a), (d), (c))
+/*
+ * Slowdown I/O port space accesses for antique hardware.
+ */
+#undef CONF_SLOWDOWN_IO
 
-#define iowrite8_rep(a, s, c)	writesb((a), (s), (c))
-#define iowrite16_rep(a, s, c)	writesw((a), (s), (c))
-#define iowrite32_rep(a, s, c)	writesl((a), (s), (c))
+/*
+ * On SuperH I/O ports are memory mapped, so we access them using normal
+ * load/store instructions. sh_io_port_base is the virtual address to
+ * which all ports are being mapped.
+ */
+extern unsigned long sh_io_port_base;
 
-#define mmiowb()	wmb()	/* synco on SH-4A, otherwise a nop */
+static inline void __set_io_port_base(unsigned long pbase)
+{
+	*(unsigned long *)&sh_io_port_base = pbase;
+	barrier();
+}
+
+#ifdef CONFIG_GENERIC_IOMAP
+#define __ioport_map ioport_map
+#else
+extern void __iomem *__ioport_map(unsigned long addr, unsigned int size);
+#endif
+
+#ifdef CONF_SLOWDOWN_IO
+#define SLOW_DOWN_IO __raw_readw(sh_io_port_base)
+#else
+#define SLOW_DOWN_IO
+#endif
+
+#define __BUILD_IOPORT_SINGLE(pfx, bwlq, type, p, slow)			\
+									\
+static inline void pfx##out##bwlq##p(type val, unsigned long port)	\
+{									\
+	volatile type *__addr;						\
+									\
+	__addr = __ioport_map(port, sizeof(type));			\
+	*__addr = val;							\
+	slow;								\
+}									\
+									\
+static inline type pfx##in##bwlq##p(unsigned long port)			\
+{									\
+	volatile type *__addr;						\
+	type __val;							\
+									\
+	__addr = __ioport_map(port, sizeof(type));			\
+	__val = *__addr;						\
+	slow;								\
+									\
+	return __val;							\
+}
+
+#define __BUILD_IOPORT_PFX(bus, bwlq, type)				\
+	__BUILD_IOPORT_SINGLE(bus, bwlq, type, ,)			\
+	__BUILD_IOPORT_SINGLE(bus, bwlq, type, _p, SLOW_DOWN_IO)
+
+#define BUILDIO_IOPORT(bwlq, type)					\
+	__BUILD_IOPORT_PFX(, bwlq, type)
+
+BUILDIO_IOPORT(b, u8)
+BUILDIO_IOPORT(w, u16)
+BUILDIO_IOPORT(l, u32)
+BUILDIO_IOPORT(q, u64)
+
+#define __BUILD_IOPORT_STRING(bwlq, type)				\
+									\
+static inline void outs##bwlq(unsigned long port, const void *addr,	\
+			      unsigned int count)			\
+{									\
+	const volatile type *__addr = addr;				\
+									\
+	while (count--) {						\
+		out##bwlq(*__addr, port);				\
+		__addr++;						\
+	}								\
+}									\
+									\
+static inline void ins##bwlq(unsigned long port, void *addr,		\
+			     unsigned int count)			\
+{									\
+	volatile type *__addr = addr;					\
+									\
+	while (count--) {						\
+		*__addr = in##bwlq(port);				\
+		__addr++;						\
+	}								\
+}
+
+__BUILD_IOPORT_STRING(b, u8)
+__BUILD_IOPORT_STRING(w, u16)
+__BUILD_IOPORT_STRING(l, u32)
+__BUILD_IOPORT_STRING(q, u64)
+
+#else /* !CONFIG_HAS_IOPORT_MAP */
+
+#include <asm/io_noioport.h>
+
+#endif
+
 
 #define IO_SPACE_LIMIT 0xffffffff
 
-/*
- * This function provides a method for the generic case where a board-specific
- * ioport_map simply needs to return the port + some arbitrary port base.
- *
- * We use this at board setup time to implicitly set the port base, and
- * as a result, we can use the generic ioport_map.
- */
-static inline void __set_io_port_base(unsigned long pbase)
-{
-	extern unsigned long generic_io_base;
-
-	generic_io_base = pbase;
-}
-
-#define __ioport_map(p, n) sh_mv.mv_ioport_map((p), (n))
-
 /* We really want to try and get these to memcpy etc */
-extern void memcpy_fromio(void *, volatile void __iomem *, unsigned long);
-extern void memcpy_toio(volatile void __iomem *, const void *, unsigned long);
-extern void memset_io(volatile void __iomem *, int, unsigned long);
-
-/* SuperH on-chip I/O functions */
-static inline unsigned char ctrl_inb(unsigned long addr)
-{
-	return *(volatile unsigned char*)addr;
-}
-
-static inline unsigned short ctrl_inw(unsigned long addr)
-{
-	return *(volatile unsigned short*)addr;
-}
-
-static inline unsigned int ctrl_inl(unsigned long addr)
-{
-	return *(volatile unsigned long*)addr;
-}
-
-static inline unsigned long long ctrl_inq(unsigned long addr)
-{
-	return *(volatile unsigned long long*)addr;
-}
-
-static inline void ctrl_outb(unsigned char b, unsigned long addr)
-{
-	*(volatile unsigned char*)addr = b;
-}
-
-static inline void ctrl_outw(unsigned short b, unsigned long addr)
-{
-	*(volatile unsigned short*)addr = b;
-}
-
-static inline void ctrl_outl(unsigned int b, unsigned long addr)
-{
-        *(volatile unsigned long*)addr = b;
-}
-
-static inline void ctrl_outq(unsigned long long b, unsigned long addr)
-{
-	*(volatile unsigned long long*)addr = b;
-}
-
-static inline void ctrl_delay(void)
-{
-#ifdef P2SEG
-	ctrl_inw(P2SEG);
-#endif
-}
+void memcpy_fromio(void *, const volatile void __iomem *, unsigned long);
+void memcpy_toio(volatile void __iomem *, const void *, unsigned long);
+void memset_io(volatile void __iomem *, int, unsigned long);
 
 /* Quad-word real-mode I/O, don't ask.. */
 unsigned long long peek_real_address_q(unsigned long long addr);
@@ -276,79 +242,40 @@ unsigned long long poke_real_address_q(unsigned long long addr,
 #define phys_to_virt(address)	(__va(address))
 #endif
 
-/*
- * On 32-bit SH, we traditionally have the whole physical address space
- * mapped at all times (as MIPS does), so "ioremap()" and "iounmap()" do
- * not need to do anything but place the address in the proper segment.
- * This is true for P1 and P2 addresses, as well as some P3 ones.
- * However, most of the P3 addresses and newer cores using extended
- * addressing need to map through page tables, so the ioremap()
- * implementation becomes a bit more complicated.
- *
- * See arch/sh/mm/ioremap.c for additional notes on this.
- *
- * We cheat a bit and always return uncachable areas until we've fixed
- * the drivers to handle caching properly.
- *
- * On the SH-5 the concept of segmentation in the 1:1 PXSEG sense simply
- * doesn't exist, so everything must go through page tables.
- */
 #ifdef CONFIG_MMU
-void __iomem *__ioremap(unsigned long offset, unsigned long size,
-			unsigned long flags);
-void __iounmap(void __iomem *addr);
+void iounmap(void __iomem *addr);
+void __iomem *__ioremap_caller(phys_addr_t offset, unsigned long size,
+			       pgprot_t prot, void *caller);
 
-/* arch/sh/mm/ioremap_64.c */
-unsigned long onchip_remap(unsigned long addr, unsigned long size,
-			   const char *name);
-extern void onchip_unmap(unsigned long vaddr);
-#else
-#define __ioremap(offset, size, flags)	((void __iomem *)(offset))
-#define __iounmap(addr)			do { } while (0)
-#define onchip_remap(addr, size, name)	(addr)
-#define onchip_unmap(addr)		do { } while (0)
-#endif /* CONFIG_MMU */
-
-static inline void __iomem *
-__ioremap_mode(unsigned long offset, unsigned long size, unsigned long flags)
+static inline void __iomem *ioremap(phys_addr_t offset, unsigned long size)
 {
-#ifdef CONFIG_SUPERH32
-	unsigned long last_addr = offset + size - 1;
-#endif
-	void __iomem *ret;
-
-	ret = __ioremap_trapped(offset, size);
-	if (ret)
-		return ret;
-
-#ifdef CONFIG_SUPERH32
-	/*
-	 * For P1 and P2 space this is trivial, as everything is already
-	 * mapped. Uncached access for P1 addresses are done through P2.
-	 * In the P3 case or for addresses outside of the 29-bit space,
-	 * mapping must be done by the PMB or by using page tables.
-	 */
-	if (likely(PXSEG(offset) < P3SEG && PXSEG(last_addr) < P3SEG)) {
-		if (unlikely(flags & _PAGE_CACHABLE))
-			return (void __iomem *)P1SEGADDR(offset);
-
-		return (void __iomem *)P2SEGADDR(offset);
-	}
-#endif
-
-	return __ioremap(offset, size, flags);
+	return __ioremap_caller(offset, size, PAGE_KERNEL_NOCACHE,
+			__builtin_return_address(0));
 }
 
-#define ioremap(offset, size)				\
-	__ioremap_mode((offset), (size), 0)
-#define ioremap_nocache(offset, size)			\
-	__ioremap_mode((offset), (size), 0)
-#define ioremap_cache(offset, size)			\
-	__ioremap_mode((offset), (size), _PAGE_CACHABLE)
-#define p3_ioremap(offset, size, flags)			\
-	__ioremap((offset), (size), (flags))
-#define iounmap(addr)					\
-	__iounmap((addr))
+static inline void __iomem *
+ioremap_cache(phys_addr_t offset, unsigned long size)
+{
+	return __ioremap_caller(offset, size, PAGE_KERNEL,
+			__builtin_return_address(0));
+}
+#define ioremap_cache ioremap_cache
+
+#ifdef CONFIG_HAVE_IOREMAP_PROT
+static inline void __iomem *ioremap_prot(phys_addr_t offset, unsigned long size,
+		unsigned long flags)
+{
+	return __ioremap_caller(offset, size, __pgprot(flags),
+			__builtin_return_address(0));
+}
+#endif /* CONFIG_HAVE_IOREMAP_PROT */
+
+#else /* CONFIG_MMU */
+#define iounmap(addr)		do { } while (0)
+#define ioremap(offset, size)	((void __iomem *)(unsigned long)(offset))
+#endif /* CONFIG_MMU */
+
+#define ioremap_uc	ioremap
 
 /*
  * Convert a physical pointer to a virtual kernel pointer for /dev/mem
@@ -361,6 +288,8 @@ __ioremap_mode(unsigned long offset, unsigned long size, unsigned long flags)
  */
 #define xlate_dev_kmem_ptr(p)	p
 
-#endif /* __KERNEL__ */
+#define ARCH_HAS_VALID_PHYS_ADDR_RANGE
+int valid_phys_addr_range(phys_addr_t addr, size_t size);
+int valid_mmap_phys_addr_range(unsigned long pfn, size_t size);
 
 #endif /* __ASM_SH_IO_H */

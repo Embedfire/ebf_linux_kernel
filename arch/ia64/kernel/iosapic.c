@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * I/O SAPIC support.
  *
@@ -66,17 +67,14 @@
  *     used as architecture-independent interrupt handling mechanism in Linux.
  *     As an IRQ is a number, we have to have
  *     IA-64 interrupt vector number <-> IRQ number mapping.  On smaller
- *     systems, we use one-to-one mapping between IA-64 vector and IRQ.  A
- *     platform can implement platform_irq_to_vector(irq) and
- *     platform_local_vector_to_irq(vector) APIs to differentiate the mapping.
- *     Please see also arch/ia64/include/asm/hw_irq.h for those APIs.
+ *     systems, we use one-to-one mapping between IA-64 vector and IRQ.
  *
  * To sum up, there are three levels of mappings involved:
  *
  *	PCI pin -> global system interrupt (GSI) -> IA-64 vector <-> IRQ
  *
  * Note: The term "IRQ" is loosely used everywhere in Linux kernel to
- * describeinterrupts.  Now we use "IRQ" only for Linux IRQ's.  ISA IRQ
+ * describe interrupts.  Now we use "IRQ" only for Linux IRQ's.  ISA IRQ
  * (isa_irq) is the only exception in this source code.
  */
 
@@ -86,18 +84,18 @@
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/pci.h>
+#include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/string.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 
 #include <asm/delay.h>
 #include <asm/hw_irq.h>
 #include <asm/io.h>
 #include <asm/iosapic.h>
-#include <asm/machvec.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
-#include <asm/system.h>
+#include <asm/xtp.h>
 
 #undef DEBUG_INTERRUPT_ROUTING
 
@@ -106,10 +104,6 @@
 #else
 #define DBG(fmt...)
 #endif
-
-#define NR_PREALLOCATE_RTE_ENTRIES \
-	(PAGE_SIZE / sizeof(struct iosapic_rte_info))
-#define RTE_PREALLOCATED	(1)
 
 static DEFINE_SPINLOCK(iosapic_lock);
 
@@ -135,7 +129,6 @@ struct iosapic_rte_info {
 	struct list_head rte_list;	/* RTEs sharing the same vector */
 	char		rte_index;	/* IOSAPIC RTE index */
 	int		refcnt;		/* reference counter */
-	unsigned int	flags;		/* flags */
 	struct iosapic	*iosapic;
 } ____cacheline_aligned;
 
@@ -152,10 +145,7 @@ static struct iosapic_intr_info {
 	unsigned char	trigger	: 1;	/* trigger mode (see iosapic.h) */
 } iosapic_intr_info[NR_IRQS];
 
-static unsigned char pcat_compat __devinitdata;	/* 8259 compatibility flag */
-
-static int iosapic_kmalloc_ok;
-static LIST_HEAD(free_rte_list);
+static unsigned char pcat_compat;	/* 8259 compatibility flag */
 
 static inline void
 iosapic_write(struct iosapic *iosapic, unsigned int reg, u32 val)
@@ -264,7 +254,7 @@ set_rte (unsigned int gsi, unsigned int irq, unsigned int dest, int mask)
 }
 
 static void
-nop (unsigned int irq)
+iosapic_nop (struct irq_data *data)
 {
 	/* do nothing... */
 }
@@ -294,8 +284,9 @@ kexec_disable_iosapic(void)
 #endif
 
 static void
-mask_irq (unsigned int irq)
+mask_irq (struct irq_data *data)
 {
+	unsigned int irq = data->irq;
 	u32 low32;
 	int rte_index;
 	struct iosapic_rte_info *rte;
@@ -312,8 +303,9 @@ mask_irq (unsigned int irq)
 }
 
 static void
-unmask_irq (unsigned int irq)
+unmask_irq (struct irq_data *data)
 {
+	unsigned int irq = data->irq;
 	u32 low32;
 	int rte_index;
 	struct iosapic_rte_info *rte;
@@ -329,29 +321,31 @@ unmask_irq (unsigned int irq)
 }
 
 
-static void
-iosapic_set_affinity (unsigned int irq, cpumask_t mask)
+static int
+iosapic_set_affinity(struct irq_data *data, const struct cpumask *mask,
+		     bool force)
 {
 #ifdef CONFIG_SMP
+	unsigned int irq = data->irq;
 	u32 high32, low32;
-	int dest, rte_index;
+	int cpu, dest, rte_index;
 	int redir = (irq & IA64_IRQ_REDIRECTED) ? 1 : 0;
 	struct iosapic_rte_info *rte;
 	struct iosapic *iosapic;
 
 	irq &= (~IA64_IRQ_REDIRECTED);
 
-	cpus_and(mask, mask, cpu_online_map);
-	if (cpus_empty(mask))
-		return;
+	cpu = cpumask_first_and(cpu_online_mask, mask);
+	if (cpu >= nr_cpu_ids)
+		return -1;
 
-	if (irq_prepare_move(irq, first_cpu(mask)))
-		return;
+	if (irq_prepare_move(irq, cpu))
+		return -1;
 
-	dest = cpu_physical_id(first_cpu(mask));
+	dest = cpu_physical_id(cpu);
 
 	if (!iosapic_intr_info[irq].count)
-		return;			/* not an IOSAPIC interrupt */
+		return -1;			/* not an IOSAPIC interrupt */
 
 	set_irq_affinity_info(irq, dest, redir);
 
@@ -376,7 +370,9 @@ iosapic_set_affinity (unsigned int irq, cpumask_t mask)
 		iosapic_write(iosapic, IOSAPIC_RTE_HIGH(rte_index), high32);
 		iosapic_write(iosapic, IOSAPIC_RTE_LOW(rte_index), low32);
 	}
+
 #endif
+	return 0;
 }
 
 /*
@@ -384,50 +380,51 @@ iosapic_set_affinity (unsigned int irq, cpumask_t mask)
  */
 
 static unsigned int
-iosapic_startup_level_irq (unsigned int irq)
+iosapic_startup_level_irq (struct irq_data *data)
 {
-	unmask_irq(irq);
+	unmask_irq(data);
 	return 0;
 }
 
 static void
-iosapic_end_level_irq (unsigned int irq)
+iosapic_unmask_level_irq (struct irq_data *data)
 {
+	unsigned int irq = data->irq;
 	ia64_vector vec = irq_to_vector(irq);
 	struct iosapic_rte_info *rte;
 	int do_unmask_irq = 0;
 
 	irq_complete_move(irq);
-	if (unlikely(irq_desc[irq].status & IRQ_MOVE_PENDING)) {
+	if (unlikely(irqd_is_setaffinity_pending(data))) {
 		do_unmask_irq = 1;
-		mask_irq(irq);
-	}
+		mask_irq(data);
+	} else
+		unmask_irq(data);
 
 	list_for_each_entry(rte, &iosapic_intr_info[irq].rtes, rte_list)
 		iosapic_eoi(rte->iosapic->addr, vec);
 
 	if (unlikely(do_unmask_irq)) {
-		move_masked_irq(irq);
-		unmask_irq(irq);
+		irq_move_masked_irq(data);
+		unmask_irq(data);
 	}
 }
 
 #define iosapic_shutdown_level_irq	mask_irq
 #define iosapic_enable_level_irq	unmask_irq
 #define iosapic_disable_level_irq	mask_irq
-#define iosapic_ack_level_irq		nop
+#define iosapic_ack_level_irq		iosapic_nop
 
 static struct irq_chip irq_type_iosapic_level = {
-	.name =		"IO-SAPIC-level",
-	.startup =	iosapic_startup_level_irq,
-	.shutdown =	iosapic_shutdown_level_irq,
-	.enable =	iosapic_enable_level_irq,
-	.disable =	iosapic_disable_level_irq,
-	.ack =		iosapic_ack_level_irq,
-	.end =		iosapic_end_level_irq,
-	.mask =		mask_irq,
-	.unmask =	unmask_irq,
-	.set_affinity =	iosapic_set_affinity
+	.name =			"IO-SAPIC-level",
+	.irq_startup =		iosapic_startup_level_irq,
+	.irq_shutdown =		iosapic_shutdown_level_irq,
+	.irq_enable =		iosapic_enable_level_irq,
+	.irq_disable =		iosapic_disable_level_irq,
+	.irq_ack =		iosapic_ack_level_irq,
+	.irq_mask =		mask_irq,
+	.irq_unmask =		iosapic_unmask_level_irq,
+	.irq_set_affinity =	iosapic_set_affinity
 };
 
 /*
@@ -435,9 +432,9 @@ static struct irq_chip irq_type_iosapic_level = {
  */
 
 static unsigned int
-iosapic_startup_edge_irq (unsigned int irq)
+iosapic_startup_edge_irq (struct irq_data *data)
 {
-	unmask_irq(irq);
+	unmask_irq(data);
 	/*
 	 * IOSAPIC simply drops interrupts pended while the
 	 * corresponding pin was masked, so we can't know if an
@@ -447,37 +444,25 @@ iosapic_startup_edge_irq (unsigned int irq)
 }
 
 static void
-iosapic_ack_edge_irq (unsigned int irq)
+iosapic_ack_edge_irq (struct irq_data *data)
 {
-	irq_desc_t *idesc = irq_desc + irq;
-
-	irq_complete_move(irq);
-	move_native_irq(irq);
-	/*
-	 * Once we have recorded IRQ_PENDING already, we can mask the
-	 * interrupt for real. This prevents IRQ storms from unhandled
-	 * devices.
-	 */
-	if ((idesc->status & (IRQ_PENDING|IRQ_DISABLED)) ==
-	    (IRQ_PENDING|IRQ_DISABLED))
-		mask_irq(irq);
+	irq_complete_move(data->irq);
+	irq_move_irq(data);
 }
 
 #define iosapic_enable_edge_irq		unmask_irq
-#define iosapic_disable_edge_irq	nop
-#define iosapic_end_edge_irq		nop
+#define iosapic_disable_edge_irq	iosapic_nop
 
 static struct irq_chip irq_type_iosapic_edge = {
-	.name =		"IO-SAPIC-edge",
-	.startup =	iosapic_startup_edge_irq,
-	.shutdown =	iosapic_disable_edge_irq,
-	.enable =	iosapic_enable_edge_irq,
-	.disable =	iosapic_disable_edge_irq,
-	.ack =		iosapic_ack_edge_irq,
-	.end =		iosapic_end_edge_irq,
-	.mask =		mask_irq,
-	.unmask =	unmask_irq,
-	.set_affinity =	iosapic_set_affinity
+	.name =			"IO-SAPIC-edge",
+	.irq_startup =		iosapic_startup_edge_irq,
+	.irq_shutdown =		iosapic_disable_edge_irq,
+	.irq_enable =		iosapic_enable_edge_irq,
+	.irq_disable =		iosapic_disable_edge_irq,
+	.irq_ack =		iosapic_ack_edge_irq,
+	.irq_mask =		mask_irq,
+	.irq_unmask =		unmask_irq,
+	.irq_set_affinity =	iosapic_set_affinity
 };
 
 static unsigned int
@@ -507,7 +492,7 @@ static int iosapic_find_sharable_irq(unsigned long trigger, unsigned long pol)
 	if (trigger == IOSAPIC_EDGE)
 		return -EINVAL;
 
-	for (i = 0; i <= NR_IRQS; i++) {
+	for (i = 0; i < NR_IRQS; i++) {
 		info = &iosapic_intr_info[i];
 		if (info->trigger == trigger && info->polarity == pol &&
 		    (info->dmode == IOSAPIC_FIXED ||
@@ -549,37 +534,6 @@ iosapic_reassign_vector (int irq)
 	}
 }
 
-static struct iosapic_rte_info * __init_refok iosapic_alloc_rte (void)
-{
-	int i;
-	struct iosapic_rte_info *rte;
-	int preallocated = 0;
-
-	if (!iosapic_kmalloc_ok && list_empty(&free_rte_list)) {
-		rte = alloc_bootmem(sizeof(struct iosapic_rte_info) *
-				    NR_PREALLOCATE_RTE_ENTRIES);
-		for (i = 0; i < NR_PREALLOCATE_RTE_ENTRIES; i++, rte++)
-			list_add(&rte->rte_list, &free_rte_list);
-	}
-
-	if (!list_empty(&free_rte_list)) {
-		rte = list_entry(free_rte_list.next, struct iosapic_rte_info,
-				 rte_list);
-		list_del(&rte->rte_list);
-		preallocated++;
-	} else {
-		rte = kmalloc(sizeof(struct iosapic_rte_info), GFP_ATOMIC);
-		if (!rte)
-			return NULL;
-	}
-
-	memset(rte, 0, sizeof(struct iosapic_rte_info));
-	if (preallocated)
-		rte->flags |= RTE_PREALLOCATED;
-
-	return rte;
-}
-
 static inline int irq_is_shared (int irq)
 {
 	return (iosapic_intr_info[irq].count > 1);
@@ -598,8 +552,7 @@ static int
 register_intr (unsigned int gsi, int irq, unsigned char delivery,
 	       unsigned long polarity, unsigned long trigger)
 {
-	irq_desc_t *idesc;
-	struct hw_interrupt_type *irq_type;
+	struct irq_chip *chip, *irq_type;
 	int index;
 	struct iosapic_rte_info *rte;
 
@@ -612,7 +565,7 @@ register_intr (unsigned int gsi, int irq, unsigned char delivery,
 
 	rte = find_rte(irq, gsi);
 	if (!rte) {
-		rte = iosapic_alloc_rte();
+		rte = kzalloc(sizeof (*rte), GFP_ATOMIC);
 		if (!rte) {
 			printk(KERN_WARNING "%s: cannot allocate memory\n",
 			       __func__);
@@ -646,15 +599,18 @@ register_intr (unsigned int gsi, int irq, unsigned char delivery,
 
 	irq_type = iosapic_get_irq_chip(trigger);
 
-	idesc = irq_desc + irq;
-	if (irq_type != NULL && idesc->chip != irq_type) {
-		if (idesc->chip != &no_irq_type)
+	chip = irq_get_chip(irq);
+	if (irq_type != NULL && chip != irq_type) {
+		if (chip != &no_irq_chip)
 			printk(KERN_WARNING
 			       "%s: changing vector %d from %s to %s\n",
 			       __func__, irq_to_vector(irq),
-			       idesc->chip->name, irq_type->name);
-		idesc->chip = irq_type;
+			       chip->name, irq_type->name);
+		chip = irq_type;
 	}
+	irq_set_chip_handler_name_locked(irq_get_irq_data(irq), chip,
+		trigger == IOSAPIC_EDGE ? handle_edge_irq : handle_level_irq,
+		NULL);
 	return 0;
 }
 
@@ -687,29 +643,25 @@ get_target_cpu (unsigned int gsi, int irq)
 	if (!cpu_online(smp_processor_id()))
 		return cpu_physical_id(smp_processor_id());
 
-#ifdef CONFIG_ACPI
 	if (cpe_vector > 0 && irq_to_vector(irq) == IA64_CPEP_VECTOR)
 		return get_cpei_target_cpu();
-#endif
 
 #ifdef CONFIG_NUMA
 	{
 		int num_cpus, cpu_index, iosapic_index, numa_cpu, i = 0;
-		cpumask_t cpu_mask;
+		const struct cpumask *cpu_mask;
 
 		iosapic_index = find_iosapic(gsi);
 		if (iosapic_index < 0 ||
 		    iosapic_lists[iosapic_index].node == MAX_NUMNODES)
 			goto skip_numa_setup;
 
-		cpu_mask = node_to_cpumask(iosapic_lists[iosapic_index].node);
-		cpus_and(cpu_mask, cpu_mask, domain);
-		for_each_cpu_mask(numa_cpu, cpu_mask) {
-			if (!cpu_online(numa_cpu))
-				cpu_clear(numa_cpu, cpu_mask);
+		cpu_mask = cpumask_of_node(iosapic_lists[iosapic_index].node);
+		num_cpus = 0;
+		for_each_cpu_and(numa_cpu, cpu_mask, &domain) {
+			if (cpu_online(numa_cpu))
+				num_cpus++;
 		}
-
-		num_cpus = cpus_weight(cpu_mask);
 
 		if (!num_cpus)
 			goto skip_numa_setup;
@@ -717,10 +669,11 @@ get_target_cpu (unsigned int gsi, int irq)
 		/* Use irq assignment to distribute across cpus in node */
 		cpu_index = irq % num_cpus;
 
-		for (numa_cpu = first_cpu(cpu_mask) ; i < cpu_index ; i++)
-			numa_cpu = next_cpu(numa_cpu, cpu_mask);
+		for_each_cpu_and(numa_cpu, cpu_mask, &domain)
+			if (cpu_online(numa_cpu) && i++ >= cpu_index)
+				break;
 
-		if (numa_cpu != NR_CPUS)
+		if (numa_cpu < nr_cpu_ids)
 			return cpu_physical_id(numa_cpu);
 	}
 skip_numa_setup:
@@ -731,9 +684,9 @@ skip_numa_setup:
 	 * case of NUMA.)
 	 */
 	do {
-		if (++cpu >= NR_CPUS)
+		if (++cpu >= nr_cpu_ids)
 			cpu = 0;
-	} while (!cpu_online(cpu) || !cpu_isset(cpu, domain));
+	} while (!cpu_online(cpu) || !cpumask_test_cpu(cpu, &domain));
 
 	return cpu_physical_id(cpu);
 #else  /* CONFIG_SMP */
@@ -765,6 +718,7 @@ iosapic_register_intr (unsigned int gsi,
 	struct iosapic_rte_info *rte;
 	u32 low32;
 	unsigned char dmode;
+	struct irq_desc *desc;
 
 	/*
 	 * If this GSI has already been registered (i.e., it's a
@@ -777,7 +731,7 @@ iosapic_register_intr (unsigned int gsi,
 		rte = find_rte(irq, gsi);
 		if(iosapic_intr_info[irq].count == 0) {
 			assign_irq_vector(irq);
-			dynamic_irq_init(irq);
+			irq_init_desc(irq);
 		} else if (rte->refcnt != NO_REF_RTE) {
 			rte->refcnt++;
 			goto unlock_iosapic_lock;
@@ -792,12 +746,13 @@ iosapic_register_intr (unsigned int gsi,
 			goto unlock_iosapic_lock;
 	}
 
-	spin_lock(&irq_desc[irq].lock);
+	desc = irq_to_desc(irq);
+	raw_spin_lock(&desc->lock);
 	dest = get_target_cpu(gsi, irq);
 	dmode = choose_dmode();
 	err = register_intr(gsi, irq, dmode, polarity, trigger);
 	if (err < 0) {
-		spin_unlock(&irq_desc[irq].lock);
+		raw_spin_unlock(&desc->lock);
 		irq = err;
 		goto unlock_iosapic_lock;
 	}
@@ -816,7 +771,7 @@ iosapic_register_intr (unsigned int gsi,
 	       (polarity == IOSAPIC_POL_HIGH ? "high" : "low"),
 	       cpu_logical_id(dest), dest, irq_to_vector(irq));
 
-	spin_unlock(&irq_desc[irq].lock);
+	raw_spin_unlock(&desc->lock);
  unlock_iosapic_lock:
 	spin_unlock_irqrestore(&iosapic_lock, flags);
 	return irq;
@@ -827,7 +782,6 @@ iosapic_unregister_intr (unsigned int gsi)
 {
 	unsigned long flags;
 	int irq, index;
-	irq_desc_t *idesc;
 	u32 low32;
 	unsigned long trigger, polarity;
 	unsigned int dest;
@@ -857,7 +811,6 @@ iosapic_unregister_intr (unsigned int gsi)
 	if (--rte->refcnt > 0)
 		goto out;
 
-	idesc = irq_desc + irq;
 	rte->refcnt = NO_REF_RTE;
 
 	/* Mask the interrupt */
@@ -881,7 +834,7 @@ iosapic_unregister_intr (unsigned int gsi)
 	if (iosapic_intr_info[irq].count == 0) {
 #ifdef CONFIG_SMP
 		/* Clear affinity */
-		cpus_setall(idesc->affinity);
+		cpumask_setall(irq_get_affinity_mask(irq));
 #endif
 		/* Clear the interrupt information */
 		iosapic_intr_info[irq].dest = 0;
@@ -957,10 +910,8 @@ iosapic_register_platform_intr (u32 int_type, unsigned int gsi,
 /*
  * ACPI calls this when it finds an entry for a legacy ISA IRQ override.
  */
-void __devinit
-iosapic_override_isa_irq (unsigned int isa_irq, unsigned int gsi,
-			  unsigned long polarity,
-			  unsigned long trigger)
+void iosapic_override_isa_irq(unsigned int isa_irq, unsigned int gsi,
+			      unsigned long polarity, unsigned long trigger)
 {
 	int vector, irq;
 	unsigned int dest = cpu_physical_id(smp_processor_id());
@@ -1055,8 +1006,27 @@ iosapic_check_gsi_range (unsigned int gsi_base, unsigned int ver)
 	return 0;
 }
 
-int __devinit
-iosapic_init (unsigned long phys_addr, unsigned int gsi_base)
+static int
+iosapic_delete_rte(unsigned int irq, unsigned int gsi)
+{
+	struct iosapic_rte_info *rte, *temp;
+
+	list_for_each_entry_safe(rte, temp, &iosapic_intr_info[irq].rtes,
+								rte_list) {
+		if (rte->iosapic->gsi_base + rte->rte_index == gsi) {
+			if (rte->refcnt)
+				return -EBUSY;
+
+			list_del(&rte->rte_list);
+			kfree(rte);
+			return 0;
+		}
+	}
+
+	return -EINVAL;
+}
+
+int iosapic_init(unsigned long phys_addr, unsigned int gsi_base)
 {
 	int num_rte, err, index;
 	unsigned int isa_irq, ver;
@@ -1071,6 +1041,10 @@ iosapic_init (unsigned long phys_addr, unsigned int gsi_base)
 	}
 
 	addr = ioremap(phys_addr, 0);
+	if (addr == NULL) {
+		spin_unlock_irqrestore(&iosapic_lock, flags);
+		return -ENOMEM;
+	}
 	ver = iosapic_version(addr);
 	if ((err = iosapic_check_gsi_range(gsi_base, ver))) {
 		iounmap(addr);
@@ -1109,11 +1083,9 @@ iosapic_init (unsigned long phys_addr, unsigned int gsi_base)
 	return 0;
 }
 
-#ifdef CONFIG_HOTPLUG
-int
-iosapic_remove (unsigned int gsi_base)
+int iosapic_remove(unsigned int gsi_base)
 {
-	int index, err = 0;
+	int i, irq, index, err = 0;
 	unsigned long flags;
 
 	spin_lock_irqsave(&iosapic_lock, flags);
@@ -1131,17 +1103,25 @@ iosapic_remove (unsigned int gsi_base)
 		goto out;
 	}
 
+	for (i = gsi_base; i < gsi_base + iosapic_lists[index].num_rte; i++) {
+		irq = __gsi_to_irq(i);
+		if (irq < 0)
+			continue;
+
+		err = iosapic_delete_rte(irq, i);
+		if (err)
+			goto out;
+	}
+
 	iounmap(iosapic_lists[index].addr);
 	iosapic_free(index);
  out:
 	spin_unlock_irqrestore(&iosapic_lock, flags);
 	return err;
 }
-#endif /* CONFIG_HOTPLUG */
 
 #ifdef CONFIG_NUMA
-void __devinit
-map_iosapic_to_node(unsigned int gsi_base, int node)
+void map_iosapic_to_node(unsigned int gsi_base, int node)
 {
 	int index;
 
@@ -1155,10 +1135,3 @@ map_iosapic_to_node(unsigned int gsi_base, int node)
 	return;
 }
 #endif
-
-static int __init iosapic_enable_kmalloc (void)
-{
-	iosapic_kmalloc_ok = 1;
-	return 0;
-}
-core_initcall (iosapic_enable_kmalloc);

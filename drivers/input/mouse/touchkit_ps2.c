@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* ----------------------------------------------------------------------------
  * touchkit_ps2.c  --  Driver for eGalax TouchKit PS/2 Touchscreens
  *
@@ -5,28 +6,13 @@
  * Copyright (C) 2004 by Daniel Ritz
  * Copyright (C) by Todd E. Johnson (mtouchusb.c)
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  * Based upon touchkitusb.c
  *
- * Vendor documentation is available in support section of:
- * http://www.egalax.com.tw/
+ * Vendor documentation is available at:
+ * http://home.eeti.com.tw/web20/drivers/Software%20Programming%20Guide_v2.0.pdf 
  */
 
 #include <linux/kernel.h>
-#include <linux/slab.h>
 
 #include <linux/input.h>
 #include <linux/serio.h>
@@ -67,7 +53,7 @@ static psmouse_ret_t touchkit_ps2_process_byte(struct psmouse *psmouse)
 	return PSMOUSE_FULL_PACKET;
 }
 
-int touchkit_ps2_detect(struct psmouse *psmouse, int set_properties)
+int touchkit_ps2_detect(struct psmouse *psmouse, bool set_properties)
 {
 	struct input_dev *dev = psmouse->dev;
 	unsigned char param[3];
@@ -86,7 +72,8 @@ int touchkit_ps2_detect(struct psmouse *psmouse, int set_properties)
 
 	if (set_properties) {
 		dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
-		set_bit(BTN_TOUCH, dev->keybit);
+		dev->keybit[BIT_WORD(BTN_MOUSE)] = 0;
+		dev->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);
 		input_set_abs_params(dev, ABS_X, 0, TOUCHKIT_MAX_XC, 0, 0);
 		input_set_abs_params(dev, ABS_Y, 0, TOUCHKIT_MAX_YC, 0, 0);
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_IA64_IRQ_H
 #define _ASM_IA64_IRQ_H
 
@@ -13,7 +14,7 @@
 
 #include <linux/types.h>
 #include <linux/cpumask.h>
-#include <asm-ia64/nr-irqs.h>
+#include <generated/nr-irqs.h>
 
 static __inline__ int
 irq_canonicalize (int irq)
@@ -27,8 +28,8 @@ irq_canonicalize (int irq)
 }
 
 extern void set_irq_affinity_info (unsigned int irq, int dest, int redir);
-bool is_affinity_mask_valid(cpumask_t cpumask);
 
-#define is_affinity_mask_valid is_affinity_mask_valid
+int create_irq(void);
+void destroy_irq(unsigned int irq);
 
 #endif /* _ASM_IA64_IRQ_H */

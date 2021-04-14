@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * (C) 2007 Patrick McHardy <kaber@trash.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/module.h>
 #include <linux/skbuff.h>
@@ -14,45 +11,37 @@
 #include <net/netfilter/xt_rateest.h>
 
 
-static bool xt_rateest_mt(const struct sk_buff *skb,
-			  const struct net_device *in,
-			  const struct net_device *out,
-			  const struct xt_match *match,
-			  const void *matchinfo,
-			  int offset,
-			  unsigned int protoff,
-			  bool *hotdrop)
+static bool
+xt_rateest_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
-	const struct xt_rateest_match_info *info = matchinfo;
-	struct gnet_stats_rate_est *r;
+	const struct xt_rateest_match_info *info = par->matchinfo;
+	struct gnet_stats_rate_est64 sample = {0};
 	u_int32_t bps1, bps2, pps1, pps2;
 	bool ret = true;
 
-	spin_lock_bh(&info->est1->lock);
-	r = &info->est1->rstats;
+	gen_estimator_read(&info->est1->rate_est, &sample);
+
 	if (info->flags & XT_RATEEST_MATCH_DELTA) {
-		bps1 = info->bps1 >= r->bps ? info->bps1 - r->bps : 0;
-		pps1 = info->pps1 >= r->pps ? info->pps1 - r->pps : 0;
+		bps1 = info->bps1 >= sample.bps ? info->bps1 - sample.bps : 0;
+		pps1 = info->pps1 >= sample.pps ? info->pps1 - sample.pps : 0;
 	} else {
-		bps1 = r->bps;
-		pps1 = r->pps;
+		bps1 = sample.bps;
+		pps1 = sample.pps;
 	}
-	spin_unlock_bh(&info->est1->lock);
 
 	if (info->flags & XT_RATEEST_MATCH_ABS) {
 		bps2 = info->bps2;
 		pps2 = info->pps2;
 	} else {
-		spin_lock_bh(&info->est2->lock);
-		r = &info->est2->rstats;
+		gen_estimator_read(&info->est2->rate_est, &sample);
+
 		if (info->flags & XT_RATEEST_MATCH_DELTA) {
-			bps2 = info->bps2 >= r->bps ? info->bps2 - r->bps : 0;
-			pps2 = info->pps2 >= r->pps ? info->pps2 - r->pps : 0;
+			bps2 = info->bps2 >= sample.bps ? info->bps2 - sample.bps : 0;
+			pps2 = info->pps2 >= sample.pps ? info->pps2 - sample.pps : 0;
 		} else {
-			bps2 = r->bps;
-			pps2 = r->pps;
+			bps2 = sample.bps;
+			pps2 = sample.pps;
 		}
-		spin_unlock_bh(&info->est2->lock);
 	}
 
 	switch (info->mode) {
@@ -72,7 +61,7 @@ static bool xt_rateest_mt(const struct sk_buff *skb,
 		if (info->flags & XT_RATEEST_MATCH_BPS)
 			ret &= bps1 == bps2;
 		if (info->flags & XT_RATEEST_MATCH_PPS)
-			ret &= pps2 == pps2;
+			ret &= pps1 == pps2;
 		break;
 	}
 
@@ -80,14 +69,11 @@ static bool xt_rateest_mt(const struct sk_buff *skb,
 	return ret;
 }
 
-static bool xt_rateest_mt_checkentry(const char *tablename,
-				     const void *ip,
-				     const struct xt_match *match,
-				     void *matchinfo,
-				     unsigned int hook_mask)
+static int xt_rateest_mt_checkentry(const struct xt_mtchk_param *par)
 {
-	struct xt_rateest_match_info *info = matchinfo;
+	struct xt_rateest_match_info *info = par->matchinfo;
 	struct xt_rateest *est1, *est2;
+	int ret = -EINVAL;
 
 	if (hweight32(info->flags & (XT_RATEEST_MATCH_ABS |
 				     XT_RATEEST_MATCH_REL)) != 1)
@@ -105,68 +91,57 @@ static bool xt_rateest_mt_checkentry(const char *tablename,
 		goto err1;
 	}
 
-	est1 = xt_rateest_lookup(info->name1);
+	ret  = -ENOENT;
+	est1 = xt_rateest_lookup(par->net, info->name1);
 	if (!est1)
 		goto err1;
 
+	est2 = NULL;
 	if (info->flags & XT_RATEEST_MATCH_REL) {
-		est2 = xt_rateest_lookup(info->name2);
+		est2 = xt_rateest_lookup(par->net, info->name2);
 		if (!est2)
 			goto err2;
-	} else
-		est2 = NULL;
-
+	}
 
 	info->est1 = est1;
 	info->est2 = est2;
-	return true;
+	return 0;
 
 err2:
-	xt_rateest_put(est1);
+	xt_rateest_put(par->net, est1);
 err1:
-	return false;
+	return ret;
 }
 
-static void xt_rateest_mt_destroy(const struct xt_match *match,
-				  void *matchinfo)
+static void xt_rateest_mt_destroy(const struct xt_mtdtor_param *par)
 {
-	struct xt_rateest_match_info *info = matchinfo;
+	struct xt_rateest_match_info *info = par->matchinfo;
 
-	xt_rateest_put(info->est1);
+	xt_rateest_put(par->net, info->est1);
 	if (info->est2)
-		xt_rateest_put(info->est2);
+		xt_rateest_put(par->net, info->est2);
 }
 
-static struct xt_match xt_rateest_match[] __read_mostly = {
-	{
-		.family		= AF_INET,
-		.name		= "rateest",
-		.match		= xt_rateest_mt,
-		.checkentry	= xt_rateest_mt_checkentry,
-		.destroy	= xt_rateest_mt_destroy,
-		.matchsize	= sizeof(struct xt_rateest_match_info),
-		.me		= THIS_MODULE,
-	},
-	{
-		.family		= AF_INET6,
-		.name		= "rateest",
-		.match		= xt_rateest_mt,
-		.checkentry	= xt_rateest_mt_checkentry,
-		.destroy	= xt_rateest_mt_destroy,
-		.matchsize	= sizeof(struct xt_rateest_match_info),
-		.me		= THIS_MODULE,
-	},
+static struct xt_match xt_rateest_mt_reg __read_mostly = {
+	.name       = "rateest",
+	.revision   = 0,
+	.family     = NFPROTO_UNSPEC,
+	.match      = xt_rateest_mt,
+	.checkentry = xt_rateest_mt_checkentry,
+	.destroy    = xt_rateest_mt_destroy,
+	.matchsize  = sizeof(struct xt_rateest_match_info),
+	.usersize   = offsetof(struct xt_rateest_match_info, est1),
+	.me         = THIS_MODULE,
 };
 
 static int __init xt_rateest_mt_init(void)
 {
-	return xt_register_matches(xt_rateest_match,
-				   ARRAY_SIZE(xt_rateest_match));
+	return xt_register_match(&xt_rateest_mt_reg);
 }
 
 static void __exit xt_rateest_mt_fini(void)
 {
-	xt_unregister_matches(xt_rateest_match, ARRAY_SIZE(xt_rateest_match));
+	xt_unregister_match(&xt_rateest_mt_reg);
 }
 
 MODULE_AUTHOR("Patrick McHardy <kaber@trash.net>");

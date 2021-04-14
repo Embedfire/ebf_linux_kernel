@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * This file contains low level CPU setup functions.
  * Valentine Barshak <vbarshak@ru.mvista.com>
@@ -5,12 +6,6 @@
  *
  * Based on cpu_setup_6xx code by
  * Benjamin Herrenschmidt <benh@kernel.crashing.org>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
- *
  */
 
 #include <asm/processor.h>
@@ -34,7 +29,15 @@ _GLOBAL(__setup_cpu_440grx)
 	blr
 _GLOBAL(__setup_cpu_460ex)
 _GLOBAL(__setup_cpu_460gt)
-	b	__init_fpu_44x
+_GLOBAL(__setup_cpu_460sx)
+_GLOBAL(__setup_cpu_apm821xx)
+	mflr	r4
+	bl	__init_fpu_44x
+	bl	__fixup_440A_mcheck
+	mtlr	r4
+	blr
+
+_GLOBAL(__setup_cpu_440x5)
 _GLOBAL(__setup_cpu_440gx)
 _GLOBAL(__setup_cpu_440spe)
 	b	__fixup_440A_mcheck

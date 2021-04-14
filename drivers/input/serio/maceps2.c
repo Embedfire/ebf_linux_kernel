@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * SGI O2 MACE PS2 controller driver for linux
  *
  * Copyright (C) 2002 Vivien Chappelier
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation
  */
 #include <linux/module.h>
 #include <linux/init.h>
@@ -21,7 +18,6 @@
 
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <asm/ip32/mace.h>
 #include <asm/ip32/ip32_ints.h>
 
@@ -117,7 +113,7 @@ static void maceps2_close(struct serio *dev)
 }
 
 
-static struct serio * __devinit maceps2_allocate_port(int idx)
+static struct serio *maceps2_allocate_port(int idx)
 {
 	struct serio *serio;
 
@@ -136,7 +132,7 @@ static struct serio * __devinit maceps2_allocate_port(int idx)
 	return serio;
 }
 
-static int __devinit maceps2_probe(struct platform_device *dev)
+static int maceps2_probe(struct platform_device *dev)
 {
 	maceps2_port[0] = maceps2_allocate_port(0);
 	maceps2_port[1] = maceps2_allocate_port(1);
@@ -152,7 +148,7 @@ static int __devinit maceps2_probe(struct platform_device *dev)
 	return 0;
 }
 
-static int __devexit maceps2_remove(struct platform_device *dev)
+static int maceps2_remove(struct platform_device *dev)
 {
 	serio_unregister_port(maceps2_port[0]);
 	serio_unregister_port(maceps2_port[1]);
@@ -163,10 +159,9 @@ static int __devexit maceps2_remove(struct platform_device *dev)
 static struct platform_driver maceps2_driver = {
 	.driver		= {
 		.name	= "maceps2",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= maceps2_probe,
-	.remove		= __devexit_p(maceps2_remove),
+	.remove		= maceps2_remove,
 };
 
 static int __init maceps2_init(void)

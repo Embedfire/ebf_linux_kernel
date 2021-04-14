@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/drivers/pcmcia/soc_common.h
  *
@@ -10,16 +11,21 @@
 #define _ASM_ARCH_PCMCIA
 
 /* include the world */
+#include <linux/clk.h>
 #include <linux/cpufreq.h>
-#include <pcmcia/cs_types.h>
-#include <pcmcia/cs.h>
 #include <pcmcia/ss.h>
 #include <pcmcia/cistpl.h>
-#include "cs_internal.h"
 
 
 struct device;
+struct gpio_desc;
 struct pcmcia_low_level;
+struct regulator;
+
+struct soc_pcmcia_regulator {
+	struct regulator	*reg;
+	bool			on;
+};
 
 /*
  * This structure encapsulates per-socket state which we might need to
@@ -31,14 +37,13 @@ struct soc_pcmcia_socket {
 	/*
 	 * Info from low level handler
 	 */
-	struct device		*dev;
 	unsigned int		nr;
-	unsigned int		irq;
+	struct clk		*clk;
 
 	/*
 	 * Core PCMCIA state
 	 */
-	struct pcmcia_low_level *ops;
+	const struct pcmcia_low_level *ops;
 
 	unsigned int		status;
 	socket_state_t		cs_state;
@@ -53,10 +58,37 @@ struct soc_pcmcia_socket {
 	struct resource		res_attr;
 	void __iomem		*virt_io;
 
+	struct {
+		int		gpio;
+		struct gpio_desc *desc;
+		unsigned int	irq;
+		const char	*name;
+	} stat[6];
+#define SOC_STAT_CD		0	/* Card detect */
+#define SOC_STAT_BVD1		1	/* BATDEAD / IOSTSCHG */
+#define SOC_STAT_BVD2		2	/* BATWARN / IOSPKR */
+#define SOC_STAT_RDY		3	/* Ready / Interrupt */
+#define SOC_STAT_VS1		4	/* Voltage sense 1 */
+#define SOC_STAT_VS2		5	/* Voltage sense 2 */
+
+	struct gpio_desc	*gpio_reset;
+	struct gpio_desc	*gpio_bus_enable;
+	struct soc_pcmcia_regulator vcc;
+	struct soc_pcmcia_regulator vpp;
+
 	unsigned int		irq_state;
 
+#ifdef CONFIG_CPU_FREQ
+	struct notifier_block	cpufreq_nb;
+#endif
 	struct timer_list	poll_timer;
 	struct list_head	node;
+	void *driver_data;
+};
+
+struct skt_dev_info {
+	int nskt;
+	struct soc_pcmcia_socket skt[];
 };
 
 struct pcmcia_state {
@@ -112,32 +144,27 @@ struct pcmcia_low_level {
 };
 
 
-struct pcmcia_irqs {
-	int sock;
-	int irq;
-	const char *str;
-};
-
 struct soc_pcmcia_timing {
 	unsigned short io;
 	unsigned short mem;
 	unsigned short attr;
 };
 
-extern int soc_pcmcia_request_irqs(struct soc_pcmcia_socket *skt, struct pcmcia_irqs *irqs, int nr);
-extern void soc_pcmcia_free_irqs(struct soc_pcmcia_socket *skt, struct pcmcia_irqs *irqs, int nr);
-extern void soc_pcmcia_disable_irqs(struct soc_pcmcia_socket *skt, struct pcmcia_irqs *irqs, int nr);
-extern void soc_pcmcia_enable_irqs(struct soc_pcmcia_socket *skt, struct pcmcia_irqs *irqs, int nr);
 extern void soc_common_pcmcia_get_timing(struct soc_pcmcia_socket *, struct soc_pcmcia_timing *);
 
+void soc_pcmcia_init_one(struct soc_pcmcia_socket *skt,
+	const struct pcmcia_low_level *ops, struct device *dev);
+void soc_pcmcia_remove_one(struct soc_pcmcia_socket *skt);
+int soc_pcmcia_add_one(struct soc_pcmcia_socket *skt);
+int soc_pcmcia_request_gpiods(struct soc_pcmcia_socket *skt);
 
-extern struct list_head soc_pcmcia_sockets;
+void soc_common_cf_socket_state(struct soc_pcmcia_socket *skt,
+	struct pcmcia_state *state);
 
-extern int soc_common_drv_pcmcia_probe(struct device *dev, struct pcmcia_low_level *ops, int first, int nr);
-extern int soc_common_drv_pcmcia_remove(struct device *dev);
+int soc_pcmcia_regulator_set(struct soc_pcmcia_socket *skt,
+	struct soc_pcmcia_regulator *r, int v);
 
-
-#ifdef DEBUG
+#ifdef CONFIG_PCMCIA_DEBUG
 
 extern void soc_pcmcia_debug(struct soc_pcmcia_socket *skt, const char *func,
 			     int lvl, const char *fmt, ...);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	W83977F Watchdog Timer Driver for Winbond W83977F I/O Chip
  *
@@ -7,13 +8,9 @@
  *           and wdt977.c by Woody Suwalski
  *
  *			-----------------------
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
- *
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -29,12 +26,9 @@
 #include <linux/uaccess.h>
 #include <linux/io.h>
 
-#include <asm/system.h>
 
 #define WATCHDOG_VERSION  "1.00"
 #define WATCHDOG_NAME     "W83977F WDT"
-#define PFX WATCHDOG_NAME ": "
-#define DRIVER_VERSION    WATCHDOG_NAME " driver, v" WATCHDOG_VERSION "\n"
 
 #define IO_INDEX_PORT     0x3F0
 #define IO_DATA_PORT      (IO_INDEX_PORT+1)
@@ -59,8 +53,8 @@ MODULE_PARM_DESC(timeout,
 module_param(testmode, int, 0);
 MODULE_PARM_DESC(testmode, "Watchdog testmode (1 = no reboot), default=0");
 
-static int nowayout = WATCHDOG_NOWAYOUT;
-module_param(nowayout, int, 0);
+static bool nowayout = WATCHDOG_NOWAYOUT;
+module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 		"Watchdog cannot be stopped once started (default="
 				__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
@@ -131,7 +125,7 @@ static int wdt_start(void)
 
 	spin_unlock_irqrestore(&spinlock, flags);
 
-	printk(KERN_INFO PFX "activated.\n");
+	pr_info("activated\n");
 
 	return 0;
 }
@@ -185,7 +179,7 @@ static int wdt_stop(void)
 
 	spin_unlock_irqrestore(&spinlock, flags);
 
-	printk(KERN_INFO PFX "shutdown.\n");
+	pr_info("shutdown\n");
 
 	return 0;
 }
@@ -225,7 +219,7 @@ static int wdt_keepalive(void)
 
 static int wdt_set_timeout(int t)
 {
-	int tmrval;
+	unsigned int tmrval;
 
 	/*
 	 * Convert seconds to watchdog counter time units, rounding up.
@@ -299,7 +293,7 @@ static int wdt_open(struct inode *inode, struct file *file)
 		__module_get(THIS_MODULE);
 
 	wdt_start();
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int wdt_release(struct inode *inode, struct file *file)
@@ -313,8 +307,7 @@ static int wdt_release(struct inode *inode, struct file *file)
 		clear_bit(0, &timer_alive);
 	} else {
 		wdt_keepalive();
-		printk(KERN_CRIT PFX
-			"unexpected close, not stopping watchdog!\n");
+		pr_crit("unexpected close, not stopping watchdog!\n");
 	}
 	expect_close = 0;
 	return 0;
@@ -371,7 +364,7 @@ static ssize_t wdt_write(struct file *file, const char __user *buf,
  *      according to their available features.
  */
 
-static struct watchdog_info ident = {
+static const struct watchdog_info ident = {
 	.options = WDIOF_SETTIMEOUT | WDIOF_MAGICCLOSE | WDIOF_KEEPALIVEPING,
 	.firmware_version =	1,
 	.identity = WATCHDOG_NAME,
@@ -426,10 +419,10 @@ static long wdt_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 
 		if (wdt_set_timeout(new_timeout))
-		    return -EINVAL;
+			return -EINVAL;
 
 		wdt_keepalive();
-		/* Fall */
+		fallthrough;
 
 	case WDIOC_GETTIMEOUT:
 		return put_user(timeout, uarg.i);
@@ -453,6 +446,7 @@ static const struct file_operations wdt_fops = {
 	.llseek		= no_llseek,
 	.write		= wdt_write,
 	.unlocked_ioctl	= wdt_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= wdt_open,
 	.release	= wdt_release,
 };
@@ -471,7 +465,7 @@ static int __init w83977f_wdt_init(void)
 {
 	int rc;
 
-	printk(KERN_INFO PFX DRIVER_VERSION);
+	pr_info("driver v%s\n", WATCHDOG_VERSION);
 
 	/*
 	 * Check that the timeout value is within it's range;
@@ -479,36 +473,31 @@ static int __init w83977f_wdt_init(void)
 	 */
 	if (wdt_set_timeout(timeout)) {
 		wdt_set_timeout(DEFAULT_TIMEOUT);
-		printk(KERN_INFO PFX
-		    "timeout value must be 15 <= timeout <= 7635, using %d\n",
-							DEFAULT_TIMEOUT);
+		pr_info("timeout value must be 15 <= timeout <= 7635, using %d\n",
+			DEFAULT_TIMEOUT);
 	}
 
 	if (!request_region(IO_INDEX_PORT, 2, WATCHDOG_NAME)) {
-		printk(KERN_ERR PFX "I/O address 0x%04x already in use\n",
-			IO_INDEX_PORT);
+		pr_err("I/O address 0x%04x already in use\n", IO_INDEX_PORT);
 		rc = -EIO;
 		goto err_out;
 	}
 
 	rc = register_reboot_notifier(&wdt_notifier);
 	if (rc) {
-		printk(KERN_ERR PFX
-			"cannot register reboot notifier (err=%d)\n", rc);
+		pr_err("cannot register reboot notifier (err=%d)\n", rc);
 		goto err_out_region;
 	}
 
 	rc = misc_register(&wdt_miscdev);
 	if (rc) {
-		printk(KERN_ERR PFX
-			"cannot register miscdev on minor=%d (err=%d)\n",
-						wdt_miscdev.minor, rc);
+		pr_err("cannot register miscdev on minor=%d (err=%d)\n",
+		       wdt_miscdev.minor, rc);
 		goto err_out_reboot;
 	}
 
-	printk(KERN_INFO PFX
-		"initialized. timeout=%d sec (nowayout=%d testmode=%d)\n",
-					timeout, nowayout, testmode);
+	pr_info("initialized. timeout=%d sec (nowayout=%d testmode=%d)\n",
+		timeout, nowayout, testmode);
 
 	return 0;
 
@@ -534,4 +523,3 @@ module_exit(w83977f_wdt_exit);
 MODULE_AUTHOR("Jose Goncalves <jose.goncalves@inov.pt>");
 MODULE_DESCRIPTION("Driver for watchdog timer in W83977F I/O chip");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);

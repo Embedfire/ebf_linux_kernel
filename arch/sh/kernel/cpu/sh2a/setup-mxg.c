@@ -1,16 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Renesas MX-G (R8A03022BG) Setup
  *
- *  Copyright (C) 2008  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
+ *  Copyright (C) 2008, 2009  Paul Mundt
  */
 #include <linux/platform_device.h>
 #include <linux/init.h>
 #include <linux/serial.h>
 #include <linux/serial_sci.h>
+#include <linux/sh_timer.h>
+#include <asm/platform_early.h>
 
 enum {
 	UNUSED = 0,
@@ -20,23 +19,15 @@ enum {
 	IRQ8, IRQ9, IRQ10, IRQ11, IRQ12, IRQ13, IRQ14, IRQ15,
 
 	PINT0, PINT1, PINT2, PINT3, PINT4, PINT5, PINT6, PINT7,
-
 	SINT8, SINT7, SINT6, SINT5, SINT4, SINT3, SINT2, SINT1,
 
-	SCIF0_BRI, SCIF0_ERI, SCIF0_RXI, SCIF0_TXI,
-	SCIF1_BRI, SCIF1_ERI, SCIF1_RXI, SCIF1_TXI,
+	SCIF0, SCIF1,
 
-	MTU2_TGI0A, MTU2_TGI0B, MTU2_TGI0C, MTU2_TGI0D,
-	MTU2_TCI0V, MTU2_TGI0E, MTU2_TGI0F,
-	MTU2_TGI1A, MTU2_TGI1B, MTU2_TCI1V, MTU2_TCI1U,
-	MTU2_TGI2A, MTU2_TGI2B, MTU2_TCI2V, MTU2_TCI2U,
-	MTU2_TGI3A, MTU2_TGI3B, MTU2_TGI3C, MTU2_TGI3D, MTU2_TCI3V,
-	MTU2_TGI4A, MTU2_TGI4B, MTU2_TGI4C, MTU2_TGI4D, MTU2_TCI4V,
-	MTU2_TGI5U, MTU2_TGI5V, MTU2_TGI5W,
+	MTU2_GROUP1, MTU2_GROUP2, MTU2_GROUP3, MTU2_GROUP4, MTU2_GROUP5,
+	MTU2_TGI3B, MTU2_TGI3C,
 
 	/* interrupt groups */
-	PINT, SCIF0, SCIF1,
-	MTU2_GROUP1, MTU2_GROUP2, MTU2_GROUP3, MTU2_GROUP4, MTU2_GROUP5
+	PINT,
 };
 
 static struct intc_vect vectors[] __initdata = {
@@ -59,47 +50,36 @@ static struct intc_vect vectors[] __initdata = {
 	INTC_IRQ(SINT4, 98), INTC_IRQ(SINT3, 99),
 	INTC_IRQ(SINT2, 100), INTC_IRQ(SINT1, 101),
 
-	INTC_IRQ(SCIF0_RXI, 220), INTC_IRQ(SCIF0_TXI, 221),
-	INTC_IRQ(SCIF0_BRI, 222), INTC_IRQ(SCIF0_ERI, 223),
-	INTC_IRQ(SCIF1_RXI, 224), INTC_IRQ(SCIF1_TXI, 225),
-	INTC_IRQ(SCIF1_BRI, 226), INTC_IRQ(SCIF1_ERI, 227),
+	INTC_IRQ(SCIF0, 220), INTC_IRQ(SCIF0, 221),
+	INTC_IRQ(SCIF0, 222), INTC_IRQ(SCIF0, 223),
+	INTC_IRQ(SCIF1, 224), INTC_IRQ(SCIF1, 225),
+	INTC_IRQ(SCIF1, 226), INTC_IRQ(SCIF1, 227),
 
-	INTC_IRQ(MTU2_TGI0A, 228), INTC_IRQ(MTU2_TGI0B, 229),
-	INTC_IRQ(MTU2_TGI0C, 230), INTC_IRQ(MTU2_TGI0D, 231),
-	INTC_IRQ(MTU2_TCI0V, 232), INTC_IRQ(MTU2_TGI0E, 233),
+	INTC_IRQ(MTU2_GROUP1, 228), INTC_IRQ(MTU2_GROUP1, 229),
+	INTC_IRQ(MTU2_GROUP1, 230), INTC_IRQ(MTU2_GROUP1, 231),
+	INTC_IRQ(MTU2_GROUP1, 232), INTC_IRQ(MTU2_GROUP1, 233),
 
-	INTC_IRQ(MTU2_TGI0F, 234), INTC_IRQ(MTU2_TGI1A, 235),
-	INTC_IRQ(MTU2_TGI1B, 236), INTC_IRQ(MTU2_TCI1V, 237),
-	INTC_IRQ(MTU2_TCI1U, 238), INTC_IRQ(MTU2_TGI2A, 239),
+	INTC_IRQ(MTU2_GROUP2, 234), INTC_IRQ(MTU2_GROUP2, 235),
+	INTC_IRQ(MTU2_GROUP2, 236), INTC_IRQ(MTU2_GROUP2, 237),
+	INTC_IRQ(MTU2_GROUP2, 238), INTC_IRQ(MTU2_GROUP2, 239),
 
-	INTC_IRQ(MTU2_TGI2B, 240), INTC_IRQ(MTU2_TCI2V, 241),
-	INTC_IRQ(MTU2_TCI2U, 242), INTC_IRQ(MTU2_TGI3A, 243),
+	INTC_IRQ(MTU2_GROUP3, 240), INTC_IRQ(MTU2_GROUP3, 241),
+	INTC_IRQ(MTU2_GROUP3, 242), INTC_IRQ(MTU2_GROUP3, 243),
 
 	INTC_IRQ(MTU2_TGI3B, 244),
 	INTC_IRQ(MTU2_TGI3C, 245),
 
-	INTC_IRQ(MTU2_TGI3D, 246), INTC_IRQ(MTU2_TCI3V, 247),
-	INTC_IRQ(MTU2_TGI4A, 248), INTC_IRQ(MTU2_TGI4B, 249),
-	INTC_IRQ(MTU2_TGI4C, 250), INTC_IRQ(MTU2_TGI4D, 251),
+	INTC_IRQ(MTU2_GROUP4, 246), INTC_IRQ(MTU2_GROUP4, 247),
+	INTC_IRQ(MTU2_GROUP4, 248), INTC_IRQ(MTU2_GROUP4, 249),
+	INTC_IRQ(MTU2_GROUP4, 250), INTC_IRQ(MTU2_GROUP4, 251),
 
-	INTC_IRQ(MTU2_TCI4V, 252), INTC_IRQ(MTU2_TGI5U, 253),
-	INTC_IRQ(MTU2_TGI5V, 254), INTC_IRQ(MTU2_TGI5W, 255),
+	INTC_IRQ(MTU2_GROUP5, 252), INTC_IRQ(MTU2_GROUP5, 253),
+	INTC_IRQ(MTU2_GROUP5, 254), INTC_IRQ(MTU2_GROUP5, 255),
 };
 
 static struct intc_group groups[] __initdata = {
 	INTC_GROUP(PINT, PINT0, PINT1, PINT2, PINT3,
 		   PINT4, PINT5, PINT6, PINT7),
-	INTC_GROUP(MTU2_GROUP1, MTU2_TGI0A, MTU2_TGI0B, MTU2_TGI0C, MTU2_TGI0D,
-		   MTU2_TCI0V, MTU2_TGI0E),
-	INTC_GROUP(MTU2_GROUP2, MTU2_TGI0F, MTU2_TGI1A, MTU2_TGI1B,
-		   MTU2_TCI1V, MTU2_TCI1U, MTU2_TGI2A),
-	INTC_GROUP(MTU2_GROUP3, MTU2_TGI2B, MTU2_TCI2V, MTU2_TCI2U,
-		   MTU2_TGI3A),
-	INTC_GROUP(MTU2_GROUP4, MTU2_TGI3D, MTU2_TCI3V, MTU2_TGI4A,
-		   MTU2_TGI4B, MTU2_TGI4C, MTU2_TGI4D),
-	INTC_GROUP(MTU2_GROUP5, MTU2_TCI4V, MTU2_TGI5U, MTU2_TGI5V, MTU2_TGI5W),
-	INTC_GROUP(SCIF0, SCIF0_BRI, SCIF0_ERI, SCIF0_RXI, SCIF0_TXI),
-	INTC_GROUP(SCIF1, SCIF1_BRI, SCIF1_ERI, SCIF1_RXI, SCIF1_TXI),
 };
 
 static struct intc_prio_reg prio_registers[] __initdata = {
@@ -132,27 +112,43 @@ static struct intc_mask_reg mask_registers[] __initdata = {
 static DECLARE_INTC_DESC(intc_desc, "mxg", vectors, groups,
 			 mask_registers, prio_registers, NULL);
 
-static struct plat_sci_port sci_platform_data[] = {
-	{
-		.mapbase	= 0xff804000,
-		.flags		= UPF_BOOT_AUTOCONF,
-		.type		= PORT_SCIF,
-		.irqs		= { 223, 220, 221, 222 },
-	}, {
-		.flags = 0,
-	}
+static struct resource mtu2_resources[] = {
+	DEFINE_RES_MEM(0xff801000, 0x400),
+	DEFINE_RES_IRQ_NAMED(228, "tgi0a"),
+	DEFINE_RES_IRQ_NAMED(234, "tgi1a"),
+	DEFINE_RES_IRQ_NAMED(240, "tgi2a"),
 };
 
-static struct platform_device sci_device = {
-	.name		= "sh-sci",
+static struct platform_device mtu2_device = {
+	.name		= "sh-mtu2",
 	.id		= -1,
+	.resource	= mtu2_resources,
+	.num_resources	= ARRAY_SIZE(mtu2_resources),
+};
+
+static struct plat_sci_port scif0_platform_data = {
+	.scscr		= SCSCR_REIE,
+	.type		= PORT_SCIF,
+};
+
+static struct resource scif0_resources[] = {
+	DEFINE_RES_MEM(0xff804000, 0x100),
+	DEFINE_RES_IRQ(220),
+};
+
+static struct platform_device scif0_device = {
+	.name		= "sh-sci",
+	.id		= 0,
+	.resource	= scif0_resources,
+	.num_resources	= ARRAY_SIZE(scif0_resources),
 	.dev		= {
-		.platform_data	= sci_platform_data,
+		.platform_data	= &scif0_platform_data,
 	},
 };
 
 static struct platform_device *mxg_devices[] __initdata = {
-	&sci_device,
+	&scif0_device,
+	&mtu2_device,
 };
 
 static int __init mxg_devices_setup(void)
@@ -160,9 +156,20 @@ static int __init mxg_devices_setup(void)
 	return platform_add_devices(mxg_devices,
 				    ARRAY_SIZE(mxg_devices));
 }
-__initcall(mxg_devices_setup);
+arch_initcall(mxg_devices_setup);
 
 void __init plat_irq_setup(void)
 {
 	register_intc_controller(&intc_desc);
+}
+
+static struct platform_device *mxg_early_devices[] __initdata = {
+	&scif0_device,
+	&mtu2_device,
+};
+
+void __init plat_early_device_setup(void)
+{
+	sh_early_platform_add_devices(mxg_early_devices,
+				   ARRAY_SIZE(mxg_early_devices));
 }

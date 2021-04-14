@@ -1,32 +1,20 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /***************************************************************************
 *   Copyright (C) 2006 by Joachim Fritschi, <jfritschi@freenet.de>        *
 *                                                                         *
-*   This program is free software; you can redistribute it and/or modify  *
-*   it under the terms of the GNU General Public License as published by  *
-*   the Free Software Foundation; either version 2 of the License, or     *
-*   (at your option) any later version.                                   *
-*                                                                         *
-*   This program is distributed in the hope that it will be useful,       *
-*   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
-*   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
-*   GNU General Public License for more details.                          *
-*                                                                         *
-*   You should have received a copy of the GNU General Public License     *
-*   along with this program; if not, write to the                         *
-*   Free Software Foundation, Inc.,                                       *
-*   59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.             *
 ***************************************************************************/
 
 .file "twofish-i586-asm.S"
 .text
 
+#include <linux/linkage.h>
 #include <asm/asm-offsets.h>
 
-/* return adress at 0 */
+/* return address at 0 */
 
 #define in_blk    12  /* input byte array address parameter*/
 #define out_blk   8  /* output byte array address parameter*/
-#define tfm       4  /* Twofish context structure */
+#define ctx       4  /* Twofish context structure */
 
 #define a_offset	0
 #define b_offset	4
@@ -219,19 +207,15 @@
 	xor	%esi,		d ## D;\
 	ror	$1,		d ## D;
 
-.align 4
-.global twofish_enc_blk
-.global twofish_dec_blk
-
-twofish_enc_blk:
+SYM_FUNC_START(twofish_enc_blk)
 	push	%ebp			/* save registers according to calling convention*/
 	push    %ebx
 	push    %esi
 	push    %edi
 
-	mov	tfm + 16(%esp),	%ebp	/* abuse the base pointer: set new base bointer to the crypto tfm */
-	add	$crypto_tfm_ctx_offset, %ebp	/* ctx adress */
-	mov     in_blk+16(%esp),%edi	/* input adress in edi */
+	mov	ctx + 16(%esp),	%ebp	/* abuse the base pointer: set new base
+					 * pointer to the ctx address */
+	mov     in_blk+16(%esp),%edi	/* input address in edi */
 
 	mov	(%edi),		%eax
 	mov	b_offset(%edi),	%ebx
@@ -277,17 +261,18 @@ twofish_enc_blk:
 	pop	%ebp
 	mov	$1,	%eax
 	ret
+SYM_FUNC_END(twofish_enc_blk)
 
-twofish_dec_blk:
+SYM_FUNC_START(twofish_dec_blk)
 	push	%ebp			/* save registers according to calling convention*/
 	push    %ebx
 	push    %esi
 	push    %edi
 
 
-	mov	tfm + 16(%esp),	%ebp	/* abuse the base pointer: set new base bointer to the crypto tfm */
-	add	$crypto_tfm_ctx_offset, %ebp	/* ctx adress */
-	mov     in_blk+16(%esp),%edi	/* input adress in edi */
+	mov	ctx + 16(%esp),	%ebp	/* abuse the base pointer: set new base
+					 * pointer to the ctx address */
+	mov     in_blk+16(%esp),%edi	/* input address in edi */
 
 	mov	(%edi),		%eax
 	mov	b_offset(%edi),	%ebx
@@ -333,3 +318,4 @@ twofish_dec_blk:
 	pop	%ebp
 	mov	$1,	%eax
 	ret
+SYM_FUNC_END(twofish_dec_blk)

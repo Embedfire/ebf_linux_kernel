@@ -9,6 +9,8 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/init.h>
@@ -39,13 +41,13 @@ int __init jffs2_create_slab_caches(void)
 
 	raw_dirent_slab = kmem_cache_create("jffs2_raw_dirent",
 					    sizeof(struct jffs2_raw_dirent),
-					    0, 0, NULL);
+					    0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!raw_dirent_slab)
 		goto err;
 
 	raw_inode_slab = kmem_cache_create("jffs2_raw_inode",
 					   sizeof(struct jffs2_raw_inode),
-					   0, 0, NULL);
+					   0, SLAB_HWCACHE_ALIGN, NULL);
 	if (!raw_inode_slab)
 		goto err;
 
@@ -95,25 +97,16 @@ int __init jffs2_create_slab_caches(void)
 
 void jffs2_destroy_slab_caches(void)
 {
-	if(full_dnode_slab)
-		kmem_cache_destroy(full_dnode_slab);
-	if(raw_dirent_slab)
-		kmem_cache_destroy(raw_dirent_slab);
-	if(raw_inode_slab)
-		kmem_cache_destroy(raw_inode_slab);
-	if(tmp_dnode_info_slab)
-		kmem_cache_destroy(tmp_dnode_info_slab);
-	if(raw_node_ref_slab)
-		kmem_cache_destroy(raw_node_ref_slab);
-	if(node_frag_slab)
-		kmem_cache_destroy(node_frag_slab);
-	if(inode_cache_slab)
-		kmem_cache_destroy(inode_cache_slab);
+	kmem_cache_destroy(full_dnode_slab);
+	kmem_cache_destroy(raw_dirent_slab);
+	kmem_cache_destroy(raw_inode_slab);
+	kmem_cache_destroy(tmp_dnode_info_slab);
+	kmem_cache_destroy(raw_node_ref_slab);
+	kmem_cache_destroy(node_frag_slab);
+	kmem_cache_destroy(inode_cache_slab);
 #ifdef CONFIG_JFFS2_FS_XATTR
-	if (xattr_datum_cache)
-		kmem_cache_destroy(xattr_datum_cache);
-	if (xattr_ref_cache)
-		kmem_cache_destroy(xattr_ref_cache);
+	kmem_cache_destroy(xattr_datum_cache);
+	kmem_cache_destroy(xattr_ref_cache);
 #endif
 }
 
@@ -284,10 +277,11 @@ void jffs2_free_inode_cache(struct jffs2_inode_cache *x)
 struct jffs2_xattr_datum *jffs2_alloc_xattr_datum(void)
 {
 	struct jffs2_xattr_datum *xd;
-	xd = kmem_cache_alloc(xattr_datum_cache, GFP_KERNEL);
+	xd = kmem_cache_zalloc(xattr_datum_cache, GFP_KERNEL);
 	dbg_memalloc("%p\n", xd);
+	if (!xd)
+		return NULL;
 
-	memset(xd, 0, sizeof(struct jffs2_xattr_datum));
 	xd->class = RAWNODE_CLASS_XATTR_DATUM;
 	xd->node = (void *)xd;
 	INIT_LIST_HEAD(&xd->xindex);
@@ -303,10 +297,11 @@ void jffs2_free_xattr_datum(struct jffs2_xattr_datum *xd)
 struct jffs2_xattr_ref *jffs2_alloc_xattr_ref(void)
 {
 	struct jffs2_xattr_ref *ref;
-	ref = kmem_cache_alloc(xattr_ref_cache, GFP_KERNEL);
+	ref = kmem_cache_zalloc(xattr_ref_cache, GFP_KERNEL);
 	dbg_memalloc("%p\n", ref);
+	if (!ref)
+		return NULL;
 
-	memset(ref, 0, sizeof(struct jffs2_xattr_ref));
 	ref->class = RAWNODE_CLASS_XATTR_REF;
 	ref->node = (void *)ref;
 	return ref;

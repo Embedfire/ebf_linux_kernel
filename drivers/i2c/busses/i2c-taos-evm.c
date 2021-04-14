@@ -1,22 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for the TAOS evaluation modules
  * These devices include an I2C master which can be controlled over the
  * serial port.
  *
- * Copyright (C) 2007 Jean Delvare <khali@linux-fr.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+ * Copyright (C) 2007 Jean Delvare <jdelvare@suse.de>
  */
 
 #include <linux/delay.h>
@@ -32,10 +20,12 @@
 
 #define TAOS_STATE_INIT		0
 #define TAOS_STATE_IDLE		1
-#define TAOS_STATE_SEND		2
+#define TAOS_STATE_EOFF		2
 #define TAOS_STATE_RECV		3
 
 #define TAOS_CMD_RESET		0x12
+#define TAOS_CMD_ECHO_ON	'+'
+#define TAOS_CMD_ECHO_OFF	'-'
 
 static DECLARE_WAIT_QUEUE_HEAD(wq);
 
@@ -49,7 +39,7 @@ struct taos_data {
 };
 
 /* TAOS TSL2550 EVM */
-static struct i2c_board_info tsl2550_info = {
+static const struct i2c_board_info tsl2550_info = {
 	I2C_BOARD_INFO("tsl2550", 0x39),
 };
 
@@ -59,10 +49,10 @@ static struct i2c_client *taos_instantiate_device(struct i2c_adapter *adapter)
 	if (!strncmp(adapter->name, "TAOS TSL2550 EVM", 16)) {
 		dev_info(&adapter->dev, "Instantiating device %s at 0x%02x\n",
 			tsl2550_info.type, tsl2550_info.addr);
-		return i2c_new_device(adapter, &tsl2550_info);
+		return i2c_new_client_device(adapter, &tsl2550_info);
 	}
 
-	return NULL;
+	return ERR_PTR(-ENODEV);
 }
 
 static int taos_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
@@ -102,17 +92,9 @@ static int taos_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 
 	/* Send the transaction to the TAOS EVM */
 	dev_dbg(&adapter->dev, "Command buffer: %s\n", taos->buffer);
-	taos->pos = 0;
-	taos->state = TAOS_STATE_SEND;
-	serio_write(serio, taos->buffer[0]);
-	wait_event_interruptible_timeout(wq, taos->state == TAOS_STATE_IDLE,
-					 msecs_to_jiffies(250));
-	if (taos->state != TAOS_STATE_IDLE) {
-		dev_err(&adapter->dev, "Transaction failed "
-			"(state=%d, pos=%d)\n", taos->state, taos->pos);
-		taos->addr = 0;
-		return -EIO;
-	}
+	for (p = taos->buffer; *p; p++)
+		serio_write(serio, *p);
+
 	taos->addr = addr;
 
 	/* Start the transaction and read the answer */
@@ -122,7 +104,7 @@ static int taos_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 	wait_event_interruptible_timeout(wq, taos->state == TAOS_STATE_IDLE,
 					 msecs_to_jiffies(150));
 	if (taos->state != TAOS_STATE_IDLE
-	 || taos->pos != 6) {
+	 || taos->pos != 5) {
 		dev_err(&adapter->dev, "Transaction timeout (pos=%d)\n",
 			taos->pos);
 		return -EIO;
@@ -130,7 +112,7 @@ static int taos_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 	dev_dbg(&adapter->dev, "Answer buffer: %s\n", taos->buffer);
 
 	/* Interpret the returned string */
-	p = taos->buffer + 2;
+	p = taos->buffer + 1;
 	p[3] = '\0';
 	if (!strcmp(p, "NAK"))
 		return -ENODEV;
@@ -140,7 +122,13 @@ static int taos_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 			return 0;
 	} else {
 		if (p[0] == 'x') {
-			data->byte = simple_strtol(p + 1, NULL, 16);
+			/*
+			 * Voluntarily dropping error code of kstrtou8 since all
+			 * error code that it could return are invalid according
+			 * to Documentation/i2c/fault-codes.rst.
+			 */
+			if (kstrtou8(p + 1, 16, &data->byte))
+				return -EPROTO;
 			return 0;
 		}
 	}
@@ -173,13 +161,9 @@ static irqreturn_t taos_interrupt(struct serio *serio, unsigned char data,
 			wake_up_interruptible(&wq);
 		}
 		break;
-	case TAOS_STATE_SEND:
-		if (taos->buffer[++taos->pos])
-			serio_write(serio, taos->buffer[taos->pos]);
-		else {
-			taos->state = TAOS_STATE_IDLE;
-			wake_up_interruptible(&wq);
-		}
+	case TAOS_STATE_EOFF:
+		taos->state = TAOS_STATE_IDLE;
+		wake_up_interruptible(&wq);
 		break;
 	case TAOS_STATE_RECV:
 		taos->buffer[taos->pos++] = data;
@@ -244,7 +228,7 @@ static int taos_connect(struct serio *serio, struct serio_driver *drv)
 
 	if (taos->state != TAOS_STATE_IDLE) {
 		err = -ENODEV;
-		dev_dbg(&serio->dev, "TAOS EVM reset failed (state=%d, "
+		dev_err(&serio->dev, "TAOS EVM reset failed (state=%d, "
 			"pos=%d)\n", taos->state, taos->pos);
 		goto exit_close;
 	}
@@ -257,10 +241,23 @@ static int taos_connect(struct serio *serio, struct serio_driver *drv)
 	}
 	strlcpy(adapter->name, name, sizeof(adapter->name));
 
+	/* Turn echo off for better performance */
+	taos->state = TAOS_STATE_EOFF;
+	serio_write(serio, TAOS_CMD_ECHO_OFF);
+
+	wait_event_interruptible_timeout(wq, taos->state == TAOS_STATE_IDLE,
+					 msecs_to_jiffies(250));
+	if (taos->state != TAOS_STATE_IDLE) {
+		err = -ENODEV;
+		dev_err(&serio->dev, "TAOS EVM echo off failed "
+			"(state=%d)\n", taos->state);
+		goto exit_close;
+	}
+
 	err = i2c_add_adapter(adapter);
 	if (err)
 		goto exit_close;
-	dev_dbg(&serio->dev, "Connected to TAOS EVM\n");
+	dev_info(&serio->dev, "Connected to TAOS EVM\n");
 
 	taos->client = taos_instantiate_device(adapter);
 	return 0;
@@ -268,7 +265,6 @@ static int taos_connect(struct serio *serio, struct serio_driver *drv)
  exit_close:
 	serio_close(serio);
  exit_kfree:
-	serio_set_drvdata(serio, NULL);
 	kfree(taos);
  exit:
 	return err;
@@ -278,17 +274,15 @@ static void taos_disconnect(struct serio *serio)
 {
 	struct taos_data *taos = serio_get_drvdata(serio);
 
-	if (taos->client)
-		i2c_unregister_device(taos->client);
+	i2c_unregister_device(taos->client);
 	i2c_del_adapter(&taos->adapter);
 	serio_close(serio);
-	serio_set_drvdata(serio, NULL);
 	kfree(taos);
 
-	dev_dbg(&serio->dev, "Disconnected from TAOS EVM\n");
+	dev_info(&serio->dev, "Disconnected from TAOS EVM\n");
 }
 
-static struct serio_device_id taos_serio_ids[] = {
+static const struct serio_device_id taos_serio_ids[] = {
 	{
 		.type	= SERIO_RS232,
 		.proto	= SERIO_TAOSEVM,
@@ -310,19 +304,8 @@ static struct serio_driver taos_drv = {
 	.interrupt	= taos_interrupt,
 };
 
-static int __init taos_init(void)
-{
-	return serio_register_driver(&taos_drv);
-}
+module_serio_driver(taos_drv);
 
-static void __exit taos_exit(void)
-{
-	serio_unregister_driver(&taos_drv);
-}
-
-MODULE_AUTHOR("Jean Delvare <khali@linux-fr.org>");
+MODULE_AUTHOR("Jean Delvare <jdelvare@suse.de>");
 MODULE_DESCRIPTION("TAOS evaluation module driver");
 MODULE_LICENSE("GPL");
-
-module_init(taos_init);
-module_exit(taos_exit);

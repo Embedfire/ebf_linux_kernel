@@ -1,10 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (C) Paul Mackerras 1997.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  *
  * NOTE: this code runs in 32 bit mode and is packaged as ELF32.
  */
@@ -235,7 +231,7 @@ memchr:
 	.globl	memcmp
 memcmp:
 	cmpwi	0,r5,0
-	blelr
+	ble	2f
 	mtctr	r5
 	addi	r6,r3,-1
 	addi	r4,r4,-1
@@ -243,6 +239,8 @@ memcmp:
 	lbzu	r0,1(r4)
 	subf.	r3,r0,r3
 	bdnzt	2,1b
+	blr
+2:	li	r3,0
 	blr
 
 

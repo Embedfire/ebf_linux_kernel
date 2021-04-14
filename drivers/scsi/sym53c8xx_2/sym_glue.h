@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Device driver for the SYMBIOS/LSILOGIC 53C8XX and 53C1010 family 
  * of PCI-SCSI IO processors.
@@ -21,20 +22,6 @@
  * Copyright (C) 1997 Richard Waltham <dormouse@farsrobt.demon.co.uk>
  *
  *-----------------------------------------------------------------------------
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef SYM_GLUE_H
@@ -174,7 +161,7 @@ struct sym_slcb {
  */
 struct sym_shcb {
 	/*
-	 *  Chip and controller indentification.
+	 *  Chip and controller identification.
 	 */
 	int		unit;
 	char		inst_name[16];
@@ -234,7 +221,7 @@ static inline struct sym_hcb * sym_get_hcb(struct Scsi_Host *host)
 /*
  *  Set the status field of a CAM CCB.
  */
-static __inline void 
+static inline void
 sym_set_cam_status(struct scsi_cmnd *cmd, int status)
 {
 	cmd->result &= ~(0xff  << 16);
@@ -244,7 +231,7 @@ sym_set_cam_status(struct scsi_cmnd *cmd, int status)
 /*
  *  Get the status field of a CAM CCB.
  */
-static __inline int 
+static inline int
 sym_get_cam_status(struct scsi_cmnd *cmd)
 {
 	return host_byte(cmd->result);
@@ -253,10 +240,10 @@ sym_get_cam_status(struct scsi_cmnd *cmd)
 /*
  *  Build CAM result for a successful IO and for a failed IO.
  */
-static __inline void sym_set_cam_result_ok(struct sym_ccb *cp, struct scsi_cmnd *cmd, int resid)
+static inline void sym_set_cam_result_ok(struct sym_ccb *cp, struct scsi_cmnd *cmd, int resid)
 {
 	scsi_set_resid(cmd, resid);
-	cmd->result = (((DID_OK) << 16) + ((cp->ssss_status) & 0x7f));
+	cmd->result = (DID_OK << 16) | (cp->ssss_status & 0x7f);
 }
 void sym_set_cam_result_error(struct sym_hcb *np, struct sym_ccb *cp, int resid);
 

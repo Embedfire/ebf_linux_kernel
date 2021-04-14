@@ -1,24 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * This file does the necessary interface mapping between the bootwrapper
  * device tree operations and the interface provided by shared source
  * files flatdevicetree.[ch].
  *
  * Copyright 2007 David Gibson, IBM Corporation.
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
  */
 
 #include <stddef.h>
@@ -44,12 +30,12 @@
 
 #define offset_devp(off)	\
 	({ \
-		int _offset = (off); \
+		unsigned long _offset = (off); \
 		check_err(_offset) ? NULL : (void *)(_offset+1); \
 	})
 
-#define devp_offset_find(devp)	(((int)(devp))-1)
-#define devp_offset(devp)	(devp ? ((int)(devp))-1 : 0)
+#define devp_offset_find(devp)	(((unsigned long)(devp))-1)
+#define devp_offset(devp)	(devp ? ((unsigned long)(devp))-1 : 0)
 
 static void *fdt;
 static void *buf; /* = NULL */
@@ -103,6 +89,11 @@ static int fdt_wrapper_setprop(const void *devp, const char *name,
 	}
 
 	return check_err(rc);
+}
+
+static int fdt_wrapper_del_node(const void *devp)
+{
+	return fdt_del_node(fdt, devp_offset(devp));
 }
 
 static void *fdt_wrapper_get_parent(const void *devp)
@@ -165,6 +156,7 @@ static unsigned long fdt_wrapper_finalize(void)
 void fdt_init(void *blob)
 {
 	int err;
+	int bufsize;
 
 	dt_ops.finddevice = fdt_wrapper_finddevice;
 	dt_ops.getprop = fdt_wrapper_getprop;
@@ -173,21 +165,21 @@ void fdt_init(void *blob)
 	dt_ops.create_node = fdt_wrapper_create_node;
 	dt_ops.find_node_by_prop_value = fdt_wrapper_find_node_by_prop_value;
 	dt_ops.find_node_by_compatible = fdt_wrapper_find_node_by_compatible;
+	dt_ops.del_node = fdt_wrapper_del_node;
 	dt_ops.get_path = fdt_wrapper_get_path;
 	dt_ops.finalize = fdt_wrapper_finalize;
 
 	/* Make sure the dt blob is the right version and so forth */
 	fdt = blob;
-	err = fdt_open_into(fdt, fdt, fdt_totalsize(blob));
-	if (err == -FDT_ERR_NOSPACE) {
-		int bufsize = fdt_totalsize(fdt) + 4;
-		buf = malloc(bufsize);
-		err = fdt_open_into(fdt, buf, bufsize);
-	}
+	bufsize = fdt_totalsize(fdt) + EXPAND_GRANULARITY;
+	buf = malloc(bufsize);
+	if(!buf)
+		fatal("malloc failed. can't relocate the device tree\n\r");
+
+	err = fdt_open_into(fdt, buf, bufsize);
 
 	if (err != 0)
 		fatal("fdt_init(): %s\n\r", fdt_strerror(err));
 
-	if (buf)
-		fdt = buf;
+	fdt = buf;
 }

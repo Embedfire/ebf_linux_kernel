@@ -1,19 +1,35 @@
-/* Copyright (c) 2007 Coraid, Inc.  See COPYING for GPL terms. */
+/* Copyright (c) 2013 Coraid, Inc.  See COPYING for GPL terms. */
 /*
  * aoeblk.c
  * block device routines
  */
 
+#include <linux/kernel.h>
 #include <linux/hdreg.h>
-#include <linux/blkdev.h>
+#include <linux/blk-mq.h>
 #include <linux/backing-dev.h>
 #include <linux/fs.h>
 #include <linux/ioctl.h>
+#include <linux/slab.h>
+#include <linux/ratelimit.h>
 #include <linux/genhd.h>
 #include <linux/netdevice.h>
+#include <linux/mutex.h>
+#include <linux/export.h>
+#include <linux/moduleparam.h>
+#include <linux/debugfs.h>
+#include <scsi/sg.h>
 #include "aoe.h"
 
+static DEFINE_MUTEX(aoeblk_mutex);
 static struct kmem_cache *buf_pool_cache;
+static struct dentry *aoe_debugfs_dir;
+
+/* GPFS needs a larger value than the default. */
+static int aoe_maxsectors;
+module_param(aoe_maxsectors, int, 0644);
+MODULE_PARM_DESC(aoe_maxsectors,
+	"When nonzero, set the maximum number of sectors per I/O request");
 
 static ssize_t aoedisk_show_state(struct device *dev,
 				  struct device_attribute *attr, char *page)
@@ -37,7 +53,7 @@ static ssize_t aoedisk_show_mac(struct device *dev,
 
 	if (t == NULL)
 		return snprintf(page, PAGE_SIZE, "none\n");
-	return snprintf(page, PAGE_SIZE, "%012llx\n", mac_addr(t->addr));
+	return snprintf(page, PAGE_SIZE, "%pm\n", t->addr);
 }
 static ssize_t aoedisk_show_netif(struct device *dev,
 				  struct device_attribute *attr, char *page)
@@ -53,7 +69,7 @@ static ssize_t aoedisk_show_netif(struct device *dev,
 	nd = nds;
 	ne = nd + ARRAY_SIZE(nds);
 	t = d->targets;
-	te = t + NTARGETS;
+	te = t + d->ntargets;
 	for (; t < te && *t; t++) {
 		ifp = (*t)->ifs;
 		e = ifp + NAOEIFS;
@@ -71,9 +87,9 @@ static ssize_t aoedisk_show_netif(struct device *dev,
 	if (*nd == NULL)
 		return snprintf(page, PAGE_SIZE, "none\n");
 	for (p = page; nd < ne; nd++)
-		p += snprintf(p, PAGE_SIZE - (p-page), "%s%s",
+		p += scnprintf(p, PAGE_SIZE - (p-page), "%s%s",
 			p == page ? "" : ",", (*nd)->name);
-	p += snprintf(p, PAGE_SIZE - (p-page), "\n");
+	p += scnprintf(p, PAGE_SIZE - (p-page), "\n");
 	return p-page;
 }
 /* firmware version */
@@ -85,141 +101,184 @@ static ssize_t aoedisk_show_fwver(struct device *dev,
 
 	return snprintf(page, PAGE_SIZE, "0x%04x\n", (unsigned int) d->fw_ver);
 }
+static ssize_t aoedisk_show_payload(struct device *dev,
+				    struct device_attribute *attr, char *page)
+{
+	struct gendisk *disk = dev_to_disk(dev);
+	struct aoedev *d = disk->private_data;
 
-static DEVICE_ATTR(state, S_IRUGO, aoedisk_show_state, NULL);
-static DEVICE_ATTR(mac, S_IRUGO, aoedisk_show_mac, NULL);
-static DEVICE_ATTR(netif, S_IRUGO, aoedisk_show_netif, NULL);
+	return snprintf(page, PAGE_SIZE, "%lu\n", d->maxbcnt);
+}
+
+static int aoedisk_debugfs_show(struct seq_file *s, void *ignored)
+{
+	struct aoedev *d;
+	struct aoetgt **t, **te;
+	struct aoeif *ifp, *ife;
+	unsigned long flags;
+	char c;
+
+	d = s->private;
+	seq_printf(s, "rttavg: %d rttdev: %d\n",
+		d->rttavg >> RTTSCALE,
+		d->rttdev >> RTTDSCALE);
+	seq_printf(s, "nskbpool: %d\n", skb_queue_len(&d->skbpool));
+	seq_printf(s, "kicked: %ld\n", d->kicked);
+	seq_printf(s, "maxbcnt: %ld\n", d->maxbcnt);
+	seq_printf(s, "ref: %ld\n", d->ref);
+
+	spin_lock_irqsave(&d->lock, flags);
+	t = d->targets;
+	te = t + d->ntargets;
+	for (; t < te && *t; t++) {
+		c = '\t';
+		seq_printf(s, "falloc: %ld\n", (*t)->falloc);
+		seq_printf(s, "ffree: %p\n",
+			list_empty(&(*t)->ffree) ? NULL : (*t)->ffree.next);
+		seq_printf(s, "%pm:%d:%d:%d\n", (*t)->addr, (*t)->nout,
+			(*t)->maxout, (*t)->nframes);
+		seq_printf(s, "\tssthresh:%d\n", (*t)->ssthresh);
+		seq_printf(s, "\ttaint:%d\n", (*t)->taint);
+		seq_printf(s, "\tr:%d\n", (*t)->rpkts);
+		seq_printf(s, "\tw:%d\n", (*t)->wpkts);
+		ifp = (*t)->ifs;
+		ife = ifp + ARRAY_SIZE((*t)->ifs);
+		for (; ifp->nd && ifp < ife; ifp++) {
+			seq_printf(s, "%c%s", c, ifp->nd->name);
+			c = ',';
+		}
+		seq_puts(s, "\n");
+	}
+	spin_unlock_irqrestore(&d->lock, flags);
+
+	return 0;
+}
+
+static int aoe_debugfs_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, aoedisk_debugfs_show, inode->i_private);
+}
+
+static DEVICE_ATTR(state, 0444, aoedisk_show_state, NULL);
+static DEVICE_ATTR(mac, 0444, aoedisk_show_mac, NULL);
+static DEVICE_ATTR(netif, 0444, aoedisk_show_netif, NULL);
 static struct device_attribute dev_attr_firmware_version = {
-	.attr = { .name = "firmware-version", .mode = S_IRUGO, .owner = THIS_MODULE },
+	.attr = { .name = "firmware-version", .mode = 0444 },
 	.show = aoedisk_show_fwver,
 };
+static DEVICE_ATTR(payload, 0444, aoedisk_show_payload, NULL);
 
 static struct attribute *aoe_attrs[] = {
 	&dev_attr_state.attr,
 	&dev_attr_mac.attr,
 	&dev_attr_netif.attr,
 	&dev_attr_firmware_version.attr,
+	&dev_attr_payload.attr,
 	NULL,
 };
 
-static const struct attribute_group attr_group = {
+static const struct attribute_group aoe_attr_group = {
 	.attrs = aoe_attrs,
 };
 
-static int
-aoedisk_add_sysfs(struct aoedev *d)
+static const struct attribute_group *aoe_attr_groups[] = {
+	&aoe_attr_group,
+	NULL,
+};
+
+static const struct file_operations aoe_debugfs_fops = {
+	.open = aoe_debugfs_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+static void
+aoedisk_add_debugfs(struct aoedev *d)
 {
-	return sysfs_create_group(&d->gd->dev.kobj, &attr_group);
+	char *p;
+
+	if (aoe_debugfs_dir == NULL)
+		return;
+	p = strchr(d->gd->disk_name, '/');
+	if (p == NULL)
+		p = d->gd->disk_name;
+	else
+		p++;
+	BUG_ON(*p == '\0');
+	d->debugfs = debugfs_create_file(p, 0444, aoe_debugfs_dir, d,
+					 &aoe_debugfs_fops);
 }
 void
-aoedisk_rm_sysfs(struct aoedev *d)
+aoedisk_rm_debugfs(struct aoedev *d)
 {
-	sysfs_remove_group(&d->gd->dev.kobj, &attr_group);
+	debugfs_remove(d->debugfs);
+	d->debugfs = NULL;
 }
 
 static int
-aoeblk_open(struct inode *inode, struct file *filp)
+aoeblk_open(struct block_device *bdev, fmode_t mode)
 {
-	struct aoedev *d;
+	struct aoedev *d = bdev->bd_disk->private_data;
 	ulong flags;
 
-	d = inode->i_bdev->bd_disk->private_data;
+	if (!virt_addr_valid(d)) {
+		pr_crit("aoe: invalid device pointer in %s\n",
+			__func__);
+		WARN_ON(1);
+		return -ENODEV;
+	}
+	if (!(d->flags & DEVFL_UP) || d->flags & DEVFL_TKILL)
+		return -ENODEV;
 
+	mutex_lock(&aoeblk_mutex);
 	spin_lock_irqsave(&d->lock, flags);
-	if (d->flags & DEVFL_UP) {
+	if (d->flags & DEVFL_UP && !(d->flags & DEVFL_TKILL)) {
 		d->nopen++;
 		spin_unlock_irqrestore(&d->lock, flags);
+		mutex_unlock(&aoeblk_mutex);
 		return 0;
 	}
 	spin_unlock_irqrestore(&d->lock, flags);
+	mutex_unlock(&aoeblk_mutex);
 	return -ENODEV;
 }
 
-static int
-aoeblk_release(struct inode *inode, struct file *filp)
+static void
+aoeblk_release(struct gendisk *disk, fmode_t mode)
 {
-	struct aoedev *d;
+	struct aoedev *d = disk->private_data;
 	ulong flags;
-
-	d = inode->i_bdev->bd_disk->private_data;
 
 	spin_lock_irqsave(&d->lock, flags);
 
 	if (--d->nopen == 0) {
 		spin_unlock_irqrestore(&d->lock, flags);
 		aoecmd_cfg(d->aoemajor, d->aoeminor);
-		return 0;
+		return;
 	}
 	spin_unlock_irqrestore(&d->lock, flags);
-
-	return 0;
 }
 
-static int
-aoeblk_make_request(struct request_queue *q, struct bio *bio)
+static blk_status_t aoeblk_queue_rq(struct blk_mq_hw_ctx *hctx,
+				    const struct blk_mq_queue_data *bd)
 {
-	struct aoedev *d;
-	struct buf *buf;
-	struct sk_buff *sl;
-	ulong flags;
+	struct aoedev *d = hctx->queue->queuedata;
 
-	blk_queue_bounce(q, &bio);
-
-	if (bio == NULL) {
-		printk(KERN_ERR "aoe: bio is NULL\n");
-		BUG();
-		return 0;
-	}
-	d = bio->bi_bdev->bd_disk->private_data;
-	if (d == NULL) {
-		printk(KERN_ERR "aoe: bd_disk->private_data is NULL\n");
-		BUG();
-		bio_endio(bio, -ENXIO);
-		return 0;
-	} else if (bio->bi_io_vec == NULL) {
-		printk(KERN_ERR "aoe: bi_io_vec is NULL\n");
-		BUG();
-		bio_endio(bio, -ENXIO);
-		return 0;
-	}
-	buf = mempool_alloc(d->bufpool, GFP_NOIO);
-	if (buf == NULL) {
-		printk(KERN_INFO "aoe: buf allocation failure\n");
-		bio_endio(bio, -ENOMEM);
-		return 0;
-	}
-	memset(buf, 0, sizeof(*buf));
-	INIT_LIST_HEAD(&buf->bufs);
-	buf->stime = jiffies;
-	buf->bio = bio;
-	buf->resid = bio->bi_size;
-	buf->sector = bio->bi_sector;
-	buf->bv = &bio->bi_io_vec[bio->bi_idx];
-	buf->bv_resid = buf->bv->bv_len;
-	WARN_ON(buf->bv_resid == 0);
-	buf->bv_off = buf->bv->bv_offset;
-
-	spin_lock_irqsave(&d->lock, flags);
+	spin_lock_irq(&d->lock);
 
 	if ((d->flags & DEVFL_UP) == 0) {
-		printk(KERN_INFO "aoe: device %ld.%d is not up\n",
+		pr_info_ratelimited("aoe: device %ld.%d is not up\n",
 			d->aoemajor, d->aoeminor);
-		spin_unlock_irqrestore(&d->lock, flags);
-		mempool_free(buf, d->bufpool);
-		bio_endio(bio, -ENXIO);
-		return 0;
+		spin_unlock_irq(&d->lock);
+		blk_mq_start_request(bd->rq);
+		return BLK_STS_IOERR;
 	}
 
-	list_add_tail(&buf->bufs, &d->bufq);
-
+	list_add_tail(&bd->rq->queuelist, &d->rq_list);
 	aoecmd_work(d);
-	sl = d->sendq_hd;
-	d->sendq_hd = d->sendq_tl = NULL;
-
-	spin_unlock_irqrestore(&d->lock, flags);
-	aoenet_xmit(sl);
-
-	return 0;
+	spin_unlock_irq(&d->lock);
+	return BLK_STS_OK;
 }
 
 static int
@@ -238,11 +297,45 @@ aoeblk_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 	return 0;
 }
 
-static struct block_device_operations aoe_bdops = {
+static int
+aoeblk_ioctl(struct block_device *bdev, fmode_t mode, uint cmd, ulong arg)
+{
+	struct aoedev *d;
+
+	if (!arg)
+		return -EINVAL;
+
+	d = bdev->bd_disk->private_data;
+	if ((d->flags & DEVFL_UP) == 0) {
+		pr_err("aoe: disk not up\n");
+		return -ENODEV;
+	}
+
+	if (cmd == HDIO_GET_IDENTITY) {
+		if (!copy_to_user((void __user *) arg, &d->ident,
+			sizeof(d->ident)))
+			return 0;
+		return -EFAULT;
+	}
+
+	/* udev calls scsi_id, which uses SG_IO, resulting in noise */
+	if (cmd != SG_IO)
+		pr_info("aoe: unknown ioctl 0x%x\n", cmd);
+
+	return -ENOTTY;
+}
+
+static const struct block_device_operations aoe_bdops = {
 	.open = aoeblk_open,
 	.release = aoeblk_release,
+	.ioctl = aoeblk_ioctl,
+	.compat_ioctl = blkdev_compat_ptr_ioctl,
 	.getgeo = aoeblk_getgeo,
 	.owner = THIS_MODULE,
+};
+
+static const struct blk_mq_ops aoeblk_mq_ops = {
+	.queue_rq	= aoeblk_queue_rq,
 };
 
 /* alloc_disk and add_disk can sleep */
@@ -251,59 +344,113 @@ aoeblk_gdalloc(void *vp)
 {
 	struct aoedev *d = vp;
 	struct gendisk *gd;
+	mempool_t *mp;
+	struct request_queue *q;
+	struct blk_mq_tag_set *set;
 	ulong flags;
+	int late = 0;
+	int err;
+
+	spin_lock_irqsave(&d->lock, flags);
+	if (d->flags & DEVFL_GDALLOC
+	&& !(d->flags & DEVFL_TKILL)
+	&& !(d->flags & DEVFL_GD_NOW))
+		d->flags |= DEVFL_GD_NOW;
+	else
+		late = 1;
+	spin_unlock_irqrestore(&d->lock, flags);
+	if (late)
+		return;
 
 	gd = alloc_disk(AOE_PARTITIONS);
 	if (gd == NULL) {
-		printk(KERN_ERR
-			"aoe: cannot allocate disk structure for %ld.%d\n",
+		pr_err("aoe: cannot allocate disk structure for %ld.%d\n",
 			d->aoemajor, d->aoeminor);
 		goto err;
 	}
 
-	d->bufpool = mempool_create_slab_pool(MIN_BUFS, buf_pool_cache);
-	if (d->bufpool == NULL) {
+	mp = mempool_create(MIN_BUFS, mempool_alloc_slab, mempool_free_slab,
+		buf_pool_cache);
+	if (mp == NULL) {
 		printk(KERN_ERR "aoe: cannot allocate bufpool for %ld.%d\n",
 			d->aoemajor, d->aoeminor);
 		goto err_disk;
 	}
 
-	blk_queue_make_request(&d->blkq, aoeblk_make_request);
-	if (bdi_init(&d->blkq.backing_dev_info))
+	set = &d->tag_set;
+	set->ops = &aoeblk_mq_ops;
+	set->cmd_size = sizeof(struct aoe_req);
+	set->nr_hw_queues = 1;
+	set->queue_depth = 128;
+	set->numa_node = NUMA_NO_NODE;
+	set->flags = BLK_MQ_F_SHOULD_MERGE;
+	err = blk_mq_alloc_tag_set(set);
+	if (err) {
+		pr_err("aoe: cannot allocate tag set for %ld.%d\n",
+			d->aoemajor, d->aoeminor);
 		goto err_mempool;
+	}
+
+	q = blk_mq_init_queue(set);
+	if (IS_ERR(q)) {
+		pr_err("aoe: cannot allocate block queue for %ld.%d\n",
+			d->aoemajor, d->aoeminor);
+		blk_mq_free_tag_set(set);
+		goto err_mempool;
+	}
+
 	spin_lock_irqsave(&d->lock, flags);
+	WARN_ON(!(d->flags & DEVFL_GD_NOW));
+	WARN_ON(!(d->flags & DEVFL_GDALLOC));
+	WARN_ON(d->flags & DEVFL_TKILL);
+	WARN_ON(d->gd);
+	WARN_ON(d->flags & DEVFL_UP);
+	blk_queue_max_hw_sectors(q, BLK_DEF_MAX_SECTORS);
+	blk_queue_io_opt(q, SZ_2M);
+	d->bufpool = mp;
+	d->blkq = gd->queue = q;
+	q->queuedata = d;
+	d->gd = gd;
+	if (aoe_maxsectors)
+		blk_queue_max_hw_sectors(q, aoe_maxsectors);
 	gd->major = AOE_MAJOR;
-	gd->first_minor = d->sysminor * AOE_PARTITIONS;
+	gd->first_minor = d->sysminor;
 	gd->fops = &aoe_bdops;
 	gd->private_data = d;
-	gd->capacity = d->ssize;
+	set_capacity(gd, d->ssize);
 	snprintf(gd->disk_name, sizeof gd->disk_name, "etherd/e%ld.%d",
 		d->aoemajor, d->aoeminor);
 
-	gd->queue = &d->blkq;
-	d->gd = gd;
 	d->flags &= ~DEVFL_GDALLOC;
 	d->flags |= DEVFL_UP;
 
 	spin_unlock_irqrestore(&d->lock, flags);
 
-	add_disk(gd);
-	aoedisk_add_sysfs(d);
+	device_add_disk(NULL, gd, aoe_attr_groups);
+	aoedisk_add_debugfs(d);
+
+	spin_lock_irqsave(&d->lock, flags);
+	WARN_ON(!(d->flags & DEVFL_GD_NOW));
+	d->flags &= ~DEVFL_GD_NOW;
+	spin_unlock_irqrestore(&d->lock, flags);
 	return;
 
 err_mempool:
-	mempool_destroy(d->bufpool);
+	mempool_destroy(mp);
 err_disk:
 	put_disk(gd);
 err:
 	spin_lock_irqsave(&d->lock, flags);
-	d->flags &= ~DEVFL_GDALLOC;
+	d->flags &= ~DEVFL_GD_NOW;
+	schedule_work(&d->work);
 	spin_unlock_irqrestore(&d->lock, flags);
 }
 
 void
 aoeblk_exit(void)
 {
+	debugfs_remove_recursive(aoe_debugfs_dir);
+	aoe_debugfs_dir = NULL;
 	kmem_cache_destroy(buf_pool_cache);
 }
 
@@ -315,7 +462,7 @@ aoeblk_init(void)
 					   0, 0, NULL);
 	if (buf_pool_cache == NULL)
 		return -ENOMEM;
-
+	aoe_debugfs_dir = debugfs_create_dir("aoe", NULL);
 	return 0;
 }
 

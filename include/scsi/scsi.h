@@ -1,185 +1,34 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This header file contains public constants and structures used by
- * the scsi code for linux.
- *
- * For documentation on the OPCODES, MESSAGES, and SENSE values,
- * please consult the SCSI standard.
+ * the SCSI initiator code.
  */
 #ifndef _SCSI_SCSI_H
 #define _SCSI_SCSI_H
 
 #include <linux/types.h>
-#include <scsi/scsi_cmnd.h>
+#include <linux/scatterlist.h>
+#include <linux/kernel.h>
+#include <scsi/scsi_common.h>
+#include <scsi/scsi_proto.h>
+
+struct scsi_cmnd;
+
+enum scsi_timeouts {
+	SCSI_DEFAULT_EH_TIMEOUT		= 10 * HZ,
+};
 
 /*
- * The maximum number of SG segments that we will put inside a
- * scatterlist (unless chaining is used). Should ideally fit inside a
- * single page, to avoid a higher order allocation.  We could define this
- * to SG_MAX_SINGLE_ALLOC to pack correctly at the highest order.  The
- * minimum value is 32
+ * DIX-capable adapters effectively support infinite chaining for the
+ * protection information scatterlist
  */
-#define SCSI_MAX_SG_SEGMENTS	128
-
-/*
- * Like SCSI_MAX_SG_SEGMENTS, but for archs that have sg chaining. This limit
- * is totally arbitrary, a setting of 2048 will get you at least 8mb ios.
- */
-#ifdef ARCH_HAS_SG_CHAIN
-#define SCSI_MAX_SG_CHAIN_SEGMENTS	2048
-#else
-#define SCSI_MAX_SG_CHAIN_SEGMENTS	SCSI_MAX_SG_SEGMENTS
-#endif
+#define SCSI_MAX_PROT_SG_SEGMENTS	0xFFFF
 
 /*
  * Special value for scanning to specify scanning or rescanning of all
  * possible channels, (target) ids, or luns on a given shost.
  */
 #define SCAN_WILD_CARD	~0
-
-/*
- *      SCSI opcodes
- */
-
-#define TEST_UNIT_READY       0x00
-#define REZERO_UNIT           0x01
-#define REQUEST_SENSE         0x03
-#define FORMAT_UNIT           0x04
-#define READ_BLOCK_LIMITS     0x05
-#define REASSIGN_BLOCKS       0x07
-#define INITIALIZE_ELEMENT_STATUS 0x07
-#define READ_6                0x08
-#define WRITE_6               0x0a
-#define SEEK_6                0x0b
-#define READ_REVERSE          0x0f
-#define WRITE_FILEMARKS       0x10
-#define SPACE                 0x11
-#define INQUIRY               0x12
-#define RECOVER_BUFFERED_DATA 0x14
-#define MODE_SELECT           0x15
-#define RESERVE               0x16
-#define RELEASE               0x17
-#define COPY                  0x18
-#define ERASE                 0x19
-#define MODE_SENSE            0x1a
-#define START_STOP            0x1b
-#define RECEIVE_DIAGNOSTIC    0x1c
-#define SEND_DIAGNOSTIC       0x1d
-#define ALLOW_MEDIUM_REMOVAL  0x1e
-
-#define SET_WINDOW            0x24
-#define READ_CAPACITY         0x25
-#define READ_10               0x28
-#define WRITE_10              0x2a
-#define SEEK_10               0x2b
-#define POSITION_TO_ELEMENT   0x2b
-#define WRITE_VERIFY          0x2e
-#define VERIFY                0x2f
-#define SEARCH_HIGH           0x30
-#define SEARCH_EQUAL          0x31
-#define SEARCH_LOW            0x32
-#define SET_LIMITS            0x33
-#define PRE_FETCH             0x34
-#define READ_POSITION         0x34
-#define SYNCHRONIZE_CACHE     0x35
-#define LOCK_UNLOCK_CACHE     0x36
-#define READ_DEFECT_DATA      0x37
-#define MEDIUM_SCAN           0x38
-#define COMPARE               0x39
-#define COPY_VERIFY           0x3a
-#define WRITE_BUFFER          0x3b
-#define READ_BUFFER           0x3c
-#define UPDATE_BLOCK          0x3d
-#define READ_LONG             0x3e
-#define WRITE_LONG            0x3f
-#define CHANGE_DEFINITION     0x40
-#define WRITE_SAME            0x41
-#define READ_TOC              0x43
-#define LOG_SELECT            0x4c
-#define LOG_SENSE             0x4d
-#define XDWRITEREAD_10        0x53
-#define MODE_SELECT_10        0x55
-#define RESERVE_10            0x56
-#define RELEASE_10            0x57
-#define MODE_SENSE_10         0x5a
-#define PERSISTENT_RESERVE_IN 0x5e
-#define PERSISTENT_RESERVE_OUT 0x5f
-#define VARIABLE_LENGTH_CMD   0x7f
-#define REPORT_LUNS           0xa0
-#define MAINTENANCE_IN        0xa3
-#define MAINTENANCE_OUT       0xa4
-#define MOVE_MEDIUM           0xa5
-#define EXCHANGE_MEDIUM       0xa6
-#define READ_12               0xa8
-#define WRITE_12              0xaa
-#define WRITE_VERIFY_12       0xae
-#define SEARCH_HIGH_12        0xb0
-#define SEARCH_EQUAL_12       0xb1
-#define SEARCH_LOW_12         0xb2
-#define READ_ELEMENT_STATUS   0xb8
-#define SEND_VOLUME_TAG       0xb6
-#define WRITE_LONG_2          0xea
-#define READ_16               0x88
-#define WRITE_16              0x8a
-#define VERIFY_16	      0x8f
-#define SERVICE_ACTION_IN     0x9e
-/* values for service action in */
-#define	SAI_READ_CAPACITY_16  0x10
-/* values for maintenance in */
-#define MI_REPORT_TARGET_PGS  0x0a
-/* values for maintenance out */
-#define MO_SET_TARGET_PGS     0x0a
-
-/* Values for T10/04-262r7 */
-#define	ATA_16		      0x85	/* 16-byte pass-thru */
-#define	ATA_12		      0xa1	/* 12-byte pass-thru */
-
-/*
- *	SCSI command lengths
- */
-
-#define SCSI_MAX_VARLEN_CDB_SIZE 260
-
-/* defined in T10 SCSI Primary Commands-2 (SPC2) */
-struct scsi_varlen_cdb_hdr {
-	u8 opcode;        /* opcode always == VARIABLE_LENGTH_CMD */
-	u8 control;
-	u8 misc[5];
-	u8 additional_cdb_length;         /* total cdb length - 8 */
-	__be16 service_action;
-	/* service specific data follows */
-};
-
-static inline unsigned
-scsi_varlen_cdb_length(const void *hdr)
-{
-	return ((struct scsi_varlen_cdb_hdr *)hdr)->additional_cdb_length + 8;
-}
-
-extern const unsigned char scsi_command_size_tbl[8];
-#define COMMAND_SIZE(opcode) scsi_command_size_tbl[((opcode) >> 5) & 7]
-
-static inline unsigned
-scsi_command_size(const unsigned char *cmnd)
-{
-	return (cmnd[0] == VARIABLE_LENGTH_CMD) ?
-		scsi_varlen_cdb_length(cmnd) : COMMAND_SIZE(cmnd[0]);
-}
-
-/*
- *  SCSI Architecture Model (SAM) Status codes. Taken from SAM-3 draft
- *  T10/1561-D Revision 4 Draft dated 7th November 2002.
- */
-#define SAM_STAT_GOOD            0x00
-#define SAM_STAT_CHECK_CONDITION 0x02
-#define SAM_STAT_CONDITION_MET   0x04
-#define SAM_STAT_BUSY            0x08
-#define SAM_STAT_INTERMEDIATE    0x10
-#define SAM_STAT_INTERMEDIATE_CONDITION_MET 0x14
-#define SAM_STAT_RESERVATION_CONFLICT 0x18
-#define SAM_STAT_COMMAND_TERMINATED 0x22	/* obsolete in SAM-3 */
-#define SAM_STAT_TASK_SET_FULL   0x28
-#define SAM_STAT_ACA_ACTIVE      0x30
-#define SAM_STAT_TASK_ABORTED    0x40
 
 /** scsi_status_is_good - check the status return.
  *
@@ -198,89 +47,14 @@ static inline int scsi_status_is_good(int status)
 	 */
 	status &= 0xfe;
 	return ((status == SAM_STAT_GOOD) ||
+		(status == SAM_STAT_CONDITION_MET) ||
+		/* Next two "intermediate" statuses are obsolete in SAM-4 */
 		(status == SAM_STAT_INTERMEDIATE) ||
 		(status == SAM_STAT_INTERMEDIATE_CONDITION_MET) ||
 		/* FIXME: this is obsolete in SAM-3 */
 		(status == SAM_STAT_COMMAND_TERMINATED));
 }
 
-/*
- *  Status codes. These are deprecated as they are shifted 1 bit right
- *  from those found in the SCSI standards. This causes confusion for
- *  applications that are ported to several OSes. Prefer SAM Status codes
- *  above.
- */
-
-#define GOOD                 0x00
-#define CHECK_CONDITION      0x01
-#define CONDITION_GOOD       0x02
-#define BUSY                 0x04
-#define INTERMEDIATE_GOOD    0x08
-#define INTERMEDIATE_C_GOOD  0x0a
-#define RESERVATION_CONFLICT 0x0c
-#define COMMAND_TERMINATED   0x11
-#define QUEUE_FULL           0x14
-#define ACA_ACTIVE           0x18
-#define TASK_ABORTED         0x20
-
-#define STATUS_MASK          0xfe
-
-/*
- *  SENSE KEYS
- */
-
-#define NO_SENSE            0x00
-#define RECOVERED_ERROR     0x01
-#define NOT_READY           0x02
-#define MEDIUM_ERROR        0x03
-#define HARDWARE_ERROR      0x04
-#define ILLEGAL_REQUEST     0x05
-#define UNIT_ATTENTION      0x06
-#define DATA_PROTECT        0x07
-#define BLANK_CHECK         0x08
-#define COPY_ABORTED        0x0a
-#define ABORTED_COMMAND     0x0b
-#define VOLUME_OVERFLOW     0x0d
-#define MISCOMPARE          0x0e
-
-
-/*
- *  DEVICE TYPES
- *  Please keep them in 0x%02x format for $MODALIAS to work
- */
-
-#define TYPE_DISK           0x00
-#define TYPE_TAPE           0x01
-#define TYPE_PRINTER        0x02
-#define TYPE_PROCESSOR      0x03    /* HP scanners use this */
-#define TYPE_WORM           0x04    /* Treated as ROM by our system */
-#define TYPE_ROM            0x05
-#define TYPE_SCANNER        0x06
-#define TYPE_MOD            0x07    /* Magneto-optical disk - 
-				     * - treated as TYPE_DISK */
-#define TYPE_MEDIUM_CHANGER 0x08
-#define TYPE_COMM           0x09    /* Communications device */
-#define TYPE_RAID           0x0c
-#define TYPE_ENCLOSURE      0x0d    /* Enclosure Services Device */
-#define TYPE_RBC	    0x0e
-#define TYPE_NO_LUN         0x7f
-
-/* SCSI protocols; these are taken from SPC-3 section 7.5 */
-enum scsi_protocol {
-	SCSI_PROTOCOL_FCP = 0,	/* Fibre Channel */
-	SCSI_PROTOCOL_SPI = 1,	/* parallel SCSI */
-	SCSI_PROTOCOL_SSA = 2,	/* Serial Storage Architecture - Obsolete */
-	SCSI_PROTOCOL_SBP = 3,	/* firewire */
-	SCSI_PROTOCOL_SRP = 4,	/* Infiniband RDMA */
-	SCSI_PROTOCOL_ISCSI = 5,
-	SCSI_PROTOCOL_SAS = 6,
-	SCSI_PROTOCOL_ADT = 7,	/* Media Changers */
-	SCSI_PROTOCOL_ATA = 8,
-	SCSI_PROTOCOL_UNSPEC = 0xf, /* No specific protocol */
-};
-
-/* Returns a human-readable name for the device */
-extern const char * scsi_device_type(unsigned type);
 
 /*
  * standard mode-select header prepended to all mode-select commands
@@ -302,13 +76,6 @@ struct ccs_modesel_head {
 };
 
 /*
- * ScsiLun: 8 byte LUN.
- */
-struct scsi_lun {
-	__u8 scsi_lun[8];
-};
-
-/*
  * The Well Known LUNS (SAM-3) in our int representation of a LUN
  */
 #define SCSI_W_LUN_BASE 0xc100
@@ -316,7 +83,7 @@ struct scsi_lun {
 #define SCSI_W_LUN_ACCESS_CONTROL (SCSI_W_LUN_BASE + 2)
 #define SCSI_W_LUN_TARGET_LOG_PAGE (SCSI_W_LUN_BASE + 3)
 
-static inline int scsi_is_wlun(unsigned int lun)
+static inline int scsi_is_wlun(u64 lun)
 {
 	return (lun & 0xff00) == SCSI_W_LUN_BASE;
 }
@@ -381,6 +148,17 @@ static inline int scsi_is_wlun(unsigned int lun)
 #define DID_IMM_RETRY   0x0c	/* Retry without decrementing retry count  */
 #define DID_REQUEUE	0x0d	/* Requeue command (no immediate retry) also
 				 * without decrementing the retry count	   */
+#define DID_TRANSPORT_DISRUPTED 0x0e /* Transport error disrupted execution
+				      * and the driver blocked the port to
+				      * recover the link. Transport class will
+				      * retry or fail IO */
+#define DID_TRANSPORT_FAILFAST	0x0f /* Transport class fastfailed the io */
+#define DID_TARGET_FAILURE 0x10 /* Permanent target failure, do not retry on
+				 * other paths */
+#define DID_NEXUS_FAILURE 0x11  /* Permanent nexus failure, retry on other
+				 * paths might yield different results */
+#define DID_ALLOC_FAILURE 0x12  /* Space allocation on the device failed */
+#define DID_MEDIUM_ERROR  0x13  /* Medium error */
 #define DRIVER_OK       0x00	/* Driver status                           */
 
 /*
@@ -397,16 +175,6 @@ static inline int scsi_is_wlun(unsigned int lun)
 #define DRIVER_HARD         0x07
 #define DRIVER_SENSE	    0x08
 
-#define SUGGEST_RETRY       0x10
-#define SUGGEST_ABORT       0x20
-#define SUGGEST_REMAP       0x30
-#define SUGGEST_DIE         0x40
-#define SUGGEST_SENSE       0x80
-#define SUGGEST_IS_OK       0xff
-
-#define DRIVER_MASK         0x0f
-#define SUGGEST_MASK        0xf0
-
 /*
  * Internal return values.
  */
@@ -419,6 +187,7 @@ static inline int scsi_is_wlun(unsigned int lun)
 #define ADD_TO_MLQUEUE  0x2006
 #define TIMEOUT_ERROR   0x2007
 #define SCSI_RETURN_NOT_HANDLED   0x2008
+#define FAST_IO_FAIL	0x2009
 
 /*
  * Midlevel queue return values.
@@ -426,6 +195,7 @@ static inline int scsi_is_wlun(unsigned int lun)
 #define SCSI_MLQUEUE_HOST_BUSY   0x1055
 #define SCSI_MLQUEUE_DEVICE_BUSY 0x1056
 #define SCSI_MLQUEUE_EH_RETRY    0x1057
+#define SCSI_MLQUEUE_TARGET_BUSY 0x1058
 
 /*
  *  Use these to separate status msg and our bytes
@@ -441,27 +211,10 @@ static inline int scsi_is_wlun(unsigned int lun)
 #define msg_byte(result)    (((result) >> 8) & 0xff)
 #define host_byte(result)   (((result) >> 16) & 0xff)
 #define driver_byte(result) (((result) >> 24) & 0xff)
-#define suggestion(result)  (driver_byte(result) & SUGGEST_MASK)
-
-static inline void set_msg_byte(struct scsi_cmnd *cmd, char status)
-{
-	cmd->result |= status << 8;
-}
-
-static inline void set_host_byte(struct scsi_cmnd *cmd, char status)
-{
-	cmd->result |= status << 16;
-}
-
-static inline void set_driver_byte(struct scsi_cmnd *cmd, char status)
-{
-	cmd->result |= status << 24;
-}
-
 
 #define sense_class(sense)  (((sense) >> 4) & 0x7)
 #define sense_error(sense)  ((sense) & 0xf)
-#define sense_valid(sense)  ((sense) & 0x80);
+#define sense_valid(sense)  ((sense) & 0x80)
 
 /*
  * default timeouts
@@ -520,11 +273,5 @@ static inline void set_driver_byte(struct scsi_cmnd *cmd, char status)
 
 /* Used to obtain the PCI location of a device */
 #define SCSI_IOCTL_GET_PCI		0x5387
-
-/* Pull a u32 out of a SCSI message (using BE SCSI conventions) */
-static inline __u32 scsi_to_u32(__u8 *ptr)
-{
-	return (ptr[0]<<24) + (ptr[1]<<16) + (ptr[2]<<8) + ptr[3];
-}
 
 #endif /* _SCSI_SCSI_H */

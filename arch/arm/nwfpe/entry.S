@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
     NetWinder Floating Point Emulator
     (c) Rebel.COM, 1998
@@ -5,20 +6,9 @@
 
     Direct questions, comments to Scott Bambrough <scottb@netwinder.org>
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
+#include <asm/assembler.h>
+#include <asm/opcodes.h>
 
 /* This is the kernel's entry point into the floating point emulator.
 It is called from the kernel with code similar to this:
@@ -81,26 +71,27 @@ nwfpe_enter:
 	mov	r6, r0			@ save the opcode
 emulate:
 	ldr	r1, [sp, #S_PSR]	@ fetch the PSR
-	bl	checkCondition		@ check the condition
-	cmp	r0, #0			@ r0 = 0 ==> condition failed
+	bl	arm_check_condition	@ check the condition
+	cmp	r0, #ARM_OPCODE_CONDTEST_PASS	@ condition passed?
 
 	@ if condition code failed to match, next insn
-	beq	next			@ get the next instruction;
+	bne	next			@ get the next instruction;
 
 	mov	r0, r6			@ prepare for EmulateAll()
 	bl	EmulateAll		@ emulate the instruction
 	cmp	r0, #0			@ was emulation successful
-	moveq	pc, r4			@ no, return failure
+	reteq	r4			@ no, return failure
 
 next:
+	uaccess_enable r3
 .Lx1:	ldrt	r6, [r5], #4		@ get the next instruction and
 					@ increment PC
-
+	uaccess_disable r3
 	and	r2, r6, #0x0F000000	@ test for FP insns
 	teq	r2, #0x0C000000
 	teqne	r2, #0x0D000000
 	teqne	r2, #0x0E000000
-	movne	pc, r9			@ return ok if not a fp insn
+	retne	r9			@ return ok if not a fp insn
 
 	str	r5, [sp, #S_PC]		@ update PC copy in regs
 
@@ -111,12 +102,12 @@ next:
 	@ to fault.  Emit the appropriate exception gunk to fix things up.
 	@ ??? For some reason, faults can happen at .Lx2 even with a
 	@ plain LDR instruction.  Weird, but it seems harmless.
-	.section .fixup,"ax"
+	.pushsection .text.fixup,"ax"
 	.align	2
-.Lfix:	mov	pc, r9			@ let the user eat segfaults
-	.previous
+.Lfix:	ret	r9			@ let the user eat segfaults
+	.popsection
 
-	.section __ex_table,"a"
+	.pushsection __ex_table,"a"
 	.align	3
 	.long	.Lx1, .Lfix
-	.previous
+	.popsection

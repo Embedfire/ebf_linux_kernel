@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * arch/alpha/lib/ev6-memset.S
  *
@@ -17,7 +18,7 @@
  * The algorithm for the leading and trailing quadwords remains the same,
  * however the loop has been unrolled to enable better memory throughput,
  * and the code has been replicated for each of the entry points: __memset
- * and __memsetw to permit better scheduling to eliminate the stalling
+ * and __memset16 to permit better scheduling to eliminate the stalling
  * encountered during the mask replication.
  * A future enhancement might be to put in a byte store loop for really
  * small (say < 32 bytes) memset()s.  Whether or not that change would be
@@ -26,18 +27,19 @@
  * as fixes will need to be made in multiple places.  The performance gain
  * is worth it.
  */
-
+#include <asm/export.h>
 	.set noat
 	.set noreorder
 .text
-	.globl __memset
-	.globl __memsetw
-	.globl __constant_c_memset
 	.globl memset
+	.globl __memset
+	.globl ___memset
+	.globl __memset16
+	.globl __constant_c_memset
 
-	.ent __memset
+	.ent ___memset
 .align 5
-__memset:
+___memset:
 	.frame $30,0,$26,0
 	.prologue 0
 
@@ -227,7 +229,8 @@ end_b:
 	nop
 	nop
 	ret $31,($26),1		# L0 :
-	.end __memset
+	.end ___memset
+	EXPORT_SYMBOL(___memset)
 
 	/*
 	 * This is the original body of code, prior to replication and
@@ -405,15 +408,16 @@ end:
 	nop
 	ret $31,($26),1		# L0 :
 	.end __constant_c_memset
+	EXPORT_SYMBOL(__constant_c_memset)
 
 	/*
 	 * This is a replicant of the __constant_c_memset code, rescheduled
 	 * to mask stalls.  Note that entry point names also had to change
 	 */
 	.align 5
-	.ent __memsetw
+	.ent __memset16
 
-__memsetw:
+__memset16:
 	.frame $30,0,$26,0
 	.prologue 0
 
@@ -592,6 +596,10 @@ end_w:
 	nop
 	ret $31,($26),1		# L0 :
 
-	.end __memsetw
+	.end __memset16
+	EXPORT_SYMBOL(__memset16)
 
-memset = __memset
+memset = ___memset
+__memset = ___memset
+	EXPORT_SYMBOL(memset)
+	EXPORT_SYMBOL(__memset)

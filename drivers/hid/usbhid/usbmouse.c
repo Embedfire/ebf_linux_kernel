@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  *
@@ -5,19 +6,6 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  *
  * Should you need to contact me, the author, you can do so either by
  * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
@@ -31,17 +19,21 @@
 #include <linux/usb/input.h>
 #include <linux/hid.h>
 
+/* for apple IDs */
+#ifdef CONFIG_USB_HID_MODULE
+#include "../hid-ids.h"
+#endif
+
 /*
  * Version Information
  */
 #define DRIVER_VERSION "v1.6"
 #define DRIVER_AUTHOR "Vojtech Pavlik <vojtech@ucw.cz>"
 #define DRIVER_DESC "USB HID Boot Protocol mouse driver"
-#define DRIVER_LICENSE "GPL"
 
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
-MODULE_LICENSE(DRIVER_LICENSE);
+MODULE_LICENSE("GPL");
 
 struct usb_mouse {
 	char name[128];
@@ -87,9 +79,10 @@ static void usb_mouse_irq(struct urb *urb)
 resubmit:
 	status = usb_submit_urb (urb, GFP_ATOMIC);
 	if (status)
-		err ("can't resubmit intr, %s-%s/input0, status %d",
-				mouse->usbdev->bus->bus_name,
-				mouse->usbdev->devpath, status);
+		dev_err(&mouse->usbdev->dev,
+			"can't resubmit intr, %s-%s/input0, status %d\n",
+			mouse->usbdev->bus->bus_name,
+			mouse->usbdev->devpath, status);
 }
 
 static int usb_mouse_open(struct input_dev *dev)
@@ -137,7 +130,7 @@ static int usb_mouse_probe(struct usb_interface *intf, const struct usb_device_i
 	if (!mouse || !input_dev)
 		goto fail1;
 
-	mouse->data = usb_buffer_alloc(dev, 8, GFP_ATOMIC, &mouse->data_dma);
+	mouse->data = usb_alloc_coherent(dev, 8, GFP_ATOMIC, &mouse->data_dma);
 	if (!mouse->data)
 		goto fail1;
 
@@ -200,7 +193,7 @@ static int usb_mouse_probe(struct usb_interface *intf, const struct usb_device_i
 fail3:	
 	usb_free_urb(mouse->irq);
 fail2:	
-	usb_buffer_free(dev, 8, mouse->data, mouse->data_dma);
+	usb_free_coherent(dev, 8, mouse->data, mouse->data_dma);
 fail1:	
 	input_free_device(input_dev);
 	kfree(mouse);
@@ -216,12 +209,12 @@ static void usb_mouse_disconnect(struct usb_interface *intf)
 		usb_kill_urb(mouse->irq);
 		input_unregister_device(mouse->dev);
 		usb_free_urb(mouse->irq);
-		usb_buffer_free(interface_to_usbdev(intf), 8, mouse->data, mouse->data_dma);
+		usb_free_coherent(interface_to_usbdev(intf), 8, mouse->data, mouse->data_dma);
 		kfree(mouse);
 	}
 }
 
-static struct usb_device_id usb_mouse_id_table [] = {
+static const struct usb_device_id usb_mouse_id_table[] = {
 	{ USB_INTERFACE_INFO(USB_INTERFACE_CLASS_HID, USB_INTERFACE_SUBCLASS_BOOT,
 		USB_INTERFACE_PROTOCOL_MOUSE) },
 	{ }	/* Terminating entry */
@@ -236,18 +229,4 @@ static struct usb_driver usb_mouse_driver = {
 	.id_table	= usb_mouse_id_table,
 };
 
-static int __init usb_mouse_init(void)
-{
-	int retval = usb_register(&usb_mouse_driver);
-	if (retval == 0)
-		info(DRIVER_VERSION ":" DRIVER_DESC);
-	return retval;
-}
-
-static void __exit usb_mouse_exit(void)
-{
-	usb_deregister(&usb_mouse_driver);
-}
-
-module_init(usb_mouse_init);
-module_exit(usb_mouse_exit);
+module_usb_driver(usb_mouse_driver);

@@ -7,7 +7,7 @@
  * License version 2.  This program is licensed "as is" without any
  * warranty of any kind, whether express or implied.
  */
-
+#include <linux/gpio.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
@@ -15,19 +15,18 @@
 #include <linux/irq.h>
 #include <linux/delay.h>
 #include <linux/mtd/physmap.h>
-#include <linux/mtd/nand.h>
+#include <linux/mtd/rawnand.h>
 #include <linux/mv643xx_eth.h>
 #include <linux/i2c.h>
 #include <linux/serial_reg.h>
 #include <linux/ata_platform.h>
 #include <asm/mach-types.h>
-#include <asm/gpio.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/pci.h>
-#include <mach/orion5x.h>
-#include <plat/orion_nand.h>
+#include <linux/platform_data/mtd-orion_nand.h>
 #include "common.h"
 #include "mpp.h"
+#include "orion5x.h"
 
 /*****************************************************************************
  * KUROBOX-PRO Info
@@ -119,7 +118,8 @@ static struct platform_device kurobox_pro_nor_flash = {
  * PCI
  ****************************************************************************/
 
-static int __init kurobox_pro_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int __init kurobox_pro_pci_map_irq(const struct pci_dev *dev, u8 slot,
+	u8 pin)
 {
 	int irq;
 
@@ -138,7 +138,6 @@ static int __init kurobox_pro_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 
 static struct hw_pci kurobox_pro_pci __initdata = {
 	.nr_controllers	= 2,
-	.swizzle	= pci_std_swizzle,
 	.setup		= orion5x_pci_sys_setup,
 	.scan		= orion5x_pci_sys_scan_bus,
 	.map_irq	= kurobox_pro_pci_map_irq,
@@ -161,7 +160,7 @@ subsys_initcall(kurobox_pro_pci_init);
  ****************************************************************************/
 
 static struct mv643xx_eth_platform_data kurobox_pro_eth_data = {
-	.phy_addr	= 8,
+	.phy_addr	= MV643XX_ETH_PHY_ADDR(8),
 };
 
 /*****************************************************************************
@@ -293,7 +292,7 @@ static void kurobox_pro_power_off(void)
 	const unsigned char shutdownwait[]	= {0x00, 0x0c};
 	const unsigned char poweroff[]		= {0x00, 0x06};
 	/* 38400 baud divisor */
-	const unsigned divisor = ((ORION5X_TCLK + (8 * 38400)) / (16 * 38400));
+	const unsigned divisor = ((orion5x_tclk + (8 * 38400)) / (16 * 38400));
 
 	pr_info("%s: triggering power-off...\n", __func__);
 
@@ -315,28 +314,28 @@ static void kurobox_pro_power_off(void)
 /*****************************************************************************
  * General Setup
  ****************************************************************************/
-static struct orion5x_mpp_mode kurobox_pro_mpp_modes[] __initdata = {
-	{  0, MPP_UNUSED },
-	{  1, MPP_UNUSED },
-	{  2, MPP_GPIO },		/* GPIO Micon */
-	{  3, MPP_GPIO },		/* GPIO Rtc */
-	{  4, MPP_UNUSED },
-	{  5, MPP_UNUSED },
-	{  6, MPP_NAND },		/* NAND Flash REn */
-	{  7, MPP_NAND },		/* NAND Flash WEn */
-	{  8, MPP_UNUSED },
-	{  9, MPP_UNUSED },
-	{ 10, MPP_UNUSED },
-	{ 11, MPP_UNUSED },
-	{ 12, MPP_SATA_LED },		/* SATA 0 presence */
-	{ 13, MPP_SATA_LED },		/* SATA 1 presence */
-	{ 14, MPP_SATA_LED },		/* SATA 0 active */
-	{ 15, MPP_SATA_LED },		/* SATA 1 active */
-	{ 16, MPP_UART },		/* UART1 RXD */
-	{ 17, MPP_UART },		/* UART1 TXD */
-	{ 18, MPP_UART },		/* UART1 CTSn */
-	{ 19, MPP_UART },		/* UART1 RTSn */
-	{ -1 },
+static unsigned int kurobox_pro_mpp_modes[] __initdata = {
+	MPP0_UNUSED,
+	MPP1_UNUSED,
+	MPP2_GPIO,		/* GPIO Micon */
+	MPP3_GPIO,		/* GPIO Rtc */
+	MPP4_UNUSED,
+	MPP5_UNUSED,
+	MPP6_NAND,		/* NAND Flash REn */
+	MPP7_NAND,		/* NAND Flash WEn */
+	MPP8_UNUSED,
+	MPP9_UNUSED,
+	MPP10_UNUSED,
+	MPP11_UNUSED,
+	MPP12_SATA_LED,		/* SATA 0 presence */
+	MPP13_SATA_LED,		/* SATA 1 presence */
+	MPP14_SATA_LED,		/* SATA 0 active */
+	MPP15_SATA_LED,		/* SATA 1 active */
+	MPP16_UART,		/* UART1 RXD */
+	MPP17_UART,		/* UART1 TXD */
+	MPP18_UART,		/* UART1 CTSn */
+	MPP19_UART,		/* UART1 RTSn */
+	0,
 };
 
 static void __init kurobox_pro_init(void)
@@ -360,13 +359,17 @@ static void __init kurobox_pro_init(void)
 	orion5x_uart1_init();
 	orion5x_xor_init();
 
-	orion5x_setup_dev_boot_win(KUROBOX_PRO_NOR_BOOT_BASE,
-				   KUROBOX_PRO_NOR_BOOT_SIZE);
+	mvebu_mbus_add_window_by_id(ORION_MBUS_DEVBUS_BOOT_TARGET,
+				    ORION_MBUS_DEVBUS_BOOT_ATTR,
+				    KUROBOX_PRO_NOR_BOOT_BASE,
+				    KUROBOX_PRO_NOR_BOOT_SIZE);
 	platform_device_register(&kurobox_pro_nor_flash);
 
 	if (machine_is_kurobox_pro()) {
-		orion5x_setup_dev0_win(KUROBOX_PRO_NAND_BASE,
-				       KUROBOX_PRO_NAND_SIZE);
+		mvebu_mbus_add_window_by_id(ORION_MBUS_DEVBUS_TARGET(0),
+					    ORION_MBUS_DEVBUS_ATTR(0),
+					    KUROBOX_PRO_NAND_BASE,
+					    KUROBOX_PRO_NAND_SIZE);
 		platform_device_register(&kurobox_pro_nand_flash);
 	}
 
@@ -379,27 +382,29 @@ static void __init kurobox_pro_init(void)
 #ifdef CONFIG_MACH_KUROBOX_PRO
 MACHINE_START(KUROBOX_PRO, "Buffalo/Revogear Kurobox Pro")
 	/* Maintainer: Ronen Shitrit <rshitrit@marvell.com> */
-	.phys_io	= ORION5X_REGS_PHYS_BASE,
-	.io_pg_offst	= ((ORION5X_REGS_VIRT_BASE) >> 18) & 0xFFFC,
-	.boot_params	= 0x00000100,
+	.atag_offset	= 0x100,
+	.nr_irqs	= ORION5X_NR_IRQS,
 	.init_machine	= kurobox_pro_init,
 	.map_io		= orion5x_map_io,
+	.init_early	= orion5x_init_early,
 	.init_irq	= orion5x_init_irq,
-	.timer		= &orion5x_timer,
+	.init_time	= orion5x_timer_init,
 	.fixup		= tag_fixup_mem32,
+	.restart	= orion5x_restart,
 MACHINE_END
 #endif
 
 #ifdef CONFIG_MACH_LINKSTATION_PRO
 MACHINE_START(LINKSTATION_PRO, "Buffalo Linkstation Pro/Live")
 	/* Maintainer: Byron Bradley <byron.bbradley@gmail.com> */
-	.phys_io	= ORION5X_REGS_PHYS_BASE,
-	.io_pg_offst	= ((ORION5X_REGS_VIRT_BASE) >> 18) & 0xFFFC,
-	.boot_params	= 0x00000100,
+	.atag_offset	= 0x100,
+	.nr_irqs	= ORION5X_NR_IRQS,
 	.init_machine	= kurobox_pro_init,
 	.map_io		= orion5x_map_io,
+	.init_early	= orion5x_init_early,
 	.init_irq	= orion5x_init_irq,
-	.timer		= &orion5x_timer,
+	.init_time	= orion5x_timer_init,
 	.fixup		= tag_fixup_mem32,
+	.restart	= orion5x_restart,
 MACHINE_END
 #endif

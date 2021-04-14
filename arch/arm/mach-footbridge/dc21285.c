@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/kernel/dec21285.c: PCI functions for DC21285
  *
  *  Copyright (C) 1998-2001 Russell King
  *  Copyright (C) 1998-2000 Phil Blundell
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/kernel.h>
 #include <linux/pci.h>
@@ -16,10 +13,10 @@
 #include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/irq.h>
+#include <linux/io.h>
+#include <linux/spinlock.h>
 
-#include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <asm/mach/pci.h>
 #include <asm/hardware/dec21285.h>
 
@@ -34,7 +31,6 @@
 				  PCI_STATUS_PARITY) << 16)
 
 extern int setup_arm_irq(int, struct irqaction *);
-extern void pcibios_report_status(u_int status_mask, int warn);
 
 static unsigned long
 dc21285_base_address(struct pci_bus *bus, unsigned int devfn)
@@ -69,15 +65,15 @@ dc21285_read_config(struct pci_bus *bus, unsigned int devfn, int where,
 	if (addr)
 		switch (size) {
 		case 1:
-			asm("ldrb	%0, [%1, %2]"
+			asm volatile("ldrb	%0, [%1, %2]"
 				: "=r" (v) : "r" (addr), "r" (where) : "cc");
 			break;
 		case 2:
-			asm("ldrh	%0, [%1, %2]"
+			asm volatile("ldrh	%0, [%1, %2]"
 				: "=r" (v) : "r" (addr), "r" (where) : "cc");
 			break;
 		case 4:
-			asm("ldr	%0, [%1, %2]"
+			asm volatile("ldr	%0, [%1, %2]"
 				: "=r" (v) : "r" (addr), "r" (where) : "cc");
 			break;
 		}
@@ -103,17 +99,17 @@ dc21285_write_config(struct pci_bus *bus, unsigned int devfn, int where,
 	if (addr)
 		switch (size) {
 		case 1:
-			asm("strb	%0, [%1, %2]"
+			asm volatile("strb	%0, [%1, %2]"
 				: : "r" (value), "r" (addr), "r" (where)
 				: "cc");
 			break;
 		case 2:
-			asm("strh	%0, [%1, %2]"
+			asm volatile("strh	%0, [%1, %2]"
 				: : "r" (value), "r" (addr), "r" (where)
 				: "cc");
 			break;
 		case 4:
-			asm("str	%0, [%1, %2]"
+			asm volatile("str	%0, [%1, %2]"
 				: : "r" (value), "r" (addr), "r" (where)
 				: "cc");
 			break;
@@ -128,7 +124,7 @@ dc21285_write_config(struct pci_bus *bus, unsigned int devfn, int where,
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static struct pci_ops dc21285_ops = {
+struct pci_ops dc21285_ops = {
 	.read	= dc21285_read_config,
 	.write	= dc21285_write_config,
 };
@@ -136,19 +132,14 @@ static struct pci_ops dc21285_ops = {
 static struct timer_list serr_timer;
 static struct timer_list perr_timer;
 
-static void dc21285_enable_error(unsigned long __data)
+static void dc21285_enable_error(struct timer_list *timer)
 {
-	switch (__data) {
-	case IRQ_PCI_SERR:
-		del_timer(&serr_timer);
-		break;
+	del_timer(timer);
 
-	case IRQ_PCI_PERR:
-		del_timer(&perr_timer);
-		break;
-	}
-
-	enable_irq(__data);
+	if (timer == &serr_timer)
+		enable_irq(IRQ_PCI_SERR);
+	else if (timer == &perr_timer)
+		enable_irq(IRQ_PCI_PERR);
 }
 
 /*
@@ -257,7 +248,7 @@ int __init dc21285_setup(int nr, struct pci_sys_data *sys)
 	if (nr || !footbridge_cfn_mode())
 		return 0;
 
-	res = kzalloc(sizeof(struct resource) * 2, GFP_KERNEL);
+	res = kcalloc(2, sizeof(struct resource), GFP_KERNEL);
 	if (!res) {
 		printk("out of memory for root bus resources");
 		return 0;
@@ -273,28 +264,28 @@ int __init dc21285_setup(int nr, struct pci_sys_data *sys)
 	allocate_resource(&iomem_resource, &res[0], 0x40000000,
 			  0x80000000, 0xffffffff, 0x40000000, NULL, NULL);
 
-	sys->resource[0] = &ioport_resource;
-	sys->resource[1] = &res[0];
-	sys->resource[2] = &res[1];
 	sys->mem_offset  = DC21285_PCI_MEM;
+
+	pci_add_resource_offset(&sys->resources, &res[0], sys->mem_offset);
+	pci_add_resource_offset(&sys->resources, &res[1], sys->mem_offset);
 
 	return 1;
 }
 
-struct pci_bus * __init dc21285_scan_bus(int nr, struct pci_sys_data *sys)
-{
-	return pci_scan_bus(0, &dc21285_ops, sys);
-}
+#define dc21285_request_irq(_a, _b, _c, _d, _e) \
+	WARN_ON(request_irq(_a, _b, _c, _d, _e) < 0)
 
 void __init dc21285_preinit(void)
 {
 	unsigned int mem_size, mem_mask;
 	int cfn_mode;
 
+	pcibios_min_mem = 0x81000000;
+
 	mem_size = (unsigned int)high_memory - PAGE_OFFSET;
 	for (mem_mask = 0x00100000; mem_mask < 0x10000000; mem_mask <<= 1)
 		if (mem_mask >= mem_size)
-			break;		
+			break;
 
 	/*
 	 * These registers need to be set up whether we're the
@@ -323,37 +314,24 @@ void __init dc21285_preinit(void)
 		*CSR_PCICMD = (*CSR_PCICMD & 0xffff) | PCICMD_ERROR_BITS;
 	}
 
-	init_timer(&serr_timer);
-	init_timer(&perr_timer);
-
-	serr_timer.data = IRQ_PCI_SERR;
-	serr_timer.function = dc21285_enable_error;
-	perr_timer.data = IRQ_PCI_PERR;
-	perr_timer.function = dc21285_enable_error;
+	timer_setup(&serr_timer, dc21285_enable_error, 0);
+	timer_setup(&perr_timer, dc21285_enable_error, 0);
 
 	/*
 	 * We don't care if these fail.
 	 */
-	request_irq(IRQ_PCI_SERR, dc21285_serr_irq, IRQF_DISABLED,
-		    "PCI system error", &serr_timer);
-	request_irq(IRQ_PCI_PERR, dc21285_parity_irq, IRQF_DISABLED,
-		    "PCI parity error", &perr_timer);
-	request_irq(IRQ_PCI_ABORT, dc21285_abort_irq, IRQF_DISABLED,
-		    "PCI abort", NULL);
-	request_irq(IRQ_DISCARD_TIMER, dc21285_discard_irq, IRQF_DISABLED,
-		    "Discard timer", NULL);
-	request_irq(IRQ_PCI_DPERR, dc21285_dparity_irq, IRQF_DISABLED,
-		    "PCI data parity", NULL);
+	dc21285_request_irq(IRQ_PCI_SERR, dc21285_serr_irq, 0,
+			    "PCI system error", &serr_timer);
+	dc21285_request_irq(IRQ_PCI_PERR, dc21285_parity_irq, 0,
+			    "PCI parity error", &perr_timer);
+	dc21285_request_irq(IRQ_PCI_ABORT, dc21285_abort_irq, 0,
+			    "PCI abort", NULL);
+	dc21285_request_irq(IRQ_DISCARD_TIMER, dc21285_discard_irq, 0,
+			    "Discard timer", NULL);
+	dc21285_request_irq(IRQ_PCI_DPERR, dc21285_dparity_irq, 0,
+			    "PCI data parity", NULL);
 
 	if (cfn_mode) {
-		static struct resource csrio;
-
-		csrio.flags  = IORESOURCE_IO;
-		csrio.name   = "Footbridge";
-
-		allocate_resource(&ioport_resource, &csrio, 128,
-				  0xff00, 0xffff, 128, NULL, NULL);
-
 		/*
 		 * Map our SDRAM at a known address in PCI space, just in case
 		 * the firmware had other ideas.  Using a nonzero base is
@@ -361,7 +339,7 @@ void __init dc21285_preinit(void)
 		 * in the range 0x000a0000 to 0x000c0000. (eg, S3 cards).
 		 */
 		*CSR_PCICSRBASE       = 0xf4000000;
-		*CSR_PCICSRIOBASE     = csrio.start;
+		*CSR_PCICSRIOBASE     = 0;
 		*CSR_PCISDRAMBASE     = __virt_to_bus(PAGE_OFFSET);
 		*CSR_PCIROMBASE       = 0;
 		*CSR_PCICMD = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER |

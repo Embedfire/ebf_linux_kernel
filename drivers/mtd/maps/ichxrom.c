@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ichxrom.c
  *
@@ -8,6 +9,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
@@ -56,17 +58,19 @@ static void ichxrom_cleanup(struct ichxrom_window *window)
 {
 	struct ichxrom_map_info *map, *scratch;
 	u16 word;
+	int ret;
 
 	/* Disable writes through the rom window */
-	pci_read_config_word(window->pdev, BIOS_CNTL, &word);
-	pci_write_config_word(window->pdev, BIOS_CNTL, word & ~1);
+	ret = pci_read_config_word(window->pdev, BIOS_CNTL, &word);
+	if (!ret)
+		pci_write_config_word(window->pdev, BIOS_CNTL, word & ~1);
 	pci_dev_put(window->pdev);
 
 	/* Free all of the mtd devices */
 	list_for_each_entry_safe(map, scratch, &window->maps, list) {
 		if (map->rsrc.parent)
 			release_resource(&map->rsrc);
-		del_mtd_device(map->mtd);
+		mtd_device_unregister(map->mtd);
 		map_destroy(map->mtd);
 		list_del(&map->list);
 		kfree(map);
@@ -83,8 +87,8 @@ static void ichxrom_cleanup(struct ichxrom_window *window)
 }
 
 
-static int __devinit ichxrom_init_one (struct pci_dev *pdev,
-	const struct pci_device_id *ent)
+static int __init ichxrom_init_one(struct pci_dev *pdev,
+				   const struct pci_device_id *ent)
 {
 	static char *rom_probe_types[] = { "cfi_probe", "jedec_probe", NULL };
 	struct ichxrom_window *window = &ichxrom_window;
@@ -166,7 +170,7 @@ static int __devinit ichxrom_init_one (struct pci_dev *pdev,
 
 	/*
 	 * Try to reserve the window mem region.  If this fails then
-	 * it is likely due to the window being "reseved" by the BIOS.
+	 * it is likely due to the window being "reserved" by the BIOS.
 	 */
 	window->rsrc.name = MOD_NAME;
 	window->rsrc.start = window->phys;
@@ -174,16 +178,13 @@ static int __devinit ichxrom_init_one (struct pci_dev *pdev,
 	window->rsrc.flags = IORESOURCE_MEM | IORESOURCE_BUSY;
 	if (request_resource(&iomem_resource, &window->rsrc)) {
 		window->rsrc.parent = NULL;
-		printk(KERN_DEBUG MOD_NAME
-			": %s(): Unable to register resource"
-			" 0x%.16llx-0x%.16llx - kernel bug?\n",
-			__func__,
-			(unsigned long long)window->rsrc.start,
-			(unsigned long long)window->rsrc.end);
+		printk(KERN_DEBUG MOD_NAME ": "
+		       "%s(): Unable to register resource %pR - kernel bug?\n",
+		       __func__, &window->rsrc);
 	}
 
 	/* Map the firmware hub into my address space. */
-	window->virt = ioremap_nocache(window->phys, window->size);
+	window->virt = ioremap(window->phys, window->size);
 	if (!window->virt) {
 		printk(KERN_ERR MOD_NAME ": ioremap(%08lx, %08lx) failed\n",
 			window->phys, window->size);
@@ -258,8 +259,8 @@ static int __devinit ichxrom_init_one (struct pci_dev *pdev,
 		/* Trim the size if we are larger than the map */
 		if (map->mtd->size > map->map.size) {
 			printk(KERN_WARNING MOD_NAME
-				" rom(%u) larger than window(%lu). fixing...\n",
-				map->mtd->size, map->map.size);
+				" rom(%llu) larger than window(%lu). fixing...\n",
+				(unsigned long long)map->mtd->size, map->map.size);
 			map->mtd->size = map->map.size;
 		}
 		if (window->rsrc.parent) {
@@ -289,7 +290,7 @@ static int __devinit ichxrom_init_one (struct pci_dev *pdev,
 
 		/* Now that the mtd devices is complete claim and export it */
 		map->mtd->owner = THIS_MODULE;
-		if (add_mtd_device(map->mtd)) {
+		if (mtd_device_register(map->mtd, NULL, 0)) {
 			map_destroy(map->mtd);
 			map->mtd = NULL;
 			goto out;
@@ -317,13 +318,13 @@ static int __devinit ichxrom_init_one (struct pci_dev *pdev,
 }
 
 
-static void __devexit ichxrom_remove_one (struct pci_dev *pdev)
+static void ichxrom_remove_one(struct pci_dev *pdev)
 {
 	struct ichxrom_window *window = &ichxrom_window;
 	ichxrom_cleanup(window);
 }
 
-static struct pci_device_id ichxrom_pci_tbl[] __devinitdata = {
+static const struct pci_device_id ichxrom_pci_tbl[] = {
 	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801BA_0,
 	  PCI_ANY_ID, PCI_ANY_ID, },
 	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801CA_0,
@@ -351,7 +352,7 @@ static struct pci_driver ichxrom_driver = {
 static int __init init_ichxrom(void)
 {
 	struct pci_dev *pdev;
-	struct pci_device_id *id;
+	const struct pci_device_id *id;
 
 	pdev = NULL;
 	for (id = ichxrom_pci_tbl; id->vendor; id++) {

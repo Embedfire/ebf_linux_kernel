@@ -51,6 +51,25 @@
 #ifndef FP_EX_INVALID
 #define FP_EX_INVALID		0
 #endif
+#ifndef FP_EX_INVALID_SNAN
+#define FP_EX_INVALID_SNAN	0
+#endif
+/* inf - inf */
+#ifndef FP_EX_INVALID_ISI
+#define FP_EX_INVALID_ISI	0
+#endif
+/* inf / inf */
+#ifndef FP_EX_INVALID_IDI
+#define FP_EX_INVALID_IDI	0
+#endif
+/* 0 / 0 */
+#ifndef FP_EX_INVALID_ZDZ
+#define FP_EX_INVALID_ZDZ	0
+#endif
+/* inf * 0 */
+#ifndef FP_EX_INVALID_IMZ
+#define FP_EX_INVALID_IMZ	0
+#endif
 #ifndef FP_EX_OVERFLOW
 #define FP_EX_OVERFLOW		0
 #endif
@@ -119,7 +138,7 @@ do {							\
       _FP_FRAC_ADDI_##wc(X, _FP_WORK_ROUND);		\
 } while (0)
 
-#define _FP_ROUND_ZERO(wc, X)		0
+#define _FP_ROUND_ZERO(wc, X)		(void)0
 
 #define _FP_ROUND_PINF(wc, X)				\
 do {							\

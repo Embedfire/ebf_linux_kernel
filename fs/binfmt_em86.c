@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/fs/binfmt_em86.c
  *
@@ -11,7 +12,6 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/stat.h>
-#include <linux/slab.h>
 #include <linux/binfmts.h>
 #include <linux/elf.h>
 #include <linux/init.h>
@@ -23,9 +23,10 @@
 #define EM86_INTERP	"/usr/bin/em86"
 #define EM86_I_NAME	"em86"
 
-static int load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
+static int load_em86(struct linux_binprm *bprm)
 {
-	char *interp, *i_name, *i_arg;
+	const char *i_name, *i_arg;
+	char *interp;
 	struct file * file;
 	int retval;
 	struct elfhdr	elf_ex;
@@ -39,14 +40,13 @@ static int load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
 	/* First of all, some simple consistency checks */
 	if ((elf_ex.e_type != ET_EXEC && elf_ex.e_type != ET_DYN) ||
 		(!((elf_ex.e_machine == EM_386) || (elf_ex.e_machine == EM_486))) ||
-		(!bprm->file->f_op || !bprm->file->f_op->mmap)) {
+		!bprm->file->f_op->mmap) {
 			return -ENOEXEC;
 	}
 
-	bprm->sh_bang = 1;	/* Well, the bang-shell is implicit... */
-	allow_write_access(bprm->file);
-	fput(bprm->file);
-	bprm->file = NULL;
+	/* Need to be able to load the file after exec */
+	if (bprm->interp_flags & BINPRM_FLAGS_PATH_INACCESSIBLE)
+		return -ENOENT;
 
 	/* Unlike in the script case, we don't have to do any hairy
 	 * parsing to find our interpreter... it's hardcoded!
@@ -64,15 +64,15 @@ static int load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
 	 * user environment and arguments are stored.
 	 */
 	remove_arg_zero(bprm);
-	retval = copy_strings_kernel(1, &bprm->filename, bprm);
+	retval = copy_string_kernel(bprm->filename, bprm);
 	if (retval < 0) return retval; 
 	bprm->argc++;
 	if (i_arg) {
-		retval = copy_strings_kernel(1, &i_arg, bprm);
+		retval = copy_string_kernel(i_arg, bprm);
 		if (retval < 0) return retval; 
 		bprm->argc++;
 	}
-	retval = copy_strings_kernel(1, &i_name, bprm);
+	retval = copy_string_kernel(i_name, bprm);
 	if (retval < 0)	return retval;
 	bprm->argc++;
 
@@ -85,13 +85,8 @@ static int load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
 	if (IS_ERR(file))
 		return PTR_ERR(file);
 
-	bprm->file = file;
-
-	retval = prepare_binprm(bprm);
-	if (retval < 0)
-		return retval;
-
-	return search_binary_handler(bprm, regs);
+	bprm->interpreter = file;
+	return 0;
 }
 
 static struct linux_binfmt em86_format = {
@@ -101,7 +96,8 @@ static struct linux_binfmt em86_format = {
 
 static int __init init_em86_binfmt(void)
 {
-	return register_binfmt(&em86_format);
+	register_binfmt(&em86_format);
+	return 0;
 }
 
 static void __exit exit_em86_binfmt(void)

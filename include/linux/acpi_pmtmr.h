@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ACPI_PMTMR_H_
 #define _ACPI_PMTMR_H_
 
@@ -24,8 +25,6 @@ static inline u32 acpi_pm_read_early(void)
 	/* mask the output to 24 bits */
 	return acpi_pm_read_verified() & ACPI_PM_MASK;
 }
-
-extern void pmtimer_wait(unsigned);
 
 #else
 

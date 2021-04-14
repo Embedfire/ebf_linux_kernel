@@ -101,7 +101,7 @@ typedef struct {
 } DSP_UART_CFG_1;
 
 typedef struct {
-	unsigned char Enable:1;	/* RW: Enable I/O and IRQ: 0=FALSE, 1=TRUE */
+	unsigned char Enable:1;	/* RW: Enable I/O and IRQ: 0=false, 1=true */
 	unsigned char Reserved:7;	/* 0: Reserved */
 } DSP_UART_CFG_2;
 
@@ -114,7 +114,7 @@ typedef struct {
 } DSP_HBRIDGE_CFG_1;
 
 typedef struct {
-	unsigned char Enable:1;	/* RW: enable I/O and IRQ: 0=FALSE, 1=TRUE */
+	unsigned char Enable:1;	/* RW: enable I/O and IRQ: 0=false, 1=true */
 	unsigned char Reserved:7;	/* 0: Reserved */
 } DSP_HBRIDGE_CFG_2;
 
@@ -122,7 +122,7 @@ typedef struct {
 typedef struct {
 	unsigned char Dma:3;	/* RW: DMA channel selection */
 	unsigned char NumTransfers:2;	/* RW: Maximum # of transfers once being granted the ISA bus */
-	unsigned char ReRequest:2;	/* RW: Minumum delay between releasing the ISA bus and requesting it again */
+	unsigned char ReRequest:2;	/* RW: Minimum delay between releasing the ISA bus and requesting it again */
 	unsigned char MEMCS16:1;	/* RW: ISA signal MEMCS16: 0=disabled, 1=enabled */
 } DSP_BUSMASTER_CFG_1;
 
@@ -133,12 +133,12 @@ typedef struct {
 
 
 typedef struct {
-	unsigned char GateIOCHRDY:1;	/* RW: Enable IOCHRDY gating: 0=FALSE, 1=TRUE */
+	unsigned char GateIOCHRDY:1;	/* RW: Enable IOCHRDY gating: 0=false, 1=true */
 	unsigned char Reserved:7;	/* 0: Reserved */
 } DSP_ISA_PROT_CFG;
 
 typedef struct {
-	unsigned char Enable:1;	/* RW: Enable low power suspend/resume 0=FALSE, 1=TRUE */
+	unsigned char Enable:1;	/* RW: Enable low power suspend/resume 0=false, 1=true */
 	unsigned char Reserved:7;	/* 0: Reserved */
 } DSP_POWER_MGMT_CFG;
 

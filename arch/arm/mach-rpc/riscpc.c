@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mach-rpc/riscpc.c
  *
  *  Copyright (C) 1998-2001 Russell King
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  Architecture specific fixups.
  */
@@ -18,14 +15,18 @@
 #include <linux/device.h>
 #include <linux/serial_8250.h>
 #include <linux/ata_platform.h>
+#include <linux/io.h>
+#include <linux/i2c.h>
+#include <linux/reboot.h>
 
 #include <asm/elf.h>
-#include <asm/io.h>
 #include <asm/mach-types.h>
 #include <mach/hardware.h>
+#include <asm/hardware/iomd.h>
 #include <asm/page.h>
 #include <asm/domain.h>
 #include <asm/setup.h>
+#include <asm/system_misc.h>
 
 #include <asm/mach/map.h>
 #include <asm/mach/arch.h>
@@ -45,6 +46,7 @@ static int __init parse_tag_acorn(const struct tag *tag)
 	switch (tag->u.acorn.vram_pages) {
 	case 512:
 		vram_size += PAGE_SIZE * 256;
+		fallthrough;	/* ??? */
 	case 256:
 		vram_size += PAGE_SIZE * 256;
 	default:
@@ -73,7 +75,7 @@ static struct map_desc rpc_io_desc[] __initdata = {
 		.length		= 	IO_SIZE	 ,
 		.type		= MT_DEVICE
 	}, {	/* EASI space	*/
-		.virtual	= EASI_BASE,
+		.virtual	= (unsigned long)EASI_BASE,
 		.pfn		= __phys_to_pfn(EASI_START),
 		.length		= EASI_SIZE,
 		.type		= MT_DEVICE
@@ -96,15 +98,9 @@ static void __init rpc_map_io(void)
 }
 
 static struct resource acornfb_resources[] = {
-	{	/* VIDC */
-		.start		= 0x03400000,
-		.end		= 0x035fffff,
-		.flags		= IORESOURCE_MEM,
-	}, {
-		.start		= IRQ_VSYNCPULSE,
-		.end		= IRQ_VSYNCPULSE,
-		.flags		= IORESOURCE_IRQ,
-	},
+	/* VIDC */
+	DEFINE_RES_MEM(0x03400000, 0x00200000),
+	DEFINE_RES_IRQ(IRQ_VSYNCPULSE),
 };
 
 static struct platform_device acornfb_device = {
@@ -118,11 +114,7 @@ static struct platform_device acornfb_device = {
 };
 
 static struct resource iomd_resources[] = {
-	{
-		.start		= 0x03200000,
-		.end		= 0x0320ffff,
-		.flags		= IORESOURCE_MEM,
-	},
+	DEFINE_RES_MEM(0x03200000, 0x10000),
 };
 
 static struct platform_device iomd_device = {
@@ -132,18 +124,25 @@ static struct platform_device iomd_device = {
 	.resource		= iomd_resources,
 };
 
+static struct resource iomd_kart_resources[] = {
+	DEFINE_RES_IRQ(IRQ_KEYBOARDRX),
+	DEFINE_RES_IRQ(IRQ_KEYBOARDTX),
+};
+
 static struct platform_device kbd_device = {
 	.name			= "kart",
 	.id			= -1,
 	.dev			= {
 		.parent 	= &iomd_device.dev,
 	},
+	.num_resources		= ARRAY_SIZE(iomd_kart_resources),
+	.resource		= iomd_kart_resources,
 };
 
 static struct plat_serial8250_port serial_platform_data[] = {
 	{
 		.mapbase	= 0x03010fe0,
-		.irq		= 10,
+		.irq		= IRQ_SERIALPORT,
 		.uartclk	= 1843200,
 		.regshift	= 2,
 		.iotype		= UPIO_MEM,
@@ -165,21 +164,9 @@ static struct pata_platform_info pata_platform_data = {
 };
 
 static struct resource pata_resources[] = {
-	[0] = {
-		.start		= 0x030107c0,
-		.end		= 0x030107df,
-		.flags		= IORESOURCE_MEM,
-	},
-	[1] = {
-		.start		= 0x03010fd8,
-		.end		= 0x03010fdb,
-		.flags		= IORESOURCE_MEM,
-	},
-	[2] = {
-		.start		= IRQ_HARDDISK,
-		.end		= IRQ_HARDDISK,
-		.flags		= IORESOURCE_IRQ,
-	},
+	DEFINE_RES_MEM(0x030107c0, 0x20),
+	DEFINE_RES_MEM(0x03010fd8, 0x04),
+	DEFINE_RES_IRQ(IRQ_HARDDISK),
 };
 
 static struct platform_device pata_device = {
@@ -201,23 +188,37 @@ static struct platform_device *devs[] __initdata = {
 	&pata_device,
 };
 
+static struct i2c_board_info i2c_rtc = {
+	I2C_BOARD_INFO("pcf8583", 0x50)
+};
+
 static int __init rpc_init(void)
 {
+	i2c_register_board_info(0, &i2c_rtc, 1);
 	return platform_add_devices(devs, ARRAY_SIZE(devs));
 }
 
 arch_initcall(rpc_init);
 
-extern struct sys_timer ioc_timer;
+static void rpc_restart(enum reboot_mode mode, const char *cmd)
+{
+	iomd_writeb(0, IOMD_ROMCR0);
+
+	/*
+	 * Jump into the ROM
+	 */
+	soft_restart(0);
+}
+
+void ioc_timer_init(void);
 
 MACHINE_START(RISCPC, "Acorn-RiscPC")
 	/* Maintainer: Russell King */
-	.phys_io	= 0x03000000,
-	.io_pg_offst	= ((0xe0000000) >> 18) & 0xfffc,
-	.boot_params	= 0x10000100,
+	.atag_offset	= 0x100,
 	.reserve_lp0	= 1,
 	.reserve_lp1	= 1,
 	.map_io		= rpc_map_io,
 	.init_irq	= rpc_init_irq,
-	.timer		= &ioc_timer,
+	.init_time	= ioc_timer_init,
+	.restart	= rpc_restart,
 MACHINE_END

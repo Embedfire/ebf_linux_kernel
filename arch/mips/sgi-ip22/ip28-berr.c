@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * ip28-berr.c: Bus error handling.
  *
@@ -7,11 +8,13 @@
 
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/signal.h>
 #include <linux/seq_file.h>
 
 #include <asm/addrspace.h>
-#include <asm/system.h>
 #include <asm/traps.h>
 #include <asm/branch.h>
 #include <asm/irq_regs.h>
@@ -20,7 +23,7 @@
 #include <asm/sgi/ioc.h>
 #include <asm/sgi/ip22.h>
 #include <asm/r4kcache.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/bootinfo.h>
 
 static unsigned int count_be_is_fixup;
@@ -137,14 +140,14 @@ static void save_and_clear_buserr(void)
 	hpc3.scsi[1].cbp   = hpc3c0->scsi_chan1.cbptr;
 	hpc3.scsi[1].ndptr = hpc3c0->scsi_chan1.ndptr;
 
-	hpc3.ethrx.addr  = (unsigned long)&hpc3c0->ethregs.rx_cbptr;
-	hpc3.ethrx.ctrl  = hpc3c0->ethregs.rx_ctrl; /* HPC3_ERXCTRL_ACTIVE ? */
-	hpc3.ethrx.cbp   = hpc3c0->ethregs.rx_cbptr;
+	hpc3.ethrx.addr	 = (unsigned long)&hpc3c0->ethregs.rx_cbptr;
+	hpc3.ethrx.ctrl	 = hpc3c0->ethregs.rx_ctrl; /* HPC3_ERXCTRL_ACTIVE ? */
+	hpc3.ethrx.cbp	 = hpc3c0->ethregs.rx_cbptr;
 	hpc3.ethrx.ndptr = hpc3c0->ethregs.rx_ndptr;
 
-	hpc3.ethtx.addr  = (unsigned long)&hpc3c0->ethregs.tx_cbptr;
-	hpc3.ethtx.ctrl  = hpc3c0->ethregs.tx_ctrl; /* HPC3_ETXCTRL_ACTIVE ? */
-	hpc3.ethtx.cbp   = hpc3c0->ethregs.tx_cbptr;
+	hpc3.ethtx.addr	 = (unsigned long)&hpc3c0->ethregs.tx_cbptr;
+	hpc3.ethtx.ctrl	 = hpc3c0->ethregs.tx_ctrl; /* HPC3_ETXCTRL_ACTIVE ? */
+	hpc3.ethtx.cbp	 = hpc3c0->ethregs.tx_cbptr;
 	hpc3.ethtx.ndptr = hpc3c0->ethregs.tx_ndptr;
 
 	for (i = 0; i < 8; ++i) {
@@ -197,11 +200,11 @@ static void print_cache_tags(void)
 			scb | (1 << 12)*i);
 	}
 	i = read_c0_config();
-	scb = i & (1 << 13) ? 7:6;      /* scblksize = 2^[7..6] */
+	scb = i & (1 << 13) ? 7:6;	/* scblksize = 2^[7..6] */
 	scw = ((i >> 16) & 7) + 19 - 1; /* scwaysize = 2^[24..19] / 2 */
 
 	i = ((1 << scw) - 1) & ~((1 << scb) - 1);
-	printk(KERN_ERR "S: 0: %08x %08x, 1: %08x %08x  (PA[%u:%u] %05x)\n",
+	printk(KERN_ERR "S: 0: %08x %08x, 1: %08x %08x	(PA[%u:%u] %05x)\n",
 		cache_tags.tags[0][0].hi, cache_tags.tags[0][0].lo,
 		cache_tags.tags[0][1].hi, cache_tags.tags[0][1].lo,
 		scw-1, scb, i & (unsigned)cache_tags.err_addr);
@@ -298,23 +301,6 @@ static void print_buserr(const struct pt_regs *regs)
 	       field, regs->cp0_epc, field, regs->regs[31]);
 }
 
-/*
- * Check, whether MC's (virtual) DMA address caused the bus error.
- * See "Virtual DMA Specification", Draft 1.5, Feb 13 1992, SGI
- */
-
-static int addr_is_ram(unsigned long addr, unsigned sz)
-{
-	int i;
-
-	for (i = 0; i < boot_mem_map.nr_map; i++) {
-		unsigned long a = boot_mem_map.map[i].addr;
-		if (a <= addr && addr+sz <= a+boot_mem_map.map[i].size)
-			return 1;
-	}
-	return 0;
-}
-
 static int check_microtlb(u32 hi, u32 lo, unsigned long vaddr)
 {
 	/* This is likely rather similar to correct code ;-) */
@@ -329,7 +315,7 @@ static int check_microtlb(u32 hi, u32 lo, unsigned long vaddr)
 			/* PTEIndex is VPN-low (bits [22:14]/[20:12] ?) */
 			unsigned long pte = (lo >> 6) << 12; /* PTEBase */
 			pte += 8*((vaddr >> pgsz) & 0x1ff);
-			if (addr_is_ram(pte, 8)) {
+			if (page_is_ram(PFN_DOWN(pte))) {
 				/*
 				 * Note: Since DMA hardware does look up
 				 * translation on its own, this PTE *must*
@@ -339,7 +325,7 @@ static int check_microtlb(u32 hi, u32 lo, unsigned long vaddr)
 						PHYS_TO_XKSEG_UNCACHED(pte);
 				a = (a & 0x3f) << 6; /* PFN */
 				a += vaddr & ((1 << pgsz) - 1);
-				return (cpu_err_addr == a);
+				return cpu_err_addr == a;
 			}
 		}
 	}
@@ -352,7 +338,7 @@ static int check_vdma_memaddr(void)
 		u32 a = sgimc->maddronly;
 
 		if (!(sgimc->dma_ctrl & 0x100)) /* Xlate-bit clear ? */
-			return (cpu_err_addr == a);
+			return cpu_err_addr == a;
 
 		if (check_microtlb(sgimc->dtlb_hi0, sgimc->dtlb_lo0, a) ||
 		    check_microtlb(sgimc->dtlb_hi1, sgimc->dtlb_lo1, a) ||
@@ -368,7 +354,7 @@ static int check_vdma_gioaddr(void)
 	if (gio_err_stat & GIO_ERRMASK) {
 		u32 a = sgimc->gio_dma_trans;
 		a = (sgimc->gmaddronly & ~a) | (sgimc->gio_dma_sbits & a);
-		return (gio_err_addr == a);
+		return gio_err_addr == a;
 	}
 	return 0;
 }
@@ -453,16 +439,16 @@ mips_be_fatal:
 
 void ip22_be_interrupt(int irq)
 {
-	const struct pt_regs *regs = get_irq_regs();
+	struct pt_regs *regs = get_irq_regs();
 
 	count_be_interrupt++;
 
 	if (ip28_be_interrupt(regs) != MIPS_BE_DISCARD) {
 		/* Assume it would be too dangerous to continue ... */
 		die_if_kernel("Oops", regs);
-		force_sig(SIGBUS, current);
+		force_sig(SIGBUS);
 	} else if (debug_be_interrupt)
-		show_regs((struct pt_regs *)regs);
+		show_regs(regs);
 }
 
 static int ip28_be_handler(struct pt_regs *regs, int is_fixup)

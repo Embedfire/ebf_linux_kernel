@@ -181,9 +181,10 @@
 #include <linux/init.h>
 #include <linux/soundcard.h>
 #include <linux/poll.h>
-#include <linux/smp_lock.h>
+#include <linux/mutex.h>
+#include <linux/sched/signal.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "dmasound.h"
 
@@ -194,6 +195,7 @@
      *  Declarations
      */
 
+static DEFINE_MUTEX(dmasound_core_mutex);
 int dmasound_catchRadius = 0;
 module_param(dmasound_catchRadius, int, 0);
 
@@ -212,14 +214,16 @@ static int irq_installed;
 #endif /* MODULE */
 
 /* control over who can modify resources shared between play/record */
-static mode_t shared_resource_owner;
+static fmode_t shared_resource_owner;
 static int shared_resources_initialised;
 
     /*
      *  Mid level stuff
      */
 
-struct sound_settings dmasound = { .lock = SPIN_LOCK_UNLOCKED };
+struct sound_settings dmasound = {
+	.lock = __SPIN_LOCK_UNLOCKED(dmasound.lock)
+};
 
 static inline void sound_silence(void)
 {
@@ -321,22 +325,26 @@ static struct {
 
 static int mixer_open(struct inode *inode, struct file *file)
 {
-	if (!try_module_get(dmasound.mach.owner))
+	mutex_lock(&dmasound_core_mutex);
+	if (!try_module_get(dmasound.mach.owner)) {
+		mutex_unlock(&dmasound_core_mutex);
 		return -ENODEV;
+	}
 	mixer.busy = 1;
+	mutex_unlock(&dmasound_core_mutex);
 	return 0;
 }
 
 static int mixer_release(struct inode *inode, struct file *file)
 {
-	lock_kernel();
+	mutex_lock(&dmasound_core_mutex);
 	mixer.busy = 0;
 	module_put(dmasound.mach.owner);
-	unlock_kernel();
+	mutex_unlock(&dmasound_core_mutex);
 	return 0;
 }
-static int mixer_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		       u_long arg)
+
+static int mixer_ioctl(struct file *file, u_int cmd, u_long arg)
 {
 	if (_SIOC_DIR(cmd) & _SIOC_WRITE)
 	    mixer.modify_counter++;
@@ -360,11 +368,23 @@ static int mixer_ioctl(struct inode *inode, struct file *file, u_int cmd,
 	return -EINVAL;
 }
 
+static long mixer_unlocked_ioctl(struct file *file, u_int cmd, u_long arg)
+{
+	int ret;
+
+	mutex_lock(&dmasound_core_mutex);
+	ret = mixer_ioctl(file, cmd, arg);
+	mutex_unlock(&dmasound_core_mutex);
+
+	return ret;
+}
+
 static const struct file_operations mixer_fops =
 {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
-	.ioctl		= mixer_ioctl,
+	.unlocked_ioctl	= mixer_unlocked_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= mixer_open,
 	.release	= mixer_release,
 };
@@ -401,7 +421,7 @@ static int sq_allocate_buffers(struct sound_queue *sq, int num, int size)
 		return 0;
 	sq->numBufs = num;
 	sq->bufSize = size;
-	sq->buffers = kmalloc (num * sizeof(char *), GFP_KERNEL);
+	sq->buffers = kmalloc_array (num, sizeof(char *), GFP_KERNEL);
 	if (!sq->buffers)
 		return -ENOMEM;
 	for (i = 0; i < num; i++) {
@@ -601,14 +621,26 @@ static ssize_t sq_write(struct file *file, const char __user *src, size_t uLeft,
 	}
 
 	while (uLeft) {
+		DEFINE_WAIT(wait);
+
 		while (write_sq.count >= write_sq.max_active) {
+			prepare_to_wait(&write_sq.action_queue, &wait, TASK_INTERRUPTIBLE);
 			sq_play();
-			if (write_sq.open_mode & O_NONBLOCK)
+			if (write_sq.non_blocking) {
+				finish_wait(&write_sq.action_queue, &wait);
 				return uWritten > 0 ? uWritten : -EAGAIN;
-			SLEEP(write_sq.action_queue);
-			if (signal_pending(current))
+			}
+			if (write_sq.count < write_sq.max_active)
+				break;
+
+			schedule_timeout(HZ);
+			if (signal_pending(current)) {
+				finish_wait(&write_sq.action_queue, &wait);
 				return uWritten > 0 ? uWritten : -EINTR;
+			}
 		}
+
+		finish_wait(&write_sq.action_queue, &wait);
 
 		/* Here, we can avoid disabling the interrupt by first
 		 * copying and translating the data, and then updating
@@ -639,9 +671,9 @@ static ssize_t sq_write(struct file *file, const char __user *src, size_t uLeft,
 	return uUsed < 0? uUsed: uWritten;
 }
 
-static unsigned int sq_poll(struct file *file, struct poll_table_struct *wait)
+static __poll_t sq_poll(struct file *file, struct poll_table_struct *wait)
 {
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 	int retVal;
 	
 	if (write_sq.locked == 0) {
@@ -653,7 +685,7 @@ static unsigned int sq_poll(struct file *file, struct poll_table_struct *wait)
 		poll_wait(file, &write_sq.action_queue, wait);
 	if (file->f_mode & FMODE_WRITE)
 		if (write_sq.count < write_sq.max_active || write_sq.block_size - write_sq.rear_size > 0)
-			mask |= POLLOUT | POLLWRNORM;
+			mask |= EPOLLOUT | EPOLLWRNORM;
 	return mask;
 
 }
@@ -668,7 +700,7 @@ static inline void sq_init_waitqueue(struct sound_queue *sq)
 
 #if 0 /* blocking open() */
 static inline void sq_wake_up(struct sound_queue *sq, struct file *file,
-			      mode_t mode)
+			      fmode_t mode)
 {
 	if (file->f_mode & mode) {
 		sq->busy = 0; /* CHECK: IS THIS OK??? */
@@ -677,7 +709,7 @@ static inline void sq_wake_up(struct sound_queue *sq, struct file *file,
 }
 #endif
 
-static int sq_open2(struct sound_queue *sq, struct file *file, mode_t mode,
+static int sq_open2(struct sound_queue *sq, struct file *file, fmode_t mode,
 		    int numbufs, int bufsize)
 {
 	int rc = 0;
@@ -689,11 +721,8 @@ static int sq_open2(struct sound_queue *sq, struct file *file, mode_t mode,
 			if (file->f_flags & O_NONBLOCK)
 				return rc;
 			rc = -EINTR;
-			while (sq->busy) {
-				SLEEP(sq->open_queue);
-				if (signal_pending(current))
-					return rc;
-			}
+			if (wait_event_interruptible(sq->open_queue, !sq->busy))
+				return rc;
 			rc = 0;
 #else
 			/* OSS manual says we will return EBUSY regardless
@@ -718,7 +747,7 @@ static int sq_open2(struct sound_queue *sq, struct file *file, mode_t mode,
 			return rc;
 		}
 
-		sq->open_mode = file->f_mode;
+		sq->non_blocking = file->f_flags & O_NONBLOCK;
 	}
 	return rc;
 }
@@ -735,8 +764,11 @@ static int sq_open(struct inode *inode, struct file *file)
 {
 	int rc;
 
-	if (!try_module_get(dmasound.mach.owner))
+	mutex_lock(&dmasound_core_mutex);
+	if (!try_module_get(dmasound.mach.owner)) {
+		mutex_unlock(&dmasound_core_mutex);
 		return -ENODEV;
+	}
 
 	rc = write_sq_open(file); /* checks the f_mode */
 	if (rc)
@@ -779,10 +811,11 @@ static int sq_open(struct inode *inode, struct file *file)
 		sound_set_format(AFMT_MU_LAW);
 	}
 #endif
-
+	mutex_unlock(&dmasound_core_mutex);
 	return 0;
  out:
 	module_put(dmasound.mach.owner);
+	mutex_unlock(&dmasound_core_mutex);
 	return rc;
 }
 
@@ -813,7 +846,7 @@ static void sq_reset(void)
 	shared_resources_initialised = 0 ;
 }
 
-static int sq_fsync(struct file *filp, struct dentry *dentry)
+static int sq_fsync(void)
 {
 	int rc = 0;
 	int timeout = 5;
@@ -822,7 +855,8 @@ static int sq_fsync(struct file *filp, struct dentry *dentry)
 	sq_play();	/* there may be an incomplete frame waiting */
 
 	while (write_sq.active) {
-		SLEEP(write_sq.sync_queue);
+		wait_event_interruptible_timeout(write_sq.sync_queue,
+						 !write_sq.active, HZ);
 		if (signal_pending(current)) {
 			/* While waiting for audio output to drain, an
 			 * interrupt occurred.  Stop audio output immediately
@@ -848,11 +882,11 @@ static int sq_release(struct inode *inode, struct file *file)
 {
 	int rc = 0;
 
-	lock_kernel();
+	mutex_lock(&dmasound_core_mutex);
 
 	if (file->f_mode & FMODE_WRITE) {
 		if (write_sq.busy)
-			rc = sq_fsync(file, file->f_path.dentry);
+			rc = sq_fsync();
 
 		sq_reset_output() ; /* make sure dma is stopped and all is quiet */
 		write_sq_release_buffers();
@@ -879,7 +913,7 @@ static int sq_release(struct inode *inode, struct file *file)
 	write_sq_wake_up(file); /* checks f_mode */
 #endif /* blocking open() */
 
-	unlock_kernel();
+	mutex_unlock(&dmasound_core_mutex);
 
 	return rc;
 }
@@ -891,10 +925,10 @@ static int sq_release(struct inode *inode, struct file *file)
    is the owner - if we have problems.
 */
 
-static int shared_resources_are_mine(mode_t md)
+static int shared_resources_are_mine(fmode_t md)
 {
 	if (shared_resource_owner)
-		return (shared_resource_owner & md ) ;
+		return (shared_resource_owner & md) != 0;
 	else {
 		shared_resource_owner = md ;
 		return 1 ;
@@ -953,8 +987,7 @@ printk("dmasound_core: tried to set_queue_frags on a locked queue\n") ;
 	return 0 ;
 }
 
-static int sq_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		    u_long arg)
+static int sq_ioctl(struct file *file, u_int cmd, u_long arg)
 {
 	int val, result;
 	u_long fmt;
@@ -1000,11 +1033,11 @@ static int sq_ioctl(struct inode *inode, struct file *file, u_int cmd,
 	case SNDCTL_DSP_SYNC:
 		/* This call, effectively, has the same behaviour as SNDCTL_DSP_RESET
 		   except that it waits for output to finish before resetting
-		   everything - read, however, is killed imediately.
+		   everything - read, however, is killed immediately.
 		*/
 		result = 0 ;
 		if (file->f_mode & FMODE_WRITE) {
-			result = sq_fsync(file, file->f_path.dentry);
+			result = sq_fsync();
 			sq_reset_output() ;
 		}
 		/* if we are the shared resource owner then release them */
@@ -1112,9 +1145,20 @@ static int sq_ioctl(struct inode *inode, struct file *file, u_int cmd,
 		return IOCTL_OUT(arg,val);
 
 	default:
-		return mixer_ioctl(inode, file, cmd, arg);
+		return mixer_ioctl(file, cmd, arg);
 	}
 	return -EINVAL;
+}
+
+static long sq_unlocked_ioctl(struct file *file, u_int cmd, u_long arg)
+{
+	int ret;
+
+	mutex_lock(&dmasound_core_mutex);
+	ret = sq_ioctl(file, cmd, arg);
+	mutex_unlock(&dmasound_core_mutex);
+
+	return ret;
 }
 
 static const struct file_operations sq_fops =
@@ -1123,7 +1167,8 @@ static const struct file_operations sq_fops =
 	.llseek		= no_llseek,
 	.write		= sq_write,
 	.poll		= sq_poll,
-	.ioctl		= sq_ioctl,
+	.unlocked_ioctl	= sq_unlocked_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= sq_open,
 	.release	= sq_release,
 };
@@ -1224,12 +1269,17 @@ static int state_open(struct inode *inode, struct file *file)
 {
 	char *buffer = state.buf;
 	int len = 0;
+	int ret;
 
+	mutex_lock(&dmasound_core_mutex);
+	ret = -EBUSY;
 	if (state.busy)
-		return -EBUSY;
+		goto out;
 
+	ret = -ENODEV;
 	if (!try_module_get(dmasound.mach.owner))
-		return -ENODEV;
+		goto out;
+
 	state.ptr = 0;
 	state.busy = 1;
 
@@ -1291,15 +1341,18 @@ printk("dmasound: stat buffer used %d bytes\n", len) ;
 		printk(KERN_ERR "dmasound_core: stat buffer overflowed!\n");
 
 	state.len = len;
-	return 0;
+	ret = 0;
+out:
+	mutex_unlock(&dmasound_core_mutex);
+	return ret;
 }
 
 static int state_release(struct inode *inode, struct file *file)
 {
-	lock_kernel();
+	mutex_lock(&dmasound_core_mutex);
 	state.busy = 0;
 	module_put(dmasound.mach.owner);
-	unlock_kernel();
+	mutex_unlock(&dmasound_core_mutex);
 	return 0;
 }
 
@@ -1425,13 +1478,13 @@ static int dmasound_setup(char *str)
 			printk("dmasound_setup: invalid catch radius, using default = %d\n", catchRadius);
 		else
 			catchRadius = ints[3];
-		/* fall through */
+		fallthrough;
 	case 2:
 		if (ints[1] < MIN_BUFFERS)
 			printk("dmasound_setup: invalid number of buffers, using default = %d\n", numWriteBufs);
 		else
 			numWriteBufs = ints[1];
-		/* fall through */
+		fallthrough;
 	case 1:
 		if ((size = ints[2]) < 256) /* check for small buffer specs */
 			size <<= 10 ;

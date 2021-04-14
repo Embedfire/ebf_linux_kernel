@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Driver for the Gravis Grip Multiport, a gamepad "hub" that
  *  connects up to four 9-pin digital gamepads/joysticks.
@@ -11,7 +12,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/gameport.h>
 #include <linux/input.h>
@@ -687,16 +687,4 @@ static struct gameport_driver grip_drv = {
 	.disconnect	= grip_disconnect,
 };
 
-static int __init grip_init(void)
-{
-	gameport_register_driver(&grip_drv);
-	return 0;
-}
-
-static void __exit grip_exit(void)
-{
-	gameport_unregister_driver(&grip_drv);
-}
-
-module_init(grip_init);
-module_exit(grip_exit);
+module_gameport_driver(grip_drv);

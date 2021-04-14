@@ -1,56 +1,29 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/mtd/physmap.h>
+#include <linux/serial_8250.h>
+#include <linux/serial_reg.h>
+#include <linux/usb/isp116x.h>
+#include <linux/delay.h>
+#include <linux/irqdomain.h>
 #include <asm/machvec.h>
 #include <mach-se/mach/se7343.h>
 #include <asm/heartbeat.h>
 #include <asm/irq.h>
 #include <asm/io.h>
 
-static struct resource smc91x_resources[] = {
-	[0] = {
-		.start	= 0x10000000,
-		.end	= 0x1000000F,
-		.flags	= IORESOURCE_MEM,
-	},
-	[1] = {
-		/*
-		 * shared with other devices via externel
-		 * interrupt controller in FPGA...
-		 */
-		.start	= SMC_IRQ,
-		.end	= SMC_IRQ,
-		.flags	= IORESOURCE_IRQ,
-	},
-};
-
-static struct platform_device smc91x_device = {
-	.name		= "smc91x",
-	.id		= 0,
-	.num_resources	= ARRAY_SIZE(smc91x_resources),
-	.resource	= smc91x_resources,
-};
-
-static struct resource heartbeat_resources[] = {
-	[0] = {
-		.start	= PA_LED,
-		.end	= PA_LED,
-		.flags	= IORESOURCE_MEM,
-	},
-};
-
-static struct heartbeat_data heartbeat_data = {
-	.regsize = 16,
+static struct resource heartbeat_resource = {
+	.start	= PA_LED,
+	.end	= PA_LED,
+	.flags	= IORESOURCE_MEM | IORESOURCE_MEM_16BIT,
 };
 
 static struct platform_device heartbeat_device = {
 	.name		= "heartbeat",
 	.id		= -1,
-	.dev = {
-		.platform_data = &heartbeat_data,
-	},
-	.num_resources	= ARRAY_SIZE(heartbeat_resources),
-	.resource	= heartbeat_resources,
+	.num_resources	= 1,
+	.resource	= &heartbeat_resource,
 };
 
 static struct mtd_partition nor_flash_partitions[] = {
@@ -94,14 +67,93 @@ static struct platform_device nor_flash_device = {
 	.resource	= nor_flash_resources,
 };
 
+#define ST16C2550C_FLAGS (UPF_BOOT_AUTOCONF | UPF_IOREMAP)
+
+static struct plat_serial8250_port serial_platform_data[] = {
+	[0] = {
+		.iotype		= UPIO_MEM,
+		.mapbase	= 0x16000000,
+		.regshift	= 1,
+		.flags		= ST16C2550C_FLAGS,
+		.uartclk	= 7372800,
+	},
+	[1] = {
+		.iotype		= UPIO_MEM,
+		.mapbase	= 0x17000000,
+		.regshift	= 1,
+		.flags		= ST16C2550C_FLAGS,
+		.uartclk	= 7372800,
+	},
+	{ },
+};
+
+static struct platform_device uart_device = {
+	.name			= "serial8250",
+	.id			= PLAT8250_DEV_PLATFORM,
+	.dev			= {
+		.platform_data	= serial_platform_data,
+	},
+};
+
+static void isp116x_delay(struct device *dev, int delay)
+{
+	ndelay(delay);
+}
+
+static struct resource usb_resources[] = {
+	[0] = {
+		.start  = 0x11800000,
+		.end    = 0x11800001,
+		.flags  = IORESOURCE_MEM,
+	},
+	[1] = {
+		.start  = 0x11800002,
+		.end    = 0x11800003,
+		.flags  = IORESOURCE_MEM,
+	},
+	[2] = {
+		/* Filled in later */
+		.flags  = IORESOURCE_IRQ,
+	},
+};
+
+static struct isp116x_platform_data usb_platform_data = {
+	.sel15Kres		= 1,
+	.oc_enable		= 1,
+	.int_act_high		= 0,
+	.int_edge_triggered	= 0,
+	.remote_wakeup_enable	= 0,
+	.delay			= isp116x_delay,
+};
+
+static struct platform_device usb_device = {
+	.name			= "isp116x-hcd",
+	.id			= -1,
+	.num_resources		= ARRAY_SIZE(usb_resources),
+	.resource		= usb_resources,
+	.dev			= {
+		.platform_data	= &usb_platform_data,
+	},
+
+};
+
 static struct platform_device *sh7343se_platform_devices[] __initdata = {
-	&smc91x_device,
 	&heartbeat_device,
 	&nor_flash_device,
+	&uart_device,
+	&usb_device,
 };
 
 static int __init sh7343se_devices_setup(void)
 {
+	/* Wire-up dynamic vectors */
+	serial_platform_data[0].irq = irq_find_mapping(se7343_irq_domain,
+						       SE7343_FPGA_IRQ_UARTA);
+	serial_platform_data[1].irq = irq_find_mapping(se7343_irq_domain,
+						       SE7343_FPGA_IRQ_UARTB);
+	usb_resources[2].start = usb_resources[2].end =
+		irq_find_mapping(se7343_irq_domain, SE7343_FPGA_IRQ_USB);
+
 	return platform_add_devices(sh7343se_platform_devices,
 				    ARRAY_SIZE(sh7343se_platform_devices));
 }
@@ -112,10 +164,10 @@ device_initcall(sh7343se_devices_setup);
  */
 static void __init sh7343se_setup(char **cmdline_p)
 {
-	ctrl_outw(0xf900, FPGA_OUT);	/* FPGA */
+	__raw_writew(0xf900, FPGA_OUT);	/* FPGA */
 
-	ctrl_outw(0x0002, PORT_PECR);	/* PORT E 1 = IRQ5 */
-	ctrl_outw(0x0020, PORT_PSELD);
+	__raw_writew(0x0002, PORT_PECR);	/* PORT E 1 = IRQ5 */
+	__raw_writew(0x0020, PORT_PSELD);
 
 	printk(KERN_INFO "MS7343CP01 Setup...done\n");
 }
@@ -126,27 +178,5 @@ static void __init sh7343se_setup(char **cmdline_p)
 static struct sh_machine_vector mv_7343se __initmv = {
 	.mv_name = "SolutionEngine 7343",
 	.mv_setup = sh7343se_setup,
-	.mv_nr_irqs = 108,
-	.mv_inb = sh7343se_inb,
-	.mv_inw = sh7343se_inw,
-	.mv_inl = sh7343se_inl,
-	.mv_outb = sh7343se_outb,
-	.mv_outw = sh7343se_outw,
-	.mv_outl = sh7343se_outl,
-
-	.mv_inb_p = sh7343se_inb_p,
-	.mv_inw_p = sh7343se_inw,
-	.mv_inl_p = sh7343se_inl,
-	.mv_outb_p = sh7343se_outb_p,
-	.mv_outw_p = sh7343se_outw,
-	.mv_outl_p = sh7343se_outl,
-
-	.mv_insb = sh7343se_insb,
-	.mv_insw = sh7343se_insw,
-	.mv_insl = sh7343se_insl,
-	.mv_outsb = sh7343se_outsb,
-	.mv_outsw = sh7343se_outsw,
-	.mv_outsl = sh7343se_outsl,
-
 	.mv_init_irq = init_7343se_IRQ,
 };

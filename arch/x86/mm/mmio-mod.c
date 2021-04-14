@@ -1,17 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) IBM Corporation, 2005
  *               Jeff Muizelaar, 2006, 2007
@@ -19,24 +7,24 @@
  *
  * Derived from the read-mod example from relay-examples by Tom Zanussi.
  */
+
+#define pr_fmt(fmt) "mmiotrace: " fmt
+
 #define DEBUG 1
 
-#include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/debugfs.h>
+#include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/io.h>
-#include <linux/version.h>
-#include <linux/kallsyms.h>
-#include <asm/pgtable.h>
 #include <linux/mmiotrace.h>
-#include <asm/e820.h> /* for ISA_START_ADDRESS */
-#include <asm/atomic.h>
+#include <linux/pgtable.h>
+#include <asm/e820/api.h> /* for ISA_START_ADDRESS */
+#include <linux/atomic.h>
 #include <linux/percpu.h>
 #include <linux/cpu.h>
 
 #include "pf_in.h"
-
-#define NAME "mmiotrace: "
 
 struct trap_reason {
 	unsigned long addr;
@@ -56,13 +44,6 @@ struct remap_trace {
 static DEFINE_PER_CPU(struct trap_reason, pf_reason);
 static DEFINE_PER_CPU(struct mmiotrace_rw, cpu_trace);
 
-#if 0 /* XXX: no way gather this info anymore */
-/* Access to this is not per-cpu. */
-static DEFINE_PER_CPU(atomic_t, dropped);
-#endif
-
-static struct dentry *marker_file;
-
 static DEFINE_MUTEX(mmiotrace_mutex);
 static DEFINE_SPINLOCK(trace_lock);
 static atomic_t mmiotrace_enabled;
@@ -75,14 +56,14 @@ static LIST_HEAD(trace_list);		/* struct remap_trace */
  *   and trace_lock.
  * - Routines depending on is_enabled() must take trace_lock.
  * - trace_list users must hold trace_lock.
- * - is_enabled() guarantees that mmio_trace_record is allowed.
+ * - is_enabled() guarantees that mmio_trace_{rw,mapping} are allowed.
  * - pre/post callbacks assume the effect of is_enabled() being true.
  */
 
 /* module parameters */
 static unsigned long	filter_offset;
-static int		nommiotrace;
-static int		trace_pc;
+static bool		nommiotrace;
+static bool		trace_pc;
 
 module_param(filter_offset, ulong, 0);
 module_param(nommiotrace, bool, 0);
@@ -97,61 +78,24 @@ static bool is_enabled(void)
 	return atomic_read(&mmiotrace_enabled);
 }
 
-#if 0 /* XXX: needs rewrite */
-/*
- * Write callback for the debugfs entry:
- * Read a marker and write it to the mmio trace log
- */
-static ssize_t write_marker(struct file *file, const char __user *buffer,
-						size_t count, loff_t *ppos)
-{
-	char *event = NULL;
-	struct mm_io_header *headp;
-	ssize_t len = (count > 65535) ? 65535 : count;
-
-	event = kzalloc(sizeof(*headp) + len, GFP_KERNEL);
-	if (!event)
-		return -ENOMEM;
-
-	headp = (struct mm_io_header *)event;
-	headp->type = MMIO_MAGIC | (MMIO_MARKER << MMIO_OPCODE_SHIFT);
-	headp->data_len = len;
-
-	if (copy_from_user(event + sizeof(*headp), buffer, len)) {
-		kfree(event);
-		return -EFAULT;
-	}
-
-	spin_lock_irq(&trace_lock);
-#if 0 /* XXX: convert this to use tracing */
-	if (is_enabled())
-		relay_write(chan, event, sizeof(*headp) + len);
-	else
-#endif
-		len = -EINVAL;
-	spin_unlock_irq(&trace_lock);
-	kfree(event);
-	return len;
-}
-#endif
-
 static void print_pte(unsigned long address)
 {
 	unsigned int level;
 	pte_t *pte = lookup_address(address, &level);
 
 	if (!pte) {
-		pr_err(NAME "Error in %s: no pte for page 0x%08lx\n",
-							__func__, address);
+		pr_err("Error in %s: no pte for page 0x%08lx\n",
+		       __func__, address);
 		return;
 	}
 
 	if (level == PG_LEVEL_2M) {
-		pr_emerg(NAME "4MB pages are not currently supported: "
-							"0x%08lx\n", address);
+		pr_emerg("4MB pages are not currently supported: 0x%08lx\n",
+			 address);
 		BUG();
 	}
-	pr_info(NAME "pte for 0x%lx: 0x%llx 0x%llx\n", address,
+	pr_info("pte for 0x%lx: 0x%llx 0x%llx\n",
+		address,
 		(unsigned long long)pte_val(*pte),
 		(unsigned long long)pte_val(*pte) & _PAGE_PRESENT);
 }
@@ -163,22 +107,21 @@ static void print_pte(unsigned long address)
 static void die_kmmio_nesting_error(struct pt_regs *regs, unsigned long addr)
 {
 	const struct trap_reason *my_reason = &get_cpu_var(pf_reason);
-	pr_emerg(NAME "unexpected fault for address: 0x%08lx, "
-					"last fault for address: 0x%08lx\n",
-					addr, my_reason->addr);
+	pr_emerg("unexpected fault for address: 0x%08lx, last fault for address: 0x%08lx\n",
+		 addr, my_reason->addr);
 	print_pte(addr);
-	print_symbol(KERN_EMERG "faulting IP is at %s\n", regs->ip);
-	print_symbol(KERN_EMERG "last faulting IP was at %s\n", my_reason->ip);
+	pr_emerg("faulting IP is at %pS\n", (void *)regs->ip);
+	pr_emerg("last faulting IP was at %pS\n", (void *)my_reason->ip);
 #ifdef __i386__
 	pr_emerg("eax: %08lx   ebx: %08lx   ecx: %08lx   edx: %08lx\n",
-			regs->ax, regs->bx, regs->cx, regs->dx);
+		 regs->ax, regs->bx, regs->cx, regs->dx);
 	pr_emerg("esi: %08lx   edi: %08lx   ebp: %08lx   esp: %08lx\n",
-			regs->si, regs->di, regs->bp, regs->sp);
+		 regs->si, regs->di, regs->bp, regs->sp);
 #else
 	pr_emerg("rax: %016lx   rcx: %016lx   rdx: %016lx\n",
-					regs->ax, regs->cx, regs->dx);
+		 regs->ax, regs->cx, regs->dx);
 	pr_emerg("rsi: %016lx   rdi: %016lx   rbp: %016lx   rsp: %016lx\n",
-				regs->si, regs->di, regs->bp, regs->sp);
+		 regs->si, regs->di, regs->bp, regs->sp);
 #endif
 	put_cpu_var(pf_reason);
 	BUG();
@@ -258,7 +201,7 @@ static void post(struct kmmio_probe *p, unsigned long condition,
 	/* this should always return the active_trace count to 0 */
 	my_reason->active_traces--;
 	if (my_reason->active_traces) {
-		pr_emerg(NAME "unexpected post handler");
+		pr_emerg("unexpected post handler");
 		BUG();
 	}
 
@@ -289,7 +232,7 @@ static void ioremap_trace_core(resource_size_t offset, unsigned long size,
 	};
 
 	if (!trace) {
-		pr_err(NAME "kmalloc failed in ioremap\n");
+		pr_err("kmalloc failed in ioremap\n");
 		return;
 	}
 
@@ -307,8 +250,10 @@ static void ioremap_trace_core(resource_size_t offset, unsigned long size,
 	map.map_id = trace->id;
 
 	spin_lock_irq(&trace_lock);
-	if (!is_enabled())
+	if (!is_enabled()) {
+		kfree(trace);
 		goto not_enabled;
+	}
 
 	mmio_trace_mapping(&map);
 	list_add_tail(&trace->list, &trace_list);
@@ -325,8 +270,8 @@ void mmiotrace_ioremap(resource_size_t offset, unsigned long size,
 	if (!is_enabled()) /* recheck and proper locking in *_core() */
 		return;
 
-	pr_debug(NAME "ioremap_*(0x%llx, 0x%lx) = %p\n",
-				(unsigned long long)offset, size, addr);
+	pr_debug("ioremap_*(0x%llx, 0x%lx) = %p\n",
+		 (unsigned long long)offset, size, addr);
 	if ((filter_offset) && (offset != filter_offset))
 		return;
 	ioremap_trace_core(offset, size, addr);
@@ -344,7 +289,7 @@ static void iounmap_trace_core(volatile void __iomem *addr)
 	struct remap_trace *tmp;
 	struct remap_trace *found_trace = NULL;
 
-	pr_debug(NAME "Unmapping %p.\n", addr);
+	pr_debug("Unmapping %p.\n", addr);
 
 	spin_lock_irq(&trace_lock);
 	if (!is_enabled())
@@ -377,6 +322,23 @@ void mmiotrace_iounmap(volatile void __iomem *addr)
 		iounmap_trace_core(addr);
 }
 
+int mmiotrace_printk(const char *fmt, ...)
+{
+	int ret = 0;
+	va_list args;
+	unsigned long flags;
+	va_start(args, fmt);
+
+	spin_lock_irqsave(&trace_lock, flags);
+	if (is_enabled())
+		ret = mmio_trace_printk(fmt, args);
+	spin_unlock_irqrestore(&trace_lock, flags);
+
+	va_end(args);
+	return ret;
+}
+EXPORT_SYMBOL(mmiotrace_printk);
+
 static void clear_trace_list(void)
 {
 	struct remap_trace *trace;
@@ -389,9 +351,8 @@ static void clear_trace_list(void)
 	 * Caller also ensures is_enabled() cannot change.
 	 */
 	list_for_each_entry(trace, &trace_list, list) {
-		pr_notice(NAME "purging non-iounmapped "
-					"trace @0x%08lx, size 0x%lx.\n",
-					trace->probe.addr, trace->probe.len);
+		pr_notice("purging non-iounmapped trace @0x%08lx, size 0x%lx.\n",
+			  trace->probe.addr, trace->probe.len);
 		if (!nommiotrace)
 			unregister_kmmio_probe(&trace->probe);
 	}
@@ -404,48 +365,52 @@ static void clear_trace_list(void)
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
-static cpumask_t downed_cpus;
+static cpumask_var_t downed_cpus;
 
 static void enter_uniprocessor(void)
 {
 	int cpu;
 	int err;
 
+	if (!cpumask_available(downed_cpus) &&
+	    !alloc_cpumask_var(&downed_cpus, GFP_KERNEL)) {
+		pr_notice("Failed to allocate mask\n");
+		goto out;
+	}
+
 	get_online_cpus();
-	downed_cpus = cpu_online_map;
-	cpu_clear(first_cpu(cpu_online_map), downed_cpus);
+	cpumask_copy(downed_cpus, cpu_online_mask);
+	cpumask_clear_cpu(cpumask_first(cpu_online_mask), downed_cpus);
 	if (num_online_cpus() > 1)
-		pr_notice(NAME "Disabling non-boot CPUs...\n");
+		pr_notice("Disabling non-boot CPUs...\n");
 	put_online_cpus();
 
-	for_each_cpu_mask(cpu, downed_cpus) {
-		err = cpu_down(cpu);
+	for_each_cpu(cpu, downed_cpus) {
+		err = remove_cpu(cpu);
 		if (!err)
-			pr_info(NAME "CPU%d is down.\n", cpu);
+			pr_info("CPU%d is down.\n", cpu);
 		else
-			pr_err(NAME "Error taking CPU%d down: %d\n", cpu, err);
+			pr_err("Error taking CPU%d down: %d\n", cpu, err);
 	}
+out:
 	if (num_online_cpus() > 1)
-		pr_warning(NAME "multiple CPUs still online, "
-						"may miss events.\n");
+		pr_warn("multiple CPUs still online, may miss events.\n");
 }
 
-/* __ref because leave_uniprocessor calls cpu_up which is __cpuinit,
-   but this whole function is ifdefed CONFIG_HOTPLUG_CPU */
-static void __ref leave_uniprocessor(void)
+static void leave_uniprocessor(void)
 {
 	int cpu;
 	int err;
 
-	if (cpus_weight(downed_cpus) == 0)
+	if (!cpumask_available(downed_cpus) || cpumask_weight(downed_cpus) == 0)
 		return;
-	pr_notice(NAME "Re-enabling CPUs...\n");
-	for_each_cpu_mask(cpu, downed_cpus) {
-		err = cpu_up(cpu);
+	pr_notice("Re-enabling CPUs...\n");
+	for_each_cpu(cpu, downed_cpus) {
+		err = add_cpu(cpu);
 		if (!err)
-			pr_info(NAME "enabled CPU%d.\n", cpu);
+			pr_info("enabled CPU%d.\n", cpu);
 		else
-			pr_err(NAME "cannot re-enable CPU%d: %d\n", cpu, err);
+			pr_err("cannot re-enable CPU%d: %d\n", cpu, err);
 	}
 }
 
@@ -453,7 +418,7 @@ static void __ref leave_uniprocessor(void)
 static void enter_uniprocessor(void)
 {
 	if (num_online_cpus() > 1)
-		pr_warning(NAME "multiple CPUs are online, may miss events. "
+		pr_warn("multiple CPUs are online, may miss events. "
 			"Suggest booting with maxcpus=1 kernel argument.\n");
 }
 
@@ -462,33 +427,20 @@ static void leave_uniprocessor(void)
 }
 #endif
 
-#if 0 /* XXX: out of order */
-static struct file_operations fops_marker = {
-	.owner =	THIS_MODULE,
-	.write =	write_marker
-};
-#endif
-
 void enable_mmiotrace(void)
 {
 	mutex_lock(&mmiotrace_mutex);
 	if (is_enabled())
 		goto out;
 
-#if 0 /* XXX: tracing does not support text entries */
-	marker_file = debugfs_create_file("marker", 0660, dir, NULL,
-								&fops_marker);
-	if (!marker_file)
-		pr_err(NAME "marker file creation failed.\n");
-#endif
-
 	if (nommiotrace)
-		pr_info(NAME "MMIO tracing disabled.\n");
+		pr_info("MMIO tracing disabled.\n");
+	kmmio_init();
 	enter_uniprocessor();
 	spin_lock_irq(&trace_lock);
 	atomic_inc(&mmiotrace_enabled);
 	spin_unlock_irq(&trace_lock);
-	pr_info(NAME "enabled.\n");
+	pr_info("enabled.\n");
 out:
 	mutex_unlock(&mmiotrace_mutex);
 }
@@ -506,12 +458,8 @@ void disable_mmiotrace(void)
 
 	clear_trace_list(); /* guarantees: no more kmmio callbacks */
 	leave_uniprocessor();
-	if (marker_file) {
-		debugfs_remove(marker_file);
-		marker_file = NULL;
-	}
-
-	pr_info(NAME "disabled.\n");
+	kmmio_cleanup();
+	pr_info("disabled.\n");
 out:
 	mutex_unlock(&mmiotrace_mutex);
 }

@@ -1,18 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* -*- linux-c -*- ------------------------------------------------------- *
  *
  *   Copyright (C) 1991, 1992 Linus Torvalds
  *   Copyright 2007 rPath, Inc. - All Rights Reserved
- *
- *   This file is part of the Linux kernel, and is made available under
- *   the terms of the GNU General Public License version 2.
+ *   Copyright 2009 Intel Corporation; author H. Peter Anvin
  *
  * ----------------------------------------------------------------------- */
 
 /*
  * Main module for the real-mode kernel code
  */
+#include <linux/build_bug.h>
 
 #include "boot.h"
+#include "string.h"
 
 struct boot_params boot_params __attribute__((aligned(16)));
 
@@ -34,8 +35,8 @@ static void copy_boot_params(void)
 	const struct old_cmdline * const oldcmd =
 		(const struct old_cmdline *)OLD_CL_ADDRESS;
 
-	BUILD_BUG_ON(sizeof boot_params != 4096);
-	memcpy(&boot_params.hdr, &hdr, sizeof hdr);
+	BUILD_BUG_ON(sizeof(boot_params) != 4096);
+	memcpy(&boot_params.hdr, &hdr, sizeof(hdr));
 
 	if (!boot_params.hdr.cmd_line_ptr &&
 	    oldcmd->cl_magic == OLD_CL_MAGIC) {
@@ -56,16 +57,21 @@ static void copy_boot_params(void)
 }
 
 /*
- * Set the keyboard repeat rate to maximum.  Unclear why this
+ * Query the keyboard lock status as given by the BIOS, and
+ * set the keyboard repeat rate to maximum.  Unclear why the latter
  * is done here; this might be possible to kill off as stale code.
  */
-static void keyboard_set_repeat(void)
+static void keyboard_init(void)
 {
-	u16 ax = 0x0305;
-	u16 bx = 0;
-	asm volatile("int $0x16"
-		     : "+a" (ax), "+b" (bx)
-		     : : "ecx", "edx", "esi", "edi");
+	struct biosregs ireg, oreg;
+	initregs(&ireg);
+
+	ireg.ah = 0x02;		/* Get keyboard status */
+	intcall(0x16, &ireg, &oreg);
+	boot_params.kbd_status = oreg.al;
+
+	ireg.ax = 0x0305;	/* Set keyboard repeat rate */
+	intcall(0x16, &ireg, NULL);
 }
 
 /*
@@ -73,18 +79,22 @@ static void keyboard_set_repeat(void)
  */
 static void query_ist(void)
 {
+	struct biosregs ireg, oreg;
+
 	/* Some older BIOSes apparently crash on this call, so filter
 	   it from machines too old to have SpeedStep at all. */
 	if (cpu.level < 6)
 		return;
 
-	asm("int $0x15"
-	    : "=a" (boot_params.ist_info.signature),
-	      "=b" (boot_params.ist_info.command),
-	      "=c" (boot_params.ist_info.event),
-	      "=d" (boot_params.ist_info.perf_level)
-	    : "a" (0x0000e980),	 /* IST Support */
-	      "d" (0x47534943)); /* Request value */
+	initregs(&ireg);
+	ireg.ax  = 0xe980;	 /* IST Support */
+	ireg.edx = 0x47534943;	 /* Request value */
+	intcall(0x15, &ireg, &oreg);
+
+	boot_params.ist_info.signature  = oreg.eax;
+	boot_params.ist_info.command    = oreg.ebx;
+	boot_params.ist_info.event      = oreg.ecx;
+	boot_params.ist_info.perf_level = oreg.edx;
 }
 
 /*
@@ -93,13 +103,12 @@ static void query_ist(void)
 static void set_bios_mode(void)
 {
 #ifdef CONFIG_X86_64
-	u32 eax, ebx;
+	struct biosregs ireg;
 
-	eax = 0xec00;
-	ebx = 2;
-	asm volatile("int $0x15"
-		     : "+a" (eax), "+b" (ebx)
-		     : : "ecx", "edx", "esi", "edi");
+	initregs(&ireg);
+	ireg.ax = 0xec00;
+	ireg.bx = 2;
+	intcall(0x15, &ireg, NULL);
 #endif
 }
 
@@ -127,6 +136,11 @@ void main(void)
 	/* First, copy the boot header into the "zeropage" */
 	copy_boot_params();
 
+	/* Initialize the early-boot console */
+	console_init();
+	if (cmdline_find_option_bool("debug"))
+		puts("early console in setup code\n");
+
 	/* End of heap check */
 	init_heap();
 
@@ -143,16 +157,8 @@ void main(void)
 	/* Detect memory layout */
 	detect_memory();
 
-	/* Set keyboard repeat rate (why?) */
-	keyboard_set_repeat();
-
-	/* Query MCA information */
-	query_mca();
-
-	/* Voyager */
-#ifdef CONFIG_X86_VOYAGER
-	query_voyager();
-#endif
+	/* Set keyboard repeat rate (why?) and query the lock flags */
+	keyboard_init();
 
 	/* Query Intel SpeedStep (IST) information */
 	query_ist();
@@ -169,10 +175,6 @@ void main(void)
 
 	/* Set the video mode */
 	set_video();
-
-	/* Parse command line for 'quiet' and pass it to decompressor. */
-	if (cmdline_find_option_bool("quiet"))
-		boot_params.hdr.loadflags |= QUIET_FLAG;
 
 	/* Do the last things and invoke protected mode */
 	go_to_protected_mode();

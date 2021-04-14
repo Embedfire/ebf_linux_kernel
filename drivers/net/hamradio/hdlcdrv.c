@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*****************************************************************************/
 
 /*
  *	hdlcdrv.c  -- HDLC packet radio network driver.
  *
  *	Copyright (C) 1996-2000  Thomas Sailer (sailer@ife.ee.ethz.ch)
- *
- *	This program is free software; you can redistribute it and/or modify
- *	it under the terms of the GNU General Public License as published by
- *	the Free Software Foundation; either version 2 of the License, or
- *	(at your option) any later version.
- *
- *	This program is distributed in the hope that it will be useful,
- *	but WITHOUT ANY WARRANTY; without even the implied warranty of
- *	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *	GNU General Public License for more details.
- *
- *	You should have received a copy of the GNU General Public License
- *	along with this program; if not, write to the Free Software
- *	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  *  Please note that the GPL allows you to use the driver, NOT the radio.
  *  In order to use the radio, you need a license from the communications
@@ -42,12 +29,12 @@
 
 /*****************************************************************************/
 
+#include <linux/capability.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/net.h>
 #include <linux/in.h>
 #include <linux/if.h>
-#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/bitops.h>
@@ -58,7 +45,7 @@
 #include <linux/hdlcdrv.h>
 #include <linux/random.h>
 #include <net/ax25.h> 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <linux/crc-ccitt.h>
 
@@ -110,7 +97,7 @@ static int calc_crc_ccitt(const unsigned char *buf, int cnt)
 	for (; cnt > 0; cnt--)
 		crc = (crc >> 8) ^ crc_ccitt_table[(crc ^ *buf++) & 0xff];
 	crc ^= 0xffff;
-	return (crc & 0xffff);
+	return crc & 0xffff;
 }
 #endif
 
@@ -154,7 +141,7 @@ static void hdlc_rx_flag(struct net_device *dev, struct hdlcdrv_state *s)
 	pkt_len = s->hdlcrx.len - 2 + 1; /* KISS kludge */
 	if (!(skb = dev_alloc_skb(pkt_len))) {
 		printk("%s: memory squeeze, dropping packet\n", dev->name);
-		s->stats.rx_dropped++;
+		dev->stats.rx_dropped++;
 		return;
 	}
 	cp = skb_put(skb, pkt_len);
@@ -162,8 +149,7 @@ static void hdlc_rx_flag(struct net_device *dev, struct hdlcdrv_state *s)
 	memcpy(cp, s->hdlcrx.buffer, pkt_len - 1);
 	skb->protocol = ax25_type_trans(skb, dev);
 	netif_rx(skb);
-	dev->last_rx = jiffies;
-	s->stats.rx_packets++;
+	dev->stats.rx_packets++;
 }
 
 void hdlcdrv_receiver(struct net_device *dev, struct hdlcdrv_state *s)
@@ -327,7 +313,7 @@ void hdlcdrv_transmitter(struct net_device *dev, struct hdlcdrv_state *s)
 			s->hdlctx.len = pkt_len+2; /* the appended CRC */
 			s->hdlctx.tx_state = 2;
 			s->hdlctx.bitstream = 0;
-			s->stats.tx_packets++;
+			dev->stats.tx_packets++;
 			break;
 		case 2:
 			if (!s->hdlctx.len) {
@@ -390,7 +376,7 @@ void hdlcdrv_arbitrate(struct net_device *dev, struct hdlcdrv_state *s)
 	if ((--s->hdlctx.slotcnt) > 0)
 		return;
 	s->hdlctx.slotcnt = s->ch_params.slottime;
-	if ((random32() % 256) > s->ch_params.ppersist)
+	if ((prandom_u32() % 256) > s->ch_params.ppersist)
 		return;
 	start_tx(dev, s);
 }
@@ -400,20 +386,26 @@ void hdlcdrv_arbitrate(struct net_device *dev, struct hdlcdrv_state *s)
  * ===================== network driver interface =========================
  */
 
-static int hdlcdrv_send_packet(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t hdlcdrv_send_packet(struct sk_buff *skb,
+				       struct net_device *dev)
 {
 	struct hdlcdrv_state *sm = netdev_priv(dev);
+
+	if (skb->protocol == htons(ETH_P_IP))
+		return ax25_ip_xmit(skb);
 
 	if (skb->data[0] != 0) {
 		do_kiss_params(sm, skb->data, skb->len);
 		dev_kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
-	if (sm->skb)
-		return -1;
+	if (sm->skb) {
+		dev_kfree_skb(skb);
+		return NETDEV_TX_OK;
+	}
 	netif_stop_queue(dev);
 	sm->skb = skb;
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* --------------------------------------------------------------------- */
@@ -425,19 +417,6 @@ static int hdlcdrv_set_mac_address(struct net_device *dev, void *addr)
 	/* addr is an AX.25 shifted ASCII mac address */
 	memcpy(dev->dev_addr, sa->sa_data, dev->addr_len); 
 	return 0;                                         
-}
-
-/* --------------------------------------------------------------------- */
-
-static struct net_device_stats *hdlcdrv_get_stats(struct net_device *dev)
-{
-	struct hdlcdrv_state *sm = netdev_priv(dev);
-
-	/* 
-	 * Get the current statistics.  This may be called with the
-	 * card open or closed. 
-	 */
-	return &sm->stats;
 }
 
 /* --------------------------------------------------------------------- */
@@ -496,8 +475,7 @@ static int hdlcdrv_close(struct net_device *dev)
 
 	if (s->ops && s->ops->close)
 		i = s->ops->close(dev);
-	if (s->skb)
-		dev_kfree_skb(s->skb);
+	dev_kfree_skb(s->skb);
 	s->skb = NULL;
 	s->opened = 0;
 	return i;
@@ -569,10 +547,10 @@ static int hdlcdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		bi.data.cs.ptt = hdlcdrv_ptt(s);
 		bi.data.cs.dcd = s->hdlcrx.dcd;
 		bi.data.cs.ptt_keyed = s->ptt_keyed;
-		bi.data.cs.tx_packets = s->stats.tx_packets;
-		bi.data.cs.tx_errors = s->stats.tx_errors;
-		bi.data.cs.rx_packets = s->stats.rx_packets;
-		bi.data.cs.rx_errors = s->stats.rx_errors;
+		bi.data.cs.tx_packets = dev->stats.tx_packets;
+		bi.data.cs.tx_errors = dev->stats.tx_errors;
+		bi.data.cs.rx_packets = dev->stats.rx_packets;
+		bi.data.cs.rx_errors = dev->stats.rx_errors;
 		break;		
 
 	case HDLCDRVCTL_OLDGETSTAT:
@@ -584,6 +562,10 @@ static int hdlcdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	case HDLCDRVCTL_CALIBRATE:
 		if(!capable(CAP_SYS_RAWIO))
 			return -EPERM;
+		if (s->par.bitrate <= 0)
+			return -EINVAL;
+		if (bi.data.calibrate > INT_MAX / s->par.bitrate)
+			return -EINVAL;
 		s->hdlctx.calibrate = bi.data.calibrate * s->par.bitrate / 16;
 		return 0;
 
@@ -631,6 +613,14 @@ static int hdlcdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 /* --------------------------------------------------------------------- */
 
+static const struct net_device_ops hdlcdrv_netdev = {
+	.ndo_open	= hdlcdrv_open,
+	.ndo_stop	= hdlcdrv_close,
+	.ndo_start_xmit = hdlcdrv_send_packet,
+	.ndo_do_ioctl	= hdlcdrv_ioctl,
+	.ndo_set_mac_address = hdlcdrv_set_mac_address,
+};
+
 /*
  * Initialize fields in hdlcdrv
  */
@@ -670,21 +660,13 @@ static void hdlcdrv_setup(struct net_device *dev)
 	s->bitbuf_hdlc.shreg = 0x80;
 #endif /* HDLCDRV_DEBUG */
 
-	/*
-	 * initialize the device struct
-	 */
-	dev->open = hdlcdrv_open;
-	dev->stop = hdlcdrv_close;
-	dev->do_ioctl = hdlcdrv_ioctl;
-	dev->hard_start_xmit = hdlcdrv_send_packet;
-	dev->get_stats = hdlcdrv_get_stats;
 
 	/* Fill in the fields of the device structure */
 
 	s->skb = NULL;
 	
+	dev->netdev_ops = &hdlcdrv_netdev;
 	dev->header_ops = &ax25_header_ops;
-	dev->set_mac_address = hdlcdrv_set_mac_address;
 	
 	dev->type = ARPHRD_AX25;           /* AF_AX25 device */
 	dev->hard_header_len = AX25_MAX_HEADER_LEN + AX25_BPQ_HEADER_LEN;
@@ -705,12 +687,10 @@ struct net_device *hdlcdrv_register(const struct hdlcdrv_ops *ops,
 	struct hdlcdrv_state *s;
 	int err;
 
-	BUG_ON(ops == NULL);
-
 	if (privsize < sizeof(struct hdlcdrv_state))
 		privsize = sizeof(struct hdlcdrv_state);
 
-	dev = alloc_netdev(privsize, ifname, hdlcdrv_setup);
+	dev = alloc_netdev(privsize, ifname, NET_NAME_UNKNOWN, hdlcdrv_setup);
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -762,7 +742,7 @@ EXPORT_SYMBOL(hdlcdrv_unregister);
 static int __init hdlcdrv_init_driver(void)
 {
 	printk(KERN_INFO "hdlcdrv: (C) 1996-2000 Thomas Sailer HB9JNX/AE4WA\n");
-	printk(KERN_INFO "hdlcdrv: version 0.8 compiled " __TIME__ " " __DATE__ "\n");
+	printk(KERN_INFO "hdlcdrv: version 0.8\n");
 	return 0;
 }
 

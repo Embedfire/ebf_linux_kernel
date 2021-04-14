@@ -1,10 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 /* net/atm/addr.c - Local ATM address registry */
 
 /* Written 1995-2000 by Werner Almesberger, EPFL LRC/ICA */
 
 #include <linux/atm.h>
 #include <linux/atmdev.h>
-#include <asm/uaccess.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
 
 #include "signaling.h"
 #include "addr.h"

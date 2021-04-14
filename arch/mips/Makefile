@@ -12,9 +12,15 @@
 # for "archclean" cleaning up for this architecture.
 #
 
-KBUILD_DEFCONFIG := ip22_defconfig
+archscripts: scripts_basic
+	$(Q)$(MAKE) $(build)=arch/mips/tools elf-entry
+ifeq ($(CONFIG_CPU_LOONGSON3_WORKAROUNDS),y)
+	$(Q)$(MAKE) $(build)=arch/mips/tools loongson3-llsc-check
+endif
+	$(Q)$(MAKE) $(build)=arch/mips/boot/tools relocs
 
-cflags-y := -ffunction-sections
+KBUILD_DEFCONFIG := 32r2el_defconfig
+KBUILD_DTBS      := dtbs
 
 #
 # Select the object file format to substitute into the linker script.
@@ -50,6 +56,15 @@ ifneq ($(SUBARCH),$(ARCH))
   endif
 endif
 
+ifdef CONFIG_FUNCTION_GRAPH_TRACER
+  ifndef KBUILD_MCOUNT_RA_ADDRESS
+    ifeq ($(call cc-option-yn,-mmcount-ra-address), y)
+      cflags-y += -mmcount-ra-address -DKBUILD_MCOUNT_RA_ADDRESS
+    endif
+  endif
+endif
+cflags-y += $(call cc-option, -mno-check-zero-division)
+
 ifdef CONFIG_32BIT
 ld-emul			= $(32bit-emul)
 vmlinux-32		= vmlinux
@@ -68,6 +83,7 @@ endif
 
 all-$(CONFIG_BOOT_ELF32)	:= $(vmlinux-32)
 all-$(CONFIG_BOOT_ELF64)	:= $(vmlinux-64)
+all-$(CONFIG_SYS_SUPPORTS_ZBOOT)+= vmlinuz
 
 #
 # GCC uses -G 0 -mabicalls -fpic as default.  We don't want PIC in the kernel
@@ -82,513 +98,170 @@ all-$(CONFIG_BOOT_ELF64)	:= $(vmlinux-64)
 cflags-y			+= -G 0 -mno-abicalls -fno-pic -pipe
 cflags-y			+= -msoft-float
 LDFLAGS_vmlinux			+= -G 0 -static -n -nostdlib
-MODFLAGS			+= -mlong-calls
+KBUILD_AFLAGS_MODULE		+= -mlong-calls
+KBUILD_CFLAGS_MODULE		+= -mlong-calls
+
+ifeq ($(CONFIG_RELOCATABLE),y)
+LDFLAGS_vmlinux			+= --emit-relocs
+endif
+
+#
+# pass -msoft-float to GAS if it supports it.  However on newer binutils
+# (specifically newer than 2.24.51.20140728) we then also need to explicitly
+# set ".set hardfloat" in all files which manipulate floating point registers.
+#
+ifneq ($(call as-option,-Wa$(comma)-msoft-float,),)
+	cflags-y		+= -DGAS_HAS_SET_HARDFLOAT -Wa,-msoft-float
+endif
 
 cflags-y += -ffreestanding
 
-#
-# We explicitly add the endianness specifier if needed, this allows
-# to compile kernels with a toolchain for the other endianness. We
-# carefully avoid to add it redundantly because gcc 3.3/3.4 complains
-# when fed the toolchain default!
-#
-# Certain gcc versions upto gcc 4.1.1 (probably 4.2-subversion as of
-# 2006-10-10 don't properly change the predefined symbols if -EB / -EL
-# are used, so we kludge that here.  A bug has been filed at
-# http://gcc.gnu.org/bugzilla/show_bug.cgi?id=29413.
-#
-undef-all += -UMIPSEB -U_MIPSEB -U__MIPSEB -U__MIPSEB__
-undef-all += -UMIPSEL -U_MIPSEL -U__MIPSEL -U__MIPSEL__
-predef-be += -DMIPSEB -D_MIPSEB -D__MIPSEB -D__MIPSEB__
-predef-le += -DMIPSEL -D_MIPSEL -D__MIPSEL -D__MIPSEL__
-cflags-$(CONFIG_CPU_BIG_ENDIAN)		+= $(shell $(CC) -dumpmachine |grep -q 'mips.*el-.*' && echo -EB $(undef-all) $(predef-be))
-cflags-$(CONFIG_CPU_LITTLE_ENDIAN)	+= $(shell $(CC) -dumpmachine |grep -q 'mips.*el-.*' || echo -EL $(undef-all) $(predef-le))
-
-cflags-$(CONFIG_CPU_HAS_SMARTMIPS)	+= $(call cc-option,-msmartmips)
+cflags-$(CONFIG_CPU_BIG_ENDIAN)		+= -EB
+cflags-$(CONFIG_CPU_LITTLE_ENDIAN)	+= -EL
 
 cflags-$(CONFIG_SB1XXX_CORELIS)	+= $(call cc-option,-mno-sched-prolog) \
 				   -fno-omit-frame-pointer
+
+# Some distribution-specific toolchains might pass the -fstack-check
+# option during the build, which adds a simple stack-probe at the beginning
+# of every function.  This stack probe is to ensure that there is enough
+# stack space, else a SEGV is generated.  This is not desirable for MIPS
+# as kernel stacks are small, placed in unmapped virtual memory, and do not
+# grow when overflowed.  Especially on SGI IP27 platforms, this check will
+# lead to a NULL pointer dereference in _raw_spin_lock_irq.
+#
+# In disassembly, this stack probe appears at the top of a function as:
+#    sd		zero,<offset>(sp)
+# Where <offset> is a negative value.
+#
+cflags-y += -fno-stack-check
+
+# binutils from v2.35 when built with --enable-mips-fix-loongson3-llsc=yes,
+# supports an -mfix-loongson3-llsc flag which emits a sync prior to each ll
+# instruction to work around a CPU bug (see __SYNC_loongson3_war in asm/sync.h
+# for a description).
+#
+# We disable this in order to prevent the assembler meddling with the
+# instruction that labels refer to, ie. if we label an ll instruction:
+#
+# 1: ll v0, 0(a0)
+#
+# ...then with the assembler fix applied the label may actually point at a sync
+# instruction inserted by the assembler, and if we were using the label in an
+# exception table the table would no longer contain the address of the ll
+# instruction.
+#
+# Avoid this by explicitly disabling that assembler behaviour.
+#
+cflags-y += $(call as-option,-Wa$(comma)-mno-fix-loongson3-llsc,)
 
 #
 # CPU-dependent compiler/assembler options for optimization.
 #
 cflags-$(CONFIG_CPU_R3000)	+= -march=r3000
 cflags-$(CONFIG_CPU_TX39XX)	+= -march=r3900
-cflags-$(CONFIG_CPU_R6000)	+= -march=r6000 -Wa,--trap
-cflags-$(CONFIG_CPU_R4300)	+= -march=r4300 -Wa,--trap
 cflags-$(CONFIG_CPU_VR41XX)	+= -march=r4100 -Wa,--trap
 cflags-$(CONFIG_CPU_R4X00)	+= -march=r4600 -Wa,--trap
 cflags-$(CONFIG_CPU_TX49XX)	+= -march=r4600 -Wa,--trap
-cflags-$(CONFIG_CPU_LOONGSON2)	+= -march=r4600 -Wa,--trap
-cflags-$(CONFIG_CPU_MIPS32_R1)	+= $(call cc-option,-march=mips32,-mips32 -U_MIPS_ISA -D_MIPS_ISA=_MIPS_ISA_MIPS32) \
-			-Wa,-mips32 -Wa,--trap
-cflags-$(CONFIG_CPU_MIPS32_R2)	+= $(call cc-option,-march=mips32r2,-mips32r2 -U_MIPS_ISA -D_MIPS_ISA=_MIPS_ISA_MIPS32) \
-			-Wa,-mips32r2 -Wa,--trap
-cflags-$(CONFIG_CPU_MIPS64_R1)	+= $(call cc-option,-march=mips64,-mips64 -U_MIPS_ISA -D_MIPS_ISA=_MIPS_ISA_MIPS64) \
-			-Wa,-mips64 -Wa,--trap
-cflags-$(CONFIG_CPU_MIPS64_R2)	+= $(call cc-option,-march=mips64r2,-mips64r2 -U_MIPS_ISA -D_MIPS_ISA=_MIPS_ISA_MIPS64) \
-			-Wa,-mips64r2 -Wa,--trap
+cflags-$(CONFIG_CPU_MIPS32_R1)	+= -march=mips32 -Wa,--trap
+cflags-$(CONFIG_CPU_MIPS32_R2)	+= -march=mips32r2 -Wa,--trap
+cflags-$(CONFIG_CPU_MIPS32_R5)	+= -march=mips32r5 -Wa,--trap -modd-spreg
+cflags-$(CONFIG_CPU_MIPS32_R6)	+= -march=mips32r6 -Wa,--trap -modd-spreg
+cflags-$(CONFIG_CPU_MIPS64_R1)	+= -march=mips64 -Wa,--trap
+cflags-$(CONFIG_CPU_MIPS64_R2)	+= -march=mips64r2 -Wa,--trap
+cflags-$(CONFIG_CPU_MIPS64_R5)	+= -march=mips64r5 -Wa,--trap
+cflags-$(CONFIG_CPU_MIPS64_R6)	+= -march=mips64r6 -Wa,--trap
+cflags-$(CONFIG_CPU_P5600)	+= -march=p5600 -Wa,--trap -modd-spreg
 cflags-$(CONFIG_CPU_R5000)	+= -march=r5000 -Wa,--trap
-cflags-$(CONFIG_CPU_R5432)	+= $(call cc-option,-march=r5400,-march=r5000) \
+cflags-$(CONFIG_CPU_R5500)	+= $(call cc-option,-march=r5500,-march=r5000) \
 			-Wa,--trap
 cflags-$(CONFIG_CPU_NEVADA)	+= $(call cc-option,-march=rm5200,-march=r5000) \
 			-Wa,--trap
 cflags-$(CONFIG_CPU_RM7000)	+= $(call cc-option,-march=rm7000,-march=r5000) \
 			-Wa,--trap
-cflags-$(CONFIG_CPU_RM9000)	+= $(call cc-option,-march=rm9000,-march=r5000) \
-			-Wa,--trap
 cflags-$(CONFIG_CPU_SB1)	+= $(call cc-option,-march=sb1,-march=r5000) \
 			-Wa,--trap
-cflags-$(CONFIG_CPU_R8000)	+= -march=r8000 -Wa,--trap
+cflags-$(CONFIG_CPU_SB1)	+= $(call cc-option,-mno-mdmx)
+cflags-$(CONFIG_CPU_SB1)	+= $(call cc-option,-mno-mips3d)
 cflags-$(CONFIG_CPU_R10000)	+= $(call cc-option,-march=r10000,-march=r8000) \
 			-Wa,--trap
+cflags-$(CONFIG_CPU_CAVIUM_OCTEON) += $(call cc-option,-march=octeon) -Wa,--trap
+ifeq (,$(findstring march=octeon, $(cflags-$(CONFIG_CPU_CAVIUM_OCTEON))))
+cflags-$(CONFIG_CPU_CAVIUM_OCTEON) += -Wa,-march=octeon
+endif
+cflags-$(CONFIG_CAVIUM_CN63XXP1) += -Wa,-mfix-cn63xxp1
+cflags-$(CONFIG_CPU_BMIPS)	+= -march=mips32 -Wa,-mips32 -Wa,--trap
 
 cflags-$(CONFIG_CPU_R4000_WORKAROUNDS)	+= $(call cc-option,-mfix-r4000,)
 cflags-$(CONFIG_CPU_R4400_WORKAROUNDS)	+= $(call cc-option,-mfix-r4400,)
 cflags-$(CONFIG_CPU_DADDI_WORKAROUNDS)	+= $(call cc-option,-mno-daddi,)
 
-ifdef CONFIG_CPU_SB1
-ifdef CONFIG_SB1_PASS_1_WORKAROUNDS
-MODFLAGS	+= -msb1-pass1-workarounds
+# For smartmips configurations, there are hundreds of warnings due to ISA overrides
+# in assembly and header files. smartmips is only supported for MIPS32r1 onwards
+# and there is no support for 64-bit. Various '.set mips2' or '.set mips3' or
+# similar directives in the kernel will spam the build logs with the following warnings:
+# Warning: the `smartmips' extension requires MIPS32 revision 1 or greater
+# or
+# Warning: the 64-bit MIPS architecture does not support the `smartmips' extension
+# Pass -Wa,--no-warn to disable all assembler warnings until the kernel code has
+# been fixed properly.
+mips-cflags				:= $(cflags-y)
+ifeq ($(CONFIG_CPU_HAS_SMARTMIPS),y)
+smartmips-ase				:= $(call cc-option-yn,$(mips-cflags) -msmartmips)
+cflags-$(smartmips-ase)			+= -msmartmips -Wa,--no-warn
 endif
+ifeq ($(CONFIG_CPU_MICROMIPS),y)
+micromips-ase				:= $(call cc-option-yn,$(mips-cflags) -mmicromips)
+cflags-$(micromips-ase)			+= -mmicromips
 endif
+ifeq ($(CONFIG_CPU_HAS_MSA),y)
+toolchain-msa				:= $(call cc-option-yn,$(mips-cflags) -mhard-float -mfp64 -Wa$(comma)-mmsa)
+cflags-$(toolchain-msa)			+= -DTOOLCHAIN_SUPPORTS_MSA
+endif
+toolchain-virt				:= $(call cc-option-yn,$(mips-cflags) -mvirt)
+cflags-$(toolchain-virt)		+= -DTOOLCHAIN_SUPPORTS_VIRT
+# For -mmicromips, use -Wa,-fatal-warnings to catch unsupported -mxpa which
+# only warns
+xpa-cflags-y				:= $(mips-cflags)
+xpa-cflags-$(micromips-ase)		+= -mmicromips -Wa$(comma)-fatal-warnings
+toolchain-xpa				:= $(call cc-option-yn,$(xpa-cflags-y) -mxpa)
+cflags-$(toolchain-xpa)			+= -DTOOLCHAIN_SUPPORTS_XPA
+toolchain-crc				:= $(call cc-option-yn,$(mips-cflags) -Wa$(comma)-mcrc)
+cflags-$(toolchain-crc)			+= -DTOOLCHAIN_SUPPORTS_CRC
+toolchain-dsp				:= $(call cc-option-yn,$(mips-cflags) -Wa$(comma)-mdsp)
+cflags-$(toolchain-dsp)			+= -DTOOLCHAIN_SUPPORTS_DSP
+toolchain-ginv				:= $(call cc-option-yn,$(mips-cflags) -Wa$(comma)-mginv)
+cflags-$(toolchain-ginv)		+= -DTOOLCHAIN_SUPPORTS_GINV
 
 #
 # Firmware support
 #
-libs-$(CONFIG_ARC)		+= arch/mips/fw/arc/
-libs-$(CONFIG_CFE)		+= arch/mips/fw/cfe/
-libs-$(CONFIG_SNIPROM)		+= arch/mips/fw/sni/
+libs-$(CONFIG_FW_ARC)		+= arch/mips/fw/arc/
+libs-$(CONFIG_FW_CFE)		+= arch/mips/fw/cfe/
+libs-$(CONFIG_FW_SNIPROM)	+= arch/mips/fw/sni/
 libs-y				+= arch/mips/fw/lib/
-libs-$(CONFIG_SIBYTE_CFE)	+= arch/mips/sibyte/cfe/
+
+#
+# Kernel compression
+#
+ifdef CONFIG_SYS_SUPPORTS_ZBOOT
+COMPRESSION_FNAME		= vmlinuz
+else
+COMPRESSION_FNAME		= vmlinux
+endif
 
 #
 # Board-dependent options and extra files
 #
+include arch/mips/Kbuild.platforms
 
-#
-# Acer PICA 61, Mips Magnum 4000 and Olivetti M700.
-#
-core-$(CONFIG_MACH_JAZZ)	+= arch/mips/jazz/
-cflags-$(CONFIG_MACH_JAZZ)	+= -Iinclude/asm-mips/mach-jazz
-load-$(CONFIG_MACH_JAZZ)	+= 0xffffffff80080000
-
-#
-# Common Alchemy Au1x00 stuff
-#
-core-$(CONFIG_SOC_AU1X00)	+= arch/mips/au1000/common/
-cflags-$(CONFIG_SOC_AU1X00)	+= -Iinclude/asm-mips/mach-au1x00
-
-#
-# AMD Alchemy Pb1000 eval board
-#
-libs-$(CONFIG_MIPS_PB1000)	+= arch/mips/au1000/pb1000/
-cflags-$(CONFIG_MIPS_PB1000)	+= -Iinclude/asm-mips/mach-pb1x00
-load-$(CONFIG_MIPS_PB1000)	+= 0xffffffff80100000
-
-#
-# AMD Alchemy Pb1100 eval board
-#
-libs-$(CONFIG_MIPS_PB1100)	+= arch/mips/au1000/pb1100/
-cflags-$(CONFIG_MIPS_PB1100)	+= -Iinclude/asm-mips/mach-pb1x00
-load-$(CONFIG_MIPS_PB1100)	+= 0xffffffff80100000
-
-#
-# AMD Alchemy Pb1500 eval board
-#
-libs-$(CONFIG_MIPS_PB1500)	+= arch/mips/au1000/pb1500/
-cflags-$(CONFIG_MIPS_PB1500)	+= -Iinclude/asm-mips/mach-pb1x00
-load-$(CONFIG_MIPS_PB1500)	+= 0xffffffff80100000
-
-#
-# AMD Alchemy Pb1550 eval board
-#
-libs-$(CONFIG_MIPS_PB1550)	+= arch/mips/au1000/pb1550/
-cflags-$(CONFIG_MIPS_PB1550)	+= -Iinclude/asm-mips/mach-pb1x00
-load-$(CONFIG_MIPS_PB1550)	+= 0xffffffff80100000
-
-#
-# AMD Alchemy Pb1200 eval board
-#
-libs-$(CONFIG_MIPS_PB1200)	+= arch/mips/au1000/pb1200/
-cflags-$(CONFIG_MIPS_PB1200)	+= -Iinclude/asm-mips/mach-pb1x00
-load-$(CONFIG_MIPS_PB1200)	+= 0xffffffff80100000
-
-#
-# AMD Alchemy Db1000 eval board
-#
-libs-$(CONFIG_MIPS_DB1000)	+= arch/mips/au1000/db1x00/
-cflags-$(CONFIG_MIPS_DB1000)	+= -Iinclude/asm-mips/mach-db1x00
-load-$(CONFIG_MIPS_DB1000)	+= 0xffffffff80100000
-
-#
-# AMD Alchemy Db1100 eval board
-#
-libs-$(CONFIG_MIPS_DB1100)	+= arch/mips/au1000/db1x00/
-cflags-$(CONFIG_MIPS_DB1100)	+= -Iinclude/asm-mips/mach-db1x00
-load-$(CONFIG_MIPS_DB1100)	+= 0xffffffff80100000
-
-#
-# AMD Alchemy Db1500 eval board
-#
-libs-$(CONFIG_MIPS_DB1500)	+= arch/mips/au1000/db1x00/
-cflags-$(CONFIG_MIPS_DB1500)	+= -Iinclude/asm-mips/mach-db1x00
-load-$(CONFIG_MIPS_DB1500)	+= 0xffffffff80100000
-
-#
-# AMD Alchemy Db1550 eval board
-#
-libs-$(CONFIG_MIPS_DB1550)	+= arch/mips/au1000/db1x00/
-cflags-$(CONFIG_MIPS_DB1550)	+= -Iinclude/asm-mips/mach-db1x00
-load-$(CONFIG_MIPS_DB1550)	+= 0xffffffff80100000
-
-#
-# AMD Alchemy Db1200 eval board
-#
-libs-$(CONFIG_MIPS_DB1200)	+= arch/mips/au1000/pb1200/
-cflags-$(CONFIG_MIPS_DB1200)	+= -Iinclude/asm-mips/mach-db1x00
-load-$(CONFIG_MIPS_DB1200)	+= 0xffffffff80100000
-
-#
-# AMD Alchemy Bosporus eval board
-#
-libs-$(CONFIG_MIPS_BOSPORUS)	+= arch/mips/au1000/db1x00/
-cflags-$(CONFIG_MIPS_BOSPORUS)	+= -Iinclude/asm-mips/mach-db1x00
-load-$(CONFIG_MIPS_BOSPORUS)	+= 0xffffffff80100000
-
-#
-# AMD Alchemy Mirage eval board
-#
-libs-$(CONFIG_MIPS_MIRAGE)	+= arch/mips/au1000/db1x00/
-cflags-$(CONFIG_MIPS_MIRAGE)	+= -Iinclude/asm-mips/mach-db1x00
-load-$(CONFIG_MIPS_MIRAGE)	+= 0xffffffff80100000
-
-#
-# 4G-Systems eval board
-#
-libs-$(CONFIG_MIPS_MTX1)	+= arch/mips/au1000/mtx-1/
-load-$(CONFIG_MIPS_MTX1)	+= 0xffffffff80100000
-
-#
-# MyCable eval board
-#
-libs-$(CONFIG_MIPS_XXS1500)	+= arch/mips/au1000/xxs1500/
-load-$(CONFIG_MIPS_XXS1500)	+= 0xffffffff80100000
-
-#
-# Cobalt Server
-#
-core-$(CONFIG_MIPS_COBALT)	+= arch/mips/cobalt/
-cflags-$(CONFIG_MIPS_COBALT)	+= -Iinclude/asm-mips/mach-cobalt
-load-$(CONFIG_MIPS_COBALT)	+= 0xffffffff80080000
-
-#
-# DECstation family
-#
-core-$(CONFIG_MACH_DECSTATION)	+= arch/mips/dec/
-cflags-$(CONFIG_MACH_DECSTATION)+= -Iinclude/asm-mips/mach-dec
-libs-$(CONFIG_MACH_DECSTATION)	+= arch/mips/dec/prom/
-load-$(CONFIG_MACH_DECSTATION)	+= 0xffffffff80040000
-
-#
-# Wind River PPMC Board (4KC + GT64120)
-#
-core-$(CONFIG_WR_PPMC)		+= arch/mips/gt64120/wrppmc/
-cflags-$(CONFIG_WR_PPMC)		+= -Iinclude/asm-mips/mach-wrppmc
-load-$(CONFIG_WR_PPMC)		+= 0xffffffff80100000
-
-#
-# lemote fulong mini-PC board
-#
-core-$(CONFIG_LEMOTE_FULONG) +=arch/mips/lemote/lm2e/
-load-$(CONFIG_LEMOTE_FULONG) +=0xffffffff80100000
-cflags-$(CONFIG_LEMOTE_FULONG) += -Iinclude/asm-mips/mach-lemote
-
-#
-# MIPS Malta board
-#
-core-$(CONFIG_MIPS_MALTA)	+= arch/mips/mti-malta/
-cflags-$(CONFIG_MIPS_MALTA)	+= -Iinclude/asm-mips/mach-malta
-load-$(CONFIG_MIPS_MALTA)	+= 0xffffffff80100000
-all-$(CONFIG_MIPS_MALTA)	:= vmlinux.bin
-
-#
-# MIPS SIM
-#
-core-$(CONFIG_MIPS_SIM)		+= arch/mips/mipssim/
-cflags-$(CONFIG_MIPS_SIM)	+= -Iinclude/asm-mips/mach-mipssim
-load-$(CONFIG_MIPS_SIM)		+= 0x80100000
-
-#
-# PMC-Sierra MSP SOCs
-#
-core-$(CONFIG_PMC_MSP)		+= arch/mips/pmc-sierra/msp71xx/
-cflags-$(CONFIG_PMC_MSP)	+= -Iinclude/asm-mips/pmc-sierra/msp71xx \
-					-mno-branch-likely
-load-$(CONFIG_PMC_MSP)		+= 0xffffffff80100000
-
-#
-# PMC-Sierra Yosemite
-#
-core-$(CONFIG_PMC_YOSEMITE)	+= arch/mips/pmc-sierra/yosemite/
-cflags-$(CONFIG_PMC_YOSEMITE)	+= -Iinclude/asm-mips/mach-yosemite
-load-$(CONFIG_PMC_YOSEMITE)	+= 0xffffffff80100000
-
-#
-# Basler eXcite
-#
-core-$(CONFIG_BASLER_EXCITE)	+= arch/mips/basler/excite/
-cflags-$(CONFIG_BASLER_EXCITE)	+= -Iinclude/asm-mips/mach-excite
-load-$(CONFIG_BASLER_EXCITE)	+= 0x80100000
-
-#
-# LASAT platforms
-#
-core-$(CONFIG_LASAT)		+= arch/mips/lasat/
-cflags-$(CONFIG_LASAT)		+= -Iinclude/asm-mips/mach-lasat
-load-$(CONFIG_LASAT)		+= 0xffffffff80000000
-
-#
-# Common VR41xx
-#
-core-$(CONFIG_MACH_VR41XX)	+= arch/mips/vr41xx/common/
-cflags-$(CONFIG_MACH_VR41XX)	+= -Iinclude/asm-mips/mach-vr41xx
-
-#
-# ZAO Networks Capcella (VR4131)
-#
-load-$(CONFIG_ZAO_CAPCELLA)	+= 0xffffffff80000000
-
-#
-# Victor MP-C303/304 (VR4122)
-#
-load-$(CONFIG_VICTOR_MPC30X)	+= 0xffffffff80001000
-
-#
-# IBM WorkPad z50 (VR4121)
-#
-core-$(CONFIG_IBM_WORKPAD)	+= arch/mips/vr41xx/ibm-workpad/
-load-$(CONFIG_IBM_WORKPAD)	+= 0xffffffff80004000
-
-#
-# CASIO CASSIPEIA E-55/65 (VR4111)
-#
-core-$(CONFIG_CASIO_E55)	+= arch/mips/vr41xx/casio-e55/
-load-$(CONFIG_CASIO_E55)	+= 0xffffffff80004000
-
-#
-# TANBAC VR4131 multichip module(TB0225) and TANBAC VR4131DIMM(TB0229) (VR4131)
-#
-load-$(CONFIG_TANBAC_TB022X)	+= 0xffffffff80000000
-
-#
-# Common NXP PNX8550
-#
-core-$(CONFIG_SOC_PNX8550)	+= arch/mips/nxp/pnx8550/common/
-cflags-$(CONFIG_SOC_PNX8550)	+= -Iinclude/asm-mips/mach-pnx8550
-
-#
-# NXP PNX8550 JBS board
-#
-libs-$(CONFIG_PNX8550_JBS)	+= arch/mips/nxp/pnx8550/jbs/
-#cflags-$(CONFIG_PNX8550_JBS)	+= -Iinclude/asm-mips/mach-pnx8550
-load-$(CONFIG_PNX8550_JBS)	+= 0xffffffff80060000
-
-# NXP PNX8550 STB810 board
-#
-libs-$(CONFIG_PNX8550_STB810)	+= arch/mips/nxp/pnx8550/stb810/
-load-$(CONFIG_PNX8550_STB810)	+= 0xffffffff80060000
-
-# NEC EMMA2RH boards
-#
-core-$(CONFIG_EMMA2RH)          += arch/mips/emma2rh/common/
-cflags-$(CONFIG_EMMA2RH)        += -Iinclude/asm-mips/mach-emma2rh
-
-# NEC EMMA2RH Mark-eins
-core-$(CONFIG_MARKEINS)         += arch/mips/emma2rh/markeins/
-load-$(CONFIG_MARKEINS)         += 0xffffffff88100000
-
-#
-# SGI IP22 (Indy/Indigo2)
-#
-# Set the load address to >= 0xffffffff88069000 if you want to leave space for
-# symmon, 0xffffffff80002000 for production kernels.  Note that the value must
-# be aligned to a multiple of the kernel stack size or the handling of the
-# current variable will break so for 64-bit kernels we have to raise the start
-# address by 8kb.
-#
-core-$(CONFIG_SGI_IP22)		+= arch/mips/sgi-ip22/
-cflags-$(CONFIG_SGI_IP22)	+= -Iinclude/asm-mips/mach-ip22
-ifdef CONFIG_32BIT
-load-$(CONFIG_SGI_IP22)		+= 0xffffffff88002000
-endif
-ifdef CONFIG_64BIT
-load-$(CONFIG_SGI_IP22)		+= 0xffffffff88004000
+ifdef CONFIG_PHYSICAL_START
+load-y					= $(CONFIG_PHYSICAL_START)
 endif
 
-#
-# SGI-IP27 (Origin200/2000)
-#
-# Set the load address to >= 0xc000000000300000 if you want to leave space for
-# symmon, 0xc00000000001c000 for production kernels.  Note that the value must
-# be 16kb aligned or the handling of the current variable will break.
-#
-ifdef CONFIG_SGI_IP27
-core-$(CONFIG_SGI_IP27)		+= arch/mips/sgi-ip27/
-cflags-$(CONFIG_SGI_IP27)	+= -Iinclude/asm-mips/mach-ip27
-ifdef CONFIG_MAPPED_KERNEL
-load-$(CONFIG_SGI_IP27)		+= 0xc00000004001c000
-OBJCOPYFLAGS			:= --change-addresses=0x3fffffff80000000
-dataoffset-$(CONFIG_SGI_IP27)	+= 0x01000000
-else
-load-$(CONFIG_SGI_IP27)		+= 0xa80000000001c000
-OBJCOPYFLAGS			:= --change-addresses=0x57ffffff80000000
-endif
-endif
-
-#
-# SGI IP28 (Indigo2 R10k)
-#
-# Set the load address to >= 0xa800000020080000 if you want to leave space for
-# symmon, 0xa800000020004000 for production kernels ?  Note that the value must
-# be 16kb aligned or the handling of the current variable will break.
-# Simplified: what IP22 does at 128MB+ in ksegN, IP28 does at 512MB+ in xkphys
-#
-ifdef CONFIG_SGI_IP28
-  ifeq ($(call cc-option-yn,-mr10k-cache-barrier=1), n)
-      $(error gcc doesn't support needed option -mr10k-cache-barrier=1)
-  endif
-endif
-core-$(CONFIG_SGI_IP28)		+= arch/mips/sgi-ip22/
-cflags-$(CONFIG_SGI_IP28)	+= -mr10k-cache-barrier=1 -Iinclude/asm-mips/mach-ip28
-load-$(CONFIG_SGI_IP28)		+= 0xa800000020004000
-
-#
-# SGI-IP32 (O2)
-#
-# Set the load address to >= 80069000 if you want to leave space for symmon,
-# 0xffffffff80004000 for production kernels.  Note that the value must be aligned to
-# a multiple of the kernel stack size or the handling of the current variable
-# will break.
-#
-core-$(CONFIG_SGI_IP32)		+= arch/mips/sgi-ip32/
-cflags-$(CONFIG_SGI_IP32)	+= -Iinclude/asm-mips/mach-ip32
-load-$(CONFIG_SGI_IP32)		+= 0xffffffff80004000
-
-#
-# Sibyte SB1250/BCM1480 SOC
-#
-# This is a LIB so that it links at the end, and initcalls are later
-# the sequence; but it is built as an object so that modules don't get
-# removed (as happens, even if they have __initcall/module_init)
-#
-core-$(CONFIG_SIBYTE_BCM112X)	+= arch/mips/sibyte/sb1250/
-core-$(CONFIG_SIBYTE_BCM112X)	+= arch/mips/sibyte/common/
-cflags-$(CONFIG_SIBYTE_BCM112X)	+= -Iinclude/asm-mips/mach-sibyte \
-			-DSIBYTE_HDR_FEATURES=SIBYTE_HDR_FMASK_1250_112x_ALL
-
-core-$(CONFIG_SIBYTE_SB1250)	+= arch/mips/sibyte/sb1250/
-core-$(CONFIG_SIBYTE_SB1250)	+= arch/mips/sibyte/common/
-cflags-$(CONFIG_SIBYTE_SB1250)	+= -Iinclude/asm-mips/mach-sibyte \
-			-DSIBYTE_HDR_FEATURES=SIBYTE_HDR_FMASK_1250_112x_ALL
-
-core-$(CONFIG_SIBYTE_BCM1x55)	+= arch/mips/sibyte/bcm1480/
-core-$(CONFIG_SIBYTE_BCM1x55)	+= arch/mips/sibyte/common/
-cflags-$(CONFIG_SIBYTE_BCM1x55)	+= -Iinclude/asm-mips/mach-sibyte \
-			-DSIBYTE_HDR_FEATURES=SIBYTE_HDR_FMASK_1480_ALL
-
-core-$(CONFIG_SIBYTE_BCM1x80)	+= arch/mips/sibyte/bcm1480/
-core-$(CONFIG_SIBYTE_BCM1x80)	+= arch/mips/sibyte/common/
-cflags-$(CONFIG_SIBYTE_BCM1x80)	+= -Iinclude/asm-mips/mach-sibyte \
-			-DSIBYTE_HDR_FEATURES=SIBYTE_HDR_FMASK_1480_ALL
-
-#
-# Sibyte BCM91120x (Carmel) board
-# Sibyte BCM91120C (CRhine) board
-# Sibyte BCM91125C (CRhone) board
-# Sibyte BCM91125E (Rhone) board
-# Sibyte SWARM board
-# Sibyte BCM91x80 (BigSur) board
-#
-core-$(CONFIG_SIBYTE_CARMEL)	+= arch/mips/sibyte/swarm/
-load-$(CONFIG_SIBYTE_CARMEL)	:= 0xffffffff80100000
-core-$(CONFIG_SIBYTE_CRHINE)	+= arch/mips/sibyte/swarm/
-load-$(CONFIG_SIBYTE_CRHINE)	:= 0xffffffff80100000
-core-$(CONFIG_SIBYTE_CRHONE)	+= arch/mips/sibyte/swarm/
-load-$(CONFIG_SIBYTE_CRHONE)	:= 0xffffffff80100000
-core-$(CONFIG_SIBYTE_RHONE)	+= arch/mips/sibyte/swarm/
-load-$(CONFIG_SIBYTE_RHONE)	:= 0xffffffff80100000
-core-$(CONFIG_SIBYTE_SENTOSA)	+= arch/mips/sibyte/swarm/
-load-$(CONFIG_SIBYTE_SENTOSA)	:= 0xffffffff80100000
-core-$(CONFIG_SIBYTE_SWARM)	+= arch/mips/sibyte/swarm/
-load-$(CONFIG_SIBYTE_SWARM)	:= 0xffffffff80100000
-core-$(CONFIG_SIBYTE_BIGSUR)	+= arch/mips/sibyte/swarm/
-load-$(CONFIG_SIBYTE_BIGSUR)	:= 0xffffffff80100000
-
-#
-# Broadcom BCM47XX boards
-#
-core-$(CONFIG_BCM47XX)		+= arch/mips/bcm47xx/
-cflags-$(CONFIG_BCM47XX)	+= -Iinclude/asm-mips/mach-bcm47xx
-load-$(CONFIG_BCM47XX)		:= 0xffffffff80001000
-
-#
-# SNI RM
-#
-core-$(CONFIG_SNI_RM)		+= arch/mips/sni/
-cflags-$(CONFIG_SNI_RM)		+= -Iinclude/asm-mips/mach-rm
-ifdef CONFIG_CPU_LITTLE_ENDIAN
-load-$(CONFIG_SNI_RM)		+= 0xffffffff80600000
-else
-load-$(CONFIG_SNI_RM)		+= 0xffffffff80030000
-endif
-all-$(CONFIG_SNI_RM)		:= vmlinux.ecoff
-
-#
-# Common TXx9
-#
-core-$(CONFIG_MACH_TX39XX)	+= arch/mips/txx9/generic/
-cflags-$(CONFIG_MACH_TX39XX) += -Iinclude/asm-mips/mach-tx39xx
-load-$(CONFIG_MACH_TX39XX)	+= 0xffffffff80050000
-core-$(CONFIG_MACH_TX49XX)	+= arch/mips/txx9/generic/
-cflags-$(CONFIG_MACH_TX49XX) += -Iinclude/asm-mips/mach-tx49xx
-load-$(CONFIG_MACH_TX49XX)	+= 0xffffffff80100000
-
-#
-# Toshiba JMR-TX3927 board
-#
-core-$(CONFIG_TOSHIBA_JMR3927)	+= arch/mips/txx9/jmr3927/
-
-#
-# Routerboard 532 board
-#
-core-$(CONFIG_MIKROTIK_RB532)	+= arch/mips/rb532/
-cflags-$(CONFIG_MIKROTIK_RB532) += -Iinclude/asm-mips/mach-rc32434
-load-$(CONFIG_MIKROTIK_RB532)	+= 0xffffffff80101000
-
-#
-# Toshiba RBTX4927 board or
-# Toshiba RBTX4937 board
-#
-core-$(CONFIG_TOSHIBA_RBTX4927)	+= arch/mips/txx9/rbtx4927/
-
-#
-# Toshiba RBTX4938 board
-#
-core-$(CONFIG_TOSHIBA_RBTX4938) += arch/mips/txx9/rbtx4938/
-
-cflags-y			+= -Iinclude/asm-mips/mach-generic
+entry-y				= $(shell $(objtree)/arch/mips/tools/elf-entry vmlinux)
+cflags-y			+= -I$(srctree)/arch/mips/include/asm/mach-generic
 drivers-$(CONFIG_PCI)		+= arch/mips/pci/
-
-ifdef CONFIG_32BIT
-ifdef CONFIG_CPU_LITTLE_ENDIAN
-JIFFIES			= jiffies_64
-else
-JIFFIES			= jiffies_64 + 4
-endif
-else
-JIFFIES			= jiffies_64
-endif
 
 #
 # Automatically detect the build format. By default we choose
@@ -612,46 +285,86 @@ ifdef CONFIG_64BIT
   endif
 endif
 
-KBUILD_AFLAGS	+= $(cflags-y)
-KBUILD_CFLAGS	+= $(cflags-y) \
-			-D"VMLINUX_LOAD_ADDRESS=$(load-y)"
+# When linking a 32-bit executable the LLVM linker cannot cope with a
+# 32-bit load address that has been sign-extended to 64 bits.  Simply
+# remove the upper 32 bits then, as it is safe to do so with other
+# linkers.
+ifdef CONFIG_64BIT
+	load-ld			= $(load-y)
+else
+	load-ld			= $(subst 0xffffffff,0x,$(load-y))
+endif
 
-LDFLAGS			+= -m $(ld-emul)
+KBUILD_AFLAGS	+= $(cflags-y)
+KBUILD_CFLAGS	+= $(cflags-y)
+KBUILD_CPPFLAGS += -DVMLINUX_LOAD_ADDRESS=$(load-y) -DLINKER_LOAD_ADDRESS=$(load-ld)
+KBUILD_CPPFLAGS += -DDATAOFFSET=$(if $(dataoffset-y),$(dataoffset-y),0)
+
+bootvars-y	= VMLINUX_LOAD_ADDRESS=$(load-y) \
+		  LINKER_LOAD_ADDRESS=$(load-ld) \
+		  VMLINUX_ENTRY_ADDRESS=$(entry-y) \
+		  PLATFORM="$(platform-y)" \
+		  ITS_INPUTS="$(its-y)"
+ifdef CONFIG_32BIT
+bootvars-y	+= ADDR_BITS=32
+endif
+ifdef CONFIG_64BIT
+bootvars-y	+= ADDR_BITS=64
+endif
+
+# This is required to get dwarf unwinding tables into .debug_frame
+# instead of .eh_frame so we don't discard them.
+KBUILD_CFLAGS += -fno-asynchronous-unwind-tables
+
+KBUILD_LDFLAGS		+= -m $(ld-emul)
 
 ifdef CONFIG_MIPS
-CHECKFLAGS += $(shell $(CC) $(KBUILD_CFLAGS) -dM -E -xc /dev/null | \
+CHECKFLAGS += $(shell $(CC) $(KBUILD_CFLAGS) -dM -E -x c /dev/null | \
 	egrep -vw '__GNUC_(|MINOR_|PATCHLEVEL_)_' | \
-	sed -e 's/^\#define /-D/' -e "s/ /='/" -e "s/$$/'/")
-ifdef CONFIG_64BIT
-CHECKFLAGS		+= -m64
-endif
+	sed -e "s/^\#define /-D'/" -e "s/ /'='/" -e "s/$$/'/" -e 's/\$$/&&/g')
 endif
 
 OBJCOPYFLAGS		+= --remove-section=.reginfo
 
-#
-# Choosing incompatible machines durings configuration will result in
-# error messages during linking.  Select a default linkscript if
-# none has been choosen above.
-#
-
-CPPFLAGS_vmlinux.lds := \
-	$(KBUILD_CFLAGS) \
-	-D"LOADADDR=$(load-y)" \
-	-D"JIFFIES=$(JIFFIES)" \
-	-D"DATAOFFSET=$(if $(dataoffset-y),$(dataoffset-y),0)"
-
-head-y := arch/mips/kernel/head.o arch/mips/kernel/init_task.o
+head-y := arch/mips/kernel/head.o
 
 libs-y			+= arch/mips/lib/
+libs-$(CONFIG_MIPS_FP_SUPPORT) += arch/mips/math-emu/
 
-core-y			+= arch/mips/kernel/ arch/mips/mm/ arch/mips/math-emu/
+# See arch/mips/Kbuild for content of core part of the kernel
+core-y += arch/mips/
 
+drivers-y			+= arch/mips/crypto/
 drivers-$(CONFIG_OPROFILE)	+= arch/mips/oprofile/
 
-ifdef CONFIG_LASAT
-rom.bin rom.sw: vmlinux
-	$(Q)$(MAKE) $(build)=arch/mips/lasat/image $@
+# suspend and hibernation support
+drivers-$(CONFIG_PM)	+= arch/mips/power/
+
+# boot image targets (arch/mips/boot/)
+boot-y			:= vmlinux.bin
+boot-y			+= vmlinux.ecoff
+boot-y			+= vmlinux.srec
+ifeq ($(shell expr $(load-y) \< 0xffffffff80000000 2> /dev/null), 0)
+boot-y			+= uImage
+boot-y			+= uImage.bin
+boot-y			+= uImage.bz2
+boot-y			+= uImage.gz
+boot-y			+= uImage.lzma
+boot-y			+= uImage.lzo
+endif
+boot-y			+= vmlinux.itb
+boot-y			+= vmlinux.gz.itb
+boot-y			+= vmlinux.bz2.itb
+boot-y			+= vmlinux.lzma.itb
+boot-y			+= vmlinux.lzo.itb
+
+# compressed boot image targets (arch/mips/boot/compressed/)
+bootz-y			:= vmlinuz
+bootz-y			+= vmlinuz.bin
+bootz-y			+= vmlinuz.ecoff
+bootz-y			+= vmlinuz.srec
+ifeq ($(shell expr $(zload-y) \< 0xffffffff80000000 2> /dev/null), 0)
+bootz-y			+= uzImage.bin
 endif
 
 #
@@ -659,54 +372,196 @@ endif
 # Other need ECOFF, so we build a 32-bit ELF binary for them which we then
 # convert to ECOFF using elf2ecoff.
 #
+quiet_cmd_32 = OBJCOPY $@
+	cmd_32 = $(OBJCOPY) -O $(32bit-bfd) $(OBJCOPYFLAGS) $< $@
 vmlinux.32: vmlinux
-	$(OBJCOPY) -O $(32bit-bfd) $(OBJCOPYFLAGS) $< $@
+	$(call cmd,32)
 
 #
 # The 64-bit ELF tools are pretty broken so at this time we generate 64-bit
 # ELF files from 32-bit files by conversion.
 #
+quiet_cmd_64 = OBJCOPY $@
+	cmd_64 = $(OBJCOPY) -O $(64bit-bfd) $(OBJCOPYFLAGS) $< $@
 vmlinux.64: vmlinux
-	$(OBJCOPY) -O $(64bit-bfd) $(OBJCOPYFLAGS) $< $@
+	$(call cmd,64)
 
-makeboot =$(Q)$(MAKE) $(build)=arch/mips/boot VMLINUX=$(vmlinux-32) $(1)
+all:	$(all-y) $(KBUILD_DTBS)
 
-all:	$(all-y)
+# boot
+$(boot-y): $(vmlinux-32) FORCE
+	$(Q)$(MAKE) $(build)=arch/mips/boot VMLINUX=$(vmlinux-32) \
+		$(bootvars-y) arch/mips/boot/$@
 
-vmlinux.bin: $(vmlinux-32)
-	+@$(call makeboot,$@)
+ifdef CONFIG_SYS_SUPPORTS_ZBOOT
+# boot/compressed
+$(bootz-y): $(vmlinux-32) FORCE
+	$(Q)$(MAKE) $(build)=arch/mips/boot/compressed \
+		$(bootvars-y) 32bit-bfd=$(32bit-bfd) $@
+else
+vmlinuz: FORCE
+	@echo '   CONFIG_SYS_SUPPORTS_ZBOOT is not enabled'
+	/bin/false
+endif
 
-vmlinux.ecoff: $(vmlinux-32)
-	+@$(call makeboot,$@)
 
-vmlinux.srec: $(vmlinux-32)
-	+@$(call makeboot,$@)
+CLEAN_FILES += vmlinux.32 vmlinux.64
 
-CLEAN_FILES += vmlinux.ecoff \
-	       vmlinux.srec
+# device-trees
+core-y += arch/mips/boot/dts/
 
 archprepare:
 ifdef CONFIG_MIPS32_N32
-	@echo '  Checking missing-syscalls for N32'
-	$(Q)$(MAKE) $(build)=. missing-syscalls EXTRA_CFLAGS="-mabi=n32"
+	@$(kecho) '  Checking missing-syscalls for N32'
+	$(Q)$(MAKE) $(build)=. missing-syscalls missing_syscalls_flags="-mabi=n32"
 endif
 ifdef CONFIG_MIPS32_O32
-	@echo '  Checking missing-syscalls for O32'
-	$(Q)$(MAKE) $(build)=. missing-syscalls EXTRA_CFLAGS="-mabi=32"
+	@$(kecho) '  Checking missing-syscalls for O32'
+	$(Q)$(MAKE) $(build)=. missing-syscalls missing_syscalls_flags="-mabi=32"
 endif
 
+install:
+	$(Q)install -D -m 755 vmlinux $(INSTALL_PATH)/vmlinux-$(KERNELRELEASE)
+ifdef CONFIG_SYS_SUPPORTS_ZBOOT
+	$(Q)install -D -m 755 vmlinuz $(INSTALL_PATH)/vmlinuz-$(KERNELRELEASE)
+endif
+	$(Q)install -D -m 644 .config $(INSTALL_PATH)/config-$(KERNELRELEASE)
+	$(Q)install -D -m 644 System.map $(INSTALL_PATH)/System.map-$(KERNELRELEASE)
+
 archclean:
-	@$(MAKE) $(clean)=arch/mips/boot
-	@$(MAKE) $(clean)=arch/mips/lasat
+	$(Q)$(MAKE) $(clean)=arch/mips/boot
+	$(Q)$(MAKE) $(clean)=arch/mips/boot/compressed
+	$(Q)$(MAKE) $(clean)=arch/mips/boot/tools
+
+archheaders:
+	$(Q)$(MAKE) $(build)=arch/mips/kernel/syscalls all
 
 define archhelp
+	echo '  install              - install kernel into $(INSTALL_PATH)'
 	echo '  vmlinux.ecoff        - ECOFF boot image'
 	echo '  vmlinux.bin          - Raw binary boot image'
 	echo '  vmlinux.srec         - SREC boot image'
+	echo '  vmlinux.32           - 64-bit boot image wrapped in 32bits (IP22/IP32)'
+	echo '  vmlinuz              - Compressed boot(zboot) image'
+	echo '  vmlinuz.ecoff        - ECOFF zboot image'
+	echo '  vmlinuz.bin          - Raw binary zboot image'
+	echo '  vmlinuz.srec         - SREC zboot image'
+	echo '  uImage               - U-Boot image'
+	echo '  uImage.bin           - U-Boot image (uncompressed)'
+	echo '  uImage.bz2           - U-Boot image (bz2)'
+	echo '  uImage.gz            - U-Boot image (gzip)'
+	echo '  uImage.lzma          - U-Boot image (lzma)'
+	echo '  uImage.lzo           - U-Boot image (lzo)'
+	echo '  uzImage.bin          - U-Boot image (self-extracting)'
 	echo
-	echo '  These will be default as apropriate for a configured platform.'
+	echo '  These will be default as appropriate for a configured platform.'
+	echo
+	echo '  If you are targeting a system supported by generic kernels you may'
+	echo '  configure the kernel for a given architecture target like so:'
+	echo
+	echo '  {micro32,32,64}{r1,r2,r6}{el,}_defconfig <BOARDS="list of boards">'
+	echo
+	echo '  Where BOARDS is some subset of the following:'
+	for board in $(sort $(BOARDS)); do echo "    $${board}"; done
+	echo
+	echo '  Specifically the following generic default configurations are'
+	echo '  supported:'
+	echo
+	$(foreach cfg,$(generic_defconfigs),
+	  printf "  %-24s - Build generic kernel for $(call describe_generic_defconfig,$(cfg))\n" $(cfg);)
+	echo
+	echo '  The following legacy default configurations have been converted to'
+	echo '  generic and can still be used:'
+	echo
+	$(foreach cfg,$(sort $(legacy_defconfigs)),
+	  printf "  %-24s - Build $($(cfg)-y)\n" $(cfg);)
+	echo
+	echo '  Otherwise, the following default configurations are available:'
 endef
 
-CLEAN_FILES += vmlinux.32 \
-	       vmlinux.64 \
-	       vmlinux.ecoff
+generic_config_dir = $(srctree)/arch/$(ARCH)/configs/generic
+generic_defconfigs :=
+
+#
+# If the user generates a generic kernel configuration without specifying a
+# list of boards to include the config fragments for, default to including all
+# available board config fragments.
+#
+ifeq ($(BOARDS),)
+BOARDS = $(patsubst board-%.config,%,$(notdir $(wildcard $(generic_config_dir)/board-*.config)))
+endif
+
+#
+# Generic kernel configurations which merge generic_defconfig with the
+# appropriate config fragments from arch/mips/configs/generic/, resulting in
+# the ability to easily configure the kernel for a given architecture,
+# endianness & set of boards without duplicating the needed configuration in
+# hundreds of defconfig files.
+#
+define gen_generic_defconfigs
+$(foreach bits,$(1),$(foreach rev,$(2),$(foreach endian,$(3),
+target := $(bits)$(rev)$(filter el,$(endian))_defconfig
+generic_defconfigs += $$(target)
+$$(target): $(generic_config_dir)/$(bits)$(rev).config
+$$(target): $(generic_config_dir)/$(endian).config
+)))
+endef
+
+$(eval $(call gen_generic_defconfigs,32 64,r1 r2 r6,eb el))
+$(eval $(call gen_generic_defconfigs,micro32,r2,eb el))
+
+define describe_generic_defconfig
+$(subst 32r,MIPS32 r,$(subst 64r,MIPS64 r,$(subst el, little endian,$(patsubst %_defconfig,%,$(1)))))
+endef
+
+.PHONY: $(generic_defconfigs)
+$(generic_defconfigs):
+	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/kconfig/merge_config.sh \
+		-m -O $(objtree) $(srctree)/arch/$(ARCH)/configs/generic_defconfig $^ | \
+		grep -Ev '^#'
+	$(Q)cp $(KCONFIG_CONFIG) $(objtree)/.config.$@
+	$(Q)$(MAKE) -f $(srctree)/Makefile olddefconfig \
+		KCONFIG_CONFIG=$(objtree)/.config.$@ >/dev/null
+	$(Q)$(CONFIG_SHELL) $(srctree)/arch/$(ARCH)/tools/generic-board-config.sh \
+		$(srctree) $(objtree) $(objtree)/.config.$@ $(KCONFIG_CONFIG) \
+		"$(origin BOARDS)" $(BOARDS)
+	$(Q)$(MAKE) -f $(srctree)/Makefile olddefconfig
+
+#
+# Prevent generic merge_config rules attempting to merge single fragments
+#
+$(generic_config_dir)/%.config: ;
+
+#
+# Prevent direct use of generic_defconfig, which is intended to be used as the
+# basis of the various ISA-specific targets generated above.
+#
+.PHONY: generic_defconfig
+generic_defconfig:
+	$(Q)echo "generic_defconfig is not intended for direct use, but should instead be"
+	$(Q)echo "used via an ISA-specific target from the following list:"
+	$(Q)echo
+	$(Q)for cfg in $(generic_defconfigs); do echo "  $${cfg}"; done
+	$(Q)echo
+	$(Q)false
+
+#
+# Legacy defconfig compatibility - these targets used to be real defconfigs but
+# now that the boards have been converted to use the generic kernel they are
+# wrappers around the generic rules above.
+#
+legacy_defconfigs		+= ocelot_defconfig
+ocelot_defconfig-y		:= 32r2el_defconfig BOARDS=ocelot
+
+legacy_defconfigs		+= sead3_defconfig
+sead3_defconfig-y		:= 32r2el_defconfig BOARDS=sead-3
+
+legacy_defconfigs		+= sead3micro_defconfig
+sead3micro_defconfig-y		:= micro32r2el_defconfig BOARDS=sead-3
+
+legacy_defconfigs		+= xilfpga_defconfig
+xilfpga_defconfig-y		:= 32r2el_defconfig BOARDS=xilfpga
+
+.PHONY: $(legacy_defconfigs)
+$(legacy_defconfigs):
+	$(Q)$(MAKE) -f $(srctree)/Makefile $($@-y)

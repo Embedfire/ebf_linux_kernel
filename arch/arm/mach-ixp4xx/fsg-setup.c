@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/arm/mach-ixp4xx/fsg-setup.c
  *
@@ -14,7 +15,7 @@
  * Maintainers: http://www.nslu2-linux.org/
  *
  */
-
+#include <linux/gpio.h>
 #include <linux/if_ether.h>
 #include <linux/irq.h>
 #include <linux/serial.h>
@@ -22,13 +23,20 @@
 #include <linux/leds.h>
 #include <linux/reboot.h>
 #include <linux/i2c.h>
-#include <linux/i2c-gpio.h>
-
+#include <linux/gpio/machine.h>
+#include <linux/io.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
-#include <asm/io.h>
-#include <asm/gpio.h>
+
+#include "irqs.h"
+
+#define FSG_SDA_PIN		12
+#define FSG_SCL_PIN		13
+
+#define FSG_SB_GPIO		4	/* sync button */
+#define FSG_RB_GPIO		9	/* reset button */
+#define FSG_UB_GPIO		10	/* usb button */
 
 static struct flash_platform_data fsg_flash_data = {
 	.map_name		= "cfi_probe",
@@ -49,16 +57,21 @@ static struct platform_device fsg_flash = {
 	.resource		= &fsg_flash_resource,
 };
 
-static struct i2c_gpio_platform_data fsg_i2c_gpio_data = {
-	.sda_pin		= FSG_SDA_PIN,
-	.scl_pin		= FSG_SCL_PIN,
+static struct gpiod_lookup_table fsg_i2c_gpiod_table = {
+	.dev_id		= "i2c-gpio.0",
+	.table		= {
+		GPIO_LOOKUP_IDX("IXP4XX_GPIO_CHIP", FSG_SDA_PIN,
+				NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+		GPIO_LOOKUP_IDX("IXP4XX_GPIO_CHIP", FSG_SCL_PIN,
+				NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+	},
 };
 
 static struct platform_device fsg_i2c_gpio = {
 	.name			= "i2c-gpio",
 	.id			= 0,
 	.dev = {
-		.platform_data	= &fsg_i2c_gpio_data,
+		.platform_data	= NULL,
 	},
 };
 
@@ -119,6 +132,22 @@ static struct platform_device fsg_leds = {
 };
 
 /* Built-in 10/100 Ethernet MAC interfaces */
+static struct resource fsg_eth_npeb_resources[] = {
+	{
+		.start		= IXP4XX_EthB_BASE_PHYS,
+		.end		= IXP4XX_EthB_BASE_PHYS + 0x0fff,
+		.flags		= IORESOURCE_MEM,
+	},
+};
+
+static struct resource fsg_eth_npec_resources[] = {
+	{
+		.start		= IXP4XX_EthC_BASE_PHYS,
+		.end		= IXP4XX_EthC_BASE_PHYS + 0x0fff,
+		.flags		= IORESOURCE_MEM,
+	},
+};
+
 static struct eth_plat_info fsg_plat_eth[] = {
 	{
 		.phy		= 5,
@@ -138,12 +167,16 @@ static struct platform_device fsg_eth[] = {
 		.dev = {
 			.platform_data	= fsg_plat_eth,
 		},
+		.num_resources	= ARRAY_SIZE(fsg_eth_npeb_resources),
+		.resource	= fsg_eth_npeb_resources,
 	}, {
 		.name			= "ixp4xx_eth",
 		.id			= IXP4XX_ETH_NPEC,
 		.dev = {
 			.platform_data	= fsg_plat_eth + 1,
 		},
+		.num_resources	= ARRAY_SIZE(fsg_eth_npec_resources),
+		.resource	= fsg_eth_npec_resources,
 	}
 };
 
@@ -177,7 +210,6 @@ static irqreturn_t fsg_reset_handler(int irq, void *dev_id)
 
 static void __init fsg_init(void)
 {
-	DECLARE_MAC_BUF(mac_buf);
 	uint8_t __iomem *f;
 
 	ixp4xx_sys_init();
@@ -192,6 +224,7 @@ static void __init fsg_init(void)
 	/* Configure CS2 for operation, 8bit and writable */
 	*IXP4XX_EXP_CS2 = 0xbfff0002;
 
+	gpiod_add_lookup_table(&fsg_i2c_gpiod_table);
 	i2c_register_board_info(0, fsg_i2c_board_info,
 				ARRAY_SIZE(fsg_i2c_board_info));
 
@@ -204,16 +237,14 @@ static void __init fsg_init(void)
 	platform_add_devices(fsg_devices, ARRAY_SIZE(fsg_devices));
 
 	if (request_irq(gpio_to_irq(FSG_RB_GPIO), &fsg_reset_handler,
-			IRQF_DISABLED | IRQF_TRIGGER_LOW,
-			"FSG reset button", NULL) < 0) {
+			IRQF_TRIGGER_LOW, "FSG reset button", NULL) < 0) {
 
 		printk(KERN_DEBUG "Reset Button IRQ %d not available\n",
 			gpio_to_irq(FSG_RB_GPIO));
 	}
 
 	if (request_irq(gpio_to_irq(FSG_SB_GPIO), &fsg_power_handler,
-			IRQF_DISABLED | IRQF_TRIGGER_LOW,
-			"FSG power button", NULL) < 0) {
+			IRQF_TRIGGER_LOW, "FSG power button", NULL) < 0) {
 
 		printk(KERN_DEBUG "Power Button IRQ %d not available\n",
 			gpio_to_irq(FSG_SB_GPIO));
@@ -256,21 +287,24 @@ static void __init fsg_init(void)
 #endif
 		iounmap(f);
 	}
-	printk(KERN_INFO "FSG: Using MAC address %s for port 0\n",
-	       print_mac(mac_buf, fsg_plat_eth[0].hwaddr));
-	printk(KERN_INFO "FSG: Using MAC address %s for port 1\n",
-	       print_mac(mac_buf, fsg_plat_eth[1].hwaddr));
+	printk(KERN_INFO "FSG: Using MAC address %pM for port 0\n",
+	       fsg_plat_eth[0].hwaddr);
+	printk(KERN_INFO "FSG: Using MAC address %pM for port 1\n",
+	       fsg_plat_eth[1].hwaddr);
 
 }
 
 MACHINE_START(FSG, "Freecom FSG-3")
 	/* Maintainer: www.nslu2-linux.org */
-	.phys_io	= IXP4XX_PERIPHERAL_BASE_PHYS,
-	.io_pg_offst	= ((IXP4XX_PERIPHERAL_BASE_VIRT) >> 18) & 0xfffc,
 	.map_io		= ixp4xx_map_io,
+	.init_early	= ixp4xx_init_early,
 	.init_irq	= ixp4xx_init_irq,
-	.timer		= &ixp4xx_timer,
-	.boot_params	= 0x0100,
+	.init_time	= ixp4xx_timer_init,
+	.atag_offset	= 0x100,
 	.init_machine	= fsg_init,
+#if defined(CONFIG_PCI)
+	.dma_zone_size	= SZ_64M,
+#endif
+	.restart	= ixp4xx_restart,
 MACHINE_END
 

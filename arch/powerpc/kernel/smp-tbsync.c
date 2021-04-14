@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Smp timebase synchronization for ppc.
  *
@@ -9,8 +10,8 @@
 #include <linux/sched.h>
 #include <linux/smp.h>
 #include <linux/unistd.h>
-#include <linux/init.h>
-#include <asm/atomic.h>
+#include <linux/slab.h>
+#include <linux/atomic.h>
 #include <asm/smp.h>
 #include <asm/time.h>
 
@@ -35,13 +36,13 @@ static struct {
 
 static volatile int		running;
 
-static void __devinit enter_contest(u64 mark, long add)
+static void enter_contest(u64 mark, long add)
 {
 	while (get_tb() < mark)
 		tbsync->race_result = add;
 }
 
-void __devinit smp_generic_take_timebase(void)
+void smp_generic_take_timebase(void)
 {
 	int cmd;
 	u64 tb;
@@ -74,7 +75,7 @@ void __devinit smp_generic_take_timebase(void)
 	local_irq_restore(flags);
 }
 
-static int __devinit start_contest(int cmd, long offset, int num)
+static int start_contest(int cmd, long offset, int num)
 {
 	int i, score=0;
 	u64 tb;
@@ -109,11 +110,11 @@ static int __devinit start_contest(int cmd, long offset, int num)
 	return score;
 }
 
-void __devinit smp_generic_give_timebase(void)
+void smp_generic_give_timebase(void)
 {
 	int i, score, score2, old, min=0, max=5000, offset=1000;
 
-	printk("Synchronizing timebase\n");
+	pr_debug("Software timebase sync\n");
 
 	/* if this fails then this kernel won't work anyway... */
 	tbsync = kzalloc( sizeof(*tbsync), GFP_KERNEL );
@@ -123,13 +124,13 @@ void __devinit smp_generic_give_timebase(void)
 	while (!tbsync->ack)
 		barrier();
 
-	printk("Got ack\n");
+	pr_debug("Got ack\n");
 
 	/* binary search */
 	for (old = -1; old != offset ; offset = (min+max) / 2) {
 		score = start_contest(kSetAndTest, offset, NUM_ITER);
 
-		printk("score %d, offset %d\n", score, offset );
+		pr_debug("score %d, offset %d\n", score, offset );
 
 		if( score > 0 )
 			max = offset;
@@ -140,8 +141,8 @@ void __devinit smp_generic_give_timebase(void)
 	score = start_contest(kSetAndTest, min, NUM_ITER);
 	score2 = start_contest(kSetAndTest, max, NUM_ITER);
 
-	printk("Min %d (score %d), Max %d (score %d)\n",
-	       min, score, max, score2);
+	pr_debug("Min %d (score %d), Max %d (score %d)\n",
+		 min, score, max, score2);
 	score = abs(score);
 	score2 = abs(score2);
 	offset = (score < score2) ? min : max;
@@ -155,7 +156,7 @@ void __devinit smp_generic_give_timebase(void)
 		if (score2 <= score || score2 < 20)
 			break;
 	}
-	printk("Final offset: %d (%d/%d)\n", offset, score2, NUM_ITER );
+	pr_debug("Final offset: %d (%d/%d)\n", offset, score2, NUM_ITER );
 
 	/* exiting */
 	tbsync->cmd = kExit;

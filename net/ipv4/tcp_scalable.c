@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Tom Kelly's Scalable TCP
  *
- * See htt://www-lce.eng.cam.ac.uk/~ctk21/scalable/
+ * See http://www.deneholme.net/tom/scalable/
  *
  * John Heffner <jheffner@sc.edu>
  */
@@ -9,42 +10,38 @@
 #include <net/tcp.h>
 
 /* These factors derived from the recommended values in the aer:
- * .01 and and 7/8. We use 50 instead of 100 to account for
- * delayed ack.
+ * .01 and 7/8.
  */
-#define TCP_SCALABLE_AI_CNT	50U
+#define TCP_SCALABLE_AI_CNT	100U
 #define TCP_SCALABLE_MD_SCALE	3
 
-static void tcp_scalable_cong_avoid(struct sock *sk, u32 ack, u32 in_flight)
+static void tcp_scalable_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
-	if (!tcp_is_cwnd_limited(sk, in_flight))
+	if (!tcp_is_cwnd_limited(sk))
 		return;
 
-	if (tp->snd_cwnd <= tp->snd_ssthresh)
-		tcp_slow_start(tp);
-	else {
-		tp->snd_cwnd_cnt++;
-		if (tp->snd_cwnd_cnt > min(tp->snd_cwnd, TCP_SCALABLE_AI_CNT)){
-			if (tp->snd_cwnd < tp->snd_cwnd_clamp)
-				tp->snd_cwnd++;
-			tp->snd_cwnd_cnt = 0;
-		}
+	if (tcp_in_slow_start(tp)) {
+		acked = tcp_slow_start(tp, acked);
+		if (!acked)
+			return;
 	}
+	tcp_cong_avoid_ai(tp, min(tp->snd_cwnd, TCP_SCALABLE_AI_CNT),
+			  acked);
 }
 
 static u32 tcp_scalable_ssthresh(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
+
 	return max(tp->snd_cwnd - (tp->snd_cwnd>>TCP_SCALABLE_MD_SCALE), 2U);
 }
 
-
-static struct tcp_congestion_ops tcp_scalable = {
+static struct tcp_congestion_ops tcp_scalable __read_mostly = {
 	.ssthresh	= tcp_scalable_ssthresh,
+	.undo_cwnd	= tcp_reno_undo_cwnd,
 	.cong_avoid	= tcp_scalable_cong_avoid,
-	.min_cwnd	= tcp_reno_min_cwnd,
 
 	.owner		= THIS_MODULE,
 	.name		= "scalable",

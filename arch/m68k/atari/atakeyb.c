@@ -33,17 +33,13 @@
 #include <asm/atari_joystick.h>
 #include <asm/irq.h>
 
-extern unsigned int keymap_count;
 
 /* Hook for MIDI serial driver */
 void (*atari_MIDI_interrupt_hook) (void);
-/* Hook for mouse driver */
-void (*atari_mouse_interrupt_hook) (char *);
 /* Hook for keyboard inputdev  driver */
 void (*atari_input_keyboard_interrupt_hook) (unsigned char, char);
 /* Hook for mouse inputdev  driver */
 void (*atari_input_mouse_interrupt_hook) (char *);
-EXPORT_SYMBOL(atari_mouse_interrupt_hook);
 EXPORT_SYMBOL(atari_input_keyboard_interrupt_hook);
 EXPORT_SYMBOL(atari_input_mouse_interrupt_hook);
 
@@ -122,7 +118,7 @@ KEYBOARD_STATE kb_state;
  * bytes have been lost and in which state of the packet structure we are now.
  * This usually causes keyboards bytes to be interpreted as mouse movements
  * and vice versa, which is very annoying. It seems better to throw away some
- * bytes (that are usually mouse bytes) than to misinterpret them. Therefor I
+ * bytes (that are usually mouse bytes) than to misinterpret them. Therefore I
  * introduced the RESYNC state for IKBD data. In this state, the bytes up to
  * one that really looks like a key event (0x04..0xf2) or the start of a mouse
  * packet (0xf8..0xfb) are thrown away, but at most 2 bytes. This at least
@@ -131,7 +127,7 @@ KEYBOARD_STATE kb_state;
  * it's really hard to decide whether they're mouse or keyboard bytes. Since
  * overruns usually occur when moving the Atari mouse rapidly, they're seen as
  * mouse bytes here. If this is wrong, only a make code of the keyboard gets
- * lost, which isn't too bad. Loosing a break code would be disastrous,
+ * lost, which isn't too bad. Losing a break code would be disastrous,
  * because then the keyboard repeat strikes...
  */
 
@@ -153,7 +149,7 @@ repeat:
 	if (acia_stat & ACIA_OVRN) {
 		/* a very fast typist or a slow system, give a warning */
 		/* ...happens often if interrupts were disabled for too long */
-		printk(KERN_DEBUG "Keyboard overrun\n");
+		pr_debug("Keyboard overrun\n");
 		scancode = acia.key_data;
 		if (ikbd_self_test)
 			/* During self test, don't do resyncing, just process the code */
@@ -174,7 +170,6 @@ repeat:
 	if (acia_stat & ACIA_RDRF) {
 		/* received a character */
 		scancode = acia.key_data;	/* get it or reset the ACIA, I'll get it! */
-		tasklet_schedule(&keyboard_tasklet);
 	interpret_scancode:
 		switch (kb_state.state) {
 		case KEYBOARD:
@@ -212,7 +207,7 @@ repeat:
 					self_test_last_rcv = jiffies;
 					break;
 				}
-				/* FALL THROUGH */
+				fallthrough;
 
 			default:
 				break_flag = scancode & BREAK_MASK;
@@ -233,14 +228,14 @@ repeat:
 					keytyp = KTYP(keyval) - 0xf0;
 					keyval = KVAL(keyval);
 
-					printk(KERN_WARNING "Key with scancode %d ", scancode);
+					pr_warn("Key with scancode %d ", scancode);
 					if (keytyp == KT_LATIN || keytyp == KT_LETTER) {
 						if (keyval < ' ')
-							printk("('^%c') ", keyval + '@');
+							pr_cont("('^%c') ", keyval + '@');
 						else
-							printk("('%c') ", keyval);
+							pr_cont("('%c') ", keyval);
 					}
-					printk("is broken -- will be ignored.\n");
+					pr_cont("is broken -- will be ignored.\n");
 					break;
 				} else if (test_bit(scancode, broken_keys))
 					break;
@@ -264,8 +259,8 @@ repeat:
 			kb_state.buf[kb_state.len++] = scancode;
 			if (kb_state.len == 3) {
 				kb_state.state = KEYBOARD;
-				if (atari_mouse_interrupt_hook)
-					atari_mouse_interrupt_hook(kb_state.buf);
+				if (atari_input_mouse_interrupt_hook)
+					atari_input_mouse_interrupt_hook(kb_state.buf);
 			}
 			break;
 
@@ -304,7 +299,7 @@ repeat:
 #endif
 
 	if (acia_stat & (ACIA_FE | ACIA_PE)) {
-		printk("Error in keyboard communication\n");
+		pr_err("Error in keyboard communication\n");
 	}
 
 	/* handle_scancode() can take a lot of time, so check again if
@@ -434,14 +429,6 @@ void ikbd_mouse_y0_top(void)
 }
 EXPORT_SYMBOL(ikbd_mouse_y0_top);
 
-/* Resume */
-void ikbd_resume(void)
-{
-	static const char cmd[1] = { 0x11 };
-
-	ikbd_write(cmd, 1);
-}
-
 /* Disable mouse */
 void ikbd_mouse_disable(void)
 {
@@ -450,14 +437,6 @@ void ikbd_mouse_disable(void)
 	ikbd_write(cmd, 1);
 }
 EXPORT_SYMBOL(ikbd_mouse_disable);
-
-/* Pause output */
-void ikbd_pause(void)
-{
-	static const char cmd[1] = { 0x13 };
-
-	ikbd_write(cmd, 1);
-}
 
 /* Set joystick event reporting */
 void ikbd_joystick_event_on(void)
@@ -506,56 +485,6 @@ void ikbd_joystick_disable(void)
 	ikbd_write(cmd, 1);
 }
 
-/* Time-of-day clock set */
-void ikbd_clock_set(int year, int month, int day, int hour, int minute, int second)
-{
-	char cmd[7] = { 0x1B, year, month, day, hour, minute, second };
-
-	ikbd_write(cmd, 7);
-}
-
-/* Interrogate time-of-day clock */
-void ikbd_clock_get(int *year, int *month, int *day, int *hour, int *minute, int second)
-{
-	static const char cmd[1] = { 0x1C };
-
-	ikbd_write(cmd, 1);
-}
-
-/* Memory load */
-void ikbd_mem_write(int address, int size, char *data)
-{
-	panic("Attempt to write data into keyboard memory");
-}
-
-/* Memory read */
-void ikbd_mem_read(int address, char data[6])
-{
-	char cmd[3] = { 0x21, address>>8, address&0xFF };
-
-	ikbd_write(cmd, 3);
-
-	/* receive data and put it in data */
-}
-
-/* Controller execute */
-void ikbd_exec(int address)
-{
-	char cmd[3] = { 0x22, address>>8, address&0xFF };
-
-	ikbd_write(cmd, 3);
-}
-
-/* Status inquiries (0x87-0x9A) not yet implemented */
-
-/* Set the state of the caps lock led. */
-void atari_kbd_leds(unsigned int leds)
-{
-	char cmd[6] = {32, 0, 4, 1, 254 + ((leds & 4) != 0), 0};
-
-	ikbd_write(cmd, 6);
-}
-
 /*
  * The original code sometimes left the interrupt line of
  * the ACIAs low forever. I hope, it is fixed now.
@@ -567,14 +496,18 @@ static int atari_keyb_done = 0;
 
 int atari_keyb_init(void)
 {
+	int error;
+
 	if (atari_keyb_done)
 		return 0;
 
 	kb_state.state = KEYBOARD;
 	kb_state.len = 0;
 
-	request_irq(IRQ_MFP_ACIA, atari_keyboard_interrupt, IRQ_TYPE_SLOW,
-		    "keyboard/mouse/MIDI", atari_keyboard_interrupt);
+	error = request_irq(IRQ_MFP_ACIA, atari_keyboard_interrupt, 0,
+			    "keyboard,mouse,MIDI", atari_keyboard_interrupt);
+	if (error)
+		return error;
 
 	atari_turnoff_irq(IRQ_MFP_ACIA);
 	do {
@@ -605,10 +538,10 @@ int atari_keyb_init(void)
 				 ACIA_RHTID : 0);
 
 	/* make sure the interrupt line is up */
-	} while ((mfp.par_dt_reg & 0x10) == 0);
+	} while ((st_mfp.par_dt_reg & 0x10) == 0);
 
 	/* enable ACIA Interrupts */
-	mfp.active_edge &= ~0x10;
+	st_mfp.active_edge &= ~0x10;
 	atari_turnon_irq(IRQ_MFP_ACIA);
 
 	ikbd_self_test = 1;
@@ -620,7 +553,7 @@ int atari_keyb_init(void)
 		barrier();
 	/* if not incremented: no 0xf1 received */
 	if (ikbd_self_test == 1)
-		printk(KERN_ERR "WARNING: keyboard self test failed!\n");
+		pr_err("Keyboard self test failed!\n");
 	ikbd_self_test = 0;
 
 	ikbd_mouse_disable();
@@ -635,15 +568,3 @@ int atari_keyb_init(void)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(atari_keyb_init);
-
-int atari_kbd_translate(unsigned char keycode, unsigned char *keycodep, char raw_mode)
-{
-#ifdef CONFIG_MAGIC_SYSRQ
-	/* ALT+HELP pressed? */
-	if ((keycode == 98) && ((shift_state & 0xff) == 8))
-		*keycodep = 0xff;
-	else
-#endif
-		*keycodep = keycode;
-	return 1;
-}

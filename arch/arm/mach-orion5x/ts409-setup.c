@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * QNAP TS-409 Board Setup
  *
@@ -5,13 +6,8 @@
  *
  * Copyright (C) 2008  Sylver Bruneau <sylver.bruneau@gmail.com>
  * Copyright (C) 2008  Martin Michlmayr <tbm@cyrius.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
-
+#include <linux/gpio.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
@@ -25,12 +21,11 @@
 #include <linux/i2c.h>
 #include <linux/serial_reg.h>
 #include <asm/mach-types.h>
-#include <asm/gpio.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/pci.h>
-#include <mach/orion5x.h>
 #include "common.h"
 #include "mpp.h"
+#include "orion5x.h"
 #include "tsx09-common.h"
 
 /*****************************************************************************
@@ -56,7 +51,7 @@
 
 /****************************************************************************
  * 8MiB NOR flash. The struct mtd_partition is not in the same order as the
- *     partitions on the device because we want to keep compatability with
+ *     partitions on the device because we want to keep compatibility with
  *     existing QNAP firmware.
  *
  * Layout as used by QNAP:
@@ -121,7 +116,8 @@ static struct platform_device qnap_ts409_nor_flash = {
  * PCI
  ****************************************************************************/
 
-static int __init qnap_ts409_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int __init qnap_ts409_pci_map_irq(const struct pci_dev *dev, u8 slot,
+	u8 pin)
 {
 	int irq;
 
@@ -140,7 +136,6 @@ static int __init qnap_ts409_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 
 static struct hw_pci qnap_ts409_pci __initdata = {
 	.nr_controllers	= 2,
-	.swizzle	= pci_std_swizzle,
 	.setup		= orion5x_pci_sys_setup,
 	.scan		= orion5x_pci_sys_scan_bus,
 	.map_irq	= qnap_ts409_pci_map_irq,
@@ -242,28 +237,28 @@ static struct platform_device qnap_ts409_button_device = {
 /*****************************************************************************
  * General Setup
  ****************************************************************************/
-static struct orion5x_mpp_mode ts409_mpp_modes[] __initdata = {
-	{  0, MPP_UNUSED },
-	{  1, MPP_UNUSED },
-	{  2, MPP_UNUSED },
-	{  3, MPP_UNUSED },
-	{  4, MPP_GPIO },		/* HDD 1 status */
-	{  5, MPP_GPIO },		/* HDD 2 status */
-	{  6, MPP_GPIO },		/* HDD 3 status */
-	{  7, MPP_GPIO },		/* HDD 4 status */
-	{  8, MPP_UNUSED },
-	{  9, MPP_UNUSED },
-	{ 10, MPP_GPIO },		/* RTC int */
-	{ 11, MPP_UNUSED },
-	{ 12, MPP_UNUSED },
-	{ 13, MPP_UNUSED },
-	{ 14, MPP_GPIO },		/* SW_RST */
-	{ 15, MPP_GPIO },		/* USB copy button */
-	{ 16, MPP_UART },		/* UART1 RXD */
-	{ 17, MPP_UART },		/* UART1 TXD */
-	{ 18, MPP_UNUSED },
-	{ 19, MPP_UNUSED },
-	{ -1 },
+static unsigned int ts409_mpp_modes[] __initdata = {
+	MPP0_UNUSED,
+	MPP1_UNUSED,
+	MPP2_UNUSED,
+	MPP3_UNUSED,
+	MPP4_GPIO,		/* HDD 1 status */
+	MPP5_GPIO,		/* HDD 2 status */
+	MPP6_GPIO,		/* HDD 3 status */
+	MPP7_GPIO,		/* HDD 4 status */
+	MPP8_UNUSED,
+	MPP9_UNUSED,
+	MPP10_GPIO,		/* RTC int */
+	MPP11_UNUSED,
+	MPP12_UNUSED,
+	MPP13_UNUSED,
+	MPP14_GPIO,		/* SW_RST */
+	MPP15_GPIO,		/* USB copy button */
+	MPP16_UART,		/* UART1 RXD */
+	MPP17_UART,		/* UART1 TXD */
+	MPP18_UNUSED,
+	MPP19_UNUSED,
+	0,
 };
 
 static void __init qnap_ts409_init(void)
@@ -278,8 +273,10 @@ static void __init qnap_ts409_init(void)
 	/*
 	 * Configure peripherals.
 	 */
-	orion5x_setup_dev_boot_win(QNAP_TS409_NOR_BOOT_BASE,
-				   QNAP_TS409_NOR_BOOT_SIZE);
+	mvebu_mbus_add_window_by_id(ORION_MBUS_DEVBUS_BOOT_TARGET,
+				    ORION_MBUS_DEVBUS_BOOT_ATTR,
+				    QNAP_TS409_NOR_BOOT_BASE,
+				    QNAP_TS409_NOR_BOOT_SIZE);
 	platform_device_register(&qnap_ts409_nor_flash);
 
 	orion5x_ehci0_init();
@@ -301,7 +298,7 @@ static void __init qnap_ts409_init(void)
 			gpio_free(TS409_RTC_GPIO);
 	}
 	if (qnap_ts409_i2c_rtc.irq == 0)
-		pr_warning("qnap_ts409_init: failed to get RTC IRQ\n");
+		pr_warn("qnap_ts409_init: failed to get RTC IRQ\n");
 	i2c_register_board_info(0, &qnap_ts409_i2c_rtc, 1);
 	platform_device_register(&ts409_leds);
 
@@ -311,12 +308,13 @@ static void __init qnap_ts409_init(void)
 
 MACHINE_START(TS409, "QNAP TS-409")
 	/* Maintainer:  Sylver Bruneau <sylver.bruneau@gmail.com> */
-	.phys_io	= ORION5X_REGS_PHYS_BASE,
-	.io_pg_offst	= ((ORION5X_REGS_VIRT_BASE) >> 18) & 0xFFFC,
-	.boot_params	= 0x00000100,
+	.atag_offset	= 0x100,
+	.nr_irqs	= ORION5X_NR_IRQS,
 	.init_machine	= qnap_ts409_init,
 	.map_io		= orion5x_map_io,
+	.init_early	= orion5x_init_early,
 	.init_irq	= orion5x_init_irq,
-	.timer		= &orion5x_timer,
+	.init_time	= orion5x_timer_init,
 	.fixup		= tag_fixup_mem32,
+	.restart	= orion5x_restart,
 MACHINE_END

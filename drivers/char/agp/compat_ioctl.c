@@ -30,7 +30,8 @@
 #include <linux/pci.h>
 #include <linux/fs.h>
 #include <linux/agpgart.h>
-#include <asm/uaccess.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
 #include "agp.h"
 #include "compat_ioctl.h"
 
@@ -97,11 +98,15 @@ static int compat_agpioc_reserve_wrap(struct agp_file_private *priv, void __user
 		if (ureserve.seg_count >= 16384)
 			return -EINVAL;
 
-		usegment = kmalloc(sizeof(*usegment) * ureserve.seg_count, GFP_KERNEL);
+		usegment = kmalloc_array(ureserve.seg_count,
+					 sizeof(*usegment),
+					 GFP_KERNEL);
 		if (!usegment)
 			return -ENOMEM;
 
-		ksegment = kmalloc(sizeof(*ksegment) * kreserve.seg_count, GFP_KERNEL);
+		ksegment = kmalloc_array(kreserve.seg_count,
+					 sizeof(*ksegment),
+					 GFP_KERNEL);
 		if (!ksegment) {
 			kfree(usegment);
 			return -ENOMEM;
@@ -275,7 +280,6 @@ long compat_agp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		break;
 
 	case AGPIOC_CHIPSET_FLUSH32:
-		ret_val = agpioc_chipset_flush_wrap(curr_priv);
 		break;
 	}
 

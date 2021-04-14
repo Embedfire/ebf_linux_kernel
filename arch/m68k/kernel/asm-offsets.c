@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * This program is used to generate definitions needed by
  * assembly language modules.
@@ -7,6 +8,8 @@
  * compile this file to assembler, and then extract the
  * #defines from the assembly-language output.
  */
+
+#define ASM_OFFSETS_C
 
 #include <linux/stddef.h>
 #include <linux/sched.h>
@@ -20,13 +23,9 @@
 int main(void)
 {
 	/* offsets into the task struct */
-	DEFINE(TASK_STATE, offsetof(struct task_struct, state));
-	DEFINE(TASK_FLAGS, offsetof(struct task_struct, flags));
-	DEFINE(TASK_PTRACE, offsetof(struct task_struct, ptrace));
 	DEFINE(TASK_THREAD, offsetof(struct task_struct, thread));
-	DEFINE(TASK_INFO, offsetof(struct task_struct, thread.info));
 	DEFINE(TASK_MM, offsetof(struct task_struct, mm));
-	DEFINE(TASK_ACTIVE_MM, offsetof(struct task_struct, active_mm));
+	DEFINE(TASK_STACK, offsetof(struct task_struct, stack));
 
 	/* offsets into the thread struct */
 	DEFINE(THREAD_KSP, offsetof(struct thread_struct, ksp));
@@ -44,50 +43,48 @@ int main(void)
 	DEFINE(TINFO_FLAGS, offsetof(struct thread_info, flags));
 
 	/* offsets into the pt_regs */
-	DEFINE(PT_D0, offsetof(struct pt_regs, d0));
-	DEFINE(PT_ORIG_D0, offsetof(struct pt_regs, orig_d0));
-	DEFINE(PT_D1, offsetof(struct pt_regs, d1));
-	DEFINE(PT_D2, offsetof(struct pt_regs, d2));
-	DEFINE(PT_D3, offsetof(struct pt_regs, d3));
-	DEFINE(PT_D4, offsetof(struct pt_regs, d4));
-	DEFINE(PT_D5, offsetof(struct pt_regs, d5));
-	DEFINE(PT_A0, offsetof(struct pt_regs, a0));
-	DEFINE(PT_A1, offsetof(struct pt_regs, a1));
-	DEFINE(PT_A2, offsetof(struct pt_regs, a2));
-	DEFINE(PT_PC, offsetof(struct pt_regs, pc));
-	DEFINE(PT_SR, offsetof(struct pt_regs, sr));
+	DEFINE(PT_OFF_D0, offsetof(struct pt_regs, d0));
+	DEFINE(PT_OFF_ORIG_D0, offsetof(struct pt_regs, orig_d0));
+	DEFINE(PT_OFF_D1, offsetof(struct pt_regs, d1));
+	DEFINE(PT_OFF_D2, offsetof(struct pt_regs, d2));
+	DEFINE(PT_OFF_D3, offsetof(struct pt_regs, d3));
+	DEFINE(PT_OFF_D4, offsetof(struct pt_regs, d4));
+	DEFINE(PT_OFF_D5, offsetof(struct pt_regs, d5));
+	DEFINE(PT_OFF_A0, offsetof(struct pt_regs, a0));
+	DEFINE(PT_OFF_A1, offsetof(struct pt_regs, a1));
+	DEFINE(PT_OFF_A2, offsetof(struct pt_regs, a2));
+	DEFINE(PT_OFF_PC, offsetof(struct pt_regs, pc));
+	DEFINE(PT_OFF_SR, offsetof(struct pt_regs, sr));
+
 	/* bitfields are a bit difficult */
-	DEFINE(PT_VECTOR, offsetof(struct pt_regs, pc) + 4);
-
-	/* offsets into the irq_handler struct */
-	DEFINE(IRQ_HANDLER, offsetof(struct irq_node, handler));
-	DEFINE(IRQ_DEVID, offsetof(struct irq_node, dev_id));
-	DEFINE(IRQ_NEXT, offsetof(struct irq_node, next));
-
-	/* offsets into the kernel_stat struct */
-	DEFINE(STAT_IRQ, offsetof(struct kernel_stat, irqs));
+#ifdef CONFIG_COLDFIRE
+	DEFINE(PT_OFF_FORMATVEC, offsetof(struct pt_regs, sr) - 2);
+#else
+	DEFINE(PT_OFF_FORMATVEC, offsetof(struct pt_regs, pc) + 4);
+#endif
 
 	/* offsets into the irq_cpustat_t struct */
 	DEFINE(CPUSTAT_SOFTIRQ_PENDING, offsetof(irq_cpustat_t, __softirq_pending));
 
+	/* signal defines */
+	DEFINE(LSIGSEGV, SIGSEGV);
+	DEFINE(LSEGV_MAPERR, SEGV_MAPERR);
+	DEFINE(LSIGTRAP, SIGTRAP);
+	DEFINE(LTRAP_TRACE, TRAP_TRACE);
+
+#ifdef CONFIG_MMU
 	/* offsets into the bi_record struct */
 	DEFINE(BIR_TAG, offsetof(struct bi_record, tag));
 	DEFINE(BIR_SIZE, offsetof(struct bi_record, size));
 	DEFINE(BIR_DATA, offsetof(struct bi_record, data));
 
-	/* offsets into font_desc (drivers/video/console/font.h) */
+	/* offsets into the font_desc struct */
 	DEFINE(FONT_DESC_IDX, offsetof(struct font_desc, idx));
 	DEFINE(FONT_DESC_NAME, offsetof(struct font_desc, name));
 	DEFINE(FONT_DESC_WIDTH, offsetof(struct font_desc, width));
 	DEFINE(FONT_DESC_HEIGHT, offsetof(struct font_desc, height));
 	DEFINE(FONT_DESC_DATA, offsetof(struct font_desc, data));
 	DEFINE(FONT_DESC_PREF, offsetof(struct font_desc, pref));
-
-	/* signal defines */
-	DEFINE(SIGSEGV, SIGSEGV);
-	DEFINE(SEGV_MAPERR, SEGV_MAPERR);
-	DEFINE(SIGTRAP, SIGTRAP);
-	DEFINE(TRAP_TRACE, TRAP_TRACE);
 
 	/* offsets into the custom struct */
 	DEFINE(CUSTOMBASE, &amiga_custom);
@@ -102,6 +99,10 @@ int main(void)
 	DEFINE(CIABBASE, &ciab);
 	DEFINE(C_PRA, offsetof(struct CIA, pra));
 	DEFINE(ZTWOBASE, zTwoBase);
+
+	/* enum m68k_fixup_type */
+	DEFINE(M68K_FIXUP_MEMOFFSET, m68k_fixup_memoffset);
+#endif
 
 	return 0;
 }

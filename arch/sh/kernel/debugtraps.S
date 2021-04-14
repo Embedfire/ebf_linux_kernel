@@ -1,23 +1,20 @@
-/*
+/* SPDX-License-Identifier: GPL-2.0
+ *
  * arch/sh/kernel/debugtraps.S
  *
  * Debug trap jump tables for SuperH
  *
- *  Copyright (C) 2006  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
+ *  Copyright (C) 2006 - 2008  Paul Mundt
  */
 #include <linux/sys.h>
 #include <linux/linkage.h>
 
-#if !defined(CONFIG_SH_KGDB)
-#define kgdb_handle_exception	debug_trap_handler
+#if !defined(CONFIG_KGDB)
+#define singlestep_trap_handler		debug_trap_handler
 #endif
 
 #if !defined(CONFIG_SH_STANDARD_BIOS)
-#define sh_bios_handler		debug_trap_handler
+#define sh_bios_handler			debug_trap_handler
 #endif
 
 	.data
@@ -35,7 +32,7 @@ ENTRY(debug_trap_table)
 	.long debug_trap_handler	/* 0x39 */
 	.long debug_trap_handler	/* 0x3a */
 	.long debug_trap_handler	/* 0x3b */
-	.long kgdb_handle_exception	/* 0x3c */
-	.long debug_trap_handler	/* 0x3d */
+	.long breakpoint_trap_handler	/* 0x3c */
+	.long singlestep_trap_handler	/* 0x3d */
 	.long bug_trap_handler		/* 0x3e */
 	.long sh_bios_handler		/* 0x3f */

@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Safe Encapsulated USB Serial Driver
  *
+ *      Copyright (C) 2010 Johan Hovold <jhovold@gmail.com>
  *      Copyright (C) 2001 Lineo
  *      Copyright (C) 2001 Hewlett-Packard
- *
- *	This program is free software; you can redistribute it and/or modify
- *	it under the terms of the GNU General Public License as published by
- *	the Free Software Foundation; either version 2 of the License, or
- *	(at your option) any later version.
  *
  * By:
  *      Stuart Lynne <sl@lineo.com>, Tom Rushworth <tbr@lineo.com>
@@ -61,11 +58,11 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kernel.h>
 #include <linux/errno.h>
-#include <linux/init.h>
-#include <linux/slab.h>
+#include <linux/gfp.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
@@ -75,32 +72,15 @@
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 
+static bool safe = true;
+static bool padded = IS_ENABLED(CONFIG_USB_SERIAL_SAFE_PADDED);
 
-#ifndef CONFIG_USB_SERIAL_SAFE_PADDED
-#define CONFIG_USB_SERIAL_SAFE_PADDED 0
-#endif
-
-static int debug;
-static int safe = 1;
-static int padded = CONFIG_USB_SERIAL_SAFE_PADDED;
-
-#define DRIVER_VERSION "v0.0b"
-#define DRIVER_AUTHOR "sl@lineo.com, tbr@lineo.com"
+#define DRIVER_AUTHOR "sl@lineo.com, tbr@lineo.com, Johan Hovold <jhovold@gmail.com>"
 #define DRIVER_DESC "USB Safe Encapsulated Serial"
 
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
-
-static __u16 vendor;		/* no default */
-static __u16 product;		/* no default */
-module_param(vendor, ushort, 0);
-MODULE_PARM_DESC(vendor, "User specified USB idVendor (required)");
-module_param(product, ushort, 0);
-MODULE_PARM_DESC(product, "User specified USB idProduct (required)");
-
-module_param(debug, bool, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(debug, "Debug enabled or not");
 
 module_param(safe, bool, 0);
 MODULE_PARM_DESC(safe, "Turn Safe Encapsulation On/Off");
@@ -135,7 +115,7 @@ MODULE_PARM_DESC(padded, "Pad to full wMaxPacketSize On/Off");
 	.bInterfaceClass = (ic), \
 	.bInterfaceSubClass = (isc),
 
-static struct usb_device_id id_table[] = {
+static const struct usb_device_id id_table[] = {
 	{MY_USB_DEVICE(0x49f, 0xffff, CDC_DEVICE_CLASS, LINEO_INTERFACE_CLASS, LINEO_INTERFACE_SUBCLASS_SAFESERIAL)},	/* Itsy */
 	{MY_USB_DEVICE(0x3f0, 0x2101, CDC_DEVICE_CLASS, LINEO_INTERFACE_CLASS, LINEO_INTERFACE_SUBCLASS_SAFESERIAL)},	/* Calypso */
 	{MY_USB_DEVICE(0x4dd, 0x8001, CDC_DEVICE_CLASS, LINEO_INTERFACE_CLASS, LINEO_INTERFACE_SUBCLASS_SAFESERIAL)},	/* Iris */
@@ -143,20 +123,10 @@ static struct usb_device_id id_table[] = {
 	{MY_USB_DEVICE(0x4dd, 0x8003, CDC_DEVICE_CLASS, LINEO_INTERFACE_CLASS, LINEO_INTERFACE_SUBCLASS_SAFESERIAL)},	/* Collie */
 	{MY_USB_DEVICE(0x4dd, 0x8004, CDC_DEVICE_CLASS, LINEO_INTERFACE_CLASS, LINEO_INTERFACE_SUBCLASS_SAFESERIAL)},	/* Collie */
 	{MY_USB_DEVICE(0x5f9, 0xffff, CDC_DEVICE_CLASS, LINEO_INTERFACE_CLASS, LINEO_INTERFACE_SUBCLASS_SAFESERIAL)},	/* Sharp tmp */
-	/* extra null entry for module vendor/produc parameters */
-	{MY_USB_DEVICE(0, 0, CDC_DEVICE_CLASS, LINEO_INTERFACE_CLASS, LINEO_INTERFACE_SUBCLASS_SAFESERIAL)},
 	{}			/* terminating entry  */
 };
 
 MODULE_DEVICE_TABLE(usb, id_table);
-
-static struct usb_driver safe_driver = {
-	.name =		"safe_serial",
-	.probe =	usb_serial_probe,
-	.disconnect =	usb_serial_disconnect,
-	.id_table =	id_table,
-	.no_dynamic_id = 	1,
-};
 
 static const __u16 crc10_table[256] = {
 	0x000, 0x233, 0x255, 0x066, 0x299, 0x0aa, 0x0cc, 0x2ff,
@@ -206,200 +176,105 @@ static const __u16 crc10_table[256] = {
  * Perform a memcpy and calculate fcs using ppp 10bit CRC algorithm. Return
  * new 10 bit FCS.
  */
-static __u16 __inline__ fcs_compute10(unsigned char *sp, int len, __u16 fcs)
+static inline __u16 fcs_compute10(unsigned char *sp, int len, __u16 fcs)
 {
 	for (; len-- > 0; fcs = CRC10_FCS(fcs, *sp++));
 	return fcs;
 }
 
-static void safe_read_bulk_callback(struct urb *urb)
+static void safe_process_read_urb(struct urb *urb)
 {
-	struct usb_serial_port *port =  urb->context;
+	struct usb_serial_port *port = urb->context;
 	unsigned char *data = urb->transfer_buffer;
 	unsigned char length = urb->actual_length;
-	int result;
-	int status = urb->status;
+	int actual_length;
+	__u16 fcs;
 
-	dbg("%s", __func__);
+	if (!length)
+		return;
 
-	if (status) {
-		dbg("%s - nonzero read bulk status received: %d",
-		    __func__, status);
+	if (!safe)
+		goto out;
+
+	if (length < 2) {
+		dev_err(&port->dev, "malformed packet\n");
 		return;
 	}
 
-	dbg("safe_read_bulk_callback length: %d",
-					port->read_urb->actual_length);
-#ifdef ECHO_RCV
-	{
-		int i;
-		unsigned char *cp = port->read_urb->transfer_buffer;
-		for (i = 0; i < port->read_urb->actual_length; i++) {
-			if ((i % 32) == 0)
-				printk("\nru[%02x] ", i);
-			printk("%02x ", *cp++);
-		}
-		printk("\n");
-	}
-#endif
-	if (safe) {
-		__u16 fcs;
-		fcs = fcs_compute10(data, length, CRC10_INITFCS);
-		if (!fcs) {
-			int actual_length = data[length - 2] >> 2;
-			if (actual_length <= (length - 2)) {
-				info("%s - actual: %d", __func__,
-							actual_length);
-				tty_insert_flip_string(port->port.tty,
-							data, actual_length);
-				tty_flip_buffer_push(port->port.tty);
-			} else {
-				err("%s - inconsistent lengths %d:%d",
-					__func__, actual_length, length);
-			}
-		} else {
-			err("%s - bad CRC %x", __func__, fcs);
-		}
-	} else {
-		tty_insert_flip_string(port->port.tty, data, length);
-		tty_flip_buffer_push(port->port.tty);
+	fcs = fcs_compute10(data, length, CRC10_INITFCS);
+	if (fcs) {
+		dev_err(&port->dev, "%s - bad CRC %x\n", __func__, fcs);
+		return;
 	}
 
-	/* Continue trying to always read  */
-	usb_fill_bulk_urb(urb, port->serial->dev,
-			usb_rcvbulkpipe(port->serial->dev,
-					port->bulk_in_endpointAddress),
-			urb->transfer_buffer, urb->transfer_buffer_length,
-			safe_read_bulk_callback, port);
-
-	result = usb_submit_urb(urb, GFP_ATOMIC);
-	if (result)
-		err("%s - failed resubmitting read urb, error %d",
-							__func__, result);
-		/* FIXME: Need a mechanism to retry later if this happens */
+	actual_length = data[length - 2] >> 2;
+	if (actual_length > (length - 2)) {
+		dev_err(&port->dev, "%s - inconsistent lengths %d:%d\n",
+				__func__, actual_length, length);
+		return;
+	}
+	dev_info(&urb->dev->dev, "%s - actual: %d\n", __func__, actual_length);
+	length = actual_length;
+out:
+	tty_insert_flip_string(&port->port, data, length);
+	tty_flip_buffer_push(&port->port);
 }
 
-static int safe_write(struct tty_struct *tty, struct usb_serial_port *port,
-					const unsigned char *buf, int count)
+static int safe_prepare_write_buffer(struct usb_serial_port *port,
+						void *dest, size_t size)
 {
-	unsigned char *data;
-	int result;
-	int i;
-	int packet_length;
+	unsigned char *buf = dest;
+	int count;
+	int trailer_len;
+	int pkt_len;
+	__u16 fcs;
 
-	dbg("safe_write port: %p %d urb: %p count: %d",
-				port, port->number, port->write_urb, count);
+	trailer_len = safe ? 2 : 0;
 
-	if (!port->write_urb) {
-		dbg("%s - write urb NULL", __func__);
-		return 0;
-	}
+	count = kfifo_out_locked(&port->write_fifo, buf, size - trailer_len,
+								&port->lock);
+	if (!safe)
+		return count;
 
-	dbg("safe_write write_urb: %d transfer_buffer_length",
-	     port->write_urb->transfer_buffer_length);
-
-	if (!port->write_urb->transfer_buffer_length) {
-		dbg("%s - write urb transfer_buffer_length zero", __func__);
-		return 0;
-	}
-	if (count == 0) {
-		dbg("%s - write request of 0 bytes", __func__);
-		return 0;
-	}
-	spin_lock_bh(&port->lock);
-	if (port->write_urb_busy) {
-		spin_unlock_bh(&port->lock);
-		dbg("%s - already writing", __func__);
-		return 0;
-	}
-	port->write_urb_busy = 1;
-	spin_unlock_bh(&port->lock);
-
-	packet_length = port->bulk_out_size;	/* get max packetsize */
-
-	i = packet_length - (safe ? 2 : 0);	/* get bytes to send */
-	count = (count > i) ? i : count;
-
-
-	/* get the data into the transfer buffer */
-	data = port->write_urb->transfer_buffer;
-	memset(data, '0', packet_length);
-
-	memcpy(data, buf, count);
-
-	if (safe) {
-		__u16 fcs;
-
-		/* pad if necessary */
-		if (!padded)
-			packet_length = count + 2;
-		/* set count */
-		data[packet_length - 2] = count << 2;
-		data[packet_length - 1] = 0;
-
-		/* compute fcs and insert into trailer */
-		fcs = fcs_compute10(data, packet_length, CRC10_INITFCS);
-		data[packet_length - 2] |= fcs >> 8;
-		data[packet_length - 1] |= fcs & 0xff;
-
-		/* set length to send */
-		port->write_urb->transfer_buffer_length = packet_length;
+	/* pad if necessary */
+	if (padded) {
+		pkt_len = size;
+		memset(buf + count, '0', pkt_len - count - trailer_len);
 	} else {
-		port->write_urb->transfer_buffer_length = count;
+		pkt_len = count + trailer_len;
 	}
 
-	usb_serial_debug_data(debug, &port->dev, __func__, count,
-					port->write_urb->transfer_buffer);
-#ifdef ECHO_TX
-	{
-		int i;
-		unsigned char *cp = port->write_urb->transfer_buffer;
-		for (i = 0; i < port->write_urb->transfer_buffer_length; i++) {
-			if ((i % 32) == 0)
-				printk("\nsu[%02x] ", i);
-			printk("%02x ", *cp++);
-		}
-		printk("\n");
-	}
-#endif
-	port->write_urb->dev = port->serial->dev;
-	result = usb_submit_urb(port->write_urb, GFP_KERNEL);
-	if (result) {
-		port->write_urb_busy = 0;
-		err("%s - failed submitting write urb, error %d",
-							__func__, result);
-		return 0;
-	}
-	dbg("%s urb: %p submitted", __func__, port->write_urb);
+	/* set count */
+	buf[pkt_len - 2] = count << 2;
+	buf[pkt_len - 1] = 0;
 
-	return count;
-}
+	/* compute fcs and insert into trailer */
+	fcs = fcs_compute10(buf, pkt_len, CRC10_INITFCS);
+	buf[pkt_len - 2] |= fcs >> 8;
+	buf[pkt_len - 1] |= fcs & 0xff;
 
-static int safe_write_room(struct tty_struct *tty)
-{
-	struct usb_serial_port *port = tty->driver_data;
-	int room = 0;		/* Default: no room */
-	unsigned long flags;
-
-	dbg("%s", __func__);
-
-	spin_lock_irqsave(&port->lock, flags);
-	if (port->write_urb_busy)
-		room = port->bulk_out_size - (safe ? 2 : 0);
-	spin_unlock_irqrestore(&port->lock, flags);
-
-	if (room)
-		dbg("safe_write_room returns %d", room);
-	return room;
+	return pkt_len;
 }
 
 static int safe_startup(struct usb_serial *serial)
 {
-	switch (serial->interface->cur_altsetting->desc.bInterfaceProtocol) {
+	struct usb_interface_descriptor	*desc;
+
+	if (serial->dev->descriptor.bDeviceClass != CDC_DEVICE_CLASS)
+		return -ENODEV;
+
+	desc = &serial->interface->cur_altsetting->desc;
+
+	if (desc->bInterfaceClass != LINEO_INTERFACE_CLASS)
+		return -ENODEV;
+	if (desc->bInterfaceSubClass != LINEO_INTERFACE_SUBCLASS_SAFESERIAL)
+		return -ENODEV;
+
+	switch (desc->bInterfaceProtocol) {
 	case LINEO_SAFESERIAL_CRC:
 		break;
 	case LINEO_SAFESERIAL_CRC_PADDED:
-		padded = 1;
+		padded = true;
 		break;
 	default:
 		return -EINVAL;
@@ -413,55 +288,14 @@ static struct usb_serial_driver safe_device = {
 		.name =		"safe_serial",
 	},
 	.id_table =		id_table,
-	.usb_driver =		&safe_driver,
 	.num_ports =		1,
-	.write =		safe_write,
-	.write_room =		safe_write_room,
-	.read_bulk_callback =	safe_read_bulk_callback,
+	.process_read_urb =	safe_process_read_urb,
+	.prepare_write_buffer =	safe_prepare_write_buffer,
 	.attach =		safe_startup,
 };
 
-static int __init safe_init(void)
-{
-	int i, retval;
+static struct usb_serial_driver * const serial_drivers[] = {
+	&safe_device, NULL
+};
 
-	info(DRIVER_VERSION " " DRIVER_AUTHOR);
-	info(DRIVER_DESC);
-	info("vendor: %x product: %x safe: %d padded: %d\n",
-					vendor, product, safe, padded);
-
-	/* if we have vendor / product parameters patch them into id list */
-	if (vendor || product) {
-		info("vendor: %x product: %x\n", vendor, product);
-
-		for (i = 0; i < ARRAY_SIZE(id_table); i++) {
-			if (!id_table[i].idVendor && !id_table[i].idProduct) {
-				id_table[i].idVendor = vendor;
-				id_table[i].idProduct = product;
-				break;
-			}
-		}
-	}
-
-	retval = usb_serial_register(&safe_device);
-	if (retval)
-		goto failed_usb_serial_register;
-	retval = usb_register(&safe_driver);
-	if (retval)
-		goto failed_usb_register;
-
-	return 0;
-failed_usb_register:
-	usb_serial_deregister(&safe_device);
-failed_usb_serial_register:
-	return retval;
-}
-
-static void __exit safe_exit(void)
-{
-	usb_deregister(&safe_driver);
-	usb_serial_deregister(&safe_device);
-}
-
-module_init(safe_init);
-module_exit(safe_exit);
+module_usb_serial_driver(serial_drivers, id_table);

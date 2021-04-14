@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * i2c-amd756-s4882.c - i2c-amd756 extras for the Tyan S4882 motherboard
  *
- * Copyright (C) 2004, 2008 Jean Delvare <khali@linux-fr.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Copyright (C) 2004, 2008 Jean Delvare <jdelvare@suse.de>
  */
  
 /*
@@ -169,20 +156,16 @@ static int __init amd756_s4882_init(void)
 	}
 
 	/* Unregister physical bus */
-	error = i2c_del_adapter(&amd756_smbus);
-	if (error) {
-		dev_err(&amd756_smbus.dev, "Physical bus removal failed\n");
-		goto ERROR0;
-	}
+	i2c_del_adapter(&amd756_smbus);
 
 	printk(KERN_INFO "Enabling SMBus multiplexing for Tyan S4882\n");
 	/* Define the 5 virtual adapters and algorithms structures */
-	if (!(s4882_adapter = kzalloc(5 * sizeof(struct i2c_adapter),
+	if (!(s4882_adapter = kcalloc(5, sizeof(struct i2c_adapter),
 				      GFP_KERNEL))) {
 		error = -ENOMEM;
 		goto ERROR1;
 	}
-	if (!(s4882_algo = kzalloc(5 * sizeof(struct i2c_algorithm),
+	if (!(s4882_algo = kcalloc(5, sizeof(struct i2c_algorithm),
 				   GFP_KERNEL))) {
 		error = -ENOMEM;
 		goto ERROR2;
@@ -197,8 +180,8 @@ static int __init amd756_s4882_init(void)
 	for (i = 1; i < 5; i++) {
 		s4882_algo[i] = *(amd756_smbus.algo);
 		s4882_adapter[i] = amd756_smbus;
-		sprintf(s4882_adapter[i].name,
-			"SMBus 8111 adapter (CPU%d)", i-1);
+		snprintf(s4882_adapter[i].name, sizeof(s4882_adapter[i].name),
+			 "SMBus 8111 adapter (CPU%d)", i-1);
 		s4882_adapter[i].algo = s4882_algo+i;
 		s4882_adapter[i].dev.parent = amd756_smbus.dev.parent;
 	}
@@ -254,7 +237,7 @@ static void __exit amd756_s4882_exit(void)
 		       "Physical bus restoration failed\n");
 }
 
-MODULE_AUTHOR("Jean Delvare <khali@linux-fr.org>");
+MODULE_AUTHOR("Jean Delvare <jdelvare@suse.de>");
 MODULE_DESCRIPTION("S4882 SMBus multiplexing");
 MODULE_LICENSE("GPL");
 

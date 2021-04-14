@@ -1,22 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* -*- mode: c; c-basic-offset: 8; -*-
  * vim: noexpandtab sw=8 ts=8 sts=0:
  *
  * Copyright (C) 2005 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  */
 
 #ifndef O2CLUSTER_TCP_INTERNAL_H
@@ -32,10 +18,10 @@
  * on their number */
 #define O2NET_QUORUM_DELAY_MS	((o2hb_dead_threshold + 2) * O2HB_REGION_TIMEOUT_MS)
 
-/* 
+/*
  * This version number represents quite a lot, unfortunately.  It not
  * only represents the raw network message protocol on the wire but also
- * locking semantics of the file system using the protocol.  It should 
+ * locking semantics of the file system using the protocol.  It should
  * be somewhere else, I'm sure, but right now it isn't.
  *
  * With version 11, we separate out the filesystem locking portion.  The
@@ -107,12 +93,12 @@ struct o2net_node {
 	struct list_head		nn_status_list;
 
 	/* connects are attempted from when heartbeat comes up until either hb
-	 * goes down, the node is unconfigured, no connect attempts succeed
-	 * before O2NET_CONN_IDLE_DELAY, or a connect succeeds.  connect_work
-	 * is queued from set_nn_state both from hb up and from itself if a
-	 * connect attempt fails and so can be self-arming.  shutdown is
-	 * careful to first mark the nn such that no connects will be attempted
-	 * before canceling delayed connect work and flushing the queue. */
+	 * goes down, the node is unconfigured, or a connect succeeds.
+	 * connect_work is queued from set_nn_state both from hb up and from
+	 * itself if a connect attempt fails and so can be self-arming.
+	 * shutdown is careful to first mark the nn such that no connects will
+	 * be attempted before canceling delayed connect work and flushing the
+	 * queue. */
 	struct delayed_work		nn_connect_work;
 	unsigned long			nn_last_connect_attempt;
 
@@ -129,7 +115,7 @@ struct o2net_node {
 
 struct o2net_sock_container {
 	struct kref		sc_kref;
-	/* the next two are vaild for the life time of the sc */
+	/* the next two are valid for the life time of the sc */
 	struct socket		*sc_sock;
 	struct o2nm_node	*sc_node;
 
@@ -165,19 +151,28 @@ struct o2net_sock_container {
 
 	/* original handlers for the sockets */
 	void			(*sc_state_change)(struct sock *sk);
-	void			(*sc_data_ready)(struct sock *sk, int bytes);
-#ifdef CONFIG_DEBUG_FS
-	struct list_head        sc_net_debug_item;
-#endif
-	struct timeval 		sc_tv_timer;
-	struct timeval 		sc_tv_data_ready;
-	struct timeval 		sc_tv_advance_start;
-	struct timeval 		sc_tv_advance_stop;
-	struct timeval 		sc_tv_func_start;
-	struct timeval 		sc_tv_func_stop;
+	void			(*sc_data_ready)(struct sock *sk);
+
 	u32			sc_msg_key;
 	u16			sc_msg_type;
 
+#ifdef CONFIG_DEBUG_FS
+	struct list_head        sc_net_debug_item;
+	ktime_t			sc_tv_timer;
+	ktime_t			sc_tv_data_ready;
+	ktime_t			sc_tv_advance_start;
+	ktime_t			sc_tv_advance_stop;
+	ktime_t			sc_tv_func_start;
+	ktime_t			sc_tv_func_stop;
+#endif
+#ifdef CONFIG_OCFS2_FS_STATS
+	ktime_t			sc_tv_acquiry_total;
+	ktime_t			sc_tv_send_total;
+	ktime_t			sc_tv_status_total;
+	u32			sc_send_count;
+	u32			sc_recv_count;
+	ktime_t			sc_tv_process_total;
+#endif
 	struct mutex		sc_send_lock;
 };
 
@@ -187,7 +182,7 @@ struct o2net_msg_handler {
 	u32			nh_msg_type;
 	u32			nh_key;
 	o2net_msg_handler_func	*nh_func;
-	o2net_msg_handler_func	*nh_func_data;
+	void			*nh_func_data;
 	o2net_post_msg_handler_func
 				*nh_post_func;
 	struct kref		nh_kref;
@@ -220,9 +215,9 @@ struct o2net_send_tracking {
 	u32				st_msg_type;
 	u32				st_msg_key;
 	u8				st_node;
-	struct timeval			st_sock_time;
-	struct timeval			st_send_time;
-	struct timeval			st_status_time;
+	ktime_t				st_sock_time;
+	ktime_t				st_send_time;
+	ktime_t				st_status_time;
 };
 #else
 struct o2net_send_tracking {

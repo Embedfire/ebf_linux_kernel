@@ -1,15 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/alpha/kernel/time.c
  *
  *  Copyright (C) 1991, 1992, 1995, 1999, 2000  Linus Torvalds
  *
- * This file contains the PC-specific time handling details:
- * reading the RTC at bootup, etc..
- * 1994-07-02    Alan Modra
- *	fixed set_rtc_mmss, fixed time.year for >= 2000, new mktime
- * 1995-03-26    Markus Kuhn
- *      fixed 500 ms bug at call to set_rtc_mmss, fixed DS12887
- *      precision CMOS clock update
+ * This file contains the clocksource time handling.
  * 1997-09-10	Updated NTP code according to technical memorandum Jan '96
  *		"A Kernel Model for Precision Timekeeping" by Dave Mills
  * 1997-01-09    Adrian Sun
@@ -21,9 +16,6 @@
  * 1999-04-16	Thorsten Kranzkowski (dl8bcu@gmx.net)
  *	fixed algorithm in do_gettimeofday() for calculating the precise time
  *	from processor cycle counter (now taking lost_ticks into account)
- * 2000-08-13	Jan-Benedict Glaw <jbglaw@lug-owl.de>
- * 	Fixed time_init to be aware of epoches != 1900. This prevents
- * 	booting up in 2048 for me;) Code is stolen from rtc.c.
  * 2003-06-03	R. Scott Bailey <scott.bailey@eds.com>
  *	Tighten sanity in time_init from 1% (10,000 PPM) to 250 PPM
  */
@@ -41,123 +33,196 @@
 #include <linux/init.h>
 #include <linux/bcd.h>
 #include <linux/profile.h>
+#include <linux/irq_work.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/io.h>
 #include <asm/hwrpb.h>
-#include <asm/8253pit.h>
 
 #include <linux/mc146818rtc.h>
 #include <linux/time.h>
 #include <linux/timex.h>
+#include <linux/clocksource.h>
+#include <linux/clockchips.h>
 
 #include "proto.h"
 #include "irq_impl.h"
 
-static int set_rtc_mmss(unsigned long);
-
 DEFINE_SPINLOCK(rtc_lock);
 EXPORT_SYMBOL(rtc_lock);
 
-#define TICK_SIZE (tick_nsec / 1000)
-
-/*
- * Shift amount by which scaled_ticks_per_cycle is scaled.  Shifting
- * by 48 gives us 16 bits for HZ while keeping the accuracy good even
- * for large CPU clock rates.
- */
-#define FIX_SHIFT	48
-
-/* lump static variables together for more efficient access: */
-static struct {
-	/* cycle counter last time it got invoked */
-	__u32 last_time;
-	/* ticks/cycle * 2^48 */
-	unsigned long scaled_ticks_per_cycle;
-	/* last time the CMOS clock got updated */
-	time_t last_rtc_update;
-	/* partial unused tick */
-	unsigned long partial_tick;
-} state;
-
 unsigned long est_cycle_freq;
+
+#ifdef CONFIG_IRQ_WORK
+
+DEFINE_PER_CPU(u8, irq_work_pending);
+
+#define set_irq_work_pending_flag()  __this_cpu_write(irq_work_pending, 1)
+#define test_irq_work_pending()      __this_cpu_read(irq_work_pending)
+#define clear_irq_work_pending()     __this_cpu_write(irq_work_pending, 0)
+
+void arch_irq_work_raise(void)
+{
+	set_irq_work_pending_flag();
+}
+
+#else  /* CONFIG_IRQ_WORK */
+
+#define test_irq_work_pending()      0
+#define clear_irq_work_pending()
+
+#endif /* CONFIG_IRQ_WORK */
 
 
 static inline __u32 rpcc(void)
 {
-    __u32 result;
-    asm volatile ("rpcc %0" : "=r"(result));
-    return result;
+	return __builtin_alpha_rpcc();
 }
 
+
+
 /*
- * timer_interrupt() needs to keep up the real-time clock,
- * as well as call the "do_timer()" routine every clocktick
+ * The RTC as a clock_event_device primitive.
  */
-irqreturn_t timer_interrupt(int irq, void *dev)
+
+static DEFINE_PER_CPU(struct clock_event_device, cpu_ce);
+
+irqreturn_t
+rtc_timer_interrupt(int irq, void *dev)
 {
-	unsigned long delta;
-	__u32 now;
-	long nticks;
+	int cpu = smp_processor_id();
+	struct clock_event_device *ce = &per_cpu(cpu_ce, cpu);
 
-#ifndef CONFIG_SMP
-	/* Not SMP, do kernel PC profiling here.  */
-	profile_tick(CPU_PROFILING);
-#endif
+	/* Don't run the hook for UNUSED or SHUTDOWN.  */
+	if (likely(clockevent_state_periodic(ce)))
+		ce->event_handler(ce);
 
-	write_seqlock(&xtime_lock);
-
-	/*
-	 * Calculate how many ticks have passed since the last update,
-	 * including any previous partial leftover.  Save any resulting
-	 * fraction for the next pass.
-	 */
-	now = rpcc();
-	delta = now - state.last_time;
-	state.last_time = now;
-	delta = delta * state.scaled_ticks_per_cycle + state.partial_tick;
-	state.partial_tick = delta & ((1UL << FIX_SHIFT) - 1); 
-	nticks = delta >> FIX_SHIFT;
-
-	if (nticks)
-		do_timer(nticks);
-
-	/*
-	 * If we have an externally synchronized Linux clock, then update
-	 * CMOS clock accordingly every ~11 minutes. Set_rtc_mmss() has to be
-	 * called as close as possible to 500 ms before the new second starts.
-	 */
-	if (ntp_synced()
-	    && xtime.tv_sec > state.last_rtc_update + 660
-	    && xtime.tv_nsec >= 500000 - ((unsigned) TICK_SIZE) / 2
-	    && xtime.tv_nsec <= 500000 + ((unsigned) TICK_SIZE) / 2) {
-		int tmp = set_rtc_mmss(xtime.tv_sec);
-		state.last_rtc_update = xtime.tv_sec - (tmp ? 600 : 0);
+	if (test_irq_work_pending()) {
+		clear_irq_work_pending();
+		irq_work_run();
 	}
-
-	write_sequnlock(&xtime_lock);
-
-#ifndef CONFIG_SMP
-	while (nticks--)
-		update_process_times(user_mode(get_irq_regs()));
-#endif
 
 	return IRQ_HANDLED;
 }
 
+static int
+rtc_ce_set_next_event(unsigned long evt, struct clock_event_device *ce)
+{
+	/* This hook is for oneshot mode, which we don't support.  */
+	return -EINVAL;
+}
+
+static void __init
+init_rtc_clockevent(void)
+{
+	int cpu = smp_processor_id();
+	struct clock_event_device *ce = &per_cpu(cpu_ce, cpu);
+
+	*ce = (struct clock_event_device){
+		.name = "rtc",
+		.features = CLOCK_EVT_FEAT_PERIODIC,
+		.rating = 100,
+		.cpumask = cpumask_of(cpu),
+		.set_next_event = rtc_ce_set_next_event,
+	};
+
+	clockevents_config_and_register(ce, CONFIG_HZ, 0, 0);
+}
+
+
+/*
+ * The QEMU clock as a clocksource primitive.
+ */
+
+static u64
+qemu_cs_read(struct clocksource *cs)
+{
+	return qemu_get_vmtime();
+}
+
+static struct clocksource qemu_cs = {
+	.name                   = "qemu",
+	.rating                 = 400,
+	.read                   = qemu_cs_read,
+	.mask                   = CLOCKSOURCE_MASK(64),
+	.flags                  = CLOCK_SOURCE_IS_CONTINUOUS,
+	.max_idle_ns		= LONG_MAX
+};
+
+
+/*
+ * The QEMU alarm as a clock_event_device primitive.
+ */
+
+static int qemu_ce_shutdown(struct clock_event_device *ce)
+{
+	/* The mode member of CE is updated for us in generic code.
+	   Just make sure that the event is disabled.  */
+	qemu_set_alarm_abs(0);
+	return 0;
+}
+
+static int
+qemu_ce_set_next_event(unsigned long evt, struct clock_event_device *ce)
+{
+	qemu_set_alarm_rel(evt);
+	return 0;
+}
+
+static irqreturn_t
+qemu_timer_interrupt(int irq, void *dev)
+{
+	int cpu = smp_processor_id();
+	struct clock_event_device *ce = &per_cpu(cpu_ce, cpu);
+
+	ce->event_handler(ce);
+	return IRQ_HANDLED;
+}
+
+static void __init
+init_qemu_clockevent(void)
+{
+	int cpu = smp_processor_id();
+	struct clock_event_device *ce = &per_cpu(cpu_ce, cpu);
+
+	*ce = (struct clock_event_device){
+		.name = "qemu",
+		.features = CLOCK_EVT_FEAT_ONESHOT,
+		.rating = 400,
+		.cpumask = cpumask_of(cpu),
+		.set_state_shutdown = qemu_ce_shutdown,
+		.set_state_oneshot = qemu_ce_shutdown,
+		.tick_resume = qemu_ce_shutdown,
+		.set_next_event = qemu_ce_set_next_event,
+	};
+
+	clockevents_config_and_register(ce, NSEC_PER_SEC, 1000, LONG_MAX);
+}
+
+
 void __init
 common_init_rtc(void)
 {
-	unsigned char x;
+	unsigned char x, sel = 0;
 
 	/* Reset periodic interrupt frequency.  */
-	x = CMOS_READ(RTC_FREQ_SELECT) & 0x3f;
-        /* Test includes known working values on various platforms
-           where 0x26 is wrong; we refuse to change those. */
-	if (x != 0x26 && x != 0x25 && x != 0x19 && x != 0x06) {
-		printk("Setting RTC_FREQ to 1024 Hz (%x)\n", x);
-		CMOS_WRITE(0x26, RTC_FREQ_SELECT);
+#if CONFIG_HZ == 1024 || CONFIG_HZ == 1200
+ 	x = CMOS_READ(RTC_FREQ_SELECT) & 0x3f;
+	/* Test includes known working values on various platforms
+	   where 0x26 is wrong; we refuse to change those. */
+ 	if (x != 0x26 && x != 0x25 && x != 0x19 && x != 0x06) {
+		sel = RTC_REF_CLCK_32KHZ + 6;
 	}
+#elif CONFIG_HZ == 256 || CONFIG_HZ == 128 || CONFIG_HZ == 64 || CONFIG_HZ == 32
+	sel = RTC_REF_CLCK_32KHZ + __builtin_ffs(32768 / CONFIG_HZ);
+#else
+# error "Unknown HZ from arch/alpha/Kconfig"
+#endif
+	if (sel) {
+		printk(KERN_INFO "Setting RTC_FREQ to %d Hz (%x)\n",
+		       CONFIG_HZ, sel);
+		CMOS_WRITE(sel, RTC_FREQ_SELECT);
+ 	}
 
 	/* Turn on periodic interrupts.  */
 	x = CMOS_READ(RTC_CONTROL);
@@ -177,10 +242,40 @@ common_init_rtc(void)
 	outb(0x31, 0x42);
 	outb(0x13, 0x42);
 
-	init_rtc_irq();
+	init_rtc_irq(NULL);
 }
 
+
+#ifndef CONFIG_ALPHA_WTINT
+/*
+ * The RPCC as a clocksource primitive.
+ *
+ * While we have free-running timecounters running on all CPUs, and we make
+ * a half-hearted attempt in init_rtc_rpcc_info to sync the timecounter
+ * with the wall clock, that initialization isn't kept up-to-date across
+ * different time counters in SMP mode.  Therefore we can only use this
+ * method when there's only one CPU enabled.
+ *
+ * When using the WTINT PALcall, the RPCC may shift to a lower frequency,
+ * or stop altogether, while waiting for the interrupt.  Therefore we cannot
+ * use this method when WTINT is in use.
+ */
 
+static u64 read_rpcc(struct clocksource *cs)
+{
+	return rpcc();
+}
+
+static struct clocksource clocksource_rpcc = {
+	.name                   = "rpcc",
+	.rating                 = 300,
+	.read                   = read_rpcc,
+	.mask                   = CLOCKSOURCE_MASK(32),
+	.flags                  = CLOCK_SOURCE_IS_CONTINUOUS
+};
+#endif /* ALPHA_WTINT */
+
+
 /* Validate a computed cycle counter result against the known bounds for
    the given processor core.  There's too much brokenness in the way of
    timing hardware for any one method to work everywhere.  :-(
@@ -294,9 +389,16 @@ rpcc_after_update_in_progress(void)
 void __init
 time_init(void)
 {
-	unsigned int year, mon, day, hour, min, sec, cc1, cc2, epoch;
+	unsigned int cc1, cc2;
 	unsigned long cycle_freq, tolerance;
 	long diff;
+
+	if (alpha_using_qemu) {
+		clocksource_register_hz(&qemu_cs, NSEC_PER_SEC);
+		init_qemu_clockevent();
+		init_rtc_irq(qemu_timer_interrupt);
+		return;
+	}
 
 	/* Calibrate CPU clock -- attempt #1.  */
 	if (!est_cycle_freq)
@@ -332,239 +434,25 @@ time_init(void)
 		       "and unable to estimate a proper value!\n");
 	}
 
-	/* From John Bowman <bowman@math.ualberta.ca>: allow the values
-	   to settle, as the Update-In-Progress bit going low isn't good
-	   enough on some hardware.  2ms is our guess; we haven't found 
-	   bogomips yet, but this is close on a 500Mhz box.  */
-	__delay(1000000);
-
-	sec = CMOS_READ(RTC_SECONDS);
-	min = CMOS_READ(RTC_MINUTES);
-	hour = CMOS_READ(RTC_HOURS);
-	day = CMOS_READ(RTC_DAY_OF_MONTH);
-	mon = CMOS_READ(RTC_MONTH);
-	year = CMOS_READ(RTC_YEAR);
-
-	if (!(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) || RTC_ALWAYS_BCD) {
-		BCD_TO_BIN(sec);
-		BCD_TO_BIN(min);
-		BCD_TO_BIN(hour);
-		BCD_TO_BIN(day);
-		BCD_TO_BIN(mon);
-		BCD_TO_BIN(year);
-	}
-
-	/* PC-like is standard; used for year >= 70 */
-	epoch = 1900;
-	if (year < 20)
-		epoch = 2000;
-	else if (year >= 20 && year < 48)
-		/* NT epoch */
-		epoch = 1980;
-	else if (year >= 48 && year < 70)
-		/* Digital UNIX epoch */
-		epoch = 1952;
-
-	printk(KERN_INFO "Using epoch = %d\n", epoch);
-
-	if ((year += epoch) < 1970)
-		year += 100;
-
-	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-	xtime.tv_nsec = 0;
-
-        wall_to_monotonic.tv_sec -= xtime.tv_sec;
-        wall_to_monotonic.tv_nsec = 0;
-
-	if (HZ > (1<<16)) {
-		extern void __you_loose (void);
-		__you_loose();
-	}
-
-	state.last_time = cc1;
-	state.scaled_ticks_per_cycle
-		= ((unsigned long) HZ << FIX_SHIFT) / cycle_freq;
-	state.last_rtc_update = 0;
-	state.partial_tick = 0L;
+	/* See above for restrictions on using clocksource_rpcc.  */
+#ifndef CONFIG_ALPHA_WTINT
+	if (hwrpb->nr_processors == 1)
+		clocksource_register_hz(&clocksource_rpcc, cycle_freq);
+#endif
 
 	/* Startup the timer source. */
 	alpha_mv.init_rtc();
+	init_rtc_clockevent();
 }
 
-/*
- * Use the cycle counter to estimate an displacement from the last time
- * tick.  Unfortunately the Alpha designers made only the low 32-bits of
- * the cycle counter active, so we overflow on 8.2 seconds on a 500MHz
- * part.  So we can't do the "find absolute time in terms of cycles" thing
- * that the other ports do.
- */
-void
-do_gettimeofday(struct timeval *tv)
-{
-	unsigned long flags;
-	unsigned long sec, usec, seq;
-	unsigned long delta_cycles, delta_usec, partial_tick;
-
-	do {
-		seq = read_seqbegin_irqsave(&xtime_lock, flags);
-
-		delta_cycles = rpcc() - state.last_time;
-		sec = xtime.tv_sec;
-		usec = (xtime.tv_nsec / 1000);
-		partial_tick = state.partial_tick;
-
-	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
-
+/* Initialize the clock_event_device for secondary cpus.  */
 #ifdef CONFIG_SMP
-	/* Until and unless we figure out how to get cpu cycle counters
-	   in sync and keep them there, we can't use the rpcc tricks.  */
-	delta_usec = 0;
-#else
-	/*
-	 * usec = cycles * ticks_per_cycle * 2**48 * 1e6 / (2**48 * ticks)
-	 *	= cycles * (s_t_p_c) * 1e6 / (2**48 * ticks)
-	 *	= cycles * (s_t_p_c) * 15625 / (2**42 * ticks)
-	 *
-	 * which, given a 600MHz cycle and a 1024Hz tick, has a
-	 * dynamic range of about 1.7e17, which is less than the
-	 * 1.8e19 in an unsigned long, so we are safe from overflow.
-	 *
-	 * Round, but with .5 up always, since .5 to even is harder
-	 * with no clear gain.
-	 */
-
-	delta_usec = (delta_cycles * state.scaled_ticks_per_cycle 
-		      + partial_tick) * 15625;
-	delta_usec = ((delta_usec / ((1UL << (FIX_SHIFT-6-1)) * HZ)) + 1) / 2;
-#endif
-
-	usec += delta_usec;
-	if (usec >= 1000000) {
-		sec += 1;
-		usec -= 1000000;
-	}
-
-	tv->tv_sec = sec;
-	tv->tv_usec = usec;
-}
-
-EXPORT_SYMBOL(do_gettimeofday);
-
-int
-do_settimeofday(struct timespec *tv)
+void __init
+init_clockevent(void)
 {
-	time_t wtm_sec, sec = tv->tv_sec;
-	long wtm_nsec, nsec = tv->tv_nsec;
-	unsigned long delta_nsec;
-
-	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
-		return -EINVAL;
-
-	write_seqlock_irq(&xtime_lock);
-
-	/* The offset that is added into time in do_gettimeofday above
-	   must be subtracted out here to keep a coherent view of the
-	   time.  Without this, a full-tick error is possible.  */
-
-#ifdef CONFIG_SMP
-	delta_nsec = 0;
-#else
-	delta_nsec = rpcc() - state.last_time;
-	delta_nsec = (delta_nsec * state.scaled_ticks_per_cycle 
-		      + state.partial_tick) * 15625;
-	delta_nsec = ((delta_nsec / ((1UL << (FIX_SHIFT-6-1)) * HZ)) + 1) / 2;
-	delta_nsec *= 1000;
+	if (alpha_using_qemu)
+		init_qemu_clockevent();
+	else
+		init_rtc_clockevent();
+}
 #endif
-
-	nsec -= delta_nsec;
-
-	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
-	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
-
-	set_normalized_timespec(&xtime, sec, nsec);
-	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
-
-	ntp_clear();
-
-	write_sequnlock_irq(&xtime_lock);
-	clock_was_set();
-	return 0;
-}
-
-EXPORT_SYMBOL(do_settimeofday);
-
-
-/*
- * In order to set the CMOS clock precisely, set_rtc_mmss has to be
- * called 500 ms after the second nowtime has started, because when
- * nowtime is written into the registers of the CMOS clock, it will
- * jump to the next second precisely 500 ms later. Check the Motorola
- * MC146818A or Dallas DS12887 data sheet for details.
- *
- * BUG: This routine does not handle hour overflow properly; it just
- *      sets the minutes. Usually you won't notice until after reboot!
- */
-
-
-static int
-set_rtc_mmss(unsigned long nowtime)
-{
-	int retval = 0;
-	int real_seconds, real_minutes, cmos_minutes;
-	unsigned char save_control, save_freq_select;
-
-	/* irq are locally disabled here */
-	spin_lock(&rtc_lock);
-	/* Tell the clock it's being set */
-	save_control = CMOS_READ(RTC_CONTROL);
-	CMOS_WRITE((save_control|RTC_SET), RTC_CONTROL);
-
-	/* Stop and reset prescaler */
-	save_freq_select = CMOS_READ(RTC_FREQ_SELECT);
-	CMOS_WRITE((save_freq_select|RTC_DIV_RESET2), RTC_FREQ_SELECT);
-
-	cmos_minutes = CMOS_READ(RTC_MINUTES);
-	if (!(save_control & RTC_DM_BINARY) || RTC_ALWAYS_BCD)
-		BCD_TO_BIN(cmos_minutes);
-
-	/*
-	 * since we're only adjusting minutes and seconds,
-	 * don't interfere with hour overflow. This avoids
-	 * messing with unknown time zones but requires your
-	 * RTC not to be off by more than 15 minutes
-	 */
-	real_seconds = nowtime % 60;
-	real_minutes = nowtime / 60;
-	if (((abs(real_minutes - cmos_minutes) + 15)/30) & 1) {
-		/* correct for half hour time zone */
-		real_minutes += 30;
-	}
-	real_minutes %= 60;
-
-	if (abs(real_minutes - cmos_minutes) < 30) {
-		if (!(save_control & RTC_DM_BINARY) || RTC_ALWAYS_BCD) {
-			BIN_TO_BCD(real_seconds);
-			BIN_TO_BCD(real_minutes);
-		}
-		CMOS_WRITE(real_seconds,RTC_SECONDS);
-		CMOS_WRITE(real_minutes,RTC_MINUTES);
-	} else {
-		printk(KERN_WARNING
-		       "set_rtc_mmss: can't update from %d to %d\n",
-		       cmos_minutes, real_minutes);
- 		retval = -1;
-	}
-
-	/* The following flags have to be released exactly in this order,
-	 * otherwise the DS12887 (popular MC146818A clone with integrated
-	 * battery and quartz) will not reset the oscillator and will not
-	 * update precisely 500 ms later. You won't find this mentioned in
-	 * the Dallas Semiconductor data sheets, but who believes data
-	 * sheets anyway ...                           -- Markus Kuhn
-	 */
-	CMOS_WRITE(save_control, RTC_CONTROL);
-	CMOS_WRITE(save_freq_select, RTC_FREQ_SELECT);
-	spin_unlock(&rtc_lock);
-
-	return retval;
-}

@@ -1,65 +1,20 @@
-#ifndef _LINUX_MEMPOLICY_H
-#define _LINUX_MEMPOLICY_H 1
-
-#include <linux/errno.h>
-
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * NUMA memory policies for Linux.
  * Copyright 2003,2004 Andi Kleen SuSE Labs
  */
+#ifndef _LINUX_MEMPOLICY_H
+#define _LINUX_MEMPOLICY_H 1
 
-/*
- * Both the MPOL_* mempolicy mode and the MPOL_F_* optional mode flags are
- * passed by the user to either set_mempolicy() or mbind() in an 'int' actual.
- * The MPOL_MODE_FLAGS macro determines the legal set of optional mode flags.
- */
-
-/* Policies */
-enum {
-	MPOL_DEFAULT,
-	MPOL_PREFERRED,
-	MPOL_BIND,
-	MPOL_INTERLEAVE,
-	MPOL_MAX,	/* always last member of enum */
-};
-
-/* Flags for set_mempolicy */
-#define MPOL_F_STATIC_NODES	(1 << 15)
-#define MPOL_F_RELATIVE_NODES	(1 << 14)
-
-/*
- * MPOL_MODE_FLAGS is the union of all possible optional mode flags passed to
- * either set_mempolicy() or mbind().
- */
-#define MPOL_MODE_FLAGS	(MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES)
-
-/* Flags for get_mempolicy */
-#define MPOL_F_NODE	(1<<0)	/* return next IL mode instead of node mask */
-#define MPOL_F_ADDR	(1<<1)	/* look up vma using address */
-#define MPOL_F_MEMS_ALLOWED (1<<2) /* return allowed memories */
-
-/* Flags for mbind */
-#define MPOL_MF_STRICT	(1<<0)	/* Verify existing pages in the mapping */
-#define MPOL_MF_MOVE	(1<<1)	/* Move pages owned by this process to conform to mapping */
-#define MPOL_MF_MOVE_ALL (1<<2)	/* Move every page to conform to mapping */
-#define MPOL_MF_INTERNAL (1<<3)	/* Internal flags start here */
-
-/*
- * Internal flags that share the struct mempolicy flags word with
- * "mode flags".  These flags are allocated from bit 0 up, as they
- * are never OR'ed into the mode in mempolicy API arguments.
- */
-#define MPOL_F_SHARED  (1 << 0)	/* identify shared policies */
-#define MPOL_F_LOCAL   (1 << 1)	/* preferred local allocation */
-
-#ifdef __KERNEL__
-
+#include <linux/sched.h>
 #include <linux/mmzone.h>
+#include <linux/dax.h>
 #include <linux/slab.h>
 #include <linux/rbtree.h>
 #include <linux/spinlock.h>
 #include <linux/nodemask.h>
 #include <linux/pagemap.h>
+#include <uapi/linux/mempolicy.h>
 
 struct mm_struct;
 
@@ -73,10 +28,10 @@ struct mm_struct;
  * the process policy is used. Interrupts ignore the memory policy
  * of the current process.
  *
- * Locking policy for interlave:
+ * Locking policy for interleave:
  * In process context there is no locking because only the process accesses
  * its own state. All vma manipulation is somewhat protected by a down_read on
- * mmap_sem.
+ * mmap_lock.
  *
  * Freeing policy:
  * Mempolicy objects are reference counted.  A mempolicy will be freed when
@@ -129,16 +84,6 @@ static inline void mpol_cond_put(struct mempolicy *pol)
 		__mpol_put(pol);
 }
 
-extern struct mempolicy *__mpol_cond_copy(struct mempolicy *tompol,
-					  struct mempolicy *frompol);
-static inline struct mempolicy *mpol_cond_copy(struct mempolicy *tompol,
-						struct mempolicy *frompol)
-{
-	if (!frompol)
-		return frompol;
-	return __mpol_cond_copy(tompol, frompol);
-}
-
 extern struct mempolicy *__mpol_dup(struct mempolicy *pol);
 static inline struct mempolicy *mpol_dup(struct mempolicy *pol)
 {
@@ -148,7 +93,6 @@ static inline struct mempolicy *mpol_dup(struct mempolicy *pol)
 }
 
 #define vma_policy(vma) ((vma)->vm_policy)
-#define vma_set_policy(vma, pol) ((vma)->vm_policy = (pol))
 
 static inline void mpol_get(struct mempolicy *pol)
 {
@@ -156,11 +100,11 @@ static inline void mpol_get(struct mempolicy *pol)
 		atomic_inc(&pol->refcnt);
 }
 
-extern int __mpol_equal(struct mempolicy *a, struct mempolicy *b);
-static inline int mpol_equal(struct mempolicy *a, struct mempolicy *b)
+extern bool __mpol_equal(struct mempolicy *a, struct mempolicy *b);
+static inline bool mpol_equal(struct mempolicy *a, struct mempolicy *b)
 {
 	if (a == b)
-		return 1;
+		return true;
 	return __mpol_equal(a, b);
 }
 
@@ -180,9 +124,10 @@ struct sp_node {
 
 struct shared_policy {
 	struct rb_root root;
-	spinlock_t lock;
+	rwlock_t lock;
 };
 
+int vma_dup_policy(struct vm_area_struct *src, struct vm_area_struct *dst);
 void mpol_shared_policy_init(struct shared_policy *sp, struct mempolicy *mpol);
 int mpol_set_shared_policy(struct shared_policy *info,
 				struct vm_area_struct *vma,
@@ -191,17 +136,32 @@ void mpol_free_shared_policy(struct shared_policy *p);
 struct mempolicy *mpol_shared_policy_lookup(struct shared_policy *sp,
 					    unsigned long idx);
 
+struct mempolicy *get_task_policy(struct task_struct *p);
+struct mempolicy *__get_vma_policy(struct vm_area_struct *vma,
+		unsigned long addr);
+bool vma_policy_mof(struct vm_area_struct *vma);
+
 extern void numa_default_policy(void);
 extern void numa_policy_init(void);
-extern void mpol_rebind_task(struct task_struct *tsk,
-					const nodemask_t *new);
+extern void mpol_rebind_task(struct task_struct *tsk, const nodemask_t *new);
 extern void mpol_rebind_mm(struct mm_struct *mm, nodemask_t *new);
-extern void mpol_fix_fork_child_flag(struct task_struct *p);
 
-extern struct zonelist *huge_zonelist(struct vm_area_struct *vma,
+extern int huge_node(struct vm_area_struct *vma,
 				unsigned long addr, gfp_t gfp_flags,
 				struct mempolicy **mpol, nodemask_t **nodemask);
-extern unsigned slab_node(struct mempolicy *policy);
+extern bool init_nodemask_of_mempolicy(nodemask_t *mask);
+extern bool mempolicy_nodemask_intersects(struct task_struct *tsk,
+				const nodemask_t *mask);
+extern nodemask_t *policy_nodemask(gfp_t gfp, struct mempolicy *policy);
+
+static inline nodemask_t *policy_nodemask_current(gfp_t gfp)
+{
+	struct mempolicy *mpol = get_task_policy(current);
+
+	return policy_nodemask(gfp, mpol);
+}
+
+extern unsigned int mempolicy_slab_node(void);
 
 extern enum zone_type policy_zone;
 
@@ -211,41 +171,29 @@ static inline void check_highest_zone(enum zone_type k)
 		policy_zone = k;
 }
 
-int do_migrate_pages(struct mm_struct *mm,
-	const nodemask_t *from_nodes, const nodemask_t *to_nodes, int flags);
+int do_migrate_pages(struct mm_struct *mm, const nodemask_t *from,
+		     const nodemask_t *to, int flags);
 
 
 #ifdef CONFIG_TMPFS
-extern int mpol_parse_str(char *str, struct mempolicy **mpol, int no_context);
-
-extern int mpol_to_str(char *buffer, int maxlen, struct mempolicy *pol,
-			int no_context);
+extern int mpol_parse_str(char *str, struct mempolicy **mpol);
 #endif
 
+extern void mpol_to_str(char *buffer, int maxlen, struct mempolicy *pol);
+
 /* Check if a vma is migratable */
-static inline int vma_migratable(struct vm_area_struct *vma)
-{
-	if (vma->vm_flags & (VM_IO|VM_HUGETLB|VM_PFNMAP|VM_RESERVED))
-		return 0;
-	/*
-	 * Migration allocates pages in the highest zone. If we cannot
-	 * do so then migration (at least from node to node) is not
-	 * possible.
-	 */
-	if (vma->vm_file &&
-		gfp_zone(mapping_gfp_mask(vma->vm_file->f_mapping))
-								< policy_zone)
-			return 0;
-	return 1;
-}
+extern bool vma_migratable(struct vm_area_struct *vma);
+
+extern int mpol_misplaced(struct page *, struct vm_area_struct *, unsigned long);
+extern void mpol_put_task_policy(struct task_struct *);
 
 #else
 
 struct mempolicy {};
 
-static inline int mpol_equal(struct mempolicy *a, struct mempolicy *b)
+static inline bool mpol_equal(struct mempolicy *a, struct mempolicy *b)
 {
-	return 1;
+	return true;
 }
 
 static inline void mpol_put(struct mempolicy *p)
@@ -256,29 +204,11 @@ static inline void mpol_cond_put(struct mempolicy *pol)
 {
 }
 
-static inline struct mempolicy *mpol_cond_copy(struct mempolicy *to,
-						struct mempolicy *from)
-{
-	return from;
-}
-
 static inline void mpol_get(struct mempolicy *pol)
 {
 }
 
-static inline struct mempolicy *mpol_dup(struct mempolicy *old)
-{
-	return NULL;
-}
-
 struct shared_policy {};
-
-static inline int mpol_set_shared_policy(struct shared_policy *info,
-					struct vm_area_struct *vma,
-					struct mempolicy *new)
-{
-	return -EINVAL;
-}
 
 static inline void mpol_shared_policy_init(struct shared_policy *sp,
 						struct mempolicy *mpol)
@@ -296,7 +226,12 @@ mpol_shared_policy_lookup(struct shared_policy *sp, unsigned long idx)
 }
 
 #define vma_policy(vma) NULL
-#define vma_set_policy(vma, pol) do {} while(0)
+
+static inline int
+vma_dup_policy(struct vm_area_struct *src, struct vm_area_struct *dst)
+{
+	return 0;
+}
 
 static inline void numa_policy_init(void)
 {
@@ -307,7 +242,7 @@ static inline void numa_default_policy(void)
 }
 
 static inline void mpol_rebind_task(struct task_struct *tsk,
-					const nodemask_t *new)
+				const nodemask_t *new)
 {
 }
 
@@ -315,22 +250,22 @@ static inline void mpol_rebind_mm(struct mm_struct *mm, nodemask_t *new)
 {
 }
 
-static inline void mpol_fix_fork_child_flag(struct task_struct *p)
-{
-}
-
-static inline struct zonelist *huge_zonelist(struct vm_area_struct *vma,
+static inline int huge_node(struct vm_area_struct *vma,
 				unsigned long addr, gfp_t gfp_flags,
 				struct mempolicy **mpol, nodemask_t **nodemask)
 {
 	*mpol = NULL;
 	*nodemask = NULL;
-	return node_zonelist(0, gfp_flags);
+	return 0;
 }
 
-static inline int do_migrate_pages(struct mm_struct *mm,
-			const nodemask_t *from_nodes,
-			const nodemask_t *to_nodes, int flags)
+static inline bool init_nodemask_of_mempolicy(nodemask_t *m)
+{
+	return false;
+}
+
+static inline int do_migrate_pages(struct mm_struct *mm, const nodemask_t *from,
+				   const nodemask_t *to, int flags)
 {
 	return 0;
 }
@@ -340,20 +275,25 @@ static inline void check_highest_zone(int k)
 }
 
 #ifdef CONFIG_TMPFS
-static inline int mpol_parse_str(char *str, struct mempolicy **mpol,
-				int no_context)
+static inline int mpol_parse_str(char *str, struct mempolicy **mpol)
 {
 	return 1;	/* error */
 }
-
-static inline int mpol_to_str(char *buffer, int maxlen, struct mempolicy *pol,
-				int no_context)
-{
-	return 0;
-}
 #endif
 
-#endif /* CONFIG_NUMA */
-#endif /* __KERNEL__ */
+static inline int mpol_misplaced(struct page *page, struct vm_area_struct *vma,
+				 unsigned long address)
+{
+	return -1; /* no node preference */
+}
 
+static inline void mpol_put_task_policy(struct task_struct *task)
+{
+}
+
+static inline nodemask_t *policy_nodemask_current(gfp_t gfp)
+{
+	return NULL;
+}
+#endif /* CONFIG_NUMA */
 #endif

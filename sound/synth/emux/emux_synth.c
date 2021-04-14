@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Midi synth routines for the Emu8k/Emu10k1
  *
@@ -5,23 +6,9 @@
  *  Copyright (c) 1999-2000 Takashi Iwai <tiwai@suse.de>
  *
  *  Contains code based on awe_wave.c by Takashi Iwai
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
+#include <linux/export.h>
 #include "emux_voice.h"
 #include <sound/asoundef.h>
 
@@ -66,12 +53,12 @@ snd_emux_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 	struct snd_emux_port *port;
 
 	port = p;
-	snd_assert(port != NULL && chan != NULL, return);
+	if (snd_BUG_ON(!port || !chan))
+		return;
 
 	emu = port->emu;
-	snd_assert(emu != NULL, return);
-	snd_assert(emu->ops.get_voice != NULL, return);
-	snd_assert(emu->ops.trigger != NULL, return);
+	if (snd_BUG_ON(!emu || !emu->ops.get_voice || !emu->ops.trigger))
+		return;
 
 	key = note; /* remember the original note */
 	nvoices = get_zone(emu, port, &note, vel, chan, table);
@@ -164,11 +151,12 @@ snd_emux_note_off(void *p, int note, int vel, struct snd_midi_channel *chan)
 	struct snd_emux_port *port;
 
 	port = p;
-	snd_assert(port != NULL && chan != NULL, return);
+	if (snd_BUG_ON(!port || !chan))
+		return;
 
 	emu = port->emu;
-	snd_assert(emu != NULL, return);
-	snd_assert(emu->ops.release != NULL, return);
+	if (snd_BUG_ON(!emu || !emu->ops.release))
+		return;
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
 	for (ch = 0; ch < emu->max_voices; ch++) {
@@ -184,8 +172,7 @@ snd_emux_note_off(void *p, int note, int vel, struct snd_midi_channel *chan)
 				 */
 				vp->state = SNDRV_EMUX_ST_PENDING;
 				if (! emu->timer_active) {
-					emu->tlist.expires = jiffies + 1;
-					add_timer(&emu->tlist);
+					mod_timer(&emu->tlist, jiffies + 1);
 					emu->timer_active = 1;
 				}
 			} else
@@ -201,9 +188,9 @@ snd_emux_note_off(void *p, int note, int vel, struct snd_midi_channel *chan)
  *
  * release the pending note-offs
  */
-void snd_emux_timer_callback(unsigned long data)
+void snd_emux_timer_callback(struct timer_list *t)
 {
-	struct snd_emux *emu = (struct snd_emux *) data;
+	struct snd_emux *emu = from_timer(emu, t, tlist);
 	struct snd_emux_voice *vp;
 	unsigned long flags;
 	int ch, do_again = 0;
@@ -221,8 +208,7 @@ void snd_emux_timer_callback(unsigned long data)
 		}
 	}
 	if (do_again) {
-		emu->tlist.expires = jiffies + 1;
-		add_timer(&emu->tlist);
+		mod_timer(&emu->tlist, jiffies + 1);
 		emu->timer_active = 1;
 	} else
 		emu->timer_active = 0;
@@ -242,11 +228,12 @@ snd_emux_key_press(void *p, int note, int vel, struct snd_midi_channel *chan)
 	struct snd_emux_port *port;
 
 	port = p;
-	snd_assert(port != NULL && chan != NULL, return);
+	if (snd_BUG_ON(!port || !chan))
+		return;
 
 	emu = port->emu;
-	snd_assert(emu != NULL, return);
-	snd_assert(emu->ops.update != NULL, return);
+	if (snd_BUG_ON(!emu || !emu->ops.update))
+		return;
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
 	for (ch = 0; ch < emu->max_voices; ch++) {
@@ -276,8 +263,8 @@ snd_emux_update_channel(struct snd_emux_port *port, struct snd_midi_channel *cha
 		return;
 
 	emu = port->emu;
-	snd_assert(emu != NULL, return);
-	snd_assert(emu->ops.update != NULL, return);
+	if (snd_BUG_ON(!emu || !emu->ops.update))
+		return;
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
 	for (i = 0; i < emu->max_voices; i++) {
@@ -303,8 +290,8 @@ snd_emux_update_port(struct snd_emux_port *port, int update)
 		return;
 
 	emu = port->emu;
-	snd_assert(emu != NULL, return);
-	snd_assert(emu->ops.update != NULL, return);
+	if (snd_BUG_ON(!emu || !emu->ops.update))
+		return;
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
 	for (i = 0; i < emu->max_voices; i++) {
@@ -326,7 +313,8 @@ snd_emux_control(void *p, int type, struct snd_midi_channel *chan)
 	struct snd_emux_port *port;
 
 	port = p;
-	snd_assert(port != NULL && chan != NULL, return);
+	if (snd_BUG_ON(!port || !chan))
+		return;
 
 	switch (type) {
 	case MIDI_CTL_MSB_MAIN_VOLUME:
@@ -400,11 +388,12 @@ snd_emux_terminate_note(void *p, int note, struct snd_midi_channel *chan)
 	struct snd_emux_port *port;
 
 	port = p;
-	snd_assert(port != NULL && chan != NULL, return);
+	if (snd_BUG_ON(!port || !chan))
+		return;
 
 	emu = port->emu;
-	snd_assert(emu != NULL, return);
-	snd_assert(emu->ops.terminate != NULL, return);
+	if (snd_BUG_ON(!emu || !emu->ops.terminate))
+		return;
 
 	terminate_note1(emu, note, chan, 1);
 }
@@ -451,10 +440,11 @@ snd_emux_sounds_off_all(struct snd_emux_port *port)
 	struct snd_emux_voice *vp;
 	unsigned long flags;
 
-	snd_assert(port != NULL, return);
+	if (snd_BUG_ON(!port))
+		return;
 	emu = port->emu;
-	snd_assert(emu != NULL, return);
-	snd_assert(emu->ops.terminate != NULL, return);
+	if (snd_BUG_ON(!emu || !emu->ops.terminate))
+		return;
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
 	for (i = 0; i < emu->max_voices; i++) {
@@ -539,7 +529,7 @@ update_voice(struct snd_emux *emu, struct snd_emux_voice *vp, int update)
 
 #if 0 // not used
 /* table for volume target calculation */
-static unsigned short voltarget[16] = { 
+static const unsigned short voltarget[16] = {
 	0xEAC0, 0xE0C8, 0xD740, 0xCE20, 0xC560, 0xBD08, 0xB500, 0xAD58,
 	0xA5F8, 0x9EF0, 0x9830, 0x91C0, 0x8B90, 0x85A8, 0x8000, 0x7A90
 };
@@ -626,7 +616,7 @@ setup_voice(struct snd_emux_voice *vp)
 /*
  * calculate pitch parameter
  */
-static unsigned char pan_volumes[256] = {
+static const unsigned char pan_volumes[256] = {
 0x00,0x03,0x06,0x09,0x0c,0x0f,0x12,0x14,0x17,0x1a,0x1d,0x20,0x22,0x25,0x28,0x2a,
 0x2d,0x30,0x32,0x35,0x37,0x3a,0x3c,0x3f,0x41,0x44,0x46,0x49,0x4b,0x4d,0x50,0x52,
 0x54,0x57,0x59,0x5b,0x5d,0x60,0x62,0x64,0x66,0x68,0x6a,0x6c,0x6f,0x71,0x73,0x75,
@@ -694,7 +684,7 @@ calc_pan(struct snd_emux_voice *vp)
  */
 
 /* tables for volume->attenuation calculation */
-static unsigned char voltab1[128] = {
+static const unsigned char voltab1[128] = {
    0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63,
    0x63, 0x2b, 0x29, 0x28, 0x27, 0x26, 0x25, 0x24, 0x23, 0x22,
    0x21, 0x20, 0x1f, 0x1e, 0x1e, 0x1d, 0x1c, 0x1b, 0x1b, 0x1a,
@@ -710,7 +700,7 @@ static unsigned char voltab1[128] = {
    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-static unsigned char voltab2[128] = {
+static const unsigned char voltab2[128] = {
    0x32, 0x31, 0x30, 0x2f, 0x2e, 0x2d, 0x2c, 0x2b, 0x2a, 0x2a,
    0x29, 0x28, 0x27, 0x26, 0x25, 0x24, 0x24, 0x23, 0x22, 0x21,
    0x21, 0x20, 0x1f, 0x1e, 0x1e, 0x1d, 0x1c, 0x1c, 0x1b, 0x1a,
@@ -726,7 +716,7 @@ static unsigned char voltab2[128] = {
    0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-static unsigned char expressiontab[128] = {
+static const unsigned char expressiontab[128] = {
    0x7f, 0x6c, 0x62, 0x5a, 0x54, 0x50, 0x4b, 0x48, 0x45, 0x42,
    0x40, 0x3d, 0x3b, 0x39, 0x38, 0x36, 0x34, 0x33, 0x31, 0x30,
    0x2f, 0x2d, 0x2c, 0x2b, 0x2a, 0x29, 0x28, 0x27, 0x26, 0x25,
@@ -951,7 +941,8 @@ void snd_emux_lock_voice(struct snd_emux *emu, int voice)
 	if (emu->voices[voice].state == SNDRV_EMUX_ST_OFF)
 		emu->voices[voice].state = SNDRV_EMUX_ST_LOCKED;
 	else
-		snd_printk("invalid voice for lock %d (state = %x)\n",
+		snd_printk(KERN_WARNING
+			   "invalid voice for lock %d (state = %x)\n",
 			   voice, emu->voices[voice].state);
 	spin_unlock_irqrestore(&emu->voice_lock, flags);
 }
@@ -968,7 +959,8 @@ void snd_emux_unlock_voice(struct snd_emux *emu, int voice)
 	if (emu->voices[voice].state == SNDRV_EMUX_ST_LOCKED)
 		emu->voices[voice].state = SNDRV_EMUX_ST_OFF;
 	else
-		snd_printk("invalid voice for unlock %d (state = %x)\n",
+		snd_printk(KERN_WARNING
+			   "invalid voice for unlock %d (state = %x)\n",
 			   voice, emu->voices[voice].state);
 	spin_unlock_irqrestore(&emu->voice_lock, flags);
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	6522 Versatile Interface Adapter (VIA)
  *
@@ -22,25 +23,22 @@
  *
  */
 
+#include <linux/clocksource.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/irq.h>
 
-#include <asm/bootinfo.h>
 #include <asm/macintosh.h>
 #include <asm/macints.h>
-#include <asm/machw.h>
 #include <asm/mac_via.h>
 #include <asm/mac_psc.h>
+#include <asm/mac_oss.h>
 
 volatile __u8 *via1, *via2;
-#if 0
-/* See note in mac_via.h about how this is possibly not useful */
-volatile long *via_memory_bogon=(long *)&via_memory_bogon;
-#endif
 int rbv_present;
 int via_alt_mapping;
 EXPORT_SYMBOL(via_alt_mapping);
@@ -58,38 +56,49 @@ static __u8 rbv_clear;
 static int gIER,gIFR,gBufA,gBufB;
 
 /*
- * Timer defs.
+ * On Macs with a genuine VIA chip there is no way to mask an individual slot
+ * interrupt. This limitation also seems to apply to VIA clone logic cores in
+ * Quadra-like ASICs. (RBV and OSS machines don't have this limitation.)
+ *
+ * We used to fake it by configuring the relevant VIA pin as an output
+ * (to mask the interrupt) or input (to unmask). That scheme did not work on
+ * (at least) the Quadra 700. A NuBus card's /NMRQ signal is an open-collector
+ * circuit (see Designing Cards and Drivers for Macintosh II and Macintosh SE,
+ * p. 10-11 etc) but VIA outputs are not (see datasheet).
+ *
+ * Driving these outputs high must cause the VIA to source current and the
+ * card to sink current when it asserts /NMRQ. Current will flow but the pin
+ * voltage is uncertain and so the /NMRQ condition may still cause a transition
+ * at the VIA2 CA1 input (which explains the lost interrupts). A side effect
+ * is that a disabled slot IRQ can never be tested as pending or not.
+ *
+ * Driving these outputs low doesn't work either. All the slot /NMRQ lines are
+ * (active low) OR'd together to generate the CA1 (aka "SLOTS") interrupt (see
+ * The Guide To Macintosh Family Hardware, 2nd edition p. 167). If we drive a
+ * disabled /NMRQ line low, the falling edge immediately triggers a CA1
+ * interrupt and all slot interrupts after that will generate no transition
+ * and therefore no interrupt, even after being re-enabled.
+ *
+ * So we make the VIA port A I/O lines inputs and use nubus_disabled to keep
+ * track of their states. When any slot IRQ becomes disabled we mask the CA1
+ * umbrella interrupt. Only when all slot IRQs become enabled do we unmask
+ * the CA1 interrupt. It must remain enabled even when cards have no interrupt
+ * handler registered. Drivers must therefore disable a slot interrupt at the
+ * device before they call free_irq (like shared and autovector interrupts).
+ *
+ * There is also a related problem when MacOS is used to boot Linux. A network
+ * card brought up by a MacOS driver may raise an interrupt while Linux boots.
+ * This can be fatal since it can't be handled until the right driver loads
+ * (if such a driver exists at all). Apparently related to this hardware
+ * limitation, "Designing Cards and Drivers", p. 9-8, says that a slot
+ * interrupt with no driver would crash MacOS (the book was written before
+ * the appearance of Macs with RBV or OSS).
  */
 
-#define TICK_SIZE		10000
-#define MAC_CLOCK_TICK		(783300/HZ)		/* ticks per HZ */
-#define MAC_CLOCK_LOW		(MAC_CLOCK_TICK&0xFF)
-#define MAC_CLOCK_HIGH		(MAC_CLOCK_TICK>>8)
-
-/* To disable a NuBus slot on Quadras we make the slot IRQ lines outputs, set
- * high. On RBV we just use the slot interrupt enable register. On Macs with
- * genuine VIA chips we must use nubus_disabled to keep track of disabled slot
- * interrupts. When any slot IRQ is disabled we mask the (edge triggered) CA1
- * or "SLOTS" interrupt. When no slot is disabled, we unmask the CA1 interrupt.
- * So, on genuine VIAs, having more than one NuBus IRQ can mean trouble,
- * because closing one of those drivers can mask all of the NuBus interrupts.
- * Also, since we can't mask the unregistered slot IRQs on genuine VIAs, it's
- * possible to get interrupts from cards that MacOS or the ROM has configured
- * but we have not. FWIW, "Designing Cards and Drivers for Macintosh II and
- * Macintosh SE", page 9-8, says, a slot IRQ with no driver would crash MacOS.
- */
 static u8 nubus_disabled;
 
 void via_debug_dump(void);
-irqreturn_t via1_irq(int, void *);
-irqreturn_t via2_irq(int, void *);
-irqreturn_t via_nubus_irq(int, void *);
-void via_irq_enable(int irq);
-void via_irq_disable(int irq);
-void via_irq_clear(int irq);
-
-extern irqreturn_t mac_scc_dispatch(int, void *);
-extern int oss_present;
+static void via_nubus_init(void);
 
 /*
  * Initialize the VIAs
@@ -97,29 +106,25 @@ extern int oss_present;
  * First we figure out where they actually _are_ as well as what type of
  * VIA we have for VIA2 (it could be a real VIA or an RBV or even an OSS.)
  * Then we pretty much clear them out and disable all IRQ sources.
- *
- * Note: the OSS is actually "detected" here and not in oss_init(). It just
- *	 seems more logical to do it here since via_init() needs to know
- *	 these things anyways.
  */
 
 void __init via_init(void)
 {
-	switch(macintosh_config->via_type) {
+	via1 = (void *)VIA1_BASE;
+	pr_debug("VIA1 detected at %p\n", via1);
+
+	if (oss_present) {
+		via2 = NULL;
+		rbv_present = 0;
+	} else {
+		switch (macintosh_config->via_type) {
 
 		/* IIci, IIsi, IIvx, IIvi (P6xx), LC series */
 
-		case MAC_VIA_IIci:
-			via1 = (void *) VIA1_BASE;
-			if (macintosh_config->ident == MAC_MODEL_IIFX) {
-				via2 = NULL;
-				rbv_present = 0;
-				oss_present = 1;
-			} else {
-				via2 = (void *) RBV_BASE;
-				rbv_present = 1;
-				oss_present = 0;
-			}
+		case MAC_VIA_IICI:
+			via2 = (void *)RBV_BASE;
+			pr_debug("VIA2 (RBV) detected at %p\n", via2);
+			rbv_present = 1;
 			if (macintosh_config->ident == MAC_MODEL_LCIII) {
 				rbv_clear = 0x00;
 			} else {
@@ -138,29 +143,19 @@ void __init via_init(void)
 
 		case MAC_VIA_QUADRA:
 		case MAC_VIA_II:
-			via1 = (void *) VIA1_BASE;
 			via2 = (void *) VIA2_BASE;
+			pr_debug("VIA2 detected at %p\n", via2);
 			rbv_present = 0;
-			oss_present = 0;
 			rbv_clear = 0x00;
 			gIER = vIER;
 			gIFR = vIFR;
 			gBufA = vBufA;
 			gBufB = vBufB;
 			break;
+
 		default:
 			panic("UNKNOWN VIA TYPE");
-	}
-
-	printk(KERN_INFO "VIA1 at %p is a 6522 or clone\n", via1);
-
-	printk(KERN_INFO "VIA2 at %p is ", via2);
-	if (rbv_present) {
-		printk("an RBV\n");
-	} else if (oss_present) {
-		printk("an OSS\n");
-	} else {
-		printk("a 6522 or clone\n");
+		}
 	}
 
 #ifdef DEBUG_VIA
@@ -180,12 +175,11 @@ void __init via_init(void)
 	via1[vT1CH] = 0;
 	via1[vT2CL] = 0;
 	via1[vT2CH] = 0;
-	via1[vACR] &= 0x3F;
+	via1[vACR] &= ~0xC0; /* setup T1 timer with no PB7 output */
 	via1[vACR] &= ~0x03; /* disable port A & B latches */
 
 	/*
 	 * SE/30: disable video IRQ
-	 * XXX: testing for SE/30 VBL
 	 */
 
 	if (macintosh_config->ident == MAC_MODEL_SE30) {
@@ -193,50 +187,35 @@ void __init via_init(void)
 		via1[vBufB] |= 0x40;
 	}
 
-	/*
-	 * Set the RTC bits to a known state: all lines to outputs and
-	 * RTC disabled (yes that's 0 to enable and 1 to disable).
-	 */
-
-	via1[vDirB] |= (VIA1B_vRTCEnb | VIA1B_vRTCClk | VIA1B_vRTCData);
-	via1[vBufB] |= (VIA1B_vRTCEnb | VIA1B_vRTCClk);
+	switch (macintosh_config->adb_type) {
+	case MAC_ADB_IOP:
+	case MAC_ADB_II:
+	case MAC_ADB_PB1:
+		/*
+		 * Set the RTC bits to a known state: all lines to outputs and
+		 * RTC disabled (yes that's 0 to enable and 1 to disable).
+		 */
+		via1[vDirB] |= VIA1B_vRTCEnb | VIA1B_vRTCClk | VIA1B_vRTCData;
+		via1[vBufB] |= VIA1B_vRTCEnb | VIA1B_vRTCClk;
+		break;
+	}
 
 	/* Everything below this point is VIA2/RBV only... */
 
-	if (oss_present) return;
+	if (oss_present)
+		return;
 
-#if 1
-	/* Some machines support an alternate IRQ mapping that spreads  */
-	/* Ethernet and Sound out to their own autolevel IRQs and moves */
-	/* VIA1 to level 6. A/UX uses this mapping and we do too.  Note */
-	/* that the IIfx emulates this alternate mapping using the OSS. */
-
-	switch(macintosh_config->ident) {
-		case MAC_MODEL_P475:
-		case MAC_MODEL_P475F:
-		case MAC_MODEL_P575:
-		case MAC_MODEL_Q605:
-		case MAC_MODEL_Q605_ACC:
-		case MAC_MODEL_C610:
-		case MAC_MODEL_Q610:
-		case MAC_MODEL_Q630:
-		case MAC_MODEL_C650:
-		case MAC_MODEL_Q650:
-		case MAC_MODEL_Q700:
-		case MAC_MODEL_Q800:
-		case MAC_MODEL_Q900:
-		case MAC_MODEL_Q950:
-			via_alt_mapping = 1;
-			via1[vDirB] |= 0x40;
-			via1[vBufB] &= ~0x40;
-			break;
-		default:
-			via_alt_mapping = 0;
-			break;
+	if ((macintosh_config->via_type == MAC_VIA_QUADRA) &&
+	    (macintosh_config->adb_type != MAC_ADB_PB1) &&
+	    (macintosh_config->adb_type != MAC_ADB_PB2) &&
+	    (macintosh_config->ident    != MAC_MODEL_C660) &&
+	    (macintosh_config->ident    != MAC_MODEL_Q840)) {
+		via_alt_mapping = 1;
+		via1[vDirB] |= 0x40;
+		via1[vBufB] &= ~0x40;
+	} else {
+		via_alt_mapping = 0;
 	}
-#else
-	via_alt_mapping = 0;
-#endif
 
 	/*
 	 * Now initialize VIA2. For RBV we just kill all interrupts;
@@ -252,67 +231,35 @@ void __init via_init(void)
 		via2[vT1CH] = 0;
 		via2[vT2CL] = 0;
 		via2[vT2CH] = 0;
-		via2[vACR] &= 0x3F;
+		via2[vACR] &= ~0xC0; /* setup T1 timer with no PB7 output */
 		via2[vACR] &= ~0x03; /* disable port A & B latches */
 	}
 
+	via_nubus_init();
+
+	/* Everything below this point is VIA2 only... */
+
+	if (rbv_present)
+		return;
+
 	/*
-	 * Set vPCR for SCSI interrupts (but not on RBV)
+	 * Set vPCR for control line interrupts.
+	 *
+	 * CA1 (SLOTS IRQ), CB1 (ASC IRQ): negative edge trigger.
+	 *
+	 * Macs with ESP SCSI have a negative edge triggered SCSI interrupt.
+	 * Testing reveals that PowerBooks do too. However, the SE/30
+	 * schematic diagram shows an active high NCR5380 IRQ line.
 	 */
-	if (!rbv_present) {
-		if (macintosh_config->scsi_type == MAC_SCSI_OLD) {
-			/* CB2 (IRQ) indep. input, positive edge */
-			/* CA2 (DRQ) indep. input, positive edge */
-			via2[vPCR] = 0x66;
-		} else {
-			/* CB2 (IRQ) indep. input, negative edge */
-			/* CA2 (DRQ) indep. input, negative edge */
-			via2[vPCR] = 0x22;
-		}
-	}
-}
 
-/*
- * Start the 100 Hz clock
- */
-
-void __init via_init_clock(irq_handler_t func)
-{
-	via1[vACR] |= 0x40;
-	via1[vT1LL] = MAC_CLOCK_LOW;
-	via1[vT1LH] = MAC_CLOCK_HIGH;
-	via1[vT1CL] = MAC_CLOCK_LOW;
-	via1[vT1CH] = MAC_CLOCK_HIGH;
-
-	request_irq(IRQ_MAC_TIMER_1, func, IRQ_FLG_LOCK, "timer", func);
-}
-
-/*
- * Register the interrupt dispatchers for VIA or RBV machines only.
- */
-
-void __init via_register_interrupts(void)
-{
-	if (via_alt_mapping) {
-		request_irq(IRQ_AUTO_1, via1_irq,
-				IRQ_FLG_LOCK|IRQ_FLG_FAST, "software",
-				(void *) via1);
-		request_irq(IRQ_AUTO_6, via1_irq,
-				IRQ_FLG_LOCK|IRQ_FLG_FAST, "via1",
-				(void *) via1);
+	pr_debug("VIA2 vPCR is 0x%02X\n", via2[vPCR]);
+	if (macintosh_config->via_type == MAC_VIA_II) {
+		/* CA2 (SCSI DRQ), CB2 (SCSI IRQ): indep. input, pos. edge */
+		via2[vPCR] = 0x66;
 	} else {
-		request_irq(IRQ_AUTO_1, via1_irq,
-				IRQ_FLG_LOCK|IRQ_FLG_FAST, "via1",
-				(void *) via1);
+		/* CA2 (SCSI DRQ), CB2 (SCSI IRQ): indep. input, neg. edge */
+		via2[vPCR] = 0x22;
 	}
-	request_irq(IRQ_AUTO_2, via2_irq, IRQ_FLG_LOCK|IRQ_FLG_FAST,
-			"via2", (void *) via2);
-	if (!psc_present) {
-		request_irq(IRQ_AUTO_4, mac_scc_dispatch, IRQ_FLG_LOCK,
-				"scc", mac_scc_dispatch);
-	}
-	request_irq(IRQ_MAC_NUBUS, via_nubus_irq, IRQ_FLG_LOCK|IRQ_FLG_FAST,
-			"nubus", (void *) via2);
 }
 
 /*
@@ -325,9 +272,9 @@ void via_debug_dump(void)
 		(uint) via1[vDirA], (uint) via1[vDirB], (uint) via1[vACR]);
 	printk(KERN_DEBUG "         PCR = 0x%02X  IFR = 0x%02X IER = 0x%02X\n",
 		(uint) via1[vPCR], (uint) via1[vIFR], (uint) via1[vIER]);
-	if (oss_present) {
-		printk(KERN_DEBUG "VIA2: <OSS>\n");
-	} else if (rbv_present) {
+	if (!via2)
+		return;
+	if (rbv_present) {
 		printk(KERN_DEBUG "VIA2:  IFR = 0x%02X  IER = 0x%02X\n",
 			(uint) via2[rIFR], (uint) via2[rIER]);
 		printk(KERN_DEBUG "      SIFR = 0x%02X SIER = 0x%02X\n",
@@ -343,37 +290,18 @@ void via_debug_dump(void)
 }
 
 /*
- * This is always executed with interrupts disabled.
- *
- * TBI: get time offset between scheduling timer ticks
- */
-
-unsigned long mac_gettimeoffset (void)
-{
-	unsigned long ticks, offset = 0;
-
-	/* read VIA1 timer 2 current value */
-	ticks = via1[vT1CL] | (via1[vT1CH] << 8);
-	/* The probability of underflow is less than 2% */
-	if (ticks > MAC_CLOCK_TICK - MAC_CLOCK_TICK / 50)
-		/* Check for pending timer interrupt in VIA1 IFR */
-		if (via1[vIFR] & 0x40) offset = TICK_SIZE;
-
-	ticks = MAC_CLOCK_TICK - ticks;
-	ticks = ticks * 10000L / MAC_CLOCK_TICK;
-
-	return ticks + offset;
-}
-
-/*
  * Flush the L2 cache on Macs that have it by flipping
  * the system into 24-bit mode for an instant.
  */
 
-void via_flush_cache(void)
+void via_l2_flush(int writeback)
 {
+	unsigned long flags;
+
+	local_irq_save(flags);
 	via2[gBufB] &= ~VIA2B_vMode32;
 	via2[gBufB] |= VIA2B_vMode32;
+	local_irq_restore(flags);
 }
 
 /*
@@ -395,7 +323,7 @@ int via_get_cache_disable(void)
  * Initialize VIA2 for Nubus access
  */
 
-void __init via_nubus_init(void)
+static void __init via_nubus_init(void)
 {
 	/* unlock nubus transactions */
 
@@ -410,34 +338,55 @@ void __init via_nubus_init(void)
 		via2[gBufB] |= 0x02;
 	}
 
-	/* Disable all the slot interrupts (where possible). */
+	/*
+	 * Disable the slot interrupts. On some hardware that's not possible.
+	 * On some hardware it's unclear what all of these I/O lines do.
+	 */
 
 	switch (macintosh_config->via_type) {
 	case MAC_VIA_II:
-		/* Just make the port A lines inputs. */
-		switch(macintosh_config->ident) {
-		case MAC_MODEL_II:
-		case MAC_MODEL_IIX:
-		case MAC_MODEL_IICX:
-		case MAC_MODEL_SE30:
-			/* The top two bits are RAM size outputs. */
-			via2[vDirA] &= 0xC0;
-			break;
-		default:
-			via2[vDirA] &= 0x80;
-		}
+	case MAC_VIA_QUADRA:
+		pr_debug("VIA2 vDirA is 0x%02X\n", via2[vDirA]);
 		break;
-	case MAC_VIA_IIci:
+	case MAC_VIA_IICI:
 		/* RBV. Disable all the slot interrupts. SIER works like IER. */
 		via2[rSIER] = 0x7F;
 		break;
+	}
+}
+
+void via_nubus_irq_startup(int irq)
+{
+	int irq_idx = IRQ_IDX(irq);
+
+	switch (macintosh_config->via_type) {
+	case MAC_VIA_II:
 	case MAC_VIA_QUADRA:
-		/* Disable the inactive slot interrupts by making those lines outputs. */
-		if ((macintosh_config->adb_type != MAC_ADB_PB1) &&
-		    (macintosh_config->adb_type != MAC_ADB_PB2)) {
-			via2[vBufA] |= 0x7F;
-			via2[vDirA] |= 0x7F;
+		/* Make the port A line an input. Probably redundant. */
+		if (macintosh_config->via_type == MAC_VIA_II) {
+			/* The top two bits are RAM size outputs. */
+			via2[vDirA] &= 0xC0 | ~(1 << irq_idx);
+		} else {
+			/* Allow NuBus slots 9 through F. */
+			via2[vDirA] &= 0x80 | ~(1 << irq_idx);
 		}
+		fallthrough;
+	case MAC_VIA_IICI:
+		via_irq_enable(irq);
+		break;
+	}
+}
+
+void via_nubus_irq_shutdown(int irq)
+{
+	switch (macintosh_config->via_type) {
+	case MAC_VIA_II:
+	case MAC_VIA_QUADRA:
+		/* Ensure that the umbrella CA1 interrupt remains enabled. */
+		via_irq_enable(irq);
+		break;
+	case MAC_VIA_IICI:
+		via_irq_disable(irq);
 		break;
 	}
 }
@@ -447,63 +396,63 @@ void __init via_nubus_init(void)
  * via6522.c :-), disable/pending masks added.
  */
 
-irqreturn_t via1_irq(int irq, void *dev_id)
+#define VIA_TIMER_1_INT BIT(6)
+
+void via1_irq(struct irq_desc *desc)
 {
 	int irq_num;
 	unsigned char irq_bit, events;
 
 	events = via1[vIFR] & via1[vIER] & 0x7F;
 	if (!events)
-		return IRQ_NONE;
+		return;
+
+	irq_num = IRQ_MAC_TIMER_1;
+	irq_bit = VIA_TIMER_1_INT;
+	if (events & irq_bit) {
+		unsigned long flags;
+
+		local_irq_save(flags);
+		via1[vIFR] = irq_bit;
+		generic_handle_irq(irq_num);
+		local_irq_restore(flags);
+
+		events &= ~irq_bit;
+		if (!events)
+			return;
+	}
 
 	irq_num = VIA1_SOURCE_BASE;
 	irq_bit = 1;
 	do {
 		if (events & irq_bit) {
 			via1[vIFR] = irq_bit;
-			m68k_handle_int(irq_num);
+			generic_handle_irq(irq_num);
 		}
 		++irq_num;
 		irq_bit <<= 1;
 	} while (events >= irq_bit);
-
-#if 0 /* freakin' pmu is doing weird stuff */
-	if (!oss_present) {
-		/* This (still) seems to be necessary to get IDE
-		   working.  However, if you enable VBL interrupts,
-		   you're screwed... */
-		/* FIXME: should we check the SLOTIRQ bit before
-                   pulling this stunt? */
-		/* No, it won't be set. that's why we're doing this. */
-		via_irq_disable(IRQ_MAC_NUBUS);
-		via_irq_clear(IRQ_MAC_NUBUS);
-		m68k_handle_int(IRQ_MAC_NUBUS);
-		via_irq_enable(IRQ_MAC_NUBUS);
-	}
-#endif
-	return IRQ_HANDLED;
 }
 
-irqreturn_t via2_irq(int irq, void *dev_id)
+static void via2_irq(struct irq_desc *desc)
 {
 	int irq_num;
 	unsigned char irq_bit, events;
 
 	events = via2[gIFR] & via2[gIER] & 0x7F;
 	if (!events)
-		return IRQ_NONE;
+		return;
 
 	irq_num = VIA2_SOURCE_BASE;
 	irq_bit = 1;
 	do {
 		if (events & irq_bit) {
 			via2[gIFR] = irq_bit | rbv_clear;
-			m68k_handle_int(irq_num);
+			generic_handle_irq(irq_num);
 		}
 		++irq_num;
 		irq_bit <<= 1;
 	} while (events >= irq_bit);
-	return IRQ_HANDLED;
 }
 
 /*
@@ -511,7 +460,7 @@ irqreturn_t via2_irq(int irq, void *dev_id)
  * VIA2 dispatcher as a fast interrupt handler.
  */
 
-irqreturn_t via_nubus_irq(int irq, void *dev_id)
+static void via_nubus_irq(struct irq_desc *desc)
 {
 	int slot_irq;
 	unsigned char slot_bit, events;
@@ -522,7 +471,7 @@ irqreturn_t via_nubus_irq(int irq, void *dev_id)
 	else
 		events &= ~via2[vDirA];
 	if (!events)
-		return IRQ_NONE;
+		return;
 
 	do {
 		slot_irq = IRQ_NUBUS_F;
@@ -530,7 +479,7 @@ irqreturn_t via_nubus_irq(int irq, void *dev_id)
 		do {
 			if (events & slot_bit) {
 				events &= ~slot_bit;
-				m68k_handle_int(slot_irq);
+				generic_handle_irq(slot_irq);
 			}
 			--slot_irq;
 			slot_bit >>= 1;
@@ -544,16 +493,29 @@ irqreturn_t via_nubus_irq(int irq, void *dev_id)
 		else
 			events &= ~via2[vDirA];
 	} while (events);
-	return IRQ_HANDLED;
+}
+
+/*
+ * Register the interrupt dispatchers for VIA or RBV machines only.
+ */
+
+void __init via_register_interrupts(void)
+{
+	if (via_alt_mapping) {
+		/* software interrupt */
+		irq_set_chained_handler(IRQ_AUTO_1, via1_irq);
+		/* via1 interrupt */
+		irq_set_chained_handler(IRQ_AUTO_6, via1_irq);
+	} else {
+		irq_set_chained_handler(IRQ_AUTO_1, via1_irq);
+	}
+	irq_set_chained_handler(IRQ_AUTO_2, via2_irq);
+	irq_set_chained_handler(IRQ_MAC_NUBUS, via_nubus_irq);
 }
 
 void via_irq_enable(int irq) {
 	int irq_src	= IRQ_SRC(irq);
 	int irq_idx	= IRQ_IDX(irq);
-
-#ifdef DEBUG_IRQUSE
-	printk(KERN_DEBUG "via_irq_enable(%d)\n", irq);
-#endif
 
 	if (irq_src == 1) {
 		via1[vIER] = IER_SET_BIT(irq_idx);
@@ -563,24 +525,17 @@ void via_irq_enable(int irq) {
 	} else if (irq_src == 7) {
 		switch (macintosh_config->via_type) {
 		case MAC_VIA_II:
+		case MAC_VIA_QUADRA:
 			nubus_disabled &= ~(1 << irq_idx);
 			/* Enable the CA1 interrupt when no slot is disabled. */
 			if (!nubus_disabled)
 				via2[gIER] = IER_SET_BIT(1);
 			break;
-		case MAC_VIA_IIci:
+		case MAC_VIA_IICI:
 			/* On RBV, enable the slot interrupt.
 			 * SIER works like IER.
 			 */
 			via2[rSIER] = IER_SET_BIT(irq_idx);
-			break;
-		case MAC_VIA_QUADRA:
-			/* Make the port A line an input to enable the slot irq.
-			 * But not on PowerBooks, that's ADB.
-			 */
-			if ((macintosh_config->adb_type != MAC_ADB_PB1) &&
-			    (macintosh_config->adb_type != MAC_ADB_PB2))
-				via2[vDirA] &= ~(1 << irq_idx);
 			break;
 		}
 	}
@@ -590,10 +545,6 @@ void via_irq_disable(int irq) {
 	int irq_src	= IRQ_SRC(irq);
 	int irq_idx	= IRQ_IDX(irq);
 
-#ifdef DEBUG_IRQUSE
-	printk(KERN_DEBUG "via_irq_disable(%d)\n", irq);
-#endif
-
 	if (irq_src == 1) {
 		via1[vIER] = IER_CLR_BIT(irq_idx);
 	} else if (irq_src == 2) {
@@ -601,56 +552,108 @@ void via_irq_disable(int irq) {
 	} else if (irq_src == 7) {
 		switch (macintosh_config->via_type) {
 		case MAC_VIA_II:
+		case MAC_VIA_QUADRA:
 			nubus_disabled |= 1 << irq_idx;
 			if (nubus_disabled)
 				via2[gIER] = IER_CLR_BIT(1);
 			break;
-		case MAC_VIA_IIci:
+		case MAC_VIA_IICI:
 			via2[rSIER] = IER_CLR_BIT(irq_idx);
-			break;
-		case MAC_VIA_QUADRA:
-			if ((macintosh_config->adb_type != MAC_ADB_PB1) &&
-			    (macintosh_config->adb_type != MAC_ADB_PB2))
-				via2[vDirA] |= 1 << irq_idx;
 			break;
 		}
 	}
 }
 
-void via_irq_clear(int irq) {
-	int irq_src	= IRQ_SRC(irq);
-	int irq_idx	= IRQ_IDX(irq);
-	int irq_bit	= 1 << irq_idx;
+void via1_set_head(int head)
+{
+	if (head == 0)
+		via1[vBufA] &= ~VIA1A_vHeadSel;
+	else
+		via1[vBufA] |= VIA1A_vHeadSel;
+}
+EXPORT_SYMBOL(via1_set_head);
 
-	if (irq_src == 1) {
-		via1[vIFR] = irq_bit;
-	} else if (irq_src == 2) {
-		via2[gIFR] = irq_bit | rbv_clear;
-	} else if (irq_src == 7) {
-		/* FIXME: There is no way to clear an individual nubus slot
-		 * IRQ flag, other than getting the device to do it.
-		 */
-	}
+int via2_scsi_drq_pending(void)
+{
+	return via2[gIFR] & (1 << IRQ_IDX(IRQ_MAC_SCSIDRQ));
+}
+EXPORT_SYMBOL(via2_scsi_drq_pending);
+
+/* timer and clock source */
+
+#define VIA_CLOCK_FREQ     783360                /* VIA "phase 2" clock in Hz */
+#define VIA_TIMER_CYCLES   (VIA_CLOCK_FREQ / HZ) /* clock cycles per jiffy */
+
+#define VIA_TC             (VIA_TIMER_CYCLES - 2) /* including 0 and -1 */
+#define VIA_TC_LOW         (VIA_TC & 0xFF)
+#define VIA_TC_HIGH        (VIA_TC >> 8)
+
+static u64 mac_read_clk(struct clocksource *cs);
+
+static struct clocksource mac_clk = {
+	.name   = "via1",
+	.rating = 250,
+	.read   = mac_read_clk,
+	.mask   = CLOCKSOURCE_MASK(32),
+	.flags  = CLOCK_SOURCE_IS_CONTINUOUS,
+};
+
+static u32 clk_total, clk_offset;
+
+static irqreturn_t via_timer_handler(int irq, void *dev_id)
+{
+	irq_handler_t timer_routine = dev_id;
+
+	clk_total += VIA_TIMER_CYCLES;
+	clk_offset = 0;
+	timer_routine(0, NULL);
+
+	return IRQ_HANDLED;
 }
 
-/*
- * Returns nonzero if an interrupt is pending on the given
- * VIA/IRQ combination.
- */
-
-int via_irq_pending(int irq)
+void __init via_init_clock(irq_handler_t timer_routine)
 {
-	int irq_src	= IRQ_SRC(irq);
-	int irq_idx	= IRQ_IDX(irq);
-	int irq_bit	= 1 << irq_idx;
-
-	if (irq_src == 1) {
-		return via1[vIFR] & irq_bit;
-	} else if (irq_src == 2) {
-		return via2[gIFR] & irq_bit;
-	} else if (irq_src == 7) {
-		/* Always 0 for MAC_VIA_QUADRA if the slot irq is disabled. */
-		return ~via2[gBufA] & irq_bit;
+	if (request_irq(IRQ_MAC_TIMER_1, via_timer_handler, IRQF_TIMER, "timer",
+			timer_routine)) {
+		pr_err("Couldn't register %s interrupt\n", "timer");
+		return;
 	}
-	return 0;
+
+	via1[vT1LL] = VIA_TC_LOW;
+	via1[vT1LH] = VIA_TC_HIGH;
+	via1[vT1CL] = VIA_TC_LOW;
+	via1[vT1CH] = VIA_TC_HIGH;
+	via1[vACR] |= 0x40;
+
+	clocksource_register_hz(&mac_clk, VIA_CLOCK_FREQ);
+}
+
+static u64 mac_read_clk(struct clocksource *cs)
+{
+	unsigned long flags;
+	u8 count_high;
+	u16 count;
+	u32 ticks;
+
+	/*
+	 * Timer counter wrap-around is detected with the timer interrupt flag
+	 * but reading the counter low byte (vT1CL) would reset the flag.
+	 * Also, accessing both counter registers is essentially a data race.
+	 * These problems are avoided by ignoring the low byte. Clock accuracy
+	 * is 256 times worse (error can reach 0.327 ms) but CPU overhead is
+	 * reduced by avoiding slow VIA register accesses.
+	 */
+
+	local_irq_save(flags);
+	count_high = via1[vT1CH];
+	if (count_high == 0xFF)
+		count_high = 0;
+	if (count_high > 0 && (via1[vIFR] & VIA_TIMER_1_INT))
+		clk_offset = VIA_TIMER_CYCLES;
+	count = count_high << 8;
+	ticks = VIA_TIMER_CYCLES - count;
+	ticks += clk_offset + clk_total;
+	local_irq_restore(flags);
+
+	return ticks;
 }

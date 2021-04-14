@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* drivers/video/backlight/vgg2432a4.c
  *
  * VGG2432A4 (ILI9320) LCD controller driver.
@@ -5,10 +6,6 @@
  * Copyright 2007 Simtec Electronics
  *	http://armlinux.simtec.co.uk/
  *	Ben Dooks <ben@simtec.co.uk>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
 */
 
 #include <linux/delay.h>
@@ -26,7 +23,7 @@
 
 /* Device initialisation sequences */
 
-static struct ili9320_reg vgg_init1[] = {
+static const struct ili9320_reg vgg_init1[] = {
 	{
 		.address = ILI9320_POWER1,
 		.value	 = ILI9320_POWER1_AP(0) | ILI9320_POWER1_BT(0),
@@ -43,7 +40,7 @@ static struct ili9320_reg vgg_init1[] = {
 	},
 };
 
-static struct ili9320_reg vgg_init2[] = {
+static const struct ili9320_reg vgg_init2[] = {
 	{
 		.address = ILI9320_POWER1,
 		.value   = (ILI9320_POWER1_AP(3) | ILI9320_POWER1_APE |
@@ -54,7 +51,7 @@ static struct ili9320_reg vgg_init2[] = {
 	}
 };
 
-static struct ili9320_reg vgg_gamma[] = {
+static const struct ili9320_reg vgg_gamma[] = {
 	{
 		.address = ILI9320_GAMMA1,
 		.value	 = 0x0000,
@@ -89,7 +86,7 @@ static struct ili9320_reg vgg_gamma[] = {
 
 };
 
-static struct ili9320_reg vgg_init0[] = {
+static const struct ili9320_reg vgg_init0[] = {
 	[0]	= {
 		/* set direction and scan mode gate */
 		.address = ILI9320_DRIVER,
@@ -137,7 +134,7 @@ static int vgg2432a4_lcd_init(struct ili9320 *lcd,
 
 	ili9320_write(lcd, ILI9320_RGB_IF1, cfg->rgb_if1);
 	ili9320_write(lcd, ILI9320_FRAMEMAKER, 0x0);
-	ili9320_write(lcd, ILI9320_RGB_IF2, ILI9320_RGBIF2_DPL);
+	ili9320_write(lcd, ILI9320_RGB_IF2, cfg->rgb_if2);
 
 	ret = ili9320_write_regs(lcd, vgg_init1, ARRAY_SIZE(vgg_init1));
 	if (ret != 0)
@@ -205,19 +202,15 @@ static int vgg2432a4_lcd_init(struct ili9320 *lcd,
 	return ret;
 }
 
-#ifdef CONFIG_PM
-static int vgg2432a4_suspend(struct spi_device *spi, pm_message_t state)
+#ifdef CONFIG_PM_SLEEP
+static int vgg2432a4_suspend(struct device *dev)
 {
-	return ili9320_suspend(dev_get_drvdata(&spi->dev), state);
+	return ili9320_suspend(dev_get_drvdata(dev));
 }
-
-static int vgg2432a4_resume(struct spi_device *spi)
+static int vgg2432a4_resume(struct device *dev)
 {
-	return ili9320_resume(dev_get_drvdata(&spi->dev));
+	return ili9320_resume(dev_get_drvdata(dev));
 }
-#else
-#define vgg2432a4_suspend	NULL
-#define vgg2432a4_resume 	NULL
 #endif
 
 static struct ili9320_client vgg2432a4_client = {
@@ -227,7 +220,7 @@ static struct ili9320_client vgg2432a4_client = {
 
 /* Device probe */
 
-static int __devinit vgg2432a4_probe(struct spi_device *spi)
+static int vgg2432a4_probe(struct spi_device *spi)
 {
 	int ret;
 
@@ -240,45 +233,31 @@ static int __devinit vgg2432a4_probe(struct spi_device *spi)
 	return 0;
 }
 
-static int __devexit vgg2432a4_remove(struct spi_device *spi)
+static int vgg2432a4_remove(struct spi_device *spi)
 {
-	return ili9320_remove(dev_get_drvdata(&spi->dev));
+	return ili9320_remove(spi_get_drvdata(spi));
 }
 
 static void vgg2432a4_shutdown(struct spi_device *spi)
 {
-	ili9320_shutdown(dev_get_drvdata(&spi->dev));
+	ili9320_shutdown(spi_get_drvdata(spi));
 }
+
+static SIMPLE_DEV_PM_OPS(vgg2432a4_pm_ops, vgg2432a4_suspend, vgg2432a4_resume);
 
 static struct spi_driver vgg2432a4_driver = {
 	.driver = {
 		.name		= "VGG2432A4",
-		.owner		= THIS_MODULE,
+		.pm		= &vgg2432a4_pm_ops,
 	},
 	.probe		= vgg2432a4_probe,
-	.remove		= __devexit_p(vgg2432a4_remove),
+	.remove		= vgg2432a4_remove,
 	.shutdown	= vgg2432a4_shutdown,
-	.suspend	= vgg2432a4_suspend,
-	.resume		= vgg2432a4_resume,
 };
 
-/* Device driver initialisation */
-
-static int __init vgg2432a4_init(void)
-{
-	return spi_register_driver(&vgg2432a4_driver);
-}
-
-static void __exit vgg2432a4_exit(void)
-{
-	spi_unregister_driver(&vgg2432a4_driver);
-}
-
-module_init(vgg2432a4_init);
-module_exit(vgg2432a4_exit);
+module_spi_driver(vgg2432a4_driver);
 
 MODULE_AUTHOR("Ben Dooks <ben-linux@fluff.org>");
 MODULE_DESCRIPTION("VGG2432A4 LCD Driver");
 MODULE_LICENSE("GPL v2");
-
-
+MODULE_ALIAS("spi:VGG2432A4");

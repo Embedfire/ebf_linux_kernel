@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  linux/arch/arm/mm/cache-v4wt.S
  *
  *  Copyright (C) 1997-2002 Russell king
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  ARMv4 write through cache operations support.
  *
@@ -13,7 +10,7 @@
  */
 #include <linux/linkage.h>
 #include <linux/init.h>
-#include <mach/hardware.h>
+#include <asm/assembler.h>
 #include <asm/page.h>
 #include "proc-macros.S"
 
@@ -35,11 +32,22 @@
 /*
  * This is the size at which it becomes more efficient to
  * clean the whole cache, rather than using the individual
- * cache line maintainence instructions.
+ * cache line maintenance instructions.
  *
  * *** This needs benchmarking
  */
 #define CACHE_DLIMIT	16384
+
+/*
+ *	flush_icache_all()
+ *
+ *	Unconditionally clean and invalidate the entire icache.
+ */
+ENTRY(v4wt_flush_icache_all)
+	mov	r0, #0
+	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
+	ret	lr
+ENDPROC(v4wt_flush_icache_all)
 
 /*
  *	flush_user_cache_all()
@@ -61,7 +69,7 @@ __flush_whole_cache:
 	tst	r2, #VM_EXEC
 	mcrne	p15, 0, ip, c7, c5, 0		@ invalidate I cache
 	mcr	p15, 0, ip, c7, c6, 0		@ invalidate D cache
-	mov	pc, lr
+	ret	lr
 
 /*
  *	flush_user_cache_range(start, end, flags)
@@ -84,7 +92,7 @@ ENTRY(v4wt_flush_user_cache_range)
 	add	r0, r0, #CACHE_DLINESIZE
 	cmp	r0, r1
 	blo	1b
-	mov	pc, lr
+	ret	lr
 
 /*
  *	coherent_kern_range(start, end)
@@ -115,20 +123,22 @@ ENTRY(v4wt_coherent_user_range)
 	add	r0, r0, #CACHE_DLINESIZE
 	cmp	r0, r1
 	blo	1b
-	mov	pc, lr
+	mov	r0, #0
+	ret	lr
 
 /*
- *	flush_kern_dcache_page(void *page)
+ *	flush_kern_dcache_area(void *addr, size_t size)
  *
  *	Ensure no D cache aliasing occurs, either with itself or
  *	the I cache
  *
- *	- addr	- page aligned address
+ *	- addr	- kernel address
+ *	- size	- region size
  */
-ENTRY(v4wt_flush_kern_dcache_page)
+ENTRY(v4wt_flush_kern_dcache_area)
 	mov	r2, #0
 	mcr	p15, 0, r2, c7, c5, 0		@ invalidate I cache
-	add	r1, r0, #PAGE_SZ
+	add	r1, r0, r1
 	/* fallthrough */
 
 /*
@@ -142,24 +152,13 @@ ENTRY(v4wt_flush_kern_dcache_page)
  *	- start  - virtual start address
  *	- end	 - virtual end address
  */
-ENTRY(v4wt_dma_inv_range)
+v4wt_dma_inv_range:
 	bic	r0, r0, #CACHE_DLINESIZE - 1
 1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
 	add	r0, r0, #CACHE_DLINESIZE
 	cmp	r0, r1
 	blo	1b
-	/* FALLTHROUGH */
-
-/*
- *	dma_clean_range(start, end)
- *
- *	Clean the specified virtual address range.
- *
- *	- start  - virtual start address
- *	- end	 - virtual end address
- */
-ENTRY(v4wt_dma_clean_range)
-	mov	pc, lr
+	ret	lr
 
 /*
  *	dma_flush_range(start, end)
@@ -172,17 +171,33 @@ ENTRY(v4wt_dma_clean_range)
 	.globl	v4wt_dma_flush_range
 	.equ	v4wt_dma_flush_range, v4wt_dma_inv_range
 
+/*
+ *	dma_unmap_area(start, size, dir)
+ *	- start	- kernel virtual start address
+ *	- size	- size of region
+ *	- dir	- DMA direction
+ */
+ENTRY(v4wt_dma_unmap_area)
+	add	r1, r1, r0
+	teq	r2, #DMA_TO_DEVICE
+	bne	v4wt_dma_inv_range
+	/* FALLTHROUGH */
+
+/*
+ *	dma_map_area(start, size, dir)
+ *	- start	- kernel virtual start address
+ *	- size	- size of region
+ *	- dir	- DMA direction
+ */
+ENTRY(v4wt_dma_map_area)
+	ret	lr
+ENDPROC(v4wt_dma_unmap_area)
+ENDPROC(v4wt_dma_map_area)
+
+	.globl	v4wt_flush_kern_cache_louis
+	.equ	v4wt_flush_kern_cache_louis, v4wt_flush_kern_cache_all
+
 	__INITDATA
 
-	.type	v4wt_cache_fns, #object
-ENTRY(v4wt_cache_fns)
-	.long	v4wt_flush_kern_cache_all
-	.long	v4wt_flush_user_cache_all
-	.long	v4wt_flush_user_cache_range
-	.long	v4wt_coherent_kern_range
-	.long	v4wt_coherent_user_range
-	.long	v4wt_flush_kern_dcache_page
-	.long	v4wt_dma_inv_range
-	.long	v4wt_dma_clean_range
-	.long	v4wt_dma_flush_range
-	.size	v4wt_cache_fns, . - v4wt_cache_fns
+	@ define struct cpu_cache_fns (see <asm/cacheflush.h> and proc-macros.S)
+	define_cache_functions v4wt

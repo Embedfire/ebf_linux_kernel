@@ -1,32 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *    Filename: cfag12864b.c
  *     Version: 0.1.0
  * Description: cfag12864b LCD driver
- *     License: GPLv2
  *     Depends: ks0108
  *
  *      Author: Copyright (C) Miguel Ojeda Sandonis
  *        Date: 2006-10-31
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
  */
 
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
+#include <linux/slab.h>
 #include <linux/cdev.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -48,7 +35,7 @@
 static unsigned int cfag12864b_rate = CONFIG_CFAG12864B_RATE;
 module_param(cfag12864b_rate, uint, S_IRUGO);
 MODULE_PARM_DESC(cfag12864b_rate,
-	"Refresh rate (hertzs)");
+	"Refresh rate (hertz)");
 
 unsigned int cfag12864b_getrate(void)
 {
@@ -59,7 +46,7 @@ unsigned int cfag12864b_getrate(void)
  * cfag12864b Commands
  *
  *	E = Enable signal
- *		Everytime E switch from low to high,
+ *		Every time E switch from low to high,
  *		cfag12864b/ks0108 reads the command/data.
  *
  *	CS1 = First ks0108controller.
@@ -346,8 +333,8 @@ static int __init cfag12864b_init(void)
 		goto none;
 	}
 
-	cfag12864b_cache = kmalloc(sizeof(unsigned char) *
-		CFAG12864B_SIZE, GFP_KERNEL);
+	cfag12864b_cache = kmalloc(CFAG12864B_SIZE,
+				   GFP_KERNEL);
 	if (cfag12864b_cache == NULL) {
 		printk(KERN_ERR CFAG12864B_NAME ": ERROR: "
 			"can't alloc cache buffer (%i bytes)\n",

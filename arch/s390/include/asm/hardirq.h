@@ -1,8 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- *  include/asm-s390/hardirq.h
- *
  *  S390 version
- *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 1999, 2000
  *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
  *               Denis Joseph Barrow (djbarrow@de.ibm.com,barrow_dj@yahoo.com)
  *
@@ -12,40 +11,19 @@
 #ifndef __ASM_HARDIRQ_H
 #define __ASM_HARDIRQ_H
 
-#include <linux/threads.h>
-#include <linux/sched.h>
-#include <linux/cache.h>
-#include <linux/interrupt.h>
 #include <asm/lowcore.h>
 
-/* irq_cpustat_t is unused currently, but could be converted
- * into a percpu variable instead of storing softirq_pending
- * on the lowcore */
-typedef struct {
-	unsigned int __softirq_pending;
-} irq_cpustat_t;
-
 #define local_softirq_pending() (S390_lowcore.softirq_pending)
+#define set_softirq_pending(x) (S390_lowcore.softirq_pending = (x))
+#define or_softirq_pending(x)  (S390_lowcore.softirq_pending |= (x))
 
 #define __ARCH_IRQ_STAT
 #define __ARCH_HAS_DO_SOFTIRQ
+#define __ARCH_IRQ_EXIT_IRQS_DISABLED
 
-#define HARDIRQ_BITS	8
-
-void clock_comparator_work(void);
-
-static inline unsigned long long local_tick_disable(void)
+static inline void ack_bad_irq(unsigned int irq)
 {
-	unsigned long long old;
-
-	old = S390_lowcore.clock_comparator;
-	S390_lowcore.clock_comparator = -1ULL;
-	return old;
-}
-
-static inline void local_tick_enable(unsigned long long comp)
-{
-	S390_lowcore.clock_comparator = comp;
+	printk(KERN_CRIT "unexpected IRQ trap at vector %02x\n", irq);
 }
 
 #endif /* __ASM_HARDIRQ_H */

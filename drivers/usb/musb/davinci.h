@@ -1,10 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 2005-2006 by Texas Instruments
- *
- * The Inventra Controller Driver for Linux is free software; you
- * can redistribute it and/or modify it under the terms of the GNU
- * General Public License version 2 as published by the Free Software
- * Foundation.
  */
 
 #ifndef __MUSB_HDRDF_H__
@@ -15,14 +11,21 @@
  */
 
 /* Integrated highspeed/otg PHY */
-#define	USBPHY_CTL_PADDR	(DAVINCI_SYSTEM_MODULE_BASE + 0x34)
-#define	USBPHY_PHYCLKGD		(1 << 8)
-#define	USBPHY_SESNDEN		(1 << 7)	/* v(sess_end) comparator */
-#define	USBPHY_VBDTCTEN		(1 << 6)	/* v(bus) comparator */
-#define	USBPHY_PHYPLLON		(1 << 4)	/* override pll suspend */
-#define	USBPHY_CLKO1SEL		(1 << 3)
-#define	USBPHY_OSCPDWN		(1 << 2)
-#define	USBPHY_PHYPDWN		(1 << 0)
+#define USBPHY_CTL_PADDR	0x01c40034
+#define USBPHY_DATAPOL		BIT(11)	/* (dm355) switch D+/D- */
+#define USBPHY_PHYCLKGD		BIT(8)
+#define USBPHY_SESNDEN		BIT(7)	/* v(sess_end) comparator */
+#define USBPHY_VBDTCTEN		BIT(6)	/* v(bus) comparator */
+#define USBPHY_VBUSSENS		BIT(5)	/* (dm355,ro) is vbus > 0.5V */
+#define USBPHY_PHYPLLON		BIT(4)	/* override pll suspend */
+#define USBPHY_CLKO1SEL		BIT(3)
+#define USBPHY_OSCPDWN		BIT(2)
+#define USBPHY_OTGPDWN		BIT(1)
+#define USBPHY_PHYPDWN		BIT(0)
+
+#define DM355_DEEPSLEEP_PADDR	0x01c40048
+#define DRVVBUS_FORCE		BIT(2)
+#define DRVVBUS_OVERRIDE	BIT(1)
 
 /* For now include usb OTG module registers here */
 #define DAVINCI_USB_VERSION_REG		0x00

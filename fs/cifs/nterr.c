@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Unix SMB/Netbios implementation.
  *  Version 1.9.
  *  RPC Pipe client / server routines
  *  Copyright (C) Luke Kenneth Casson Leighton 1997-2001.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 /* NT error codes - see nterr.h */
@@ -31,7 +18,7 @@ const struct nt_err_code_struct nt_errs[] = {
 	{"NT_STATUS_INVALID_INFO_CLASS", NT_STATUS_INVALID_INFO_CLASS},
 	{"NT_STATUS_INFO_LENGTH_MISMATCH", NT_STATUS_INFO_LENGTH_MISMATCH},
 	{"NT_STATUS_ACCESS_VIOLATION", NT_STATUS_ACCESS_VIOLATION},
-	{"STATUS_BUFFER_OVERFLOW", STATUS_BUFFER_OVERFLOW},
+	{"NT_STATUS_BUFFER_OVERFLOW", NT_STATUS_BUFFER_OVERFLOW},
 	{"NT_STATUS_IN_PAGE_ERROR", NT_STATUS_IN_PAGE_ERROR},
 	{"NT_STATUS_PAGEFILE_QUOTA", NT_STATUS_PAGEFILE_QUOTA},
 	{"NT_STATUS_INVALID_HANDLE", NT_STATUS_INVALID_HANDLE},
@@ -681,7 +668,7 @@ const struct nt_err_code_struct nt_errs[] = {
 	 NT_STATUS_QUOTA_LIST_INCONSISTENT},
 	{"NT_STATUS_FILE_IS_OFFLINE", NT_STATUS_FILE_IS_OFFLINE},
 	{"NT_STATUS_NO_MORE_ENTRIES", NT_STATUS_NO_MORE_ENTRIES},
-	{"STATUS_MORE_ENTRIES", STATUS_MORE_ENTRIES},
-	{"STATUS_SOME_UNMAPPED", STATUS_SOME_UNMAPPED},
+	{"NT_STATUS_MORE_ENTRIES", NT_STATUS_MORE_ENTRIES},
+	{"NT_STATUS_SOME_UNMAPPED", NT_STATUS_SOME_UNMAPPED},
 	{NULL, 0}
 };

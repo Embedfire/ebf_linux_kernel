@@ -19,32 +19,17 @@
 
 static inline int pfn_to_nid(unsigned long pfn)
 {
-#ifdef CONFIG_NUMA
 	extern int paddr_to_nid(unsigned long);
 	int nid = paddr_to_nid(pfn << PAGE_SHIFT);
 	if (nid < 0)
 		return 0;
 	else
 		return nid;
-#else
-	return 0;
-#endif
 }
 
-#ifdef CONFIG_HAVE_ARCH_EARLY_PFN_TO_NID
-extern int early_pfn_to_nid(unsigned long pfn);
-#endif
-
-#ifdef CONFIG_IA64_DIG /* DIG systems are small */
-# define MAX_PHYSNODE_ID	8
-# define NR_NODE_MEMBLKS	(MAX_NUMNODES * 8)
-#else /* sn2 is the biggest case, so we use that if !DIG */
-# define MAX_PHYSNODE_ID	2048
-# define NR_NODE_MEMBLKS	(MAX_NUMNODES * 4)
-#endif
-
-#else /* CONFIG_NUMA */
-# define NR_NODE_MEMBLKS	(MAX_NUMNODES * 4)
+#define MAX_PHYSNODE_ID		2048
 #endif /* CONFIG_NUMA */
+
+#define NR_NODE_MEMBLKS		(MAX_NUMNODES * 4)
 
 #endif /* _ASM_IA64_MMZONE_H */

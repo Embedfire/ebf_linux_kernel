@@ -1,8 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *	Description of Z8530 Z85C30 and Z85230 communications chips
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
- * Copyright (C) 1998 Alan Cox <alan@redhat.com>
+ * Copyright (C) 1998 Alan Cox <alan@lxorguk.ukuu.org.uk>
  */
 
 #ifndef _Z8530_H
@@ -395,19 +396,19 @@ struct z8530_dev
 extern u8 z8530_dead_port[];
 extern u8 z8530_hdlc_kilostream_85230[];
 extern u8 z8530_hdlc_kilostream[];
-extern irqreturn_t z8530_interrupt(int, void *);
-extern void z8530_describe(struct z8530_dev *, char *mapping, unsigned long io);
-extern int z8530_init(struct z8530_dev *);
-extern int z8530_shutdown(struct z8530_dev *);
-extern int z8530_sync_open(struct net_device *, struct z8530_channel *);
-extern int z8530_sync_close(struct net_device *, struct z8530_channel *);
-extern int z8530_sync_dma_open(struct net_device *, struct z8530_channel *);
-extern int z8530_sync_dma_close(struct net_device *, struct z8530_channel *);
-extern int z8530_sync_txdma_open(struct net_device *, struct z8530_channel *);
-extern int z8530_sync_txdma_close(struct net_device *, struct z8530_channel *);
-extern int z8530_channel_load(struct z8530_channel *, u8 *);
-extern int z8530_queue_xmit(struct z8530_channel *c, struct sk_buff *skb);
-extern void z8530_null_rx(struct z8530_channel *c, struct sk_buff *skb);
+irqreturn_t z8530_interrupt(int, void *);
+void z8530_describe(struct z8530_dev *, char *mapping, unsigned long io);
+int z8530_init(struct z8530_dev *);
+int z8530_shutdown(struct z8530_dev *);
+int z8530_sync_open(struct net_device *, struct z8530_channel *);
+int z8530_sync_close(struct net_device *, struct z8530_channel *);
+int z8530_sync_dma_open(struct net_device *, struct z8530_channel *);
+int z8530_sync_dma_close(struct net_device *, struct z8530_channel *);
+int z8530_sync_txdma_open(struct net_device *, struct z8530_channel *);
+int z8530_sync_txdma_close(struct net_device *, struct z8530_channel *);
+int z8530_channel_load(struct z8530_channel *, u8 *);
+netdev_tx_t z8530_queue_xmit(struct z8530_channel *c, struct sk_buff *skb);
+void z8530_null_rx(struct z8530_channel *c, struct sk_buff *skb);
 
 
 /*
@@ -419,8 +420,6 @@ extern struct z8530_irqhandler z8530_sync, z8530_async, z8530_nop;
 /*
  *	Asynchronous Interfacing
  */
-
-#define SERIAL_MAGIC 0x5301
 
 /*
  * The size of the serial xmit buffer is 1 page, or 4096 bytes

@@ -1,10 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  Character device driver for extended error reporting.
  *
- *  Copyright (C) 2005 IBM Corporation
+ *  Copyright IBM Corp. 2005
  *  extended error reporting for DASD ECKD devices
  *  Author(s): Stefan Weinhuber <wein@de.ibm.com>
  */
+
+#define KMSG_COMPONENT "dasd-eckd"
 
 #include <linux/init.h>
 #include <linux/fs.h>
@@ -15,11 +18,11 @@
 #include <linux/device.h>
 #include <linux/poll.h>
 #include <linux/mutex.h>
-#include <linux/smp_lock.h>
 #include <linux/err.h>
+#include <linux/slab.h>
 
-#include <asm/uaccess.h>
-#include <asm/atomic.h>
+#include <linux/uaccess.h>
+#include <linux/atomic.h>
 #include <asm/ebcdic.h>
 
 #include "dasd_int.h"
@@ -293,31 +296,35 @@ static void dasd_eer_write_standard_trigger(struct dasd_device *device,
 {
 	struct dasd_ccw_req *temp_cqr;
 	int data_size;
-	struct timeval tv;
+	struct timespec64 ts;
 	struct dasd_eer_header header;
 	unsigned long flags;
 	struct eerbuffer *eerb;
+	char *sense;
 
 	/* go through cqr chain and count the valid sense data sets */
 	data_size = 0;
 	for (temp_cqr = cqr; temp_cqr; temp_cqr = temp_cqr->refers)
-		if (temp_cqr->irb.esw.esw0.erw.cons)
+		if (dasd_get_sense(&temp_cqr->irb))
 			data_size += 32;
 
 	header.total_size = sizeof(header) + data_size + 4; /* "EOR" */
 	header.trigger = trigger;
-	do_gettimeofday(&tv);
-	header.tv_sec = tv.tv_sec;
-	header.tv_usec = tv.tv_usec;
-	strncpy(header.busid, device->cdev->dev.bus_id, DASD_EER_BUSID_SIZE);
+	ktime_get_real_ts64(&ts);
+	header.tv_sec = ts.tv_sec;
+	header.tv_usec = ts.tv_nsec / NSEC_PER_USEC;
+	strlcpy(header.busid, dev_name(&device->cdev->dev),
+		DASD_EER_BUSID_SIZE);
 
 	spin_lock_irqsave(&bufferlock, flags);
 	list_for_each_entry(eerb, &bufferlist, list) {
 		dasd_eer_start_record(eerb, header.total_size);
 		dasd_eer_write_buffer(eerb, (char *) &header, sizeof(header));
-		for (temp_cqr = cqr; temp_cqr; temp_cqr = temp_cqr->refers)
-			if (temp_cqr->irb.esw.esw0.erw.cons)
-				dasd_eer_write_buffer(eerb, cqr->irb.ecw, 32);
+		for (temp_cqr = cqr; temp_cqr; temp_cqr = temp_cqr->refers) {
+			sense = dasd_get_sense(&temp_cqr->irb);
+			if (sense)
+				dasd_eer_write_buffer(eerb, sense, 32);
+		}
 		dasd_eer_write_buffer(eerb, "EOR", 4);
 	}
 	spin_unlock_irqrestore(&bufferlock, flags);
@@ -333,7 +340,7 @@ static void dasd_eer_write_snss_trigger(struct dasd_device *device,
 {
 	int data_size;
 	int snss_rc;
-	struct timeval tv;
+	struct timespec64 ts;
 	struct dasd_eer_header header;
 	unsigned long flags;
 	struct eerbuffer *eerb;
@@ -346,10 +353,11 @@ static void dasd_eer_write_snss_trigger(struct dasd_device *device,
 
 	header.total_size = sizeof(header) + data_size + 4; /* "EOR" */
 	header.trigger = DASD_EER_STATECHANGE;
-	do_gettimeofday(&tv);
-	header.tv_sec = tv.tv_sec;
-	header.tv_usec = tv.tv_usec;
-	strncpy(header.busid, device->cdev->dev.bus_id, DASD_EER_BUSID_SIZE);
+	ktime_get_real_ts64(&ts);
+	header.tv_sec = ts.tv_sec;
+	header.tv_usec = ts.tv_nsec / NSEC_PER_USEC;
+	strlcpy(header.busid, dev_name(&device->cdev->dev),
+		DASD_EER_BUSID_SIZE);
 
 	spin_lock_irqsave(&bufferlock, flags);
 	list_for_each_entry(eerb, &bufferlist, list) {
@@ -378,6 +386,7 @@ void dasd_eer_write(struct dasd_device *device, struct dasd_ccw_req *cqr,
 		dasd_eer_write_standard_trigger(device, cqr, id);
 		break;
 	case DASD_EER_NOPATH:
+	case DASD_EER_NOSPC:
 		dasd_eer_write_standard_trigger(device, NULL, id);
 		break;
 	case DASD_EER_STATECHANGE:
@@ -439,7 +448,7 @@ static void dasd_eer_snss_cb(struct dasd_ccw_req *cqr, void *data)
 		 * is a new ccw in device->eer_cqr. Free the "old"
 		 * snss request now.
 		 */
-		dasd_kfree_request(cqr, device);
+		dasd_sfree_request(cqr, device);
 }
 
 /*
@@ -447,43 +456,59 @@ static void dasd_eer_snss_cb(struct dasd_ccw_req *cqr, void *data)
  */
 int dasd_eer_enable(struct dasd_device *device)
 {
-	struct dasd_ccw_req *cqr;
+	struct dasd_ccw_req *cqr = NULL;
 	unsigned long flags;
+	struct ccw1 *ccw;
+	int rc = 0;
 
+	spin_lock_irqsave(get_ccwdev_lock(device->cdev), flags);
 	if (device->eer_cqr)
-		return 0;
+		goto out;
+	else if (!device->discipline ||
+		 strcmp(device->discipline->name, "ECKD"))
+		rc = -EMEDIUMTYPE;
+	else if (test_bit(DASD_FLAG_OFFLINE, &device->flags))
+		rc = -EBUSY;
 
-	if (!device->discipline || strcmp(device->discipline->name, "ECKD"))
-		return -EPERM;	/* FIXME: -EMEDIUMTYPE ? */
+	if (rc)
+		goto out;
 
-	cqr = dasd_kmalloc_request("ECKD", 1 /* SNSS */,
-				   SNSS_DATA_SIZE, device);
-	if (IS_ERR(cqr))
-		return -ENOMEM;
+	cqr = dasd_smalloc_request(DASD_ECKD_MAGIC, 1 /* SNSS */,
+				   SNSS_DATA_SIZE, device, NULL);
+	if (IS_ERR(cqr)) {
+		rc = -ENOMEM;
+		cqr = NULL;
+		goto out;
+	}
 
 	cqr->startdev = device;
 	cqr->retries = 255;
 	cqr->expires = 10 * HZ;
 	clear_bit(DASD_CQR_FLAGS_USE_ERP, &cqr->flags);
+	set_bit(DASD_CQR_ALLOW_SLOCK, &cqr->flags);
 
-	cqr->cpaddr->cmd_code = DASD_ECKD_CCW_SNSS;
-	cqr->cpaddr->count = SNSS_DATA_SIZE;
-	cqr->cpaddr->flags = 0;
-	cqr->cpaddr->cda = (__u32)(addr_t) cqr->data;
+	ccw = cqr->cpaddr;
+	ccw->cmd_code = DASD_ECKD_CCW_SNSS;
+	ccw->count = SNSS_DATA_SIZE;
+	ccw->flags = 0;
+	ccw->cda = (__u32)(addr_t) cqr->data;
 
-	cqr->buildclk = get_clock();
+	cqr->buildclk = get_tod_clock();
 	cqr->status = DASD_CQR_FILLED;
 	cqr->callback = dasd_eer_snss_cb;
 
-	spin_lock_irqsave(get_ccwdev_lock(device->cdev), flags);
 	if (!device->eer_cqr) {
 		device->eer_cqr = cqr;
 		cqr = NULL;
 	}
+
+out:
 	spin_unlock_irqrestore(get_ccwdev_lock(device->cdev), flags);
+
 	if (cqr)
-		dasd_kfree_request(cqr, device);
-	return 0;
+		dasd_sfree_request(cqr, device);
+
+	return rc;
 }
 
 /*
@@ -504,7 +529,7 @@ void dasd_eer_disable(struct dasd_device *device)
 	in_use = test_and_clear_bit(DASD_FLAG_EER_IN_USE, &device->flags);
 	spin_unlock_irqrestore(get_ccwdev_lock(device->cdev), flags);
 	if (cqr && !in_use)
-		dasd_kfree_request(cqr, device);
+		dasd_sfree_request(cqr, device);
 }
 
 /*
@@ -527,30 +552,26 @@ static int dasd_eer_open(struct inode *inp, struct file *filp)
 	eerb = kzalloc(sizeof(struct eerbuffer), GFP_KERNEL);
 	if (!eerb)
 		return -ENOMEM;
-	lock_kernel();
 	eerb->buffer_page_count = eer_pages;
 	if (eerb->buffer_page_count < 1 ||
 	    eerb->buffer_page_count > INT_MAX / PAGE_SIZE) {
 		kfree(eerb);
-		MESSAGE(KERN_WARNING, "can't open device since module "
-			"parameter eer_pages is smaller then 1 or"
-			" bigger then %d", (int)(INT_MAX / PAGE_SIZE));
-		unlock_kernel();
+		DBF_EVENT(DBF_WARNING, "can't open device since module "
+			"parameter eer_pages is smaller than 1 or"
+			" bigger than %d", (int)(INT_MAX / PAGE_SIZE));
 		return -EINVAL;
 	}
 	eerb->buffersize = eerb->buffer_page_count * PAGE_SIZE;
-	eerb->buffer = kmalloc(eerb->buffer_page_count * sizeof(char *),
-			       GFP_KERNEL);
+	eerb->buffer = kmalloc_array(eerb->buffer_page_count, sizeof(char *),
+				     GFP_KERNEL);
         if (!eerb->buffer) {
 		kfree(eerb);
-		unlock_kernel();
                 return -ENOMEM;
 	}
 	if (dasd_eer_allocate_buffer_pages(eerb->buffer,
 					   eerb->buffer_page_count)) {
 		kfree(eerb->buffer);
 		kfree(eerb);
-		unlock_kernel();
 		return -ENOMEM;
 	}
 	filp->private_data = eerb;
@@ -558,7 +579,6 @@ static int dasd_eer_open(struct inode *inp, struct file *filp)
 	list_add(&eerb->list, &bufferlist);
 	spin_unlock_irqrestore(&bufferlock, flags);
 
-	unlock_kernel();
 	return nonseekable_open(inp,filp);
 }
 
@@ -642,9 +662,9 @@ static ssize_t dasd_eer_read(struct file *filp, char __user *buf,
 	return effective_count;
 }
 
-static unsigned int dasd_eer_poll(struct file *filp, poll_table *ptable)
+static __poll_t dasd_eer_poll(struct file *filp, poll_table *ptable)
 {
-	unsigned int mask;
+	__poll_t mask;
 	unsigned long flags;
 	struct eerbuffer *eerb;
 
@@ -652,7 +672,7 @@ static unsigned int dasd_eer_poll(struct file *filp, poll_table *ptable)
 	poll_wait(filp, &dasd_eer_read_wait_queue, ptable);
 	spin_lock_irqsave(&bufferlock, flags);
 	if (eerb->head != eerb->tail)
-		mask = POLLIN | POLLRDNORM ;
+		mask = EPOLLIN | EPOLLRDNORM ;
 	else
 		mask = 0;
 	spin_unlock_irqrestore(&bufferlock, flags);
@@ -665,6 +685,7 @@ static const struct file_operations dasd_eer_fops = {
 	.read		= &dasd_eer_read,
 	.poll		= &dasd_eer_poll,
 	.owner		= THIS_MODULE,
+	.llseek		= noop_llseek,
 };
 
 static struct miscdevice *dasd_eer_dev = NULL;
@@ -685,7 +706,7 @@ int __init dasd_eer_init(void)
 	if (rc) {
 		kfree(dasd_eer_dev);
 		dasd_eer_dev = NULL;
-		MESSAGE(KERN_ERR, "%s", "dasd_eer_init could not "
+		DBF_EVENT(DBF_ERR, "%s", "dasd_eer_init could not "
 		       "register misc device");
 		return rc;
 	}
@@ -696,7 +717,7 @@ int __init dasd_eer_init(void)
 void dasd_eer_exit(void)
 {
 	if (dasd_eer_dev) {
-		WARN_ON(misc_deregister(dasd_eer_dev) != 0);
+		misc_deregister(dasd_eer_dev);
 		kfree(dasd_eer_dev);
 		dasd_eer_dev = NULL;
 	}

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for DBRI sound chip found on Sparcs.
  * Copyright (C) 2004, 2005 Martin Habets (mhabets@users.sourceforge.net)
@@ -21,7 +22,7 @@
  *   - Data sheet of the T7903, a newer but very similar ISA bus equivalent
  *     available from the Lucent (formerly AT&T microelectronics) home
  *     page.
- *   - http://www.freesoft.org/Linux/DBRI/
+ *   - https://www.freesoft.org/Linux/DBRI/
  * - MMCODEC: Crystal Semiconductor CS4215 16 bit Multimedia Audio Codec
  *   Interfaces: CHI, Audio In & Out, 2 bits parallel
  *   Documentation: from the Crystal Semiconductor home page.
@@ -57,6 +58,8 @@
 #include <linux/delay.h>
 #include <linux/irq.h>
 #include <linux/io.h>
+#include <linux/dma-mapping.h>
+#include <linux/gfp.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -66,8 +69,9 @@
 #include <sound/initval.h>
 
 #include <linux/of.h>
-#include <asm/sbus.h>
-#include <asm/atomic.h>
+#include <linux/of_device.h>
+#include <linux/atomic.h>
+#include <linux/module.h>
 
 MODULE_AUTHOR("Rudolf Koenig, Brent Baccala and Martin Habets");
 MODULE_DESCRIPTION("Sun DBRI");
@@ -77,7 +81,7 @@ MODULE_SUPPORTED_DEVICE("{{Sun,DBRI}}");
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
 /* Enable this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;
 
 module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for Sun DBRI soundcard.");
@@ -100,7 +104,7 @@ module_param(dbri_debug, int, 0644);
 MODULE_PARM_DESC(dbri_debug, "Debug value for Sun DBRI soundcard.");
 
 #ifdef DBRI_DEBUG
-static char *cmds[] = {
+static const char * const cmds[] = {
 	"WAIT", "PAUSE", "JUMP", "IIQ", "REX", "SDP", "CDP", "DTS",
 	"SSP", "CHI", "NT", "TE", "CDEC", "TEST", "CDM", "RESRV"
 };
@@ -297,11 +301,11 @@ struct dbri_streaminfo {
 /* This structure holds the information for both chips (DBRI & CS4215) */
 struct snd_dbri {
 	int regs_size, irq;	/* Needed for unload */
-	struct sbus_dev *sdev;	/* SBUS device info */
+	struct platform_device *op;	/* OF device info */
 	spinlock_t lock;
 
 	struct dbri_dma *dma;	/* Pointer to our DMA block */
-	u32 dma_dvma;		/* DBRI visible DMA address */
+	dma_addr_t dma_dvma;	/* DBRI visible DMA address */
 
 	void __iomem *regs;	/* dbri HW regs */
 	int dbri_irqp;		/* intr queue pointer */
@@ -576,12 +580,16 @@ static __u32 reverse_bytes(__u32 b, int len)
 	switch (len) {
 	case 32:
 		b = ((b & 0xffff0000) >> 16) | ((b & 0x0000ffff) << 16);
+		fallthrough;
 	case 16:
 		b = ((b & 0xff00ff00) >> 8) | ((b & 0x00ff00ff) << 8);
+		fallthrough;
 	case 8:
 		b = ((b & 0xf0f0f0f0) >> 4) | ((b & 0x0f0f0f0f) << 4);
+		fallthrough;
 	case 4:
 		b = ((b & 0xcccccccc) >> 2) | ((b & 0x33333333) << 2);
+		fallthrough;
 	case 2:
 		b = ((b & 0xaaaaaaaa) >> 1) | ((b & 0x55555555) << 1);
 	case 1:
@@ -589,7 +597,7 @@ static __u32 reverse_bytes(__u32 b, int len)
 		break;
 	default:
 		printk(KERN_ERR "DBRI reverse_bytes: unsupported length\n");
-	};
+	}
 
 	return b;
 }
@@ -612,7 +620,7 @@ A circular command buffer is used here. A new command is being added
 while another can be executed. The scheme works by adding two WAIT commands
 after each sent batch of commands. When the next batch is prepared it is
 added after the WAIT commands then the WAITs are replaced with single JUMP
-command to the new batch. The the DBRI is forced to reread the last WAIT
+command to the new batch. Then the DBRI is forced to reread the last WAIT
 command (replaced by the JUMP by then). If the DBRI is still executing
 previous commands the request to reread the WAIT command is ignored.
 
@@ -654,12 +662,14 @@ static void dbri_cmdwait(struct snd_dbri *dbri)
  */
 static s32 *dbri_cmdlock(struct snd_dbri *dbri, int len)
 {
+	u32 dvma_addr = (u32)dbri->dma_dvma;
+
 	/* Space for 2 WAIT cmds (replaced later by 1 JUMP cmd) */
 	len += 2;
 	spin_lock(&dbri->cmdlock);
 	if (dbri->cmdptr - dbri->dma->cmd + len < DBRI_NO_CMDS - 2)
 		return dbri->cmdptr + 2;
-	else if (len < sbus_readl(dbri->regs + REG8) - dbri->dma_dvma)
+	else if (len < sbus_readl(dbri->regs + REG8) - dvma_addr)
 		return dbri->dma->cmd;
 	else
 		printk(KERN_ERR "DBRI: no space for commands.");
@@ -677,6 +687,7 @@ static s32 *dbri_cmdlock(struct snd_dbri *dbri, int len)
  */
 static void dbri_cmdsend(struct snd_dbri *dbri, s32 *cmd, int len)
 {
+	u32 dvma_addr = (u32)dbri->dma_dvma;
 	s32 tmp, addr;
 	static int wait_id = 0;
 
@@ -686,7 +697,7 @@ static void dbri_cmdsend(struct snd_dbri *dbri, s32 *cmd, int len)
 	*(cmd+1) = DBRI_CMD(D_WAIT, 1, wait_id);
 
 	/* Replace the last command with JUMP */
-	addr = dbri->dma_dvma + (cmd - len - dbri->dma->cmd) * sizeof(s32);
+	addr = dvma_addr + (cmd - len - dbri->dma->cmd) * sizeof(s32);
 	*(dbri->cmdptr+1) = addr;
 	*(dbri->cmdptr) = DBRI_CMD(D_JUMP, 0, 0);
 
@@ -742,8 +753,9 @@ static void dbri_reset(struct snd_dbri *dbri)
 }
 
 /* Lock must not be held before calling this */
-static void __devinit dbri_initialize(struct snd_dbri *dbri)
+static void dbri_initialize(struct snd_dbri *dbri)
 {
+	u32 dvma_addr = (u32)dbri->dma_dvma;
 	s32 *cmd;
 	u32 dma_addr;
 	unsigned long flags;
@@ -761,7 +773,7 @@ static void __devinit dbri_initialize(struct snd_dbri *dbri)
 	/*
 	 * Initialize the interrupt ring buffer.
 	 */
-	dma_addr = dbri->dma_dvma + dbri_dma_off(intr, 0);
+	dma_addr = dvma_addr + dbri_dma_off(intr, 0);
 	dbri->dma->intr[0] = dma_addr;
 	dbri->dbri_irqp = 1;
 	/*
@@ -775,7 +787,7 @@ static void __devinit dbri_initialize(struct snd_dbri *dbri)
 	dbri->cmdptr = cmd;
 	*(cmd++) = DBRI_CMD(D_WAIT, 1, 0);
 	*(cmd++) = DBRI_CMD(D_WAIT, 1, 0);
-	dma_addr = dbri->dma_dvma + dbri_dma_off(cmd, 0);
+	dma_addr = dvma_addr + dbri_dma_off(cmd, 0);
 	sbus_writel(dma_addr, dbri->regs + REG8);
 	spin_unlock(&dbri->cmdlock);
 
@@ -1074,6 +1086,7 @@ static void recv_fixed(struct snd_dbri *dbri, int pipe, volatile __u32 *ptr)
 static int setup_descs(struct snd_dbri *dbri, int streamno, unsigned int period)
 {
 	struct dbri_streaminfo *info = &dbri->stream_info[streamno];
+	u32 dvma_addr = (u32)dbri->dma_dvma;
 	__u32 dvma_buffer;
 	int desc;
 	int len;
@@ -1174,7 +1187,7 @@ static int setup_descs(struct snd_dbri *dbri, int streamno, unsigned int period)
 		else {
 			dbri->next_desc[last_desc] = desc;
 			dbri->dma->desc[last_desc].nda =
-			    dbri->dma_dvma + dbri_dma_off(desc, desc);
+			    dvma_addr + dbri_dma_off(desc, desc);
 		}
 
 		last_desc = desc;
@@ -1189,7 +1202,7 @@ static int setup_descs(struct snd_dbri *dbri, int streamno, unsigned int period)
 	}
 
 	dbri->dma->desc[last_desc].nda =
-	    dbri->dma_dvma + dbri_dma_off(desc, first_desc);
+	    dvma_addr + dbri_dma_off(desc, first_desc);
 	dbri->next_desc[last_desc] = first_desc;
 	dbri->pipes[info->pipe].first_desc = first_desc;
 	dbri->pipes[info->pipe].desc = first_desc;
@@ -1302,7 +1315,7 @@ to the DBRI via the CHI interface and few of the DBRI's PIO pins.
  * Lock must not be held before calling it.
 
 */
-static __devinit void cs4215_setup_pipes(struct snd_dbri *dbri)
+static void cs4215_setup_pipes(struct snd_dbri *dbri)
 {
 	unsigned long flags;
 
@@ -1335,7 +1348,7 @@ static __devinit void cs4215_setup_pipes(struct snd_dbri *dbri)
 	dbri_cmdwait(dbri);
 }
 
-static __devinit int cs4215_init_data(struct cs4215 *mm)
+static int cs4215_init_data(struct cs4215 *mm)
 {
 	/*
 	 * No action, memory resetting only.
@@ -1627,7 +1640,7 @@ static int cs4215_prepare(struct snd_dbri *dbri, unsigned int rate,
 /*
  *
  */
-static __devinit int cs4215_init(struct snd_dbri *dbri)
+static int cs4215_init(struct snd_dbri *dbri)
 {
 	u32 reg2 = sbus_readl(dbri->regs + REG2);
 	dprintk(D_MM, "cs4215_init: reg2=0x%x\n", reg2);
@@ -1694,6 +1707,7 @@ interrupts are disabled.
 static void xmit_descs(struct snd_dbri *dbri)
 {
 	struct dbri_streaminfo *info;
+	u32 dvma_addr;
 	s32 *cmd;
 	unsigned long flags;
 	int first_td;
@@ -1701,6 +1715,7 @@ static void xmit_descs(struct snd_dbri *dbri)
 	if (dbri == NULL)
 		return;		/* Disabled */
 
+	dvma_addr = (u32)dbri->dma_dvma;
 	info = &dbri->stream_info[DBRI_REC];
 	spin_lock_irqsave(&dbri->lock, flags);
 
@@ -1715,7 +1730,7 @@ static void xmit_descs(struct snd_dbri *dbri)
 			*(cmd++) = DBRI_CMD(D_SDP, 0,
 					    dbri->pipes[info->pipe].sdp
 					    | D_SDP_P | D_SDP_EVERY | D_SDP_C);
-			*(cmd++) = dbri->dma_dvma +
+			*(cmd++) = dvma_addr +
 				   dbri_dma_off(desc, first_td);
 			dbri_cmdsend(dbri, cmd, 2);
 
@@ -1737,7 +1752,7 @@ static void xmit_descs(struct snd_dbri *dbri)
 			*(cmd++) = DBRI_CMD(D_SDP, 0,
 					    dbri->pipes[info->pipe].sdp
 					    | D_SDP_P | D_SDP_EVERY | D_SDP_C);
-			*(cmd++) = dbri->dma_dvma +
+			*(cmd++) = dvma_addr +
 				   dbri_dma_off(desc, first_td);
 			dbri_cmdsend(dbri, cmd, 2);
 
@@ -1970,11 +1985,12 @@ static irqreturn_t snd_dbri_interrupt(int irq, void *dev_id)
 /****************************************************************************
 		PCM Interface
 ****************************************************************************/
-static struct snd_pcm_hardware snd_dbri_pcm_hw = {
+static const struct snd_pcm_hardware snd_dbri_pcm_hw = {
 	.info		= SNDRV_PCM_INFO_MMAP |
 			  SNDRV_PCM_INFO_INTERLEAVED |
 			  SNDRV_PCM_INFO_BLOCK_TRANSFER |
-			  SNDRV_PCM_INFO_MMAP_VALID,
+			  SNDRV_PCM_INFO_MMAP_VALID |
+			  SNDRV_PCM_INFO_BATCH,
 	.formats	= SNDRV_PCM_FMTBIT_MU_LAW |
 			  SNDRV_PCM_FMTBIT_A_LAW |
 			  SNDRV_PCM_FMTBIT_U8 |
@@ -2083,24 +2099,19 @@ static int snd_dbri_hw_params(struct snd_pcm_substream *substream,
 	if (ret != 0)
 		return ret;
 
-	if ((ret = snd_pcm_lib_malloc_pages(substream,
-				params_buffer_bytes(hw_params))) < 0) {
-		printk(KERN_ERR "malloc_pages failed with %d\n", ret);
-		return ret;
-	}
-
 	/* hw_params can get called multiple times. Only map the DMA once.
 	 */
 	if (info->dvma_buffer == 0) {
 		if (DBRI_STREAMNO(substream) == DBRI_PLAY)
-			direction = SBUS_DMA_TODEVICE;
+			direction = DMA_TO_DEVICE;
 		else
-			direction = SBUS_DMA_FROMDEVICE;
+			direction = DMA_FROM_DEVICE;
 
-		info->dvma_buffer = sbus_map_single(dbri->sdev,
-					runtime->dma_area,
-					params_buffer_bytes(hw_params),
-					direction);
+		info->dvma_buffer =
+			dma_map_single(&dbri->op->dev,
+				       runtime->dma_area,
+				       params_buffer_bytes(hw_params),
+				       direction);
 	}
 
 	direction = params_buffer_bytes(hw_params);
@@ -2121,12 +2132,12 @@ static int snd_dbri_hw_free(struct snd_pcm_substream *substream)
 	 */
 	if (info->dvma_buffer) {
 		if (DBRI_STREAMNO(substream) == DBRI_PLAY)
-			direction = SBUS_DMA_TODEVICE;
+			direction = DMA_TO_DEVICE;
 		else
-			direction = SBUS_DMA_FROMDEVICE;
+			direction = DMA_FROM_DEVICE;
 
-		sbus_unmap_single(dbri->sdev, info->dvma_buffer,
-				  substream->runtime->buffer_size, direction);
+		dma_unmap_single(&dbri->op->dev, info->dvma_buffer,
+				 substream->runtime->buffer_size, direction);
 		info->dvma_buffer = 0;
 	}
 	if (info->pipe != -1) {
@@ -2134,7 +2145,7 @@ static int snd_dbri_hw_free(struct snd_pcm_substream *substream)
 		info->pipe = -1;
 	}
 
-	return snd_pcm_lib_free_pages(substream);
+	return 0;
 }
 
 static int snd_dbri_prepare(struct snd_pcm_substream *substream)
@@ -2201,10 +2212,9 @@ static snd_pcm_uframes_t snd_dbri_pointer(struct snd_pcm_substream *substream)
 	return ret;
 }
 
-static struct snd_pcm_ops snd_dbri_ops = {
+static const struct snd_pcm_ops snd_dbri_ops = {
 	.open = snd_dbri_open,
 	.close = snd_dbri_close,
-	.ioctl = snd_pcm_lib_ioctl,
 	.hw_params = snd_dbri_hw_params,
 	.hw_free = snd_dbri_hw_free,
 	.prepare = snd_dbri_prepare,
@@ -2212,7 +2222,7 @@ static struct snd_pcm_ops snd_dbri_ops = {
 	.pointer = snd_dbri_pointer,
 };
 
-static int __devinit snd_dbri_pcm(struct snd_card *card)
+static int snd_dbri_pcm(struct snd_card *card)
 {
 	struct snd_pcm *pcm;
 	int err;
@@ -2223,7 +2233,6 @@ static int __devinit snd_dbri_pcm(struct snd_card *card)
 			       /* playback count */ 1,
 			       /* capture count */  1, &pcm)) < 0)
 		return err;
-	snd_assert(pcm != NULL, return -EINVAL);
 
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_dbri_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_dbri_ops);
@@ -2232,12 +2241,8 @@ static int __devinit snd_dbri_pcm(struct snd_card *card)
 	pcm->info_flags = 0;
 	strcpy(pcm->name, card->shortname);
 
-	if ((err = snd_pcm_lib_preallocate_pages_for_all(pcm,
-			SNDRV_DMA_TYPE_CONTINUOUS,
-			snd_dma_continuous_data(GFP_KERNEL),
-			64 * 1024, 64 * 1024)) < 0)
-		return err;
-
+	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_CONTINUOUS,
+				       NULL, 64 * 1024, 64 * 1024);
 	return 0;
 }
 
@@ -2263,9 +2268,10 @@ static int snd_cs4215_get_volume(struct snd_kcontrol *kcontrol,
 {
 	struct snd_dbri *dbri = snd_kcontrol_chip(kcontrol);
 	struct dbri_streaminfo *info;
-	snd_assert(dbri != NULL, return -EINVAL);
+
+	if (snd_BUG_ON(!dbri))
+		return -EINVAL;
 	info = &dbri->stream_info[kcontrol->private_value];
-	snd_assert(info != NULL, return -EINVAL);
 
 	ucontrol->value.integer.value[0] = info->left_gain;
 	ucontrol->value.integer.value[1] = info->right_gain;
@@ -2331,7 +2337,9 @@ static int snd_cs4215_get_single(struct snd_kcontrol *kcontrol,
 	int shift = (kcontrol->private_value >> 8) & 0xff;
 	int mask = (kcontrol->private_value >> 16) & 0xff;
 	int invert = (kcontrol->private_value >> 24) & 1;
-	snd_assert(dbri != NULL, return -EINVAL);
+
+	if (snd_BUG_ON(!dbri))
+		return -EINVAL;
 
 	if (elem < 4)
 		ucontrol->value.integer.value[0] =
@@ -2356,7 +2364,9 @@ static int snd_cs4215_put_single(struct snd_kcontrol *kcontrol,
 	int invert = (kcontrol->private_value >> 24) & 1;
 	int changed = 0;
 	unsigned short val;
-	snd_assert(dbri != NULL, return -EINVAL);
+
+	if (snd_BUG_ON(!dbri))
+		return -EINVAL;
 
 	val = (ucontrol->value.integer.value[0] & mask);
 	if (invert == 1)
@@ -2400,7 +2410,7 @@ static int snd_cs4215_put_single(struct snd_kcontrol *kcontrol,
   .private_value = (entry) | ((shift) << 8) | ((mask) << 16) |	\
 			((invert) << 24) },
 
-static struct snd_kcontrol_new dbri_controls[] __devinitdata = {
+static const struct snd_kcontrol_new dbri_controls[] = {
 	{
 	 .iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	 .name  = "Playback Volume",
@@ -2427,12 +2437,13 @@ static struct snd_kcontrol_new dbri_controls[] __devinitdata = {
 	CS4215_SINGLE("Mic boost", 4, 4, 1, 1)
 };
 
-static int __devinit snd_dbri_mixer(struct snd_card *card)
+static int snd_dbri_mixer(struct snd_card *card)
 {
 	int idx, err;
 	struct snd_dbri *dbri;
 
-	snd_assert(card != NULL && card->private_data != NULL, return -EINVAL);
+	if (snd_BUG_ON(!card || !card->private_data))
+		return -EINVAL;
 	dbri = card->private_data;
 
 	strcpy(card->mixername, card->shortname);
@@ -2490,19 +2501,13 @@ static void dbri_debug_read(struct snd_info_entry *entry,
 }
 #endif
 
-static void __devinit snd_dbri_proc(struct snd_card *card)
+static void snd_dbri_proc(struct snd_card *card)
 {
 	struct snd_dbri *dbri = card->private_data;
-	struct snd_info_entry *entry;
 
-	if (!snd_card_proc_new(card, "regs", &entry))
-		snd_info_set_text_ops(entry, dbri, dbri_regs_read);
-
+	snd_card_ro_proc_new(card, "regs", dbri, dbri_regs_read);
 #ifdef DBRI_DEBUG
-	if (!snd_card_proc_new(card, "debug", &entry)) {
-		snd_info_set_text_ops(entry, dbri, dbri_debug_read);
-		entry->mode = S_IFREG | S_IRUGO;	/* Readable only. */
-	}
+	snd_card_ro_proc_new(card, "debug", dbri, dbri_debug_read);
 #endif
 }
 
@@ -2513,32 +2518,33 @@ static void __devinit snd_dbri_proc(struct snd_card *card)
 */
 static void snd_dbri_free(struct snd_dbri *dbri);
 
-static int __devinit snd_dbri_create(struct snd_card *card,
-				  struct sbus_dev *sdev,
-				  int irq, int dev)
+static int snd_dbri_create(struct snd_card *card,
+			   struct platform_device *op,
+			   int irq, int dev)
 {
 	struct snd_dbri *dbri = card->private_data;
 	int err;
 
 	spin_lock_init(&dbri->lock);
-	dbri->sdev = sdev;
+	dbri->op = op;
 	dbri->irq = irq;
 
-	dbri->dma = sbus_alloc_consistent(sdev, sizeof(struct dbri_dma),
-					  &dbri->dma_dvma);
-	memset((void *)dbri->dma, 0, sizeof(struct dbri_dma));
+	dbri->dma = dma_alloc_coherent(&op->dev, sizeof(struct dbri_dma),
+				       &dbri->dma_dvma, GFP_KERNEL);
+	if (!dbri->dma)
+		return -ENOMEM;
 
-	dprintk(D_GEN, "DMA Cmd Block 0x%p (0x%08x)\n",
+	dprintk(D_GEN, "DMA Cmd Block 0x%p (%pad)\n",
 		dbri->dma, dbri->dma_dvma);
 
 	/* Map the registers into memory. */
-	dbri->regs_size = sdev->reg_addrs[0].reg_size;
-	dbri->regs = sbus_ioremap(&sdev->resource[0], 0,
-				  dbri->regs_size, "DBRI Registers");
+	dbri->regs_size = resource_size(&op->resource[0]);
+	dbri->regs = of_ioremap(&op->resource[0], 0,
+				dbri->regs_size, "DBRI Registers");
 	if (!dbri->regs) {
 		printk(KERN_ERR "DBRI: could not allocate registers\n");
-		sbus_free_consistent(sdev, sizeof(struct dbri_dma),
-				     (void *)dbri->dma, dbri->dma_dvma);
+		dma_free_coherent(&op->dev, sizeof(struct dbri_dma),
+				  (void *)dbri->dma, dbri->dma_dvma);
 		return -EIO;
 	}
 
@@ -2546,9 +2552,9 @@ static int __devinit snd_dbri_create(struct snd_card *card,
 			  "DBRI audio", dbri);
 	if (err) {
 		printk(KERN_ERR "DBRI: Can't get irq %d\n", dbri->irq);
-		sbus_iounmap(dbri->regs, dbri->regs_size);
-		sbus_free_consistent(sdev, sizeof(struct dbri_dma),
-				     (void *)dbri->dma, dbri->dma_dvma);
+		of_iounmap(&op->resource[0], dbri->regs, dbri->regs_size);
+		dma_free_coherent(&op->dev, sizeof(struct dbri_dma),
+				  (void *)dbri->dma, dbri->dma_dvma);
 		return err;
 	}
 
@@ -2572,26 +2578,22 @@ static void snd_dbri_free(struct snd_dbri *dbri)
 		free_irq(dbri->irq, dbri);
 
 	if (dbri->regs)
-		sbus_iounmap(dbri->regs, dbri->regs_size);
+		of_iounmap(&dbri->op->resource[0], dbri->regs, dbri->regs_size);
 
 	if (dbri->dma)
-		sbus_free_consistent(dbri->sdev, sizeof(struct dbri_dma),
-				     (void *)dbri->dma, dbri->dma_dvma);
+		dma_free_coherent(&dbri->op->dev,
+				  sizeof(struct dbri_dma),
+				  (void *)dbri->dma, dbri->dma_dvma);
 }
 
-static int __devinit dbri_probe(struct of_device *of_dev,
-				const struct of_device_id *match)
+static int dbri_probe(struct platform_device *op)
 {
-	struct sbus_dev *sdev = to_sbus_device(&of_dev->dev);
 	struct snd_dbri *dbri;
-	int irq;
 	struct resource *rp;
 	struct snd_card *card;
 	static int dev = 0;
+	int irq;
 	int err;
-
-	dprintk(D_GEN, "DBRI: Found %s in SBUS slot %d\n",
-		sdev->prom_name, sdev->slot);
 
 	if (dev >= SNDRV_CARDS)
 		return -ENODEV;
@@ -2600,25 +2602,25 @@ static int __devinit dbri_probe(struct of_device *of_dev,
 		return -ENOENT;
 	}
 
-	irq = sdev->irqs[0];
+	irq = op->archdata.irqs[0];
 	if (irq <= 0) {
 		printk(KERN_ERR "DBRI-%d: No IRQ.\n", dev);
 		return -ENODEV;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-			    sizeof(struct snd_dbri));
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_new(&op->dev, index[dev], id[dev], THIS_MODULE,
+			   sizeof(struct snd_dbri), &card);
+	if (err < 0)
+		return err;
 
 	strcpy(card->driver, "DBRI");
 	strcpy(card->shortname, "Sun DBRI");
-	rp = &sdev->resource[0];
+	rp = &op->resource[0];
 	sprintf(card->longname, "%s at 0x%02lx:0x%016Lx, irq %d",
 		card->shortname,
 		rp->flags & 0xffL, (unsigned long long)rp->start, irq);
 
-	err = snd_dbri_create(card, sdev, irq, dev);
+	err = snd_dbri_create(card, op, irq, dev);
 	if (err < 0) {
 		snd_card_free(card);
 		return err;
@@ -2635,7 +2637,7 @@ static int __devinit dbri_probe(struct of_device *of_dev,
 
 	/* /proc file handling */
 	snd_dbri_proc(card);
-	dev_set_drvdata(&of_dev->dev, card);
+	dev_set_drvdata(&op->dev, card);
 
 	err = snd_card_register(card);
 	if (err < 0)
@@ -2643,7 +2645,7 @@ static int __devinit dbri_probe(struct of_device *of_dev,
 
 	printk(KERN_INFO "audio%d at %p (irq %d) is DBRI(%c)+CS4215(%d)\n",
 	       dev, dbri->regs,
-	       dbri->irq, sdev->prom_name[9], dbri->mm.version);
+	       dbri->irq, op->dev.of_node->name[9], dbri->mm.version);
 	dev++;
 
 	return 0;
@@ -2654,19 +2656,17 @@ _err:
 	return err;
 }
 
-static int __devexit dbri_remove(struct of_device *dev)
+static int dbri_remove(struct platform_device *op)
 {
-	struct snd_card *card = dev_get_drvdata(&dev->dev);
+	struct snd_card *card = dev_get_drvdata(&op->dev);
 
 	snd_dbri_free(card->private_data);
 	snd_card_free(card);
 
-	dev_set_drvdata(&dev->dev, NULL);
-
 	return 0;
 }
 
-static struct of_device_id dbri_match[] = {
+static const struct of_device_id dbri_match[] = {
 	{
 		.name = "SUNW,DBRIe",
 	},
@@ -2678,23 +2678,13 @@ static struct of_device_id dbri_match[] = {
 
 MODULE_DEVICE_TABLE(of, dbri_match);
 
-static struct of_platform_driver dbri_sbus_driver = {
-	.name		= "dbri",
-	.match_table	= dbri_match,
+static struct platform_driver dbri_sbus_driver = {
+	.driver = {
+		.name = "dbri",
+		.of_match_table = dbri_match,
+	},
 	.probe		= dbri_probe,
-	.remove		= __devexit_p(dbri_remove),
+	.remove		= dbri_remove,
 };
 
-/* Probe for the dbri chip and then attach the driver. */
-static int __init dbri_init(void)
-{
-	return of_register_driver(&dbri_sbus_driver, &sbus_bus_type);
-}
-
-static void __exit dbri_exit(void)
-{
-	of_unregister_driver(&dbri_sbus_driver);
-}
-
-module_init(dbri_init);
-module_exit(dbri_exit);
+module_platform_driver(dbri_sbus_driver);

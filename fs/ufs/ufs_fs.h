@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  linux/include/linux/ufs_fs.h
  *
@@ -34,6 +35,7 @@
 #include <linux/kernel.h>
 #include <linux/stat.h>
 #include <linux/fs.h>
+#include <linux/workqueue.h>
 
 #include <asm/div64.h>
 typedef __u64 __bitwise __fs64;
@@ -48,6 +50,7 @@ typedef __u16 __bitwise __fs16;
 #define UFS_SECTOR_SIZE 512
 #define UFS_SECTOR_BITS 9
 #define UFS_MAGIC  0x00011954
+#define UFS_MAGIC_BW 0x0f242697
 #define UFS2_MAGIC 0x19540119
 #define UFS_CIGAM  0x54190100 /* byteswapped MAGIC */
 
@@ -138,12 +141,18 @@ typedef __u16 __bitwise __fs16;
 
 #define UFS_USEEFT  ((__u16)65535)
 
+/* fs_clean values */
 #define UFS_FSOK      0x7c269d38
 #define UFS_FSACTIVE  ((__s8)0x00)
 #define UFS_FSCLEAN   ((__s8)0x01)
 #define UFS_FSSTABLE  ((__s8)0x02)
 #define UFS_FSOSF1    ((__s8)0x03)	/* is this correct for DEC OSF/1? */
 #define UFS_FSBAD     ((__s8)0xff)
+
+/* Solaris-specific fs_clean values */
+#define UFS_FSSUSPEND ((__s8)0xfe)	/* temporarily suspended */
+#define UFS_FSLOG     ((__s8)0xfd)	/* logging fs */
+#define UFS_FSFIX     ((__s8)0xfc)	/* being repaired while mounted */
 
 /* From here to next blank line, s_flags for ufs_sb_info */
 /* directory entry encoding */
@@ -227,11 +236,16 @@ typedef __u16 __bitwise __fs16;
  */
 #define ufs_cbtocylno(bno) \
 	((bno) * uspi->s_nspf / uspi->s_spc)
-#define ufs_cbtorpos(bno) \
+#define ufs_cbtorpos(bno)				      \
+	((UFS_SB(sb)->s_flags & UFS_CG_SUN) ?		      \
+	 (((((bno) * uspi->s_nspf % uspi->s_spc) %	      \
+	    uspi->s_nsect) *				      \
+	   uspi->s_nrpos) / uspi->s_nsect)		      \
+	 :						      \
 	((((bno) * uspi->s_nspf % uspi->s_spc / uspi->s_nsect \
 	* uspi->s_trackskew + (bno) * uspi->s_nspf % uspi->s_spc \
 	% uspi->s_nsect * uspi->s_interleave) % uspi->s_nsect \
-	* uspi->s_nrpos) / uspi->s_npsect)
+	  * uspi->s_nrpos) / uspi->s_npsect))
 
 /*
  * The following macros optimize certain frequently calculated
@@ -720,10 +734,8 @@ struct ufs_sb_private_info {
 	__u32	s_dblkno;	/* offset of first data after cg */
 	__u32	s_cgoffset;	/* cylinder group offset in cylinder */
 	__u32	s_cgmask;	/* used to calc mod fs_ntrak */
-	__u32	s_size;		/* number of blocks (fragments) in fs */
-	__u32	s_dsize;	/* number of data blocks in fs */
-	__u64	s_u2_size;	/* ufs2: number of blocks (fragments) in fs */
-	__u64	s_u2_dsize;	/*ufs2:  number of data blocks in fs */
+	__u64	s_size;		/* number of blocks (fragments) in fs */
+	__u64	s_dsize;	/* number of data blocks in fs */
 	__u32	s_ncg;		/* number of cylinder groups */
 	__u32	s_bsize;	/* size of basic blocks */
 	__u32	s_fsize;	/* size of fragments */
@@ -780,6 +792,9 @@ struct ufs_sb_private_info {
 	__u32	s_maxsymlinklen;/* upper limit on fast symlinks' size */
 	__s32	fs_magic;       /* filesystem magic */
 	unsigned int s_dirblksize;
+	__u64   s_root_blocks;
+	__u64	s_time_to_space;
+	__u64	s_space_to_time;
 };
 
 /*

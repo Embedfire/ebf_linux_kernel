@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/fs/fat/misc.c
  *
@@ -6,57 +7,78 @@
  *		 and date_dos2unix for date==0 by Igor Zhbanov(bsg@uniyar.ac.ru)
  */
 
-#include <linux/module.h>
-#include <linux/fs.h>
-#include <linux/msdos_fs.h>
-#include <linux/buffer_head.h>
+#include "fat.h"
+#include <linux/iversion.h>
 
 /*
- * fat_fs_panic reports a severe file system problem and sets the file system
- * read-only. The file system can be made writable again by remounting it.
+ * fat_fs_error reports a file system problem that might indicate fa data
+ * corruption/inconsistency. Depending on 'errors' mount option the
+ * panic() is called, or error message is printed FAT and nothing is done,
+ * or filesystem is remounted read-only (default behavior).
+ * In case the file system is remounted read-only, it can be made writable
+ * again by remounting it.
  */
-void fat_fs_panic(struct super_block *s, const char *fmt, ...)
+void __fat_fs_error(struct super_block *sb, int report, const char *fmt, ...)
 {
+	struct fat_mount_options *opts = &MSDOS_SB(sb)->options;
 	va_list args;
+	struct va_format vaf;
 
-	printk(KERN_ERR "FAT: Filesystem panic (dev %s)\n", s->s_id);
+	if (report) {
+		va_start(args, fmt);
+		vaf.fmt = fmt;
+		vaf.va = &args;
+		fat_msg(sb, KERN_ERR, "error, %pV", &vaf);
+		va_end(args);
+	}
 
-	printk(KERN_ERR "    ");
-	va_start(args, fmt);
-	vprintk(fmt, args);
-	va_end(args);
-	printk("\n");
-
-	if (!(s->s_flags & MS_RDONLY)) {
-		s->s_flags |= MS_RDONLY;
-		printk(KERN_ERR "    File system has been set read-only\n");
+	if (opts->errors == FAT_ERRORS_PANIC)
+		panic("FAT-fs (%s): fs panic from previous error\n", sb->s_id);
+	else if (opts->errors == FAT_ERRORS_RO && !sb_rdonly(sb)) {
+		sb->s_flags |= SB_RDONLY;
+		fat_msg(sb, KERN_ERR, "Filesystem has been set read-only");
 	}
 }
+EXPORT_SYMBOL_GPL(__fat_fs_error);
 
-EXPORT_SYMBOL_GPL(fat_fs_panic);
+/**
+ * fat_msg() - print preformated FAT specific messages. Every thing what is
+ * not fat_fs_error() should be fat_msg().
+ */
+void fat_msg(struct super_block *sb, const char *level, const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list args;
+
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+	printk("%sFAT-fs (%s): %pV\n", level, sb->s_id, &vaf);
+	va_end(args);
+}
 
 /* Flushes the number of free clusters on FAT32 */
 /* XXX: Need to write one per FSINFO block.  Currently only writes 1 */
-void fat_clusters_flush(struct super_block *sb)
+int fat_clusters_flush(struct super_block *sb)
 {
 	struct msdos_sb_info *sbi = MSDOS_SB(sb);
 	struct buffer_head *bh;
 	struct fat_boot_fsinfo *fsinfo;
 
-	if (sbi->fat_bits != 32)
-		return;
+	if (!is_fat32(sbi))
+		return 0;
 
 	bh = sb_bread(sb, sbi->fsinfo_sector);
 	if (bh == NULL) {
-		printk(KERN_ERR "FAT: bread failed in fat_clusters_flush\n");
-		return;
+		fat_msg(sb, KERN_ERR, "bread failed in fat_clusters_flush");
+		return -EIO;
 	}
 
 	fsinfo = (struct fat_boot_fsinfo *)bh->b_data;
 	/* Sanity check */
 	if (!IS_FSINFO(fsinfo)) {
-		printk(KERN_ERR "FAT: Invalid FSINFO signature: "
-		       "0x%08x, 0x%08x (sector = %lu)\n",
+		fat_msg(sb, KERN_ERR, "Invalid FSINFO signature: "
+		       "0x%08x, 0x%08x (sector = %lu)",
 		       le32_to_cpu(fsinfo->signature1),
 		       le32_to_cpu(fsinfo->signature2),
 		       sbi->fsinfo_sector);
@@ -68,6 +90,8 @@ void fat_clusters_flush(struct super_block *sb)
 		mark_buffer_dirty(bh);
 	}
 	brelse(bh);
+
+	return 0;
 }
 
 /*
@@ -108,13 +132,17 @@ int fat_chain_add(struct inode *inode, int new_dclus, int nr_cluster)
 		}
 		if (ret < 0)
 			return ret;
+		/*
+		 * FIXME:Although we can add this cache, fat_cache_add() is
+		 * assuming to be called after linear search with fat_cache_id.
+		 */
 //		fat_cache_add(inode, new_fclus, new_dclus);
 	} else {
 		MSDOS_I(inode)->i_start = new_dclus;
 		MSDOS_I(inode)->i_logstart = new_dclus;
 		/*
-		 * Since generic_osync_inode() synchronize later if
-		 * this is not directory, we don't here.
+		 * Since generic_write_sync() synchronizes regular files later,
+		 * we sync here only directories.
 		 */
 		if (S_ISDIR(inode->i_mode) && IS_DIRSYNC(inode)) {
 			ret = fat_sync_inode(inode);
@@ -124,8 +152,9 @@ int fat_chain_add(struct inode *inode, int new_dclus, int nr_cluster)
 			mark_inode_dirty(inode);
 	}
 	if (new_fclus != (inode->i_blocks >> (sbi->cluster_bits - 9))) {
-		fat_fs_panic(sb, "clusters badly computed (%d != %lu)",
-			new_fclus, inode->i_blocks >> (sbi->cluster_bits - 9));
+		fat_fs_error(sb, "clusters badly computed (%d != %llu)",
+			     new_fclus,
+			     (llu)(inode->i_blocks >> (sbi->cluster_bits - 9)));
 		fat_cache_inval_inode(inode);
 	}
 	inode->i_blocks += nr_cluster << (sbi->cluster_bits - 9);
@@ -133,81 +162,204 @@ int fat_chain_add(struct inode *inode, int new_dclus, int nr_cluster)
 	return 0;
 }
 
-extern struct timezone sys_tz;
+/*
+ * The epoch of FAT timestamp is 1980.
+ *     :  bits :     value
+ * date:  0 -  4: day	(1 -  31)
+ * date:  5 -  8: month	(1 -  12)
+ * date:  9 - 15: year	(0 - 127) from 1980
+ * time:  0 -  4: sec	(0 -  29) 2sec counts
+ * time:  5 - 10: min	(0 -  59)
+ * time: 11 - 15: hour	(0 -  23)
+ */
+#define SECS_PER_MIN	60
+#define SECS_PER_HOUR	(60 * 60)
+#define SECS_PER_DAY	(SECS_PER_HOUR * 24)
+/* days between 1.1.70 and 1.1.80 (2 leap days) */
+#define DAYS_DELTA	(365 * 10 + 2)
+/* 120 (2100 - 1980) isn't leap year */
+#define YEAR_2100	120
+#define IS_LEAP_YEAR(y)	(!((y) & 3) && (y) != YEAR_2100)
 
 /* Linear day numbers of the respective 1sts in non-leap years. */
-static int day_n[] = {
-   /* Jan  Feb  Mar  Apr   May  Jun  Jul  Aug  Sep  Oct  Nov  Dec */
-	0,  31,  59,  90,  120, 151, 181, 212, 243, 273, 304, 334, 0, 0, 0, 0
+static long days_in_year[] = {
+	/* Jan  Feb  Mar  Apr  May  Jun  Jul  Aug  Sep  Oct  Nov  Dec */
+	0,   0,  31,  59,  90, 120, 151, 181, 212, 243, 273, 304, 334, 0, 0, 0,
 };
 
-/* Convert a MS-DOS time/date pair to a UNIX date (seconds since 1 1 70). */
-int date_dos2unix(unsigned short time, unsigned short date, int tz_utc)
+static inline int fat_tz_offset(struct msdos_sb_info *sbi)
 {
-	int month, year, secs;
-
-	/*
-	 * first subtract and mask after that... Otherwise, if
-	 * date == 0, bad things happen
-	 */
-	month = ((date >> 5) - 1) & 15;
-	year = date >> 9;
-	secs = (time & 31)*2+60*((time >> 5) & 63)+(time >> 11)*3600+86400*
-	    ((date & 31)-1+day_n[month]+(year/4)+year*365-((year & 3) == 0 &&
-	    month < 2 ? 1 : 0)+3653);
-			/* days since 1.1.70 plus 80's leap day */
-	if (!tz_utc)
-		secs += sys_tz.tz_minuteswest*60;
-	return secs;
+	return (sbi->options.tz_set ?
+	       -sbi->options.time_offset :
+	       sys_tz.tz_minuteswest) * SECS_PER_MIN;
 }
 
-/* Convert linear UNIX date to a MS-DOS time/date pair. */
-void fat_date_unix2dos(int unix_date, __le16 *time, __le16 *date, int tz_utc)
+/* Convert a FAT time/date pair to a UNIX date (seconds since 1 1 70). */
+void fat_time_fat2unix(struct msdos_sb_info *sbi, struct timespec64 *ts,
+		       __le16 __time, __le16 __date, u8 time_cs)
 {
-	int day, year, nl_day, month;
+	u16 time = le16_to_cpu(__time), date = le16_to_cpu(__date);
+	time64_t second;
+	long day, leap_day, month, year;
 
-	if (!tz_utc)
-		unix_date -= sys_tz.tz_minuteswest*60;
+	year  = date >> 9;
+	month = max(1, (date >> 5) & 0xf);
+	day   = max(1, date & 0x1f) - 1;
 
-	/* Jan 1 GMT 00:00:00 1980. But what about another time zone? */
-	if (unix_date < 315532800)
-		unix_date = 315532800;
+	leap_day = (year + 3) / 4;
+	if (year > YEAR_2100)		/* 2100 isn't leap year */
+		leap_day--;
+	if (IS_LEAP_YEAR(year) && month > 2)
+		leap_day++;
 
-	*time = cpu_to_le16((unix_date % 60)/2+(((unix_date/60) % 60) << 5)+
-	    (((unix_date/3600) % 24) << 11));
-	day = unix_date/86400-3652;
-	year = day/365;
-	if ((year+3)/4+365*year > day)
-		year--;
-	day -= (year+3)/4+365*year;
-	if (day == 59 && !(year & 3)) {
-		nl_day = day;
-		month = 2;
+	second =  (time & 0x1f) << 1;
+	second += ((time >> 5) & 0x3f) * SECS_PER_MIN;
+	second += (time >> 11) * SECS_PER_HOUR;
+	second += (time64_t)(year * 365 + leap_day
+		   + days_in_year[month] + day
+		   + DAYS_DELTA) * SECS_PER_DAY;
+
+	second += fat_tz_offset(sbi);
+
+	if (time_cs) {
+		ts->tv_sec = second + (time_cs / 100);
+		ts->tv_nsec = (time_cs % 100) * 10000000;
 	} else {
-		nl_day = (year & 3) || day <= 59 ? day : day-1;
-		for (month = 0; month < 12; month++) {
-			if (day_n[month] > nl_day)
-				break;
-		}
+		ts->tv_sec = second;
+		ts->tv_nsec = 0;
 	}
-	*date = cpu_to_le16(nl_day-day_n[month-1]+1+(month << 5)+(year << 9));
 }
 
-EXPORT_SYMBOL_GPL(fat_date_unix2dos);
+/* Convert linear UNIX date to a FAT time/date pair. */
+void fat_time_unix2fat(struct msdos_sb_info *sbi, struct timespec64 *ts,
+		       __le16 *time, __le16 *date, u8 *time_cs)
+{
+	struct tm tm;
+	time64_to_tm(ts->tv_sec, -fat_tz_offset(sbi), &tm);
+
+	/*  FAT can only support year between 1980 to 2107 */
+	if (tm.tm_year < 1980 - 1900) {
+		*time = 0;
+		*date = cpu_to_le16((0 << 9) | (1 << 5) | 1);
+		if (time_cs)
+			*time_cs = 0;
+		return;
+	}
+	if (tm.tm_year > 2107 - 1900) {
+		*time = cpu_to_le16((23 << 11) | (59 << 5) | 29);
+		*date = cpu_to_le16((127 << 9) | (12 << 5) | 31);
+		if (time_cs)
+			*time_cs = 199;
+		return;
+	}
+
+	/* from 1900 -> from 1980 */
+	tm.tm_year -= 80;
+	/* 0~11 -> 1~12 */
+	tm.tm_mon++;
+	/* 0~59 -> 0~29(2sec counts) */
+	tm.tm_sec >>= 1;
+
+	*time = cpu_to_le16(tm.tm_hour << 11 | tm.tm_min << 5 | tm.tm_sec);
+	*date = cpu_to_le16(tm.tm_year << 9 | tm.tm_mon << 5 | tm.tm_mday);
+	if (time_cs)
+		*time_cs = (ts->tv_sec & 1) * 100 + ts->tv_nsec / 10000000;
+}
+EXPORT_SYMBOL_GPL(fat_time_unix2fat);
+
+static inline struct timespec64 fat_timespec64_trunc_2secs(struct timespec64 ts)
+{
+	return (struct timespec64){ ts.tv_sec & ~1ULL, 0 };
+}
+
+static inline struct timespec64 fat_timespec64_trunc_10ms(struct timespec64 ts)
+{
+	if (ts.tv_nsec)
+		ts.tv_nsec -= ts.tv_nsec % 10000000UL;
+	return ts;
+}
+
+/*
+ * truncate the various times with appropriate granularity:
+ *   root inode:
+ *     all times always 0
+ *   all other inodes:
+ *     mtime - 2 seconds
+ *     ctime
+ *       msdos - 2 seconds
+ *       vfat  - 10 milliseconds
+ *     atime - 24 hours (00:00:00 in local timezone)
+ */
+int fat_truncate_time(struct inode *inode, struct timespec64 *now, int flags)
+{
+	struct msdos_sb_info *sbi = MSDOS_SB(inode->i_sb);
+	struct timespec64 ts;
+
+	if (inode->i_ino == MSDOS_ROOT_INO)
+		return 0;
+
+	if (now == NULL) {
+		now = &ts;
+		ts = current_time(inode);
+	}
+
+	if (flags & S_ATIME) {
+		/* to localtime */
+		time64_t seconds = now->tv_sec - fat_tz_offset(sbi);
+		s32 remainder;
+
+		div_s64_rem(seconds, SECS_PER_DAY, &remainder);
+		/* to day boundary, and back to unix time */
+		seconds = seconds + fat_tz_offset(sbi) - remainder;
+
+		inode->i_atime = (struct timespec64){ seconds, 0 };
+	}
+	if (flags & S_CTIME) {
+		if (sbi->options.isvfat)
+			inode->i_ctime = fat_timespec64_trunc_10ms(*now);
+		else
+			inode->i_ctime = fat_timespec64_trunc_2secs(*now);
+	}
+	if (flags & S_MTIME)
+		inode->i_mtime = fat_timespec64_trunc_2secs(*now);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(fat_truncate_time);
+
+int fat_update_time(struct inode *inode, struct timespec64 *now, int flags)
+{
+	int iflags = I_DIRTY_TIME;
+	bool dirty = false;
+
+	if (inode->i_ino == MSDOS_ROOT_INO)
+		return 0;
+
+	fat_truncate_time(inode, now, flags);
+	if (flags & S_VERSION)
+		dirty = inode_maybe_inc_iversion(inode, false);
+	if ((flags & (S_ATIME | S_CTIME | S_MTIME)) &&
+	    !(inode->i_sb->s_flags & SB_LAZYTIME))
+		dirty = true;
+
+	if (dirty)
+		iflags |= I_DIRTY_SYNC;
+	__mark_inode_dirty(inode, iflags);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(fat_update_time);
 
 int fat_sync_bhs(struct buffer_head **bhs, int nr_bhs)
 {
 	int i, err = 0;
 
-	ll_rw_block(SWRITE, nr_bhs, bhs);
+	for (i = 0; i < nr_bhs; i++)
+		write_dirty_buffer(bhs[i], 0);
+
 	for (i = 0; i < nr_bhs; i++) {
 		wait_on_buffer(bhs[i]);
-		if (buffer_eopnotsupp(bhs[i])) {
-			clear_buffer_eopnotsupp(bhs[i]);
-			err = -EOPNOTSUPP;
-		} else if (!err && !buffer_uptodate(bhs[i]))
+		if (!err && !buffer_uptodate(bhs[i]))
 			err = -EIO;
 	}
 	return err;
 }
-

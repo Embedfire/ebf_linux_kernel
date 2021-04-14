@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Generic IXP4xx beeper driver
  *
@@ -8,11 +9,6 @@
  *
  * Author: Alessandro Zummo <a.zummo@towertech.it>
  * Maintainers: http://www.nslu2-linux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/module.h>
@@ -20,6 +16,7 @@
 #include <linux/delay.h>
 #include <linux/platform_device.h>
 #include <linux/interrupt.h>
+#include <linux/gpio.h>
 #include <mach/hardware.h>
 
 MODULE_AUTHOR("Alessandro Zummo <a.zummo@towertech.it>");
@@ -29,21 +26,20 @@ MODULE_ALIAS("platform:ixp4xx-beeper");
 
 static DEFINE_SPINLOCK(beep_lock);
 
+static int ixp4xx_timer2_irq;
+
 static void ixp4xx_spkr_control(unsigned int pin, unsigned int count)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&beep_lock, flags);
 
-	 if (count) {
-		gpio_line_config(pin, IXP4XX_GPIO_OUT);
-		gpio_line_set(pin, IXP4XX_GPIO_LOW);
-
+	if (count) {
+		gpio_direction_output(pin, 0);
 		*IXP4XX_OSRT2 = (count & ~IXP4XX_OST_RELOAD_MASK) | IXP4XX_OST_ENABLE;
 	} else {
-		gpio_line_config(pin, IXP4XX_GPIO_IN);
-		gpio_line_set(pin, IXP4XX_GPIO_HIGH);
-
+		gpio_direction_output(pin, 1);
+		gpio_direction_input(pin);
 		*IXP4XX_OSRT2 = 0;
 	}
 
@@ -69,11 +65,7 @@ static int ixp4xx_spkr_event(struct input_dev *dev, unsigned int type, unsigned 
 	}
 
 	if (value > 20 && value < 32767)
-#ifndef FREQ
-		count = (ixp4xx_get_board_tick_rate() / (value * 4)) - 1;
-#else
-		count = (FREQ / (value * 4)) - 1;
-#endif
+		count = (ixp4xx_timer_freq / (value * 4)) - 1;
 
 	ixp4xx_spkr_control(pin, count);
 
@@ -82,18 +74,21 @@ static int ixp4xx_spkr_event(struct input_dev *dev, unsigned int type, unsigned 
 
 static irqreturn_t ixp4xx_spkr_interrupt(int irq, void *dev_id)
 {
+	unsigned int pin = (unsigned int) dev_id;
+
 	/* clear interrupt */
 	*IXP4XX_OSST = IXP4XX_OSST_TIMER_2_PEND;
 
 	/* flip the beeper output */
-	*IXP4XX_GPIO_GPOUTR ^= (1 << (unsigned int) dev_id);
+	gpio_set_value(pin, !gpio_get_value(pin));
 
 	return IRQ_HANDLED;
 }
 
-static int __devinit ixp4xx_spkr_probe(struct platform_device *dev)
+static int ixp4xx_spkr_probe(struct platform_device *dev)
 {
 	struct input_dev *input_dev;
+	int irq;
 	int err;
 
 	input_dev = input_allocate_device();
@@ -114,10 +109,22 @@ static int __devinit ixp4xx_spkr_probe(struct platform_device *dev)
 	input_dev->sndbit[0] = BIT_MASK(SND_BELL) | BIT_MASK(SND_TONE);
 	input_dev->event = ixp4xx_spkr_event;
 
-	err = request_irq(IRQ_IXP4XX_TIMER2, &ixp4xx_spkr_interrupt,
-			  IRQF_DISABLED | IRQF_TIMER, "ixp4xx-beeper", (void *) dev->id);
+	irq = platform_get_irq(dev, 0);
+	if (irq < 0) {
+		err = irq;
+		goto err_free_device;
+	}
+
+	err = gpio_request(dev->id, "ixp4-beeper");
 	if (err)
 		goto err_free_device;
+
+	err = request_irq(irq, &ixp4xx_spkr_interrupt,
+			  IRQF_NO_SUSPEND, "ixp4xx-beeper",
+			  (void *) dev->id);
+	if (err)
+		goto err_free_gpio;
+	ixp4xx_timer2_irq = irq;
 
 	err = input_register_device(input_dev);
 	if (err)
@@ -128,26 +135,28 @@ static int __devinit ixp4xx_spkr_probe(struct platform_device *dev)
 	return 0;
 
  err_free_irq:
-	free_irq(IRQ_IXP4XX_TIMER2, dev);
+	free_irq(irq, (void *)dev->id);
+ err_free_gpio:
+	gpio_free(dev->id);
  err_free_device:
 	input_free_device(input_dev);
 
 	return err;
 }
 
-static int __devexit ixp4xx_spkr_remove(struct platform_device *dev)
+static int ixp4xx_spkr_remove(struct platform_device *dev)
 {
 	struct input_dev *input_dev = platform_get_drvdata(dev);
 	unsigned int pin = (unsigned int) input_get_drvdata(input_dev);
 
 	input_unregister_device(input_dev);
-	platform_set_drvdata(dev, NULL);
 
 	/* turn the speaker off */
-	disable_irq(IRQ_IXP4XX_TIMER2);
+	disable_irq(ixp4xx_timer2_irq);
 	ixp4xx_spkr_control(pin, 0);
 
-	free_irq(IRQ_IXP4XX_TIMER2, dev);
+	free_irq(ixp4xx_timer2_irq, (void *)dev->id);
+	gpio_free(dev->id);
 
 	return 0;
 }
@@ -158,29 +167,17 @@ static void ixp4xx_spkr_shutdown(struct platform_device *dev)
 	unsigned int pin = (unsigned int) input_get_drvdata(input_dev);
 
 	/* turn off the speaker */
-	disable_irq(IRQ_IXP4XX_TIMER2);
+	disable_irq(ixp4xx_timer2_irq);
 	ixp4xx_spkr_control(pin, 0);
 }
 
 static struct platform_driver ixp4xx_spkr_platform_driver = {
 	.driver		= {
 		.name	= "ixp4xx-beeper",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= ixp4xx_spkr_probe,
-	.remove		= __devexit_p(ixp4xx_spkr_remove),
+	.remove		= ixp4xx_spkr_remove,
 	.shutdown	= ixp4xx_spkr_shutdown,
 };
+module_platform_driver(ixp4xx_spkr_platform_driver);
 
-static int __init ixp4xx_spkr_init(void)
-{
-	return platform_driver_register(&ixp4xx_spkr_platform_driver);
-}
-
-static void __exit ixp4xx_spkr_exit(void)
-{
-	platform_driver_unregister(&ixp4xx_spkr_platform_driver);
-}
-
-module_init(ixp4xx_spkr_init);
-module_exit(ixp4xx_spkr_exit);

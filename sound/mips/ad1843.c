@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   AD1843 low level driver
  *
@@ -6,21 +7,6 @@
  *
  *   inspired from vwsnd.c (SGI VW audio driver)
  *     Copyright 1999 Silicon Graphics, Inc.  All rights reserved.
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <linux/init.h>
@@ -276,7 +262,7 @@ static void ad1843_write_multi(struct snd_ad1843 *ad1843, int argcount, ...)
 		if (reg == -1)
 			reg = fp->reg;
 		else
-			BUG_ON(reg != fp->reg);
+			WARN_ON(reg != fp->reg);
 		m = ((1 << fp->nbits) - 1) << fp->lo_bit;
 		mask |= m;
 		bits |= (value << fp->lo_bit) & m;

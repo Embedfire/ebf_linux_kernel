@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Device Tree for the PQ2FADS-ZU board with an MPC8280 chip.
  *
  * Copyright 2007,2008 Freescale Semiconductor Inc.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 /dts-v1/;
@@ -16,6 +12,14 @@
 	compatible = "fsl,pq2fads";
 	#address-cells = <1>;
 	#size-cells = <1>;
+
+	aliases {
+		ethernet0 = &enet0;
+		ethernet1 = &enet1;
+		serial0 = &serial0;
+		serial1 = &serial1;
+		pci0 = &pci0;
+	};
 
 	cpus {
 		#address-cells = <1>;
@@ -45,7 +49,7 @@
 		#size-cells = <1>;
 		reg = <0xf0010100 0x60>;
 
-		ranges = <0x0 0x0 0xfe000000 0x800000
+		ranges = <0x0 0x0 0xff800000 0x800000
 		          0x1 0x0 0xf4500000 0x8000
 		          0x8 0x0 0xf8200000 0x8000>;
 
@@ -71,7 +75,7 @@
 		};
 	};
 
-	pci@f0010800 {
+	pci0: pci@f0010800 {
 		device_type = "pci";
 		reg = <0xf0010800 0x10c 0xf00101ac 0x8 0xf00101c4 0x8>;
 		compatible = "fsl,mpc8280-pci", "fsl,pq2-pci";
@@ -142,7 +146,7 @@
 				reg = <0x119f0 0x10 0x115f0 0x10>;
 			};
 
-			serial@11a00 {
+			serial0: serial@11a00 {
 				device_type = "serial";
 				compatible = "fsl,mpc8280-scc-uart",
 				             "fsl,cpm2-scc-uart";
@@ -153,7 +157,7 @@
 				fsl,cpm-command = <0x800000>;
 			};
 
-			serial@11a20 {
+			serial1: serial@11a20 {
 				device_type = "serial";
 				compatible = "fsl,mpc8280-scc-uart",
 				             "fsl,cpm2-scc-uart";
@@ -164,7 +168,7 @@
 				fsl,cpm-command = <0x4a00000>;
 			};
 
-			ethernet@11320 {
+			enet0: ethernet@11320 {
 				device_type = "network";
 				compatible = "fsl,mpc8280-fcc-enet",
 				             "fsl,cpm2-fcc-enet";
@@ -176,7 +180,7 @@
 				fsl,cpm-command = <0x16200300>;
 			};
 
-			ethernet@11340 {
+			enet1: ethernet@11340 {
 				device_type = "network";
 				compatible = "fsl,mpc8280-fcc-enet",
 				             "fsl,cpm2-fcc-enet";
@@ -190,7 +194,6 @@
 			};
 
 			mdio@10d40 {
-				device_type = "mdio";
 				compatible = "fsl,pq2fads-mdio-bitbang",
 				             "fsl,mpc8280-mdio-bitbang",
 				             "fsl,cpm2-mdio-bitbang";
@@ -204,14 +207,12 @@
 					interrupt-parent = <&PIC>;
 					interrupts = <25 2>;
 					reg = <0x0>;
-					device_type = "ethernet-phy";
 				};
 
 				PHY1: ethernet-phy@1 {
 					interrupt-parent = <&PIC>;
 					interrupts = <25 2>;
 					reg = <0x3>;
-					device_type = "ethernet-phy";
 				};
 			};
 
@@ -237,6 +238,6 @@
 	};
 
 	chosen {
-		linux,stdout-path = "/soc/cpm/serial@11a00";
+		stdout-path = "/soc/cpm/serial@11a00";
 	};
 };

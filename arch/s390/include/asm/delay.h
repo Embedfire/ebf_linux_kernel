@@ -1,8 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- *  include/asm-s390/delay.h
- *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 1999
  *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com)
  *
  *  Derived from "include/asm-i386/delay.h"
@@ -14,9 +13,13 @@
 #ifndef _S390_DELAY_H
 #define _S390_DELAY_H
 
-extern void __udelay(unsigned long usecs);
-extern void __delay(unsigned long loops);
+void __ndelay(unsigned long long nsecs);
+void __udelay(unsigned long long usecs);
+void udelay_simple(unsigned long long usecs);
+void __delay(unsigned long loops);
 
-#define udelay(n) __udelay(n)
+#define ndelay(n) __ndelay((unsigned long long) (n))
+#define udelay(n) __udelay((unsigned long long) (n))
+#define mdelay(n) __udelay((unsigned long long) (n) * 1000)
 
 #endif /* defined(_S390_DELAY_H) */

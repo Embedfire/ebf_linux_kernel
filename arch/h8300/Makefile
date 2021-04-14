@@ -5,63 +5,42 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# (C) Copyright 2002,2003 Yoshinori Sato <ysato@users.sourceforge.jp>
+# (C) Copyright 2002-2015 Yoshinori Sato <ysato@users.sourceforge.jp>
 #
 
-platform-$(CONFIG_CPU_H8300H)	:= h8300h
-platform-$(CONFIG_CPU_H8S)	:= h8s
-PLATFORM := $(platform-y)
-
-board-$(CONFIG_H8300H_GENERIC)		:= generic
-board-$(CONFIG_H8300H_AKI3068NET)	:= aki3068net
-board-$(CONFIG_H8300H_H8MAX)		:= h8max
-board-$(CONFIG_H8300H_SIM)		:= generic
-board-$(CONFIG_H8S_GENERIC)		:= generic
-board-$(CONFIG_H8S_EDOSK2674)		:= edosk2674
-board-$(CONFIG_H8S_SIM)			:= generic
-BOARD := $(board-y)
-
-model-$(CONFIG_RAMKERNEL)	:= ram
-model-$(CONFIG_ROMKERNEL)	:= rom
-MODEL := $(model-y)
+KBUILD_DEFCONFIG := edosk2674_defconfig
 
 cflags-$(CONFIG_CPU_H8300H)	:= -mh
-ldflags-$(CONFIG_CPU_H8300H)	:= -mh8300helf
+aflags-$(CONFIG_CPU_H8300H)	:= -mh -Wa,--mach=h8300h
+ldflags-$(CONFIG_CPU_H8300H)	:= -mh8300helf_linux
 cflags-$(CONFIG_CPU_H8S)	:= -ms
-ldflags-$(CONFIG_CPU_H8S)	:= -mh8300self
+aflags-$(CONFIG_CPU_H8S)	:= -ms -Wa,--mach=h8300s
+ldflags-$(CONFIG_CPU_H8S)	:= -mh8300self_linux
 
 KBUILD_CFLAGS += $(cflags-y)
 KBUILD_CFLAGS += -mint32 -fno-builtin
-KBUILD_CFLAGS += -g
 KBUILD_CFLAGS += -D__linux__
 KBUILD_CFLAGS += -DUTS_SYSNAME=\"uClinux\"
-KBUILD_AFLAGS += -DPLATFORM=$(PLATFORM) -DMODEL=$(MODEL) $(cflags-y)
-LDFLAGS += $(ldflags-y)
+KBUILD_AFLAGS += $(aflags-y)
+KBUILD_LDFLAGS += $(ldflags-y)
 
-CROSS_COMPILE = h8300-elf-
-LIBGCC := $(shell $(CROSS-COMPILE)$(CC) $(KBUILD_CFLAGS) -print-libgcc-file-name)
+CHECKFLAGS += -msize-long
 
-head-y := arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/crt0_$(MODEL).o
-
-core-y	+= arch/$(ARCH)/kernel/ \
-	   arch/$(ARCH)/mm/
-ifdef PLATFORM
-core-y	+= arch/$(ARCH)/platform/$(PLATFORM)/ \
-	   arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/
+ifeq ($(CROSS_COMPILE),)
+CROSS_COMPILE := $(call cc-cross-prefix, h8300-unknown-linux- h8300-linux-)
 endif
 
-libs-y	+= arch/$(ARCH)/lib/ $(LIBGCC)
+core-y	+= arch/$(ARCH)/kernel/ arch/$(ARCH)/mm/
+core-y	+= arch/$(ARCH)/boot/dts/
+
+libs-y	+= arch/$(ARCH)/lib/
 
 boot := arch/h8300/boot
-
-export MODEL PLATFORM BOARD
-
-archmrproper:
 
 archclean:
 	$(Q)$(MAKE) $(clean)=$(boot)
 
-vmlinux.srec vmlinux.bin zImage: vmlinux
+vmlinux.srec vmlinux.bin zImage uImage.bin: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
 define archhelp

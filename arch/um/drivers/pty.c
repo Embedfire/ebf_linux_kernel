@@ -1,6 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
- * Licensed under the GPL
  */
 
 #include <stdio.h>
@@ -12,10 +12,8 @@
 #include <termios.h>
 #include <sys/stat.h>
 #include "chan_user.h"
-#include "kern_constants.h"
-#include "os.h"
-#include "um_malloc.h"
-#include "user.h"
+#include <os.h>
+#include <um_malloc.h>
 
 struct pty_chan {
 	void (*announce)(char *dev_name, int dev);

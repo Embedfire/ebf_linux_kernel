@@ -1,15 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * setup.c - boot time setup code
  */
 
 #include <linux/init.h>
+#include <linux/export.h>
 
 #include <asm/bootinfo.h>
 #include <asm/reboot.h>
 #include <asm/time.h>
 #include <linux/ioport.h>
 
-#include <asm/mach-rc32434/rc32434.h>
+#include <asm/mach-rc32434/rb.h>
 #include <asm/mach-rc32434/pci.h>
 
 struct pci_reg __iomem *pci_reg;
@@ -27,7 +29,7 @@ static struct resource pci0_res[] = {
 static void rb_machine_restart(char *command)
 {
 	/* just jump to the reset vector */
-	writel(0x80000001, (void *)KSEG1ADDR(RC32434_REG_BASE + RC32434_RST));
+	writel(0x80000001, IDT434_REG_BASE + RST);
 	((void (*)(void)) KSEG1ADDR(0x1FC00000u))();
 }
 
@@ -47,7 +49,7 @@ void __init plat_mem_setup(void)
 
 	set_io_port_base(KSEG1);
 
-	pci_reg = ioremap_nocache(pci0_res[0].start,
+	pci_reg = ioremap(pci0_res[0].start,
 				pci0_res[0].end - pci0_res[0].start);
 	if (!pci_reg) {
 		printk(KERN_ERR "Could not remap PCI registers\n");

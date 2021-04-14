@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_IA64_KREGS_H
 #define _ASM_IA64_KREGS_H
 
@@ -32,7 +33,7 @@
 #define IA64_TR_CURRENT_STACK	1	/* dtr1: maps kernel's memory- & register-stacks */
 
 #define IA64_TR_ALLOC_BASE	2 	/* itr&dtr: Base of dynamic TR resource*/
-#define IA64_TR_ALLOC_MAX	32 	/* Max number for dynamic use*/
+#define IA64_TR_ALLOC_MAX	64 	/* Max number for dynamic use*/
 
 /* Processor status register bits: */
 #define IA64_PSR_BE_BIT		1

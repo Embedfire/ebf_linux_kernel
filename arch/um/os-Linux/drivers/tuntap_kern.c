@@ -1,13 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
- * Licensed under the GPL
  */
 
 #include <linux/netdevice.h>
 #include <linux/init.h>
 #include <linux/skbuff.h>
 #include <asm/errno.h>
-#include "net_kern.h"
+#include <net_kern.h>
 #include "tuntap.h"
 
 struct tuntap_init {
@@ -21,7 +21,7 @@ static void tuntap_init(struct net_device *dev, void *data)
 	struct tuntap_data *tpri;
 	struct tuntap_init *init = data;
 
-	pri = dev->priv;
+	pri = netdev_priv(dev);
 	tpri = (struct tuntap_data *) pri->user;
 	tpri->dev_name = init->dev_name;
 	tpri->fixed_config = (init->dev_name != NULL);

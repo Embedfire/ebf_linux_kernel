@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /**
  * A generic FSM based on fsm used in isdn4linux
  *
@@ -5,6 +6,7 @@
 
 #include "fsm.h"
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/timer.h>
 
 MODULE_AUTHOR("(C) 2000 IBM Corp. by Fritz Elfert (felfert@millenux.com)");
@@ -27,6 +29,7 @@ init_fsm(char *name, const char **state_names, const char **event_names, int nr_
 		return NULL;
 	}
 	strlcpy(this->name, name, sizeof(this->name));
+	init_waitqueue_head(&this->wait_q);
 
 	f = kzalloc(sizeof(fsm), order);
 	if (f == NULL) {
@@ -127,8 +130,9 @@ fsm_getstate_str(fsm_instance *fi)
 }
 
 static void
-fsm_expire_timer(fsm_timer *this)
+fsm_expire_timer(struct timer_list *t)
 {
+	fsm_timer *this = from_timer(this, t, tl);
 #if FSM_TIMER_DEBUG
 	printk(KERN_DEBUG "fsm(%s): Timer %p expired\n",
 	       this->fi->name, this);
@@ -140,13 +144,11 @@ void
 fsm_settimer(fsm_instance *fi, fsm_timer *this)
 {
 	this->fi = fi;
-	this->tl.function = (void *)fsm_expire_timer;
-	this->tl.data = (long)this;
 #if FSM_TIMER_DEBUG
 	printk(KERN_DEBUG "fsm(%s): Create timer %p\n", fi->name,
 	       this);
 #endif
-	init_timer(&this->tl);
+	timer_setup(&this->tl, fsm_expire_timer, 0);
 }
 
 void
@@ -168,9 +170,7 @@ fsm_addtimer(fsm_timer *this, int millisec, int event, void *arg)
 	       this->fi->name, this, millisec);
 #endif
 
-	init_timer(&this->tl);
-	this->tl.function = (void *)fsm_expire_timer;
-	this->tl.data = (long)this;
+	timer_setup(&this->tl, fsm_expire_timer, 0);
 	this->expire_event = event;
 	this->event_arg = arg;
 	this->tl.expires = jiffies + (millisec * HZ) / 1000;
@@ -189,9 +189,7 @@ fsm_modtimer(fsm_timer *this, int millisec, int event, void *arg)
 #endif
 
 	del_timer(&this->tl);
-	init_timer(&this->tl);
-	this->tl.function = (void *)fsm_expire_timer;
-	this->tl.data = (long)this;
+	timer_setup(&this->tl, fsm_expire_timer, 0);
 	this->expire_event = event;
 	this->event_arg = arg;
 	this->tl.expires = jiffies + (millisec * HZ) / 1000;

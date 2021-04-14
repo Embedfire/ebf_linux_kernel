@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_SH_MMU_CONTEXT_32_H
 #define __ASM_SH_MMU_CONTEXT_32_H
 
@@ -10,6 +11,17 @@ static inline void destroy_context(struct mm_struct *mm)
 	/* Do nothing */
 }
 
+#ifdef CONFIG_CPU_HAS_PTEAEX
+static inline void set_asid(unsigned long asid)
+{
+	__raw_writel(asid, MMU_PTEAEX);
+}
+
+static inline unsigned long get_asid(void)
+{
+	return __raw_readl(MMU_PTEAEX) & MMU_CONTEXT_ASID_MASK;
+}
+#else
 static inline void set_asid(unsigned long asid)
 {
 	unsigned long __dummy;
@@ -33,15 +45,16 @@ static inline unsigned long get_asid(void)
 	asid &= MMU_CONTEXT_ASID_MASK;
 	return asid;
 }
+#endif /* CONFIG_CPU_HAS_PTEAEX */
 
 /* MMU_TTB is used for optimizing the fault handling. */
 static inline void set_TTB(pgd_t *pgd)
 {
-	ctrl_outl((unsigned long)pgd, MMU_TTB);
+	__raw_writel((unsigned long)pgd, MMU_TTB);
 }
 
 static inline pgd_t *get_TTB(void)
 {
-	return (pgd_t *)ctrl_inl(MMU_TTB);
+	return (pgd_t *)__raw_readl(MMU_TTB);
 }
 #endif /* __ASM_SH_MMU_CONTEXT_32_H */

@@ -1,7 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASMARM_UCONTEXT_H
 #define _ASMARM_UCONTEXT_H
 
 #include <asm/fpstate.h>
+#include <asm/user.h>
 
 /*
  * struct sigcontext only has room for the basic registers, but struct
@@ -35,6 +37,12 @@ struct ucontext {
  * bytes, to prevent unpredictable padding in the signal frame.
  */
 
+/*
+ * Dummy padding block: if this magic is encountered, the block should
+ * be skipped using the corresponding size field.
+ */
+#define DUMMY_MAGIC		0xb0d9ed01
+
 #ifdef CONFIG_CRUNCH
 #define CRUNCH_MAGIC		0x5065cf03
 #define CRUNCH_STORAGE_SIZE	(CRUNCH_SIZE + 8)
@@ -47,7 +55,7 @@ struct crunch_sigframe {
 #endif
 
 #ifdef CONFIG_IWMMXT
-/* iwmmxt_area is 0x98 bytes long, preceeded by 8 bytes of signature */
+/* iwmmxt_area is 0x98 bytes long, preceded by 8 bytes of signature */
 #define IWMMXT_MAGIC		0x12ef842a
 #define IWMMXT_STORAGE_SIZE	(IWMMXT_SIZE + 8)
 
@@ -59,23 +67,22 @@ struct iwmmxt_sigframe {
 #endif /* CONFIG_IWMMXT */
 
 #ifdef CONFIG_VFP
-#if __LINUX_ARM_ARCH__ < 6
-/* For ARM pre-v6, we use fstmiax and fldmiax.  This adds one extra
- * word after the registers, and a word of padding at the end for
- * alignment.  */
 #define VFP_MAGIC		0x56465001
-#define VFP_STORAGE_SIZE	152
-#else
-#define VFP_MAGIC		0x56465002
-#define VFP_STORAGE_SIZE	144
-#endif
 
 struct vfp_sigframe
 {
 	unsigned long		magic;
 	unsigned long		size;
-	union vfp_state		storage;
-};
+	struct user_vfp		ufp;
+	struct user_vfp_exc	ufp_exc;
+} __attribute__((__aligned__(8)));
+
+/*
+ *  8 byte for magic and size, 264 byte for ufp, 12 bytes for ufp_exc,
+ *  4 bytes padding.
+ */
+#define VFP_STORAGE_SIZE	sizeof(struct vfp_sigframe)
+
 #endif /* CONFIG_VFP */
 
 /*
@@ -91,7 +98,7 @@ struct aux_sigframe {
 #ifdef CONFIG_IWMMXT
 	struct iwmmxt_sigframe	iwmmxt;
 #endif
-#if 0 && defined CONFIG_VFP /* Not yet saved.  */
+#ifdef CONFIG_VFP
 	struct vfp_sigframe	vfp;
 #endif
 	/* Something that isn't a valid magic number for any coprocessor.  */

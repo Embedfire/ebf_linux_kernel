@@ -30,9 +30,9 @@
 /*
  * Size used to map GRU GSeg
  */
-#if defined CONFIG_IA64
+#if defined(CONFIG_IA64)
 #define GRU_GSEG_PAGESIZE	(256 * 1024UL)
-#elif defined CONFIG_X86_64
+#elif defined(CONFIG_X86_64)
 #define GRU_GSEG_PAGESIZE	(256 * 1024UL)		/* ZZZ 2MB ??? */
 #else
 #error "Unsupported architecture"
@@ -51,6 +51,17 @@ struct gru_chiplet_info {
 	int	total_user_cbr;
 	int	free_user_dsr_bytes;
 	int	free_user_cbr;
+};
+
+/*
+ * Statictics kept for each context.
+ */
+struct gru_gseg_statistics {
+	unsigned long	fmm_tlbmiss;
+	unsigned long	upm_tlbmiss;
+	unsigned long	tlbdropin;
+	unsigned long	context_stolen;
+	unsigned long	reserved[10];
 };
 
 /* Flags for GRU options on the gru_create_context() call */

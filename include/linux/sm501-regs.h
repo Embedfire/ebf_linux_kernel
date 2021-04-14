@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* sm501-regs.h
  *
  * Copyright 2006 Simtec Electronics
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Silicon Motion SM501 register definitions
 */
@@ -30,6 +27,8 @@
 #define SM501_SYSCTRL_PCI_RETRY_DISABLE	(1<<7)
 #define SM501_SYSCTRL_PCI_SUBSYS_LOCK	(1<<11)
 #define SM501_SYSCTRL_PCI_BURST_READ_EN	(1<<15)
+
+#define SM501_SYSCTRL_2D_ENGINE_STATUS	(1<<19)
 
 /* miscellaneous control */
 

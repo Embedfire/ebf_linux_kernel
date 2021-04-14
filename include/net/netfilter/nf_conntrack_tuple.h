@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Definitions and Declarations for tuple.
  *
@@ -12,6 +13,7 @@
 
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/nf_conntrack_tuple_common.h>
+#include <linux/list_nulls.h>
 
 /* A `tuple' is a structure containing the information to uniquely
   identify a connection.  ie. if two packets have the same tuple, they
@@ -23,36 +25,8 @@
 
 #define NF_CT_TUPLE_L3SIZE	ARRAY_SIZE(((union nf_inet_addr *)NULL)->all)
 
-/* The protocol-specific manipulable parts of the tuple: always in
-   network order! */
-union nf_conntrack_man_proto
-{
-	/* Add other protocols here. */
-	__be16 all;
-
-	struct {
-		__be16 port;
-	} tcp;
-	struct {
-		__be16 port;
-	} udp;
-	struct {
-		__be16 id;
-	} icmp;
-	struct {
-		__be16 port;
-	} dccp;
-	struct {
-		__be16 port;
-	} sctp;
-	struct {
-		__be16 key;	/* GRE key is 32bit, PPtP only uses 16bit */
-	} gre;
-};
-
 /* The manipulable part of the tuple. */
-struct nf_conntrack_man
-{
+struct nf_conntrack_man {
 	union nf_inet_addr u3;
 	union nf_conntrack_man_proto u;
 	/* Layer 3 protocol */
@@ -60,8 +34,7 @@ struct nf_conntrack_man
 };
 
 /* This contains the information to distinguish a connection. */
-struct nf_conntrack_tuple
-{
+struct nf_conntrack_tuple {
 	struct nf_conntrack_man src;
 
 	/* These are the parts of the tuple which are fixed. */
@@ -99,33 +72,30 @@ struct nf_conntrack_tuple
 	} dst;
 };
 
-struct nf_conntrack_tuple_mask
-{
+struct nf_conntrack_tuple_mask {
 	struct {
 		union nf_inet_addr u3;
 		union nf_conntrack_man_proto u;
 	} src;
 };
 
-#ifdef __KERNEL__
-
 static inline void nf_ct_dump_tuple_ip(const struct nf_conntrack_tuple *t)
 {
 #ifdef DEBUG
-	printk("tuple %p: %u " NIPQUAD_FMT ":%hu -> " NIPQUAD_FMT ":%hu\n",
+	printk("tuple %p: %u %pI4:%hu -> %pI4:%hu\n",
 	       t, t->dst.protonum,
-	       NIPQUAD(t->src.u3.ip), ntohs(t->src.u.all),
-	       NIPQUAD(t->dst.u3.ip), ntohs(t->dst.u.all));
+	       &t->src.u3.ip, ntohs(t->src.u.all),
+	       &t->dst.u3.ip, ntohs(t->dst.u.all));
 #endif
 }
 
 static inline void nf_ct_dump_tuple_ipv6(const struct nf_conntrack_tuple *t)
 {
 #ifdef DEBUG
-	printk("tuple %p: %u " NIP6_FMT " %hu -> " NIP6_FMT " %hu\n",
+	printk("tuple %p: %u %pI6 %hu -> %pI6 %hu\n",
 	       t, t->dst.protonum,
-	       NIP6(*(struct in6_addr *)t->src.u3.all), ntohs(t->src.u.all),
-	       NIP6(*(struct in6_addr *)t->dst.u3.all), ntohs(t->dst.u.all));
+	       t->src.u3.all, ntohs(t->src.u.all),
+	       t->dst.u3.all, ntohs(t->dst.u.all));
 #endif
 }
 
@@ -146,17 +116,14 @@ static inline void nf_ct_dump_tuple(const struct nf_conntrack_tuple *t)
 	((enum ip_conntrack_dir)(h)->tuple.dst.dir)
 
 /* Connections have two entries in the hash table: one for each way */
-struct nf_conntrack_tuple_hash
-{
-	struct hlist_node hnode;
+struct nf_conntrack_tuple_hash {
+	struct hlist_nulls_node hnnode;
 	struct nf_conntrack_tuple tuple;
 };
 
-#endif /* __KERNEL__ */
-
 static inline bool __nf_ct_tuple_src_equal(const struct nf_conntrack_tuple *t1,
 					   const struct nf_conntrack_tuple *t2)
-{ 
+{
 	return (nf_inet_addr_cmp(&t1->src.u3, &t2->src.u3) &&
 		t1->src.u.all == t2->src.u.all &&
 		t1->src.l3num == t2->src.l3num);

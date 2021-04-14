@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	ASP Device Driver
  *
  *	(c) Copyright 2000 The Puffin Group Inc.
- *
- *	This program is free software; you can redistribute it and/or modify
- *	it under the terms of the GNU General Public License as published by
- *      the Free Software Foundation; either version 2 of the License, or
- *      (at your option) any later version.
  *
  *	by Helge Deller <deller@gmx.de>
  */
@@ -15,7 +11,6 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
-#include <linux/slab.h>
 #include <linux/types.h>
 #include <asm/io.h>
 #include <asm/led.h>
@@ -71,8 +66,7 @@ static void asp_choose_irq(struct parisc_device *dev, void *ctrl)
  */
 #define ASP_INTERRUPT_ADDR 0xf0800000
 
-int __init
-asp_init_chip(struct parisc_device *dev)
+static int __init asp_init_chip(struct parisc_device *dev)
 {
 	struct gsc_irq gsc_irq;
 	int ret;
@@ -82,7 +76,7 @@ asp_init_chip(struct parisc_device *dev)
 	asp.hpa = ASP_INTERRUPT_ADDR;
 
 	printk(KERN_INFO "%s version %d at 0x%lx found.\n", 
-		asp.name, asp.version, dev->hpa.start);
+		asp.name, asp.version, (unsigned long)dev->hpa.start);
 
 	/* the IRQ ASP should use */
 	ret = -EBUSY;
@@ -120,12 +114,12 @@ asp_init_chip(struct parisc_device *dev)
 	return ret;
 }
 
-static struct parisc_device_id asp_tbl[] = {
+static const struct parisc_device_id asp_tbl[] __initconst = {
 	{ HPHW_BA, HVERSION_REV_ANY_ID, HVERSION_ANY_ID, 0x00070 },
 	{ 0, }
 };
 
-struct parisc_driver asp_driver = {
+struct parisc_driver asp_driver __refdata = {
 	.name =		"asp",
 	.id_table =	asp_tbl,
 	.probe =	asp_init_chip,

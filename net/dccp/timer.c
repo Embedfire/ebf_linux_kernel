@@ -1,17 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  net/dccp/timer.c
  *
  *  An implementation of the DCCP protocol
  *  Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  */
 
 #include <linux/dccp.h>
 #include <linux/skbuff.h>
+#include <linux/export.h>
 
 #include "dccp.h"
 
@@ -27,7 +24,7 @@ static void dccp_write_err(struct sock *sk)
 
 	dccp_send_reset(sk, DCCP_RESET_CODE_ABORTED);
 	dccp_done(sk);
-	DCCP_INC_STATS_BH(DCCP_MIB_ABORTONTIMEOUT);
+	__DCCP_INC_STATS(DCCP_MIB_ABORTONTIMEOUT);
 }
 
 /* A write timeout has occurred. Process the after effects. */
@@ -38,7 +35,7 @@ static int dccp_write_timeout(struct sock *sk)
 
 	if (sk->sk_state == DCCP_REQUESTING || sk->sk_state == DCCP_PARTOPEN) {
 		if (icsk->icsk_retransmits != 0)
-			dst_negative_advice(&sk->sk_dst_cache);
+			dst_negative_advice(sk);
 		retry_until = icsk->icsk_syn_retries ?
 			    : sysctl_dccp_request_retries;
 	} else {
@@ -63,7 +60,7 @@ static int dccp_write_timeout(struct sock *sk)
 			   Golden words :-).
 		   */
 
-			dst_negative_advice(&sk->sk_dst_cache);
+			dst_negative_advice(sk);
 		}
 
 		retry_until = sysctl_dccp_retries2;
@@ -87,19 +84,8 @@ static void dccp_retransmit_timer(struct sock *sk)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
 
-	/* retransmit timer is used for feature negotiation throughout
-	 * connection.  In this case, no packet is re-transmitted, but rather an
-	 * ack is generated and pending changes are placed into its options.
-	 */
-	if (sk->sk_send_head == NULL) {
-		dccp_pr_debug("feat negotiation retransmit timeout %p\n", sk);
-		if (sk->sk_state == DCCP_OPEN)
-			dccp_send_ack(sk);
-		goto backoff;
-	}
-
 	/*
-	 * More than than 4MSL (8 minutes) has passed, a RESET(aborted) was
+	 * More than 4MSL (8 minutes) has passed, a RESET(aborted) was
 	 * sent, no need to retransmit, this sock is dead.
 	 */
 	if (dccp_write_timeout(sk))
@@ -110,7 +96,7 @@ static void dccp_retransmit_timer(struct sock *sk)
 	 * total number of retransmissions of clones of original packets.
 	 */
 	if (icsk->icsk_retransmits == 0)
-		DCCP_INC_STATS_BH(DCCP_MIB_TIMEOUTS);
+		__DCCP_INC_STATS(DCCP_MIB_TIMEOUTS);
 
 	if (dccp_retransmit_skb(sk) != 0) {
 		/*
@@ -126,7 +112,6 @@ static void dccp_retransmit_timer(struct sock *sk)
 		return;
 	}
 
-backoff:
 	icsk->icsk_backoff++;
 
 	icsk->icsk_rto = min(icsk->icsk_rto << 1, DCCP_RTO_MAX);
@@ -136,10 +121,11 @@ backoff:
 		__sk_dst_reset(sk);
 }
 
-static void dccp_write_timer(unsigned long data)
+static void dccp_write_timer(struct timer_list *t)
 {
-	struct sock *sk = (struct sock *)data;
-	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct inet_connection_sock *icsk =
+			from_timer(icsk, t, icsk_retransmit_timer);
+	struct sock *sk = &icsk->icsk_inet.sk;
 	int event = 0;
 
 	bh_lock_sock(sk);
@@ -172,47 +158,25 @@ out:
 	sock_put(sk);
 }
 
-/*
- *	Timer for listening sockets
- */
-static void dccp_response_timer(struct sock *sk)
+static void dccp_keepalive_timer(struct timer_list *t)
 {
-	inet_csk_reqsk_queue_prune(sk, TCP_SYNQ_INTERVAL, DCCP_TIMEOUT_INIT,
-				   DCCP_RTO_MAX);
-}
+	struct sock *sk = from_timer(sk, t, sk_timer);
 
-static void dccp_keepalive_timer(unsigned long data)
-{
-	struct sock *sk = (struct sock *)data;
-
-	/* Only process if socket is not in use. */
-	bh_lock_sock(sk);
-	if (sock_owned_by_user(sk)) {
-		/* Try again later. */
-		inet_csk_reset_keepalive_timer(sk, HZ / 20);
-		goto out;
-	}
-
-	if (sk->sk_state == DCCP_LISTEN) {
-		dccp_response_timer(sk);
-		goto out;
-	}
-out:
-	bh_unlock_sock(sk);
+	pr_err("dccp should not use a keepalive timer !\n");
 	sock_put(sk);
 }
 
 /* This is the same as tcp_delack_timer, sans prequeue & mem_reclaim stuff */
-static void dccp_delack_timer(unsigned long data)
+static void dccp_delack_timer(struct timer_list *t)
 {
-	struct sock *sk = (struct sock *)data;
-	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct inet_connection_sock *icsk =
+			from_timer(icsk, t, icsk_delack_timer);
+	struct sock *sk = &icsk->icsk_inet.sk;
 
 	bh_lock_sock(sk);
 	if (sock_owned_by_user(sk)) {
 		/* Try again later. */
-		icsk->icsk_ack.blocked = 1;
-		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_DELAYEDACKLOCKED);
+		__NET_INC_STATS(sock_net(sk), LINUX_MIB_DELAYEDACKLOCKED);
 		sk_reset_timer(sk, &icsk->icsk_delack_timer,
 			       jiffies + TCP_DELACK_MIN);
 		goto out;
@@ -230,7 +194,7 @@ static void dccp_delack_timer(unsigned long data)
 	icsk->icsk_ack.pending &= ~ICSK_ACK_TIMER;
 
 	if (inet_csk_ack_scheduled(sk)) {
-		if (!icsk->icsk_ack.pingpong) {
+		if (!inet_csk_in_pingpong_mode(sk)) {
 			/* Delayed ACK missed: inflate ATO. */
 			icsk->icsk_ack.ato = min(icsk->icsk_ack.ato << 1,
 						 icsk->icsk_rto);
@@ -238,43 +202,50 @@ static void dccp_delack_timer(unsigned long data)
 			/* Delayed ACK missed: leave pingpong mode and
 			 * deflate ATO.
 			 */
-			icsk->icsk_ack.pingpong = 0;
+			inet_csk_exit_pingpong_mode(sk);
 			icsk->icsk_ack.ato = TCP_ATO_MIN;
 		}
 		dccp_send_ack(sk);
-		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_DELAYEDACKS);
+		__NET_INC_STATS(sock_net(sk), LINUX_MIB_DELAYEDACKS);
 	}
 out:
 	bh_unlock_sock(sk);
 	sock_put(sk);
 }
 
-/* Transmit-delay timer: used by the CCIDs to delay actual send time */
-static void dccp_write_xmit_timer(unsigned long data)
+/**
+ * dccp_write_xmitlet  -  Workhorse for CCID packet dequeueing interface
+ * @data: Socket to act on
+ *
+ * See the comments above %ccid_dequeueing_decision for supported modes.
+ */
+static void dccp_write_xmitlet(unsigned long data)
 {
 	struct sock *sk = (struct sock *)data;
-	struct dccp_sock *dp = dccp_sk(sk);
 
 	bh_lock_sock(sk);
 	if (sock_owned_by_user(sk))
-		sk_reset_timer(sk, &dp->dccps_xmit_timer, jiffies+1);
+		sk_reset_timer(sk, &dccp_sk(sk)->dccps_xmit_timer, jiffies + 1);
 	else
-		dccp_write_xmit(sk, 0);
+		dccp_write_xmit(sk);
 	bh_unlock_sock(sk);
 	sock_put(sk);
 }
 
-static void dccp_init_write_xmit_timer(struct sock *sk)
+static void dccp_write_xmit_timer(struct timer_list *t)
 {
-	struct dccp_sock *dp = dccp_sk(sk);
+	struct dccp_sock *dp = from_timer(dp, t, dccps_xmit_timer);
+	struct sock *sk = &dp->dccps_inet_connection.icsk_inet.sk;
 
-	setup_timer(&dp->dccps_xmit_timer, dccp_write_xmit_timer,
-			(unsigned long)sk);
+	dccp_write_xmitlet((unsigned long)sk);
 }
 
 void dccp_init_xmit_timers(struct sock *sk)
 {
-	dccp_init_write_xmit_timer(sk);
+	struct dccp_sock *dp = dccp_sk(sk);
+
+	tasklet_init(&dp->dccps_xmitlet, dccp_write_xmitlet, (unsigned long)sk);
+	timer_setup(&dp->dccps_xmit_timer, dccp_write_xmit_timer, 0);
 	inet_csk_init_xmit_timers(sk, &dccp_write_timer, &dccp_delack_timer,
 				  &dccp_keepalive_timer);
 }
@@ -288,7 +259,7 @@ static ktime_t dccp_timestamp_seed;
  */
 u32 dccp_timestamp(void)
 {
-	s64 delta = ktime_us_delta(ktime_get_real(), dccp_timestamp_seed);
+	u64 delta = (u64)ktime_us_delta(ktime_get_real(), dccp_timestamp_seed);
 
 	do_div(delta, 10);
 	return delta;

@@ -1,19 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/boards/renesas/r7780rp/psw.c
  *
  * push switch support for RDBRP-1/RDBREVRP-1 debug boards.
  *
  * Copyright (C) 2006  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/io.h>
-#include <linux/init.h>
+#include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
-#include <asm/r7780rp.h>
+#include <mach/highlander.h>
 #include <asm/push-switch.h>
 
 static irqreturn_t psw_irq_handler(int irq, void *arg)
@@ -24,7 +21,7 @@ static irqreturn_t psw_irq_handler(int irq, void *arg)
 	unsigned int l, mask;
 	int ret = 0;
 
-	l = ctrl_inw(PA_DBSW);
+	l = __raw_readw(PA_DBSW);
 
 	/* Nothing to do if there's no state change */
 	if (psw->state) {
@@ -45,7 +42,7 @@ static irqreturn_t psw_irq_handler(int irq, void *arg)
 out:
 	/* Clear the switch IRQs */
 	l |= (0x7 << 12);
-	ctrl_outw(l, PA_DBSW);
+	__raw_writew(l, PA_DBSW);
 
 	return IRQ_RETVAL(ret);
 }

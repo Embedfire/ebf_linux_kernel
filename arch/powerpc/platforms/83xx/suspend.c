@@ -1,37 +1,39 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * MPC83xx suspend support
  *
  * Author: Scott Wood <scottwood@freescale.com>
  *
  * Copyright (c) 2006-2007 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
  */
 
-#include <linux/init.h>
 #include <linux/pm.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
 #include <linux/wait.h>
+#include <linux/sched/signal.h>
 #include <linux/kthread.h>
 #include <linux/freezer.h>
 #include <linux/suspend.h>
 #include <linux/fsl_devices.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/of_platform.h>
+#include <linux/export.h>
 
 #include <asm/reg.h>
 #include <asm/io.h>
 #include <asm/time.h>
 #include <asm/mpc6xx.h>
+#include <asm/switch_to.h>
 
 #include <sysdev/fsl_soc.h>
 
 #define PMCCR1_NEXT_STATE       0x0C /* Next state for power management */
 #define PMCCR1_NEXT_STATE_SHIFT 2
 #define PMCCR1_CURR_STATE       0x03 /* Current state for power management*/
+#define IMMR_SYSCR_OFFSET       0x100
 #define IMMR_RCW_OFFSET         0x900
 #define RCW_PCI_HOST            0x80000000
 
@@ -78,15 +80,33 @@ struct mpc83xx_clock {
 	u32 sccr;
 };
 
+struct mpc83xx_syscr {
+	__be32 sgprl;
+	__be32 sgprh;
+	__be32 spridr;
+	__be32 :32;
+	__be32 spcr;
+	__be32 sicrl;
+	__be32 sicrh;
+};
+
+struct mpc83xx_saved {
+	u32 sicrl;
+	u32 sicrh;
+	u32 sccr;
+};
+
 struct pmc_type {
 	int has_deep_sleep;
 };
 
-static struct of_device *pmc_dev;
+static struct platform_device *pmc_dev;
 static int has_deep_sleep, deep_sleeping;
 static int pmc_irq;
 static struct mpc83xx_pmc __iomem *pmc_regs;
 static struct mpc83xx_clock __iomem *clock_regs;
+static struct mpc83xx_syscr __iomem *syscr_regs;
+static struct mpc83xx_saved saved_regs;
 static int is_pci_agent, wake_from_pci;
 static phys_addr_t immrbase;
 static int pci_pm_state;
@@ -96,6 +116,7 @@ int fsl_deep_sleep(void)
 {
 	return deep_sleeping;
 }
+EXPORT_SYMBOL(fsl_deep_sleep);
 
 static int mpc83xx_change_state(void)
 {
@@ -136,6 +157,20 @@ static irqreturn_t pmc_irq_handler(int irq, void *dev_id)
 	return ret;
 }
 
+static void mpc83xx_suspend_restore_regs(void)
+{
+	out_be32(&syscr_regs->sicrl, saved_regs.sicrl);
+	out_be32(&syscr_regs->sicrh, saved_regs.sicrh);
+	out_be32(&clock_regs->sccr, saved_regs.sccr);
+}
+
+static void mpc83xx_suspend_save_regs(void)
+{
+	saved_regs.sicrl = in_be32(&syscr_regs->sicrl);
+	saved_regs.sicrh = in_be32(&syscr_regs->sicrh);
+	saved_regs.sccr = in_be32(&clock_regs->sccr);
+}
+
 static int mpc83xx_suspend_enter(suspend_state_t state)
 {
 	int ret = -EAGAIN;
@@ -165,6 +200,8 @@ static int mpc83xx_suspend_enter(suspend_state_t state)
 	 */
 
 	if (deep_sleeping) {
+		mpc83xx_suspend_save_regs();
+
 		out_be32(&pmc_regs->mask, PMCER_ALL);
 
 		out_be32(&pmc_regs->config1,
@@ -178,6 +215,8 @@ static int mpc83xx_suspend_enter(suspend_state_t state)
 		         in_be32(&pmc_regs->config1) & ~PMCCR1_POWER_OFF);
 
 		out_be32(&pmc_regs->mask, PMCER_PMCI);
+
+		mpc83xx_suspend_restore_regs();
 	} else {
 		out_be32(&pmc_regs->mask, PMCER_PMCI);
 
@@ -193,7 +232,7 @@ out:
 	return ret;
 }
 
-static void mpc83xx_suspend_finish(void)
+static void mpc83xx_suspend_end(void)
 {
 	deep_sleeping = 0;
 }
@@ -273,20 +312,27 @@ static int mpc83xx_is_pci_agent(void)
 	return ret;
 }
 
-static struct platform_suspend_ops mpc83xx_suspend_ops = {
+static const struct platform_suspend_ops mpc83xx_suspend_ops = {
 	.valid = mpc83xx_suspend_valid,
 	.begin = mpc83xx_suspend_begin,
 	.enter = mpc83xx_suspend_enter,
-	.finish = mpc83xx_suspend_finish,
+	.end = mpc83xx_suspend_end,
 };
 
-static int pmc_probe(struct of_device *ofdev,
-                     const struct of_device_id *match)
+static const struct of_device_id pmc_match[];
+static int pmc_probe(struct platform_device *ofdev)
 {
-	struct device_node *np = ofdev->node;
+	const struct of_device_id *match;
+	struct device_node *np = ofdev->dev.of_node;
 	struct resource res;
-	struct pmc_type *type = match->data;
+	const struct pmc_type *type;
 	int ret = 0;
+
+	match = of_match_device(pmc_match, &ofdev->dev);
+	if (!match)
+		return -EINVAL;
+
+	type = match->data;
 
 	if (!of_device_is_available(np))
 		return -ENODEV;
@@ -304,7 +350,7 @@ static int pmc_probe(struct of_device *ofdev,
 		return -ENODEV;
 
 	pmc_irq = irq_of_parse_and_map(np, 0);
-	if (pmc_irq != NO_IRQ) {
+	if (pmc_irq) {
 		ret = request_irq(pmc_irq, pmc_irq_handler, IRQF_SHARED,
 		                  "pmc", ofdev);
 
@@ -312,7 +358,7 @@ static int pmc_probe(struct of_device *ofdev,
 			return -EBUSY;
 	}
 
-	pmc_regs = ioremap(res.start, sizeof(struct mpc83xx_pmc));
+	pmc_regs = ioremap(res.start, sizeof(*pmc_regs));
 
 	if (!pmc_regs) {
 		ret = -ENOMEM;
@@ -325,11 +371,20 @@ static int pmc_probe(struct of_device *ofdev,
 		goto out_pmc;
 	}
 
-	clock_regs = ioremap(res.start, sizeof(struct mpc83xx_pmc));
+	clock_regs = ioremap(res.start, sizeof(*clock_regs));
 
 	if (!clock_regs) {
 		ret = -ENOMEM;
 		goto out_pmc;
+	}
+
+	if (has_deep_sleep) {
+		syscr_regs = ioremap(immrbase + IMMR_SYSCR_OFFSET,
+				     sizeof(*syscr_regs));
+		if (!syscr_regs) {
+			ret = -ENOMEM;
+			goto out_syscr;
+		}
 	}
 
 	if (is_pci_agent)
@@ -338,16 +393,18 @@ static int pmc_probe(struct of_device *ofdev,
 	suspend_set_ops(&mpc83xx_suspend_ops);
 	return 0;
 
+out_syscr:
+	iounmap(clock_regs);
 out_pmc:
 	iounmap(pmc_regs);
 out:
-	if (pmc_irq != NO_IRQ)
+	if (pmc_irq)
 		free_irq(pmc_irq, ofdev);
 
 	return ret;
 }
 
-static int pmc_remove(struct of_device *ofdev)
+static int pmc_remove(struct platform_device *ofdev)
 {
 	return -EPERM;
 };
@@ -361,7 +418,7 @@ static struct pmc_type pmc_types[] = {
 	}
 };
 
-static struct of_device_id pmc_match[] = {
+static const struct of_device_id pmc_match[] = {
 	{
 		.compatible = "fsl,mpc8313-pmc",
 		.data = &pmc_types[0],
@@ -373,16 +430,13 @@ static struct of_device_id pmc_match[] = {
 	{}
 };
 
-static struct of_platform_driver pmc_driver = {
-	.name = "mpc83xx-pmc",
-	.match_table = pmc_match,
+static struct platform_driver pmc_driver = {
+	.driver = {
+		.name = "mpc83xx-pmc",
+		.of_match_table = pmc_match,
+	},
 	.probe = pmc_probe,
 	.remove = pmc_remove
 };
 
-static int pmc_init(void)
-{
-	return of_register_platform_driver(&pmc_driver);
-}
-
-module_init(pmc_init);
+builtin_platform_driver(pmc_driver);

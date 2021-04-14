@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/sys_sio.c
  *
@@ -20,12 +21,10 @@
 
 #include <asm/compiler.h>
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/core_apecs.h>
 #include <asm/core_lca.h>
 #include <asm/tlbflush.h>
@@ -34,6 +33,7 @@
 #include "irq_impl.h"
 #include "pci_impl.h"
 #include "machvec_impl.h"
+#include "pc873xx.h"
 
 #if defined(ALPHA_RESTORE_SRM_SETUP)
 /* Save LCA configuration data as the console had it set up.  */
@@ -101,6 +101,15 @@ sio_pci_route(void)
 				   alpha_mv.sys.sio.route_tab);
 }
 
+static bool sio_pci_dev_irq_needs_level(const struct pci_dev *dev)
+{
+	if ((dev->class >> 16 == PCI_BASE_CLASS_BRIDGE) &&
+	    (dev->class >> 8 != PCI_CLASS_BRIDGE_PCMCIA))
+		return false;
+
+	return true;
+}
+
 static unsigned int __init
 sio_collect_irq_levels(void)
 {
@@ -109,8 +118,7 @@ sio_collect_irq_levels(void)
 
 	/* Iterate through the devices, collecting IRQ levels.  */
 	for_each_pci_dev(dev) {
-		if ((dev->class >> 16 == PCI_BASE_CLASS_BRIDGE) &&
-		    (dev->class >> 8 != PCI_CLASS_BRIDGE_PCMCIA))
+		if (!sio_pci_dev_irq_needs_level(dev))
 			continue;
 
 		if (dev->irq)
@@ -119,8 +127,7 @@ sio_collect_irq_levels(void)
 	return level_bits;
 }
 
-static void __init
-sio_fixup_irq_levels(unsigned int level_bits)
+static void __sio_fixup_irq_levels(unsigned int level_bits, bool reset)
 {
 	unsigned int old_level_bits;
 
@@ -138,14 +145,23 @@ sio_fixup_irq_levels(unsigned int level_bits)
 	 */
 	old_level_bits = inb(0x4d0) | (inb(0x4d1) << 8);
 
-	level_bits |= (old_level_bits & 0x71ff);
+	if (reset)
+		old_level_bits &= 0x71ff;
+
+	level_bits |= old_level_bits;
 
 	outb((level_bits >> 0) & 0xff, 0x4d0);
 	outb((level_bits >> 8) & 0xff, 0x4d1);
 }
 
-static inline int __init
-noname_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static inline void
+sio_fixup_irq_levels(unsigned int level_bits)
+{
+	__sio_fixup_irq_levels(level_bits, true);
+}
+
+static inline int
+noname_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	/*
 	 * The Noname board has 5 PCI slots with each of the 4
@@ -165,7 +181,7 @@ noname_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	 * that they use the default INTA line, if they are interrupt
 	 * driven at all).
 	 */
-	static char irq_tab[][5] __initdata = {
+	static char irq_tab[][5] = {
 		/*INT A   B   C   D */
 		{ 3,  3,  3,  3,  3}, /* idsel  6 (53c810) */ 
 		{-1, -1, -1, -1, -1}, /* idsel  7 (SIO: PCI/ISA bridge) */
@@ -180,13 +196,20 @@ noname_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	const long min_idsel = 6, max_idsel = 14, irqs_per_slot = 5;
 	int irq = COMMON_TABLE_LOOKUP, tmp;
 	tmp = __kernel_extbl(alpha_mv.sys.sio.route_tab, irq);
-	return irq >= 0 ? tmp : -1;
+
+	irq = irq >= 0 ? tmp : -1;
+
+	/* Fixup IRQ level if an actual IRQ mapping is detected */
+	if (sio_pci_dev_irq_needs_level(dev) && irq >= 0)
+		__sio_fixup_irq_levels(1 << irq, false);
+
+	return irq;
 }
 
-static inline int __init
-p2k_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static inline int
+p2k_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[][5] __initdata = {
+	static char irq_tab[][5] = {
 		/*INT A   B   C   D */
 		{ 0,  0, -1, -1, -1}, /* idsel  6 (53c810) */
 		{-1, -1, -1, -1, -1}, /* idsel  7 (SIO: PCI/ISA bridge) */
@@ -208,7 +231,27 @@ noname_init_pci(void)
 	common_init_pci();
 	sio_pci_route();
 	sio_fixup_irq_levels(sio_collect_irq_levels());
-	ns87312_enable_ide(0x26e);
+
+	if (pc873xx_probe() == -1) {
+		printk(KERN_ERR "Probing for PC873xx Super IO chip failed.\n");
+	} else {
+		printk(KERN_INFO "Found %s Super IO chip at 0x%x\n",
+			pc873xx_get_model(), pc873xx_get_base());
+
+		/* Enabling things in the Super IO chip doesn't actually
+		 * configure and enable things, the legacy drivers still
+		 * need to do the actual configuration and enabling.
+		 * This only unblocks them.
+		 */
+
+#if !defined(CONFIG_ALPHA_AVANTI)
+		/* Don't bother on the Avanti family.
+		 * None of them had on-board IDE.
+		 */
+		pc873xx_enable_ide();
+#endif
+		pc873xx_enable_epp19();
+	}
 }
 
 static inline void __init

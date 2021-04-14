@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of UBIFS.
  *
  * Copyright (C) 2006-2008 Nokia Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 51
- * Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  *
  * Authors: Adrian Hunter
  *          Artem Bityutskiy (Битюцкий Артём)
@@ -33,53 +21,41 @@
  */
 
 #include "ubifs.h"
-
-/*
- * Replay flags.
- *
- * REPLAY_DELETION: node was deleted
- * REPLAY_REF: node is a reference node
- */
-enum {
-	REPLAY_DELETION = 1,
-	REPLAY_REF = 2,
-};
+#include <linux/list_sort.h>
+#include <crypto/hash.h>
+#include <crypto/algapi.h>
 
 /**
- * struct replay_entry - replay tree entry.
+ * struct replay_entry - replay list entry.
  * @lnum: logical eraseblock number of the node
  * @offs: node offset
  * @len: node length
+ * @deletion: non-zero if this entry corresponds to a node deletion
  * @sqnum: node sequence number
- * @flags: replay flags
- * @rb: links the replay tree
+ * @list: links the replay list
  * @key: node key
  * @nm: directory entry name
  * @old_size: truncation old size
  * @new_size: truncation new size
- * @free: amount of free space in a bud
- * @dirty: amount of dirty space in a bud from padding and deletion nodes
  *
- * UBIFS journal replay must compare node sequence numbers, which means it must
- * build a tree of node information to insert into the TNC.
+ * The replay process first scans all buds and builds the replay list, then
+ * sorts the replay list in nodes sequence number order, and then inserts all
+ * the replay entries to the TNC.
  */
 struct replay_entry {
 	int lnum;
 	int offs;
 	int len;
+	u8 hash[UBIFS_HASH_ARR_SZ];
+	unsigned int deletion:1;
 	unsigned long long sqnum;
-	int flags;
-	struct rb_node rb;
+	struct list_head list;
 	union ubifs_key key;
 	union {
-		struct qstr nm;
+		struct fscrypt_name nm;
 		struct {
 			loff_t old_size;
 			loff_t new_size;
-		};
-		struct {
-			int free;
-			int dirty;
 		};
 	};
 };
@@ -88,80 +64,113 @@ struct replay_entry {
  * struct bud_entry - entry in the list of buds to replay.
  * @list: next bud in the list
  * @bud: bud description object
- * @free: free bytes in the bud
  * @sqnum: reference node sequence number
+ * @free: free bytes in the bud
+ * @dirty: dirty bytes in the bud
  */
 struct bud_entry {
 	struct list_head list;
 	struct ubifs_bud *bud;
-	int free;
 	unsigned long long sqnum;
+	int free;
+	int dirty;
 };
 
 /**
  * set_bud_lprops - set free and dirty space used by a bud.
  * @c: UBIFS file-system description object
- * @r: replay entry of bud
+ * @b: bud entry which describes the bud
+ *
+ * This function makes sure the LEB properties of bud @b are set correctly
+ * after the replay. Returns zero in case of success and a negative error code
+ * in case of failure.
  */
-static int set_bud_lprops(struct ubifs_info *c, struct replay_entry *r)
+static int set_bud_lprops(struct ubifs_info *c, struct bud_entry *b)
 {
 	const struct ubifs_lprops *lp;
 	int err = 0, dirty;
 
 	ubifs_get_lprops(c);
 
-	lp = ubifs_lpt_lookup_dirty(c, r->lnum);
+	lp = ubifs_lpt_lookup_dirty(c, b->bud->lnum);
 	if (IS_ERR(lp)) {
 		err = PTR_ERR(lp);
 		goto out;
 	}
 
 	dirty = lp->dirty;
-	if (r->offs == 0 && (lp->free != c->leb_size || lp->dirty != 0)) {
+	if (b->bud->start == 0 && (lp->free != c->leb_size || lp->dirty != 0)) {
 		/*
 		 * The LEB was added to the journal with a starting offset of
 		 * zero which means the LEB must have been empty. The LEB
-		 * property values should be lp->free == c->leb_size and
-		 * lp->dirty == 0, but that is not the case. The reason is that
-		 * the LEB was garbage collected. The garbage collector resets
-		 * the free and dirty space without recording it anywhere except
-		 * lprops, so if there is not a commit then lprops does not have
-		 * that information next time the file system is mounted.
+		 * property values should be @lp->free == @c->leb_size and
+		 * @lp->dirty == 0, but that is not the case. The reason is that
+		 * the LEB had been garbage collected before it became the bud,
+		 * and there was not commit inbetween. The garbage collector
+		 * resets the free and dirty space without recording it
+		 * anywhere except lprops, so if there was no commit then
+		 * lprops does not have that information.
 		 *
 		 * We do not need to adjust free space because the scan has told
 		 * us the exact value which is recorded in the replay entry as
-		 * r->free.
+		 * @b->free.
 		 *
 		 * However we do need to subtract from the dirty space the
 		 * amount of space that the garbage collector reclaimed, which
 		 * is the whole LEB minus the amount of space that was free.
 		 */
-		dbg_mnt("bud LEB %d was GC'd (%d free, %d dirty)", r->lnum,
+		dbg_mnt("bud LEB %d was GC'd (%d free, %d dirty)", b->bud->lnum,
 			lp->free, lp->dirty);
-		dbg_gc("bud LEB %d was GC'd (%d free, %d dirty)", r->lnum,
+		dbg_gc("bud LEB %d was GC'd (%d free, %d dirty)", b->bud->lnum,
 			lp->free, lp->dirty);
 		dirty -= c->leb_size - lp->free;
 		/*
 		 * If the replay order was perfect the dirty space would now be
-		 * zero. The order is not perfect because the the journal heads
-		 * race with eachother. This is not a problem but is does mean
+		 * zero. The order is not perfect because the journal heads
+		 * race with each other. This is not a problem but is does mean
 		 * that the dirty space may temporarily exceed c->leb_size
 		 * during the replay.
 		 */
 		if (dirty != 0)
-			dbg_msg("LEB %d lp: %d free %d dirty "
-				"replay: %d free %d dirty", r->lnum, lp->free,
-				lp->dirty, r->free, r->dirty);
+			dbg_mnt("LEB %d lp: %d free %d dirty replay: %d free %d dirty",
+				b->bud->lnum, lp->free, lp->dirty, b->free,
+				b->dirty);
 	}
-	lp = ubifs_change_lp(c, lp, r->free, dirty + r->dirty,
+	lp = ubifs_change_lp(c, lp, b->free, dirty + b->dirty,
 			     lp->flags | LPROPS_TAKEN, 0);
 	if (IS_ERR(lp)) {
 		err = PTR_ERR(lp);
 		goto out;
 	}
+
+	/* Make sure the journal head points to the latest bud */
+	err = ubifs_wbuf_seek_nolock(&c->jheads[b->bud->jhead].wbuf,
+				     b->bud->lnum, c->leb_size - b->free);
+
 out:
 	ubifs_release_lprops(c);
 	return err;
+}
+
+/**
+ * set_buds_lprops - set free and dirty space for all replayed buds.
+ * @c: UBIFS file-system description object
+ *
+ * This function sets LEB properties for all replayed buds. Returns zero in
+ * case of success and a negative error code in case of failure.
+ */
+static int set_buds_lprops(struct ubifs_info *c)
+{
+	struct bud_entry *b;
+	int err;
+
+	list_for_each_entry(b, &c->replay_buds, list) {
+		err = set_bud_lprops(c, b);
+		if (err)
+			return err;
+	}
+
+	return 0;
 }
 
 /**
@@ -192,6 +201,38 @@ static int trun_remove_range(struct ubifs_info *c, struct replay_entry *r)
 }
 
 /**
+ * inode_still_linked - check whether inode in question will be re-linked.
+ * @c: UBIFS file-system description object
+ * @rino: replay entry to test
+ *
+ * O_TMPFILE files can be re-linked, this means link count goes from 0 to 1.
+ * This case needs special care, otherwise all references to the inode will
+ * be removed upon the first replay entry of an inode with link count 0
+ * is found.
+ */
+static bool inode_still_linked(struct ubifs_info *c, struct replay_entry *rino)
+{
+	struct replay_entry *r;
+
+	ubifs_assert(c, rino->deletion);
+	ubifs_assert(c, key_type(c, &rino->key) == UBIFS_INO_KEY);
+
+	/*
+	 * Find the most recent entry for the inode behind @rino and check
+	 * whether it is a deletion.
+	 */
+	list_for_each_entry_reverse(r, &c->replay_list, list) {
+		ubifs_assert(c, r->sqnum >= rino->sqnum);
+		if (key_inum(c, &r->key) == key_inum(c, &rino->key))
+			return r->deletion == 0;
+
+	}
+
+	ubifs_assert(c, 0);
+	return false;
+}
+
+/**
  * apply_replay_entry - apply a replay entry to the TNC.
  * @c: UBIFS file-system description object
  * @r: replay entry to apply
@@ -200,28 +241,28 @@ static int trun_remove_range(struct ubifs_info *c, struct replay_entry *r)
  */
 static int apply_replay_entry(struct ubifs_info *c, struct replay_entry *r)
 {
-	int err, deletion = ((r->flags & REPLAY_DELETION) != 0);
+	int err;
 
-	dbg_mnt("LEB %d:%d len %d flgs %d sqnum %llu %s", r->lnum,
-		r->offs, r->len, r->flags, r->sqnum, DBGKEY(&r->key));
+	dbg_mntk(&r->key, "LEB %d:%d len %d deletion %d sqnum %llu key ",
+		 r->lnum, r->offs, r->len, r->deletion, r->sqnum);
 
-	/* Set c->replay_sqnum to help deal with dangling branches. */
-	c->replay_sqnum = r->sqnum;
-
-	if (r->flags & REPLAY_REF)
-		err = set_bud_lprops(c, r);
-	else if (is_hash_key(c, &r->key)) {
-		if (deletion)
+	if (is_hash_key(c, &r->key)) {
+		if (r->deletion)
 			err = ubifs_tnc_remove_nm(c, &r->key, &r->nm);
 		else
 			err = ubifs_tnc_add_nm(c, &r->key, r->lnum, r->offs,
-					       r->len, &r->nm);
+					       r->len, r->hash, &r->nm);
 	} else {
-		if (deletion)
+		if (r->deletion)
 			switch (key_type(c, &r->key)) {
 			case UBIFS_INO_KEY:
 			{
 				ino_t inum = key_inum(c, &r->key);
+
+				if (inode_still_linked(c, r)) {
+					err = 0;
+					break;
+				}
 
 				err = ubifs_tnc_remove_ino(c, inum);
 				break;
@@ -235,12 +276,12 @@ static int apply_replay_entry(struct ubifs_info *c, struct replay_entry *r)
 			}
 		else
 			err = ubifs_tnc_add(c, &r->key, r->lnum, r->offs,
-					    r->len);
+					    r->len, r->hash);
 		if (err)
 			return err;
 
 		if (c->need_recovery)
-			err = ubifs_recover_size_accum(c, &r->key, deletion,
+			err = ubifs_recover_size_accum(c, &r->key, r->deletion,
 						       r->new_size);
 	}
 
@@ -248,68 +289,78 @@ static int apply_replay_entry(struct ubifs_info *c, struct replay_entry *r)
 }
 
 /**
- * destroy_replay_tree - destroy the replay.
- * @c: UBIFS file-system description object
+ * replay_entries_cmp - compare 2 replay entries.
+ * @priv: UBIFS file-system description object
+ * @a: first replay entry
+ * @b: second replay entry
  *
- * Destroy the replay tree.
+ * This is a comparios function for 'list_sort()' which compares 2 replay
+ * entries @a and @b by comparing their sequence numer.  Returns %1 if @a has
+ * greater sequence number and %-1 otherwise.
  */
-static void destroy_replay_tree(struct ubifs_info *c)
+static int replay_entries_cmp(void *priv, struct list_head *a,
+			      struct list_head *b)
 {
-	struct rb_node *this = c->replay_tree.rb_node;
-	struct replay_entry *r;
+	struct ubifs_info *c = priv;
+	struct replay_entry *ra, *rb;
 
-	while (this) {
-		if (this->rb_left) {
-			this = this->rb_left;
-			continue;
-		} else if (this->rb_right) {
-			this = this->rb_right;
-			continue;
-		}
-		r = rb_entry(this, struct replay_entry, rb);
-		this = rb_parent(this);
-		if (this) {
-			if (this->rb_left == &r->rb)
-				this->rb_left = NULL;
-			else
-				this->rb_right = NULL;
-		}
-		if (is_hash_key(c, &r->key))
-			kfree(r->nm.name);
-		kfree(r);
-	}
-	c->replay_tree = RB_ROOT;
+	cond_resched();
+	if (a == b)
+		return 0;
+
+	ra = list_entry(a, struct replay_entry, list);
+	rb = list_entry(b, struct replay_entry, list);
+	ubifs_assert(c, ra->sqnum != rb->sqnum);
+	if (ra->sqnum > rb->sqnum)
+		return 1;
+	return -1;
 }
 
 /**
- * apply_replay_tree - apply the replay tree to the TNC.
+ * apply_replay_list - apply the replay list to the TNC.
  * @c: UBIFS file-system description object
  *
- * Apply the replay tree.
- * Returns zero in case of success and a negative error code in case of
- * failure.
+ * Apply all entries in the replay list to the TNC. Returns zero in case of
+ * success and a negative error code in case of failure.
  */
-static int apply_replay_tree(struct ubifs_info *c)
+static int apply_replay_list(struct ubifs_info *c)
 {
-	struct rb_node *this = rb_first(&c->replay_tree);
+	struct replay_entry *r;
+	int err;
 
-	while (this) {
-		struct replay_entry *r;
-		int err;
+	list_sort(c, &c->replay_list, &replay_entries_cmp);
 
+	list_for_each_entry(r, &c->replay_list, list) {
 		cond_resched();
 
-		r = rb_entry(this, struct replay_entry, rb);
 		err = apply_replay_entry(c, r);
 		if (err)
 			return err;
-		this = rb_next(this);
 	}
+
 	return 0;
 }
 
 /**
- * insert_node - insert a node to the replay tree.
+ * destroy_replay_list - destroy the replay.
+ * @c: UBIFS file-system description object
+ *
+ * Destroy the replay list.
+ */
+static void destroy_replay_list(struct ubifs_info *c)
+{
+	struct replay_entry *r, *tmp;
+
+	list_for_each_entry_safe(r, tmp, &c->replay_list, list) {
+		if (is_hash_key(c, &r->key))
+			kfree(fname_name(&r->nm));
+		list_del(&r->list);
+		kfree(r);
+	}
+}
+
+/**
+ * insert_node - insert a node to the replay list
  * @c: UBIFS file-system description object
  * @lnum: node logical eraseblock number
  * @offs: node offset
@@ -321,38 +372,24 @@ static int apply_replay_tree(struct ubifs_info *c)
  * @old_size: truncation old size
  * @new_size: truncation new size
  *
- * This function inserts a scanned non-direntry node to the replay tree. The
- * replay tree is an RB-tree containing @struct replay_entry elements which are
- * indexed by the sequence number. The replay tree is applied at the very end
- * of the replay process. Since the tree is sorted in sequence number order,
- * the older modifications are applied first. This function returns zero in
- * case of success and a negative error code in case of failure.
+ * This function inserts a scanned non-direntry node to the replay list. The
+ * replay list contains @struct replay_entry elements, and we sort this list in
+ * sequence number order before applying it. The replay list is applied at the
+ * very end of the replay process. Since the list is sorted in sequence number
+ * order, the older modifications are applied first. This function returns zero
+ * in case of success and a negative error code in case of failure.
  */
 static int insert_node(struct ubifs_info *c, int lnum, int offs, int len,
-		       union ubifs_key *key, unsigned long long sqnum,
-		       int deletion, int *used, loff_t old_size,
-		       loff_t new_size)
+		       const u8 *hash, union ubifs_key *key,
+		       unsigned long long sqnum, int deletion, int *used,
+		       loff_t old_size, loff_t new_size)
 {
-	struct rb_node **p = &c->replay_tree.rb_node, *parent = NULL;
 	struct replay_entry *r;
+
+	dbg_mntk(key, "add LEB %d:%d, key ", lnum, offs);
 
 	if (key_inum(c, key) >= c->highest_inum)
 		c->highest_inum = key_inum(c, key);
-
-	dbg_mnt("add LEB %d:%d, key %s", lnum, offs, DBGKEY(key));
-	while (*p) {
-		parent = *p;
-		r = rb_entry(parent, struct replay_entry, rb);
-		if (sqnum < r->sqnum) {
-			p = &(*p)->rb_left;
-			continue;
-		} else if (sqnum > r->sqnum) {
-			p = &(*p)->rb_right;
-			continue;
-		}
-		ubifs_err("duplicate sqnum in replay");
-		return -EINVAL;
-	}
 
 	r = kzalloc(sizeof(struct replay_entry), GFP_KERNEL);
 	if (!r)
@@ -363,19 +400,19 @@ static int insert_node(struct ubifs_info *c, int lnum, int offs, int len,
 	r->lnum = lnum;
 	r->offs = offs;
 	r->len = len;
+	ubifs_copy_hash(c, hash, r->hash);
+	r->deletion = !!deletion;
 	r->sqnum = sqnum;
-	r->flags = (deletion ? REPLAY_DELETION : 0);
+	key_copy(c, key, &r->key);
 	r->old_size = old_size;
 	r->new_size = new_size;
-	key_copy(c, key, &r->key);
 
-	rb_link_node(&r->rb, parent, p);
-	rb_insert_color(&r->rb, &c->replay_tree);
+	list_add_tail(&r->list, &c->replay_list);
 	return 0;
 }
 
 /**
- * insert_dent - insert a directory entry node into the replay tree.
+ * insert_dent - insert a directory entry node into the replay list.
  * @c: UBIFS file-system description object
  * @lnum: node logical eraseblock number
  * @offs: node offset
@@ -387,43 +424,26 @@ static int insert_node(struct ubifs_info *c, int lnum, int offs, int len,
  * @deletion: non-zero if this is a deletion
  * @used: number of bytes in use in a LEB
  *
- * This function inserts a scanned directory entry node to the replay tree.
- * Returns zero in case of success and a negative error code in case of
- * failure.
- *
- * This function is also used for extended attribute entries because they are
- * implemented as directory entry nodes.
+ * This function inserts a scanned directory entry node or an extended
+ * attribute entry to the replay list. Returns zero in case of success and a
+ * negative error code in case of failure.
  */
 static int insert_dent(struct ubifs_info *c, int lnum, int offs, int len,
-		       union ubifs_key *key, const char *name, int nlen,
-		       unsigned long long sqnum, int deletion, int *used)
+		       const u8 *hash, union ubifs_key *key,
+		       const char *name, int nlen, unsigned long long sqnum,
+		       int deletion, int *used)
 {
-	struct rb_node **p = &c->replay_tree.rb_node, *parent = NULL;
 	struct replay_entry *r;
 	char *nbuf;
 
+	dbg_mntk(key, "add LEB %d:%d, key ", lnum, offs);
 	if (key_inum(c, key) >= c->highest_inum)
 		c->highest_inum = key_inum(c, key);
-
-	dbg_mnt("add LEB %d:%d, key %s", lnum, offs, DBGKEY(key));
-	while (*p) {
-		parent = *p;
-		r = rb_entry(parent, struct replay_entry, rb);
-		if (sqnum < r->sqnum) {
-			p = &(*p)->rb_left;
-			continue;
-		}
-		if (sqnum > r->sqnum) {
-			p = &(*p)->rb_right;
-			continue;
-		}
-		ubifs_err("duplicate sqnum in replay");
-		return -EINVAL;
-	}
 
 	r = kzalloc(sizeof(struct replay_entry), GFP_KERNEL);
 	if (!r)
 		return -ENOMEM;
+
 	nbuf = kmalloc(nlen + 1, GFP_KERNEL);
 	if (!nbuf) {
 		kfree(r);
@@ -435,17 +455,16 @@ static int insert_dent(struct ubifs_info *c, int lnum, int offs, int len,
 	r->lnum = lnum;
 	r->offs = offs;
 	r->len = len;
+	ubifs_copy_hash(c, hash, r->hash);
+	r->deletion = !!deletion;
 	r->sqnum = sqnum;
-	r->nm.len = nlen;
+	key_copy(c, key, &r->key);
+	fname_len(&r->nm) = nlen;
 	memcpy(nbuf, name, nlen);
 	nbuf[nlen] = '\0';
-	r->nm.name = nbuf;
-	r->flags = (deletion ? REPLAY_DELETION : 0);
-	key_copy(c, key, &r->key);
+	fname_name(&r->nm) = nbuf;
 
-	ubifs_assert(!*p);
-	rb_link_node(&r->rb, parent, p);
-	rb_insert_color(&r->rb, &c->replay_tree);
+	list_add_tail(&r->list, &c->replay_list);
 	return 0;
 }
 
@@ -466,15 +485,15 @@ int ubifs_validate_entry(struct ubifs_info *c,
 	if (le32_to_cpu(dent->ch.len) != nlen + UBIFS_DENT_NODE_SZ + 1 ||
 	    dent->type >= UBIFS_ITYPES_CNT ||
 	    nlen > UBIFS_MAX_NLEN || dent->name[nlen] != 0 ||
-	    strnlen(dent->name, nlen) != nlen ||
+	    (key_type == UBIFS_XENT_KEY && strnlen(dent->name, nlen) != nlen) ||
 	    le64_to_cpu(dent->inum) > MAX_INUM) {
-		ubifs_err("bad %s node", key_type == UBIFS_DENT_KEY ?
+		ubifs_err(c, "bad %s node", key_type == UBIFS_DENT_KEY ?
 			  "directory entry" : "extended attribute entry");
 		return -EINVAL;
 	}
 
 	if (key_type != UBIFS_DENT_KEY && key_type != UBIFS_XENT_KEY) {
-		ubifs_err("bad key type %d", key_type);
+		ubifs_err(c, "bad key type %d", key_type);
 		return -EINVAL;
 	}
 
@@ -482,33 +501,199 @@ int ubifs_validate_entry(struct ubifs_info *c,
 }
 
 /**
+ * is_last_bud - check if the bud is the last in the journal head.
+ * @c: UBIFS file-system description object
+ * @bud: bud description object
+ *
+ * This function checks if bud @bud is the last bud in its journal head. This
+ * information is then used by 'replay_bud()' to decide whether the bud can
+ * have corruptions or not. Indeed, only last buds can be corrupted by power
+ * cuts. Returns %1 if this is the last bud, and %0 if not.
+ */
+static int is_last_bud(struct ubifs_info *c, struct ubifs_bud *bud)
+{
+	struct ubifs_jhead *jh = &c->jheads[bud->jhead];
+	struct ubifs_bud *next;
+	uint32_t data;
+	int err;
+
+	if (list_is_last(&bud->list, &jh->buds_list))
+		return 1;
+
+	/*
+	 * The following is a quirk to make sure we work correctly with UBIFS
+	 * images used with older UBIFS.
+	 *
+	 * Normally, the last bud will be the last in the journal head's list
+	 * of bud. However, there is one exception if the UBIFS image belongs
+	 * to older UBIFS. This is fairly unlikely: one would need to use old
+	 * UBIFS, then have a power cut exactly at the right point, and then
+	 * try to mount this image with new UBIFS.
+	 *
+	 * The exception is: it is possible to have 2 buds A and B, A goes
+	 * before B, and B is the last, bud B is contains no data, and bud A is
+	 * corrupted at the end. The reason is that in older versions when the
+	 * journal code switched the next bud (from A to B), it first added a
+	 * log reference node for the new bud (B), and only after this it
+	 * synchronized the write-buffer of current bud (A). But later this was
+	 * changed and UBIFS started to always synchronize the write-buffer of
+	 * the bud (A) before writing the log reference for the new bud (B).
+	 *
+	 * But because older UBIFS always synchronized A's write-buffer before
+	 * writing to B, we can recognize this exceptional situation but
+	 * checking the contents of bud B - if it is empty, then A can be
+	 * treated as the last and we can recover it.
+	 *
+	 * TODO: remove this piece of code in a couple of years (today it is
+	 * 16.05.2011).
+	 */
+	next = list_entry(bud->list.next, struct ubifs_bud, list);
+	if (!list_is_last(&next->list, &jh->buds_list))
+		return 0;
+
+	err = ubifs_leb_read(c, next->lnum, (char *)&data, next->start, 4, 1);
+	if (err)
+		return 0;
+
+	return data == 0xFFFFFFFF;
+}
+
+/* authenticate_sleb_hash is split out for stack usage */
+static int noinline_for_stack
+authenticate_sleb_hash(struct ubifs_info *c,
+		       struct shash_desc *log_hash, u8 *hash)
+{
+	SHASH_DESC_ON_STACK(hash_desc, c->hash_tfm);
+
+	hash_desc->tfm = c->hash_tfm;
+
+	ubifs_shash_copy_state(c, log_hash, hash_desc);
+	return crypto_shash_final(hash_desc, hash);
+}
+
+/**
+ * authenticate_sleb - authenticate one scan LEB
+ * @c: UBIFS file-system description object
+ * @sleb: the scan LEB to authenticate
+ * @log_hash:
+ * @is_last: if true, this is is the last LEB
+ *
+ * This function iterates over the buds of a single LEB authenticating all buds
+ * with the authentication nodes on this LEB. Authentication nodes are written
+ * after some buds and contain a HMAC covering the authentication node itself
+ * and the buds between the last authentication node and the current
+ * authentication node. It can happen that the last buds cannot be authenticated
+ * because a powercut happened when some nodes were written but not the
+ * corresponding authentication node. This function returns the number of nodes
+ * that could be authenticated or a negative error code.
+ */
+static int authenticate_sleb(struct ubifs_info *c, struct ubifs_scan_leb *sleb,
+			     struct shash_desc *log_hash, int is_last)
+{
+	int n_not_auth = 0;
+	struct ubifs_scan_node *snod;
+	int n_nodes = 0;
+	int err;
+	u8 hash[UBIFS_HASH_ARR_SZ];
+	u8 hmac[UBIFS_HMAC_ARR_SZ];
+
+	if (!ubifs_authenticated(c))
+		return sleb->nodes_cnt;
+
+	list_for_each_entry(snod, &sleb->nodes, list) {
+
+		n_nodes++;
+
+		if (snod->type == UBIFS_AUTH_NODE) {
+			struct ubifs_auth_node *auth = snod->node;
+
+			err = authenticate_sleb_hash(c, log_hash, hash);
+			if (err)
+				goto out;
+
+			err = crypto_shash_tfm_digest(c->hmac_tfm, hash,
+						      c->hash_len, hmac);
+			if (err)
+				goto out;
+
+			err = ubifs_check_hmac(c, auth->hmac, hmac);
+			if (err) {
+				err = -EPERM;
+				goto out;
+			}
+			n_not_auth = 0;
+		} else {
+			err = crypto_shash_update(log_hash, snod->node,
+						  snod->len);
+			if (err)
+				goto out;
+			n_not_auth++;
+		}
+	}
+
+	/*
+	 * A powercut can happen when some nodes were written, but not yet
+	 * the corresponding authentication node. This may only happen on
+	 * the last bud though.
+	 */
+	if (n_not_auth) {
+		if (is_last) {
+			dbg_mnt("%d unauthenticated nodes found on LEB %d, Ignoring them",
+				n_not_auth, sleb->lnum);
+			err = 0;
+		} else {
+			dbg_mnt("%d unauthenticated nodes found on non-last LEB %d",
+				n_not_auth, sleb->lnum);
+			err = -EPERM;
+		}
+	} else {
+		err = 0;
+	}
+out:
+	return err ? err : n_nodes - n_not_auth;
+}
+
+/**
  * replay_bud - replay a bud logical eraseblock.
  * @c: UBIFS file-system description object
- * @lnum: bud logical eraseblock number to replay
- * @offs: bud start offset
- * @jhead: journal head to which this bud belongs
- * @free: amount of free space in the bud is returned here
- * @dirty: amount of dirty space from padding and deletion nodes is returned
- * here
+ * @b: bud entry which describes the bud
  *
- * This function returns zero in case of success and a negative error code in
- * case of failure.
+ * This function replays bud @bud, recovers it if needed, and adds all nodes
+ * from this bud to the replay list. Returns zero in case of success and a
+ * negative error code in case of failure.
  */
-static int replay_bud(struct ubifs_info *c, int lnum, int offs, int jhead,
-		      int *free, int *dirty)
+static int replay_bud(struct ubifs_info *c, struct bud_entry *b)
 {
-	int err = 0, used = 0;
+	int is_last = is_last_bud(c, b->bud);
+	int err = 0, used = 0, lnum = b->bud->lnum, offs = b->bud->start;
+	int n_nodes, n = 0;
 	struct ubifs_scan_leb *sleb;
 	struct ubifs_scan_node *snod;
-	struct ubifs_bud *bud;
 
-	dbg_mnt("replay bud LEB %d, head %d", lnum, jhead);
-	if (c->need_recovery)
-		sleb = ubifs_recover_leb(c, lnum, offs, c->sbuf, jhead != GCHD);
+	dbg_mnt("replay bud LEB %d, head %d, offs %d, is_last %d",
+		lnum, b->bud->jhead, offs, is_last);
+
+	if (c->need_recovery && is_last)
+		/*
+		 * Recover only last LEBs in the journal heads, because power
+		 * cuts may cause corruptions only in these LEBs, because only
+		 * these LEBs could possibly be written to at the power cut
+		 * time.
+		 */
+		sleb = ubifs_recover_leb(c, lnum, offs, c->sbuf, b->bud->jhead);
 	else
-		sleb = ubifs_scan(c, lnum, offs, c->sbuf);
+		sleb = ubifs_scan(c, lnum, offs, c->sbuf, 0);
 	if (IS_ERR(sleb))
 		return PTR_ERR(sleb);
+
+	n_nodes = authenticate_sleb(c, sleb, b->bud->log_hash, is_last);
+	if (n_nodes < 0) {
+		err = n_nodes;
+		goto out;
+	}
+
+	ubifs_shash_copy_state(c, b->bud->log_hash,
+			       c->jheads[b->bud->jhead].log_hash);
 
 	/*
 	 * The bud does not have to start from offset zero - the beginning of
@@ -533,14 +718,17 @@ static int replay_bud(struct ubifs_info *c, int lnum, int offs, int jhead,
 	 */
 
 	list_for_each_entry(snod, &sleb->nodes, list) {
+		u8 hash[UBIFS_HASH_ARR_SZ];
 		int deletion = 0;
 
 		cond_resched();
 
 		if (snod->sqnum >= SQNUM_WATERMARK) {
-			ubifs_err("file system's life ended");
+			ubifs_err(c, "file system's life ended");
 			goto out_dump;
 		}
+
+		ubifs_node_calc_hash(c, snod->node, hash);
 
 		if (snod->sqnum > c->max_sqnum)
 			c->max_sqnum = snod->sqnum;
@@ -553,7 +741,7 @@ static int replay_bud(struct ubifs_info *c, int lnum, int offs, int jhead,
 
 			if (le32_to_cpu(ino->nlink) == 0)
 				deletion = 1;
-			err = insert_node(c, lnum, snod->offs, snod->len,
+			err = insert_node(c, lnum, snod->offs, snod->len, hash,
 					  &snod->key, snod->sqnum, deletion,
 					  &used, 0, new_size);
 			break;
@@ -565,7 +753,7 @@ static int replay_bud(struct ubifs_info *c, int lnum, int offs, int jhead,
 					  key_block(c, &snod->key) *
 					  UBIFS_BLOCK_SIZE;
 
-			err = insert_node(c, lnum, snod->offs, snod->len,
+			err = insert_node(c, lnum, snod->offs, snod->len, hash,
 					  &snod->key, snod->sqnum, deletion,
 					  &used, 0, new_size);
 			break;
@@ -579,7 +767,7 @@ static int replay_bud(struct ubifs_info *c, int lnum, int offs, int jhead,
 			if (err)
 				goto out_dump;
 
-			err = insert_dent(c, lnum, snod->offs, snod->len,
+			err = insert_dent(c, lnum, snod->offs, snod->len, hash,
 					  &snod->key, dent->name,
 					  le16_to_cpu(dent->nlen), snod->sqnum,
 					  !le64_to_cpu(dent->inum), &used);
@@ -596,7 +784,7 @@ static int replay_bud(struct ubifs_info *c, int lnum, int offs, int jhead,
 			if (old_size < 0 || old_size > c->max_inode_sz ||
 			    new_size < 0 || new_size > c->max_inode_sz ||
 			    old_size <= new_size) {
-				ubifs_err("bad truncation node");
+				ubifs_err(c, "bad truncation node");
 				goto out_dump;
 			}
 
@@ -605,94 +793,45 @@ static int replay_bud(struct ubifs_info *c, int lnum, int offs, int jhead,
 			 * functions which expect nodes to have keys.
 			 */
 			trun_key_init(c, &key, le32_to_cpu(trun->inum));
-			err = insert_node(c, lnum, snod->offs, snod->len,
+			err = insert_node(c, lnum, snod->offs, snod->len, hash,
 					  &key, snod->sqnum, 1, &used,
 					  old_size, new_size);
 			break;
 		}
+		case UBIFS_AUTH_NODE:
+			break;
 		default:
-			ubifs_err("unexpected node type %d in bud LEB %d:%d",
+			ubifs_err(c, "unexpected node type %d in bud LEB %d:%d",
 				  snod->type, lnum, snod->offs);
 			err = -EINVAL;
 			goto out_dump;
 		}
 		if (err)
 			goto out;
+
+		n++;
+		if (n == n_nodes)
+			break;
 	}
 
-	bud = ubifs_search_bud(c, lnum);
-	if (!bud)
-		BUG();
+	ubifs_assert(c, ubifs_search_bud(c, lnum));
+	ubifs_assert(c, sleb->endpt - offs >= used);
+	ubifs_assert(c, sleb->endpt % c->min_io_size == 0);
 
-	ubifs_assert(sleb->endpt - offs >= used);
-	ubifs_assert(sleb->endpt % c->min_io_size == 0);
-
-	if (sleb->endpt + c->min_io_size <= c->leb_size &&
-	    !(c->vfs_sb->s_flags & MS_RDONLY))
-		err = ubifs_wbuf_seek_nolock(&c->jheads[jhead].wbuf, lnum,
-					     sleb->endpt, UBI_SHORTTERM);
-
-	*dirty = sleb->endpt - offs - used;
-	*free = c->leb_size - sleb->endpt;
+	b->dirty = sleb->endpt - offs - used;
+	b->free = c->leb_size - sleb->endpt;
+	dbg_mnt("bud LEB %d replied: dirty %d, free %d",
+		lnum, b->dirty, b->free);
 
 out:
 	ubifs_scan_destroy(sleb);
 	return err;
 
 out_dump:
-	ubifs_err("bad node is at LEB %d:%d", lnum, snod->offs);
-	dbg_dump_node(c, snod->node);
+	ubifs_err(c, "bad node is at LEB %d:%d", lnum, snod->offs);
+	ubifs_dump_node(c, snod->node);
 	ubifs_scan_destroy(sleb);
 	return -EINVAL;
-}
-
-/**
- * insert_ref_node - insert a reference node to the replay tree.
- * @c: UBIFS file-system description object
- * @lnum: node logical eraseblock number
- * @offs: node offset
- * @sqnum: sequence number
- * @free: amount of free space in bud
- * @dirty: amount of dirty space from padding and deletion nodes
- *
- * This function inserts a reference node to the replay tree and returns zero
- * in case of success ort a negative error code in case of failure.
- */
-static int insert_ref_node(struct ubifs_info *c, int lnum, int offs,
-			   unsigned long long sqnum, int free, int dirty)
-{
-	struct rb_node **p = &c->replay_tree.rb_node, *parent = NULL;
-	struct replay_entry *r;
-
-	dbg_mnt("add ref LEB %d:%d", lnum, offs);
-	while (*p) {
-		parent = *p;
-		r = rb_entry(parent, struct replay_entry, rb);
-		if (sqnum < r->sqnum) {
-			p = &(*p)->rb_left;
-			continue;
-		} else if (sqnum > r->sqnum) {
-			p = &(*p)->rb_right;
-			continue;
-		}
-		ubifs_err("duplicate sqnum in replay tree");
-		return -EINVAL;
-	}
-
-	r = kzalloc(sizeof(struct replay_entry), GFP_KERNEL);
-	if (!r)
-		return -ENOMEM;
-
-	r->lnum = lnum;
-	r->offs = offs;
-	r->sqnum = sqnum;
-	r->flags = REPLAY_REF;
-	r->free = free;
-	r->dirty = dirty;
-
-	rb_link_node(&r->rb, parent, p);
-	rb_insert_color(&r->rb, &c->replay_tree);
-	return 0;
 }
 
 /**
@@ -705,17 +844,16 @@ static int insert_ref_node(struct ubifs_info *c, int lnum, int offs,
 static int replay_buds(struct ubifs_info *c)
 {
 	struct bud_entry *b;
-	int err, uninitialized_var(free), uninitialized_var(dirty);
+	int err;
+	unsigned long long prev_sqnum = 0;
 
 	list_for_each_entry(b, &c->replay_buds, list) {
-		err = replay_bud(c, b->bud->lnum, b->bud->start, b->bud->jhead,
-				 &free, &dirty);
+		err = replay_bud(c, b);
 		if (err)
 			return err;
-		err = insert_ref_node(c, b->bud->lnum, b->bud->start, b->sqnum,
-				      free, dirty);
-		if (err)
-			return err;
+
+		ubifs_assert(c, b->sqnum > prev_sqnum);
+		prev_sqnum = b->sqnum;
 	}
 
 	return 0;
@@ -752,6 +890,7 @@ static int add_replay_bud(struct ubifs_info *c, int lnum, int offs, int jhead,
 {
 	struct ubifs_bud *bud;
 	struct bud_entry *b;
+	int err;
 
 	dbg_mnt("add replay bud LEB %d:%d, head %d", lnum, offs, jhead);
 
@@ -761,13 +900,21 @@ static int add_replay_bud(struct ubifs_info *c, int lnum, int offs, int jhead,
 
 	b = kmalloc(sizeof(struct bud_entry), GFP_KERNEL);
 	if (!b) {
-		kfree(bud);
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto out;
 	}
 
 	bud->lnum = lnum;
 	bud->start = offs;
 	bud->jhead = jhead;
+	bud->log_hash = ubifs_hash_get_desc(c);
+	if (IS_ERR(bud->log_hash)) {
+		err = PTR_ERR(bud->log_hash);
+		goto out;
+	}
+
+	ubifs_shash_copy_state(c, c->log_hash, bud->log_hash);
+
 	ubifs_add_bud(c, bud);
 
 	b->bud = bud;
@@ -775,14 +922,17 @@ static int add_replay_bud(struct ubifs_info *c, int lnum, int offs, int jhead,
 	list_add_tail(&b->list, &c->replay_buds);
 
 	return 0;
+out:
+	kfree(bud);
+	kfree(b);
+
+	return err;
 }
 
 /**
  * validate_ref - validate a reference node.
  * @c: UBIFS file-system description object
  * @ref: the reference node to validate
- * @ref_lnum: LEB number of the reference node
- * @ref_offs: reference node offset
  *
  * This function returns %1 if a bud reference already exists for the LEB. %0 is
  * returned if the reference node is new, otherwise %-EINVAL is returned if
@@ -810,7 +960,7 @@ static int validate_ref(struct ubifs_info *c, const struct ubifs_ref_node *ref)
 	if (bud) {
 		if (bud->jhead == jhead && bud->start <= offs)
 			return 1;
-		ubifs_err("bud at LEB %d:%d was already referred", lnum, offs);
+		ubifs_err(c, "bud at LEB %d:%d was already referred", lnum, offs);
 		return -EINVAL;
 	}
 
@@ -836,10 +986,16 @@ static int replay_log_leb(struct ubifs_info *c, int lnum, int offs, void *sbuf)
 	const struct ubifs_cs_node *node;
 
 	dbg_mnt("replay log LEB %d:%d", lnum, offs);
-	sleb = ubifs_scan(c, lnum, offs, sbuf);
+	sleb = ubifs_scan(c, lnum, offs, sbuf, c->need_recovery);
 	if (IS_ERR(sleb)) {
-		if (c->need_recovery)
-			sleb = ubifs_recover_log_leb(c, lnum, offs, sbuf);
+		if (PTR_ERR(sleb) != -EUCLEAN || !c->need_recovery)
+			return PTR_ERR(sleb);
+		/*
+		 * Note, the below function will recover this log LEB only if
+		 * it is the last, because unclean reboots can possibly corrupt
+		 * only the tail of the log.
+		 */
+		sleb = ubifs_recover_log_leb(c, lnum, offs, sbuf);
 		if (IS_ERR(sleb))
 			return PTR_ERR(sleb);
 	}
@@ -850,7 +1006,6 @@ static int replay_log_leb(struct ubifs_info *c, int lnum, int offs, void *sbuf)
 	}
 
 	node = sleb->buf;
-
 	snod = list_entry(sleb->nodes.next, struct ubifs_scan_node, list);
 	if (c->cs_sqnum == 0) {
 		/*
@@ -861,21 +1016,28 @@ static int replay_log_leb(struct ubifs_info *c, int lnum, int offs, void *sbuf)
 		 * numbers.
 		 */
 		if (snod->type != UBIFS_CS_NODE) {
-			dbg_err("first log node at LEB %d:%d is not CS node",
-				lnum, offs);
+			ubifs_err(c, "first log node at LEB %d:%d is not CS node",
+				  lnum, offs);
 			goto out_dump;
 		}
 		if (le64_to_cpu(node->cmt_no) != c->cmt_no) {
-			dbg_err("first CS node at LEB %d:%d has wrong "
-				"commit number %llu expected %llu",
-				lnum, offs,
-				(unsigned long long)le64_to_cpu(node->cmt_no),
-				c->cmt_no);
+			ubifs_err(c, "first CS node at LEB %d:%d has wrong commit number %llu expected %llu",
+				  lnum, offs,
+				  (unsigned long long)le64_to_cpu(node->cmt_no),
+				  c->cmt_no);
 			goto out_dump;
 		}
 
 		c->cs_sqnum = le64_to_cpu(node->ch.sqnum);
 		dbg_mnt("commit start sqnum %llu", c->cs_sqnum);
+
+		err = ubifs_shash_init(c, c->log_hash);
+		if (err)
+			goto out;
+
+		err = ubifs_shash_update(c, c->log_hash, node, UBIFS_CS_NODE_SZ);
+		if (err < 0)
+			goto out;
 	}
 
 	if (snod->sqnum < c->cs_sqnum) {
@@ -883,7 +1045,7 @@ static int replay_log_leb(struct ubifs_info *c, int lnum, int offs, void *sbuf)
 		 * This means that we reached end of log and now
 		 * look to the older log data, which was already
 		 * committed but the eraseblock was not erased (UBIFS
-		 * only unmaps it). So this basically means we have to
+		 * only un-maps it). So this basically means we have to
 		 * exit with "end of log" code.
 		 */
 		err = 1;
@@ -892,22 +1054,21 @@ static int replay_log_leb(struct ubifs_info *c, int lnum, int offs, void *sbuf)
 
 	/* Make sure the first node sits at offset zero of the LEB */
 	if (snod->offs != 0) {
-		dbg_err("first node is not at zero offset");
+		ubifs_err(c, "first node is not at zero offset");
 		goto out_dump;
 	}
 
 	list_for_each_entry(snod, &sleb->nodes, list) {
-
 		cond_resched();
 
 		if (snod->sqnum >= SQNUM_WATERMARK) {
-			ubifs_err("file system's life ended");
+			ubifs_err(c, "file system's life ended");
 			goto out_dump;
 		}
 
 		if (snod->sqnum < c->cs_sqnum) {
-			dbg_err("bad sqnum %llu, commit sqnum %llu",
-				snod->sqnum, c->cs_sqnum);
+			ubifs_err(c, "bad sqnum %llu, commit sqnum %llu",
+				  snod->sqnum, c->cs_sqnum);
 			goto out_dump;
 		}
 
@@ -924,6 +1085,11 @@ static int replay_log_leb(struct ubifs_info *c, int lnum, int offs, void *sbuf)
 			if (err)
 				goto out_dump;
 
+			err = ubifs_shash_update(c, c->log_hash, ref,
+						 UBIFS_REF_NODE_SZ);
+			if (err)
+				goto out;
+
 			err = add_replay_bud(c, le32_to_cpu(ref->lnum),
 					     le32_to_cpu(ref->offs),
 					     le32_to_cpu(ref->jhead),
@@ -936,12 +1102,12 @@ static int replay_log_leb(struct ubifs_info *c, int lnum, int offs, void *sbuf)
 		case UBIFS_CS_NODE:
 			/* Make sure it sits at the beginning of LEB */
 			if (snod->offs != 0) {
-				ubifs_err("unexpected node in log");
+				ubifs_err(c, "unexpected node in log");
 				goto out_dump;
 			}
 			break;
 		default:
-			ubifs_err("unexpected node in log");
+			ubifs_err(c, "unexpected node in log");
 			goto out_dump;
 		}
 	}
@@ -957,9 +1123,9 @@ out:
 	return err;
 
 out_dump:
-	ubifs_err("log error detected while replying the log at LEB %d:%d",
+	ubifs_err(c, "log error detected while replaying the log at LEB %d:%d",
 		  lnum, offs + snod->offs);
-	dbg_dump_node(c, snod->node);
+	ubifs_dump_node(c, snod->node);
 	ubifs_scan_destroy(sleb);
 	return -EINVAL;
 }
@@ -1009,8 +1175,7 @@ out:
  */
 int ubifs_replay_journal(struct ubifs_info *c)
 {
-	int err, i, lnum, offs, free;
-	void *sbuf = NULL;
+	int err, lnum, free;
 
 	BUILD_BUG_ON(UBIFS_TRUN_KEY > 5);
 
@@ -1020,56 +1185,66 @@ int ubifs_replay_journal(struct ubifs_info *c)
 		return free; /* Error code */
 
 	if (c->ihead_offs != c->leb_size - free) {
-		ubifs_err("bad index head LEB %d:%d", c->ihead_lnum,
+		ubifs_err(c, "bad index head LEB %d:%d", c->ihead_lnum,
 			  c->ihead_offs);
 		return -EINVAL;
 	}
 
-	sbuf = vmalloc(c->leb_size);
-	if (!sbuf)
-		return -ENOMEM;
-
 	dbg_mnt("start replaying the journal");
-
 	c->replaying = 1;
-
 	lnum = c->ltail_lnum = c->lhead_lnum;
-	offs = c->lhead_offs;
 
-	for (i = 0; i < c->log_lebs; i++, lnum++) {
-		if (lnum >= UBIFS_LOG_LNUM + c->log_lebs) {
+	do {
+		err = replay_log_leb(c, lnum, 0, c->sbuf);
+		if (err == 1) {
+			if (lnum != c->lhead_lnum)
+				/* We hit the end of the log */
+				break;
+
 			/*
-			 * The log is logically circular, we reached the last
-			 * LEB, switch to the first one.
+			 * The head of the log must always start with the
+			 * "commit start" node on a properly formatted UBIFS.
+			 * But we found no nodes at all, which means that
+			 * something went wrong and we cannot proceed mounting
+			 * the file-system.
 			 */
-			lnum = UBIFS_LOG_LNUM;
-			offs = 0;
+			ubifs_err(c, "no UBIFS nodes found at the log head LEB %d:%d, possibly corrupted",
+				  lnum, 0);
+			err = -EINVAL;
 		}
-		err = replay_log_leb(c, lnum, offs, sbuf);
-		if (err == 1)
-			/* We hit the end of the log */
-			break;
 		if (err)
 			goto out;
-		offs = 0;
-	}
+		lnum = ubifs_next_log_lnum(c, lnum);
+	} while (lnum != c->ltail_lnum);
 
 	err = replay_buds(c);
 	if (err)
 		goto out;
 
-	err = apply_replay_tree(c);
+	err = apply_replay_list(c);
 	if (err)
 		goto out;
 
-	ubifs_assert(c->bud_bytes <= c->max_bud_bytes || c->need_recovery);
-	dbg_mnt("finished, log head LEB %d:%d, max_sqnum %llu, "
-		"highest_inum %lu", c->lhead_lnum, c->lhead_offs, c->max_sqnum,
-		c->highest_inum);
+	err = set_buds_lprops(c);
+	if (err)
+		goto out;
+
+	/*
+	 * UBIFS budgeting calculations use @c->bi.uncommitted_idx variable
+	 * to roughly estimate index growth. Things like @c->bi.min_idx_lebs
+	 * depend on it. This means we have to initialize it to make sure
+	 * budgeting works properly.
+	 */
+	c->bi.uncommitted_idx = atomic_long_read(&c->dirty_zn_cnt);
+	c->bi.uncommitted_idx *= c->max_idx_node_sz;
+
+	ubifs_assert(c, c->bud_bytes <= c->max_bud_bytes || c->need_recovery);
+	dbg_mnt("finished, log head LEB %d:%d, max_sqnum %llu, highest_inum %lu",
+		c->lhead_lnum, c->lhead_offs, c->max_sqnum,
+		(unsigned long)c->highest_inum);
 out:
-	destroy_replay_tree(c);
+	destroy_replay_list(c);
 	destroy_bud_list(c);
-	vfree(sbuf);
 	c->replaying = 0;
 	return err;
 }

@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Windfarm PowerMac thermal control.
  * Control loops for machines with SMU and PPC970MP processors.
  *
  * Copyright (C) 2005 Paul Mackerras, IBM Corp. <paulus@samba.org>
  * Copyright (C) 2006 Benjamin Herrenschmidt, IBM Corp.
- *
- * Use and redistribute under the terms of the GNU GPL v2.
  */
 #include <linux/types.h>
 #include <linux/errno.h>
@@ -96,14 +95,14 @@ static int cpu_last_target;
 static struct wf_pid_state backside_pid;
 static int backside_tick;
 static struct wf_pid_state slots_pid;
-static int slots_started;
+static bool slots_started;
 static struct wf_pid_state drive_bay_pid;
 static int drive_bay_tick;
 
 static int nr_cores;
 static int have_all_controls;
 static int have_all_sensors;
-static int started;
+static bool started;
 
 static int failure_state;
 #define FAILURE_SENSOR		1
@@ -133,14 +132,6 @@ static int create_cpu_loop(int cpu)
 	s32 tmax;
 	int fmin;
 
-	/* Get PID params from the appropriate SAT */
-	hdr = smu_sat_get_sdb_partition(chip, 0xC8 + core, NULL);
-	if (hdr == NULL) {
-		printk(KERN_WARNING"windfarm: can't get CPU PID fan config\n");
-		return -EINVAL;
-	}
-	piddata = (struct smu_sdbp_cpupiddata *)&hdr[1];
-
 	/* Get FVT params to get Tmax; if not found, assume default */
 	hdr = smu_sat_get_sdb_partition(chip, 0xC4 + core, NULL);
 	if (hdr) {
@@ -152,6 +143,16 @@ static int create_cpu_loop(int cpu)
 	/* We keep a global tmax for overtemp calculations */
 	if (tmax < cpu_all_tmax)
 		cpu_all_tmax = tmax;
+
+	kfree(hdr);
+
+	/* Get PID params from the appropriate SAT */
+	hdr = smu_sat_get_sdb_partition(chip, 0xC8 + core, NULL);
+	if (hdr == NULL) {
+		printk(KERN_WARNING"windfarm: can't get CPU PID fan config\n");
+		return -EINVAL;
+	}
+	piddata = (struct smu_sdbp_cpupiddata *)&hdr[1];
 
 	/*
 	 * Darwin has a minimum fan speed of 1000 rpm for the 4-way and
@@ -175,6 +176,9 @@ static int create_cpu_loop(int cpu)
 		pid.min = fmin;
 
 	wf_cpu_pid_init(&cpu_pid[cpu], &pid);
+
+	kfree(hdr);
+
 	return 0;
 }
 
@@ -462,7 +466,7 @@ static void slots_fan_tick(void)
 		/* first time; initialize things */
 		printk(KERN_INFO "windfarm: Slots control loop started.\n");
 		wf_pid_init(&slots_pid, &slots_param);
-		slots_started = 1;
+		slots_started = true;
 	}
 
 	err = slots_power->ops->get_value(slots_power, &power);
@@ -506,7 +510,7 @@ static void pm112_tick(void)
 	int i, last_failure;
 
 	if (!started) {
-		started = 1;
+		started = true;
 		printk(KERN_INFO "windfarm: CPUs control loops started.\n");
 		for (i = 0; i < nr_cores; ++i) {
 			if (create_cpu_loop(i) < 0) {
@@ -656,7 +660,7 @@ static int wf_pm112_probe(struct platform_device *dev)
 	return 0;
 }
 
-static int __devexit wf_pm112_remove(struct platform_device *dev)
+static int wf_pm112_remove(struct platform_device *dev)
 {
 	wf_unregister_client(&pm112_events);
 	/* should release all sensors and controls */
@@ -665,10 +669,9 @@ static int __devexit wf_pm112_remove(struct platform_device *dev)
 
 static struct platform_driver wf_pm112_driver = {
 	.probe = wf_pm112_probe,
-	.remove = __devexit_p(wf_pm112_remove),
+	.remove = wf_pm112_remove,
 	.driver = {
 		.name = "windfarm",
-		.owner	= THIS_MODULE,
 	},
 };
 
@@ -676,12 +679,12 @@ static int __init wf_pm112_init(void)
 {
 	struct device_node *cpu;
 
-	if (!machine_is_compatible("PowerMac11,2"))
+	if (!of_machine_is_compatible("PowerMac11,2"))
 		return -ENODEV;
 
 	/* Count the number of CPU cores */
 	nr_cores = 0;
-	for (cpu = NULL; (cpu = of_find_node_by_type(cpu, "cpu")) != NULL; )
+	for_each_node_by_type(cpu, "cpu")
 		++nr_cores;
 
 	printk(KERN_INFO "windfarm: initializing for dual-core desktop G5\n");

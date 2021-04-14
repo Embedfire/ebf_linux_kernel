@@ -64,14 +64,13 @@
 #include <linux/if_arp.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/printk.h>
 #include <linux/slab.h>
-#include <linux/miscdevice.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 #include <linux/delay.h>
-// #include <linux/trdevice.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/io.h>
 
     /* Override mptbase.h by pre-defining these! */
@@ -113,16 +112,16 @@ MODULE_DESCRIPTION(LANAME);
 #ifdef MPT_LAN_IO_DEBUG
 #define dioprintk(x)  printk x
 #else
-#define dioprintk(x)
+#define dioprintk(x)  no_printk x
 #endif
 
 #ifdef MPT_LAN_DEBUG
 #define dlprintk(x)  printk x
 #else
-#define dlprintk(x)
+#define dlprintk(x)  no_printk x
 #endif
 
-#define NETDEV_TO_LANPRIV_PTR(d)	((struct mpt_lan_priv *)(d)->priv)
+#define NETDEV_TO_LANPRIV_PTR(d)	((struct mpt_lan_priv *)netdev_priv(d))
 #define NETDEV_PTR_TO_IOC_NAME_s(d)	(NETDEV_TO_LANPRIV_PTR(d)->mpt_dev->name)
 #define IOC_AND_NETDEV_NAMES_s_s(d)	NETDEV_PTR_TO_IOC_NAME_s(d), (d)->name
 

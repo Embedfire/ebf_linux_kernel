@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * File:	mca_drv.c
  * Purpose:	Generic MCA handling layer
@@ -14,7 +15,7 @@
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/kallsyms.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/acpi.h>
 #include <linux/timer.h>
 #include <linux/module.h>
@@ -22,12 +23,11 @@
 #include <linux/smp.h>
 #include <linux/workqueue.h>
 #include <linux/mm.h>
+#include <linux/slab.h>
 
 #include <asm/delay.h>
-#include <asm/machvec.h>
 #include <asm/page.h>
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/sal.h>
 #include <asm/mca.h>
 
@@ -158,7 +158,8 @@ mca_handler_bh(unsigned long paddr, void *iip, unsigned long ipsr)
 	ia64_mlogbuf_dump();
 	printk(KERN_ERR "OS_MCA: process [cpu %d, pid: %d, uid: %d, "
 		"iip: %p, psr: 0x%lx,paddr: 0x%lx](%s) encounters MCA.\n",
-		raw_smp_processor_id(), current->pid, current->uid,
+	       raw_smp_processor_id(), current->pid,
+		from_kuid(&init_user_ns, current_uid()),
 		iip, ipsr, paddr, current->comm);
 
 	spin_lock(&mca_bh_lock);
@@ -348,8 +349,9 @@ init_record_index_pools(void)
 
 	/* - 3 - */
 	slidx_pool.max_idx = (rec_max_size/sect_min_size) * 2 + 1;
-	slidx_pool.buffer = (slidx_list_t *)
-		kmalloc(slidx_pool.max_idx * sizeof(slidx_list_t), GFP_KERNEL);
+	slidx_pool.buffer =
+		kmalloc_array(slidx_pool.max_idx, sizeof(slidx_list_t),
+			      GFP_KERNEL);
 
 	return slidx_pool.buffer ? 0 : -ENOMEM;
 }

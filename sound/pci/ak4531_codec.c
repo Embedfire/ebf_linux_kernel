@@ -1,28 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Universal routines for AK4531 codec
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
+#include <linux/module.h>
 
 #include <sound/core.h>
 #include <sound/ak4531_codec.h>
@@ -34,11 +20,7 @@ MODULE_DESCRIPTION("Universal routines for AK4531 codec");
 MODULE_LICENSE("GPL");
 */
 
-#ifdef CONFIG_PROC_FS
 static void snd_ak4531_proc_init(struct snd_card *card, struct snd_ak4531 *ak4531);
-#else
-#define snd_ak4531_proc_init(card,ak)
-#endif
 
 /*
  *
@@ -51,7 +33,8 @@ static void snd_ak4531_dump(struct snd_ak4531 *ak4531)
 	int idx;
 	
 	for (idx = 0; idx < 0x19; idx++)
-		printk("ak4531 0x%x: 0x%x\n", idx, ak4531->regs[idx]);
+		printk(KERN_DEBUG "ak4531 0x%x: 0x%x\n",
+		       idx, ak4531->regs[idx]);
 }
 
 #endif
@@ -272,7 +255,7 @@ static const DECLARE_TLV_DB_SCALE(db_scale_master, -6200, 200, 0);
 static const DECLARE_TLV_DB_SCALE(db_scale_mono, -2800, 400, 0);
 static const DECLARE_TLV_DB_SCALE(db_scale_input, -5000, 200, 0);
 
-static struct snd_kcontrol_new snd_ak4531_controls[] __devinitdata = {
+static const struct snd_kcontrol_new snd_ak4531_controls[] = {
 
 AK4531_DOUBLE_TLV("Master Playback Switch", 0,
 		  AK4531_LMASTER, AK4531_RMASTER, 7, 7, 1, 1,
@@ -352,7 +335,7 @@ static int snd_ak4531_dev_free(struct snd_device *device)
 	return snd_ak4531_free(ak4531);
 }
 
-static u8 snd_ak4531_initial_map[0x19 + 1] = {
+static const u8 snd_ak4531_initial_map[0x19 + 1] = {
 	0x9f,		/* 00: Master Volume Lch */
 	0x9f,		/* 01: Master Volume Rch */
 	0x9f,		/* 02: Voice Volume Lch */
@@ -381,20 +364,21 @@ static u8 snd_ak4531_initial_map[0x19 + 1] = {
 	0x01		/* 19: Mic Amp Setup */
 };
 
-int __devinit snd_ak4531_mixer(struct snd_card *card,
-			       struct snd_ak4531 *_ak4531,
-			       struct snd_ak4531 **rak4531)
+int snd_ak4531_mixer(struct snd_card *card,
+		     struct snd_ak4531 *_ak4531,
+		     struct snd_ak4531 **rak4531)
 {
 	unsigned int idx;
 	int err;
 	struct snd_ak4531 *ak4531;
-	static struct snd_device_ops ops = {
+	static const struct snd_device_ops ops = {
 		.dev_free =	snd_ak4531_dev_free,
 	};
 
-	snd_assert(rak4531 != NULL, return -EINVAL);
-	*rak4531 = NULL;
-	snd_assert(card != NULL && _ak4531 != NULL, return -EINVAL);
+	if (snd_BUG_ON(!card || !_ak4531))
+		return -EINVAL;
+	if (rak4531)
+		*rak4531 = NULL;
 	ak4531 = kzalloc(sizeof(*ak4531), GFP_KERNEL);
 	if (ak4531 == NULL)
 		return -ENOMEM;
@@ -428,7 +412,8 @@ int __devinit snd_ak4531_mixer(struct snd_card *card,
 #if 0
 	snd_ak4531_dump(ak4531);
 #endif
-	*rak4531 = ak4531;
+	if (rak4531)
+		*rak4531 = ak4531;
 	return 0;
 }
 
@@ -462,7 +447,6 @@ void snd_ak4531_resume(struct snd_ak4531 *ak4531)
 }
 #endif
 
-#ifdef CONFIG_PROC_FS
 /*
  * /proc interface
  */
@@ -479,12 +463,8 @@ static void snd_ak4531_proc_read(struct snd_info_entry *entry,
 		    ak4531->regs[AK4531_MIC_GAIN] & 1 ? "+30dB" : "+0dB");
 }
 
-static void __devinit
+static void
 snd_ak4531_proc_init(struct snd_card *card, struct snd_ak4531 *ak4531)
 {
-	struct snd_info_entry *entry;
-
-	if (! snd_card_proc_new(card, "ak4531", &entry))
-		snd_info_set_text_ops(entry, ak4531, snd_ak4531_proc_read);
+	snd_card_ro_proc_new(card, "ak4531", ak4531, snd_ak4531_proc_read);
 }
-#endif

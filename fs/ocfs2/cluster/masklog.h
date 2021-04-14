@@ -1,22 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* -*- mode: c; c-basic-offset: 8; -*-
  * vim: noexpandtab sw=8 ts=8 sts=0:
  *
  * Copyright (C) 2005 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  */
 
 #ifndef O2CLUSTER_MASKLOG_H
@@ -48,77 +34,64 @@
  * only emit the appropriage printk() when the caller passes in a constant
  * mask, as is almost always the case.
  *
- * All this bitmask nonsense is hidden from the /proc interface so that Joel
- * doesn't have an aneurism.  Reading the file gives a straight forward
- * indication of which bits are on or off:
- * 	ENTRY off
- * 	EXIT off
+ * All this bitmask nonsense is managed from the files under
+ * /sys/fs/o2cb/logmask/.  Reading the files gives a straightforward
+ * indication of which bits are allowed (allow) or denied (off/deny).
+ * 	ENTRY deny
+ * 	EXIT deny
  * 	TCP off
  * 	MSG off
  * 	SOCKET off
- * 	ERROR off
- * 	NOTICE on
+ * 	ERROR allow
+ * 	NOTICE allow
  *
  * Writing changes the state of a given bit and requires a strictly formatted
  * single write() call:
  *
- * 	write(fd, "ENTRY on", 8);
+ * 	write(fd, "allow", 5);
  *
- * would turn the entry bit on.  "1" is also accepted in the place of "on", and
- * "off" and "0" behave as expected.
+ * Echoing allow/deny/off string into the logmask files can flip the bits
+ * on or off as expected; here is the bash script for example:
  *
- * Some trivial shell can flip all the bits on or off:
+ * log_mask="/sys/fs/o2cb/log_mask"
+ * for node in ENTRY EXIT TCP MSG SOCKET ERROR NOTICE; do
+ *	echo allow >"$log_mask"/"$node"
+ * done
  *
- * log_mask="/proc/fs/ocfs2_nodemanager/log_mask"
- * cat $log_mask | (
- * 	while read bit status; do
- * 		# $1 is "on" or "off", say
- * 		echo "$bit $1" > $log_mask
- * 	done
- * )
+ * The debugfs.ocfs2 tool can also flip the bits with the -l option:
+ *
+ * debugfs.ocfs2 -l TCP allow
  */
 
 /* for task_struct */
 #include <linux/sched.h>
 
 /* bits that are frequently given and infrequently matched in the low word */
-/* NOTE: If you add a flag, you need to also update mlog.c! */
-#define ML_ENTRY	0x0000000000000001ULL /* func call entry */
-#define ML_EXIT		0x0000000000000002ULL /* func call exit */
-#define ML_TCP		0x0000000000000004ULL /* net cluster/tcp.c */
-#define ML_MSG		0x0000000000000008ULL /* net network messages */
-#define ML_SOCKET	0x0000000000000010ULL /* net socket lifetime */
-#define ML_HEARTBEAT	0x0000000000000020ULL /* hb all heartbeat tracking */
-#define ML_HB_BIO	0x0000000000000040ULL /* hb io tracing */
-#define ML_DLMFS	0x0000000000000080ULL /* dlm user dlmfs */
-#define ML_DLM		0x0000000000000100ULL /* dlm general debugging */
-#define ML_DLM_DOMAIN	0x0000000000000200ULL /* dlm domain debugging */
-#define ML_DLM_THREAD	0x0000000000000400ULL /* dlm domain thread */
-#define ML_DLM_MASTER	0x0000000000000800ULL /* dlm master functions */
-#define ML_DLM_RECOVERY	0x0000000000001000ULL /* dlm master functions */
-#define ML_AIO		0x0000000000002000ULL /* ocfs2 aio read and write */
-#define ML_JOURNAL	0x0000000000004000ULL /* ocfs2 journalling functions */
-#define ML_DISK_ALLOC	0x0000000000008000ULL /* ocfs2 disk allocation */
-#define ML_SUPER	0x0000000000010000ULL /* ocfs2 mount / umount */
-#define ML_FILE_IO	0x0000000000020000ULL /* ocfs2 file I/O */
-#define ML_EXTENT_MAP	0x0000000000040000ULL /* ocfs2 extent map caching */
-#define ML_DLM_GLUE	0x0000000000080000ULL /* ocfs2 dlm glue layer */
-#define ML_BH_IO	0x0000000000100000ULL /* ocfs2 buffer I/O */
-#define ML_UPTODATE	0x0000000000200000ULL /* ocfs2 caching sequence #'s */
-#define ML_NAMEI	0x0000000000400000ULL /* ocfs2 directory / namespace */
-#define ML_INODE	0x0000000000800000ULL /* ocfs2 inode manipulation */
-#define ML_VOTE		0x0000000001000000ULL /* ocfs2 node messaging  */
-#define ML_DCACHE	0x0000000002000000ULL /* ocfs2 dcache operations */
-#define ML_CONN		0x0000000004000000ULL /* net connection management */
-#define ML_QUORUM	0x0000000008000000ULL /* net connection quorum */
-#define ML_EXPORT	0x0000000010000000ULL /* ocfs2 export operations */
+/* NOTE: If you add a flag, you need to also update masklog.c! */
+#define ML_TCP		0x0000000000000001ULL /* net cluster/tcp.c */
+#define ML_MSG		0x0000000000000002ULL /* net network messages */
+#define ML_SOCKET	0x0000000000000004ULL /* net socket lifetime */
+#define ML_HEARTBEAT	0x0000000000000008ULL /* hb all heartbeat tracking */
+#define ML_HB_BIO	0x0000000000000010ULL /* hb io tracing */
+#define ML_DLMFS	0x0000000000000020ULL /* dlm user dlmfs */
+#define ML_DLM		0x0000000000000040ULL /* dlm general debugging */
+#define ML_DLM_DOMAIN	0x0000000000000080ULL /* dlm domain debugging */
+#define ML_DLM_THREAD	0x0000000000000100ULL /* dlm domain thread */
+#define ML_DLM_MASTER	0x0000000000000200ULL /* dlm master functions */
+#define ML_DLM_RECOVERY	0x0000000000000400ULL /* dlm master functions */
+#define ML_DLM_GLUE	0x0000000000000800ULL /* ocfs2 dlm glue layer */
+#define ML_VOTE		0x0000000000001000ULL /* ocfs2 node messaging  */
+#define ML_CONN		0x0000000000002000ULL /* net connection management */
+#define ML_QUORUM	0x0000000000004000ULL /* net connection quorum */
+#define ML_BASTS	0x0000000000008000ULL /* dlmglue asts and basts */
+#define ML_CLUSTER	0x0000000000010000ULL /* cluster stack */
+
 /* bits that are infrequently given and frequently matched in the high word */
-#define ML_ERROR	0x0000000100000000ULL /* sent to KERN_ERR */
-#define ML_NOTICE	0x0000000200000000ULL /* setn to KERN_NOTICE */
-#define ML_KTHREAD	0x0000000400000000ULL /* kernel thread activity */
+#define ML_ERROR	0x1000000000000000ULL /* sent to KERN_ERR */
+#define ML_NOTICE	0x2000000000000000ULL /* setn to KERN_NOTICE */
+#define ML_KTHREAD	0x4000000000000000ULL /* kernel thread activity */
 
 #define MLOG_INITIAL_AND_MASK (ML_ERROR|ML_NOTICE)
-#define MLOG_INITIAL_NOT_MASK (ML_ENTRY|ML_EXIT)
 #ifndef MLOG_MASK_PREFIX
 #define MLOG_MASK_PREFIX 0
 #endif
@@ -175,98 +148,39 @@ extern struct mlog_bits mlog_and_bits, mlog_not_bits;
 
 #endif
 
+__printf(4, 5)
+void __mlog_printk(const u64 *m, const char *func, int line,
+		   const char *fmt, ...);
+
 /*
- * smp_processor_id() "helpfully" screams when called outside preemptible
- * regions in current kernels.  sles doesn't have the variants that don't
- * scream.  just do this instead of trying to guess which we're building
- * against.. *sigh*.
+ * Testing before the __mlog_printk call lets the compiler eliminate the
+ * call completely when (m & ML_ALLOWED_BITS) is 0.
  */
-#define __mlog_cpu_guess ({		\
-	unsigned long _cpu = get_cpu();	\
-	put_cpu();			\
-	_cpu;				\
-})
-
-/* In the following two macros, the whitespace after the ',' just
- * before ##args is intentional. Otherwise, gcc 2.95 will eat the
- * previous token if args expands to nothing.
- */
-#define __mlog_printk(level, fmt, args...)				\
-	printk(level "(%u,%lu):%s:%d " fmt, task_pid_nr(current),	\
-	       __mlog_cpu_guess, __PRETTY_FUNCTION__, __LINE__ ,	\
-	       ##args)
-
-#define mlog(mask, fmt, args...) do {					\
-	u64 __m = MLOG_MASK_PREFIX | (mask);				\
-	if ((__m & ML_ALLOWED_BITS) &&					\
-	    __mlog_test_u64(__m, mlog_and_bits) &&			\
-	    !__mlog_test_u64(__m, mlog_not_bits)) {			\
-		if (__m & ML_ERROR)					\
-			__mlog_printk(KERN_ERR, "ERROR: "fmt , ##args);	\
-		else if (__m & ML_NOTICE)				\
-			__mlog_printk(KERN_NOTICE, fmt , ##args);	\
-		else __mlog_printk(KERN_INFO, fmt , ##args);		\
-	}								\
+#define mlog(mask, fmt, ...)						\
+do {									\
+	u64 _m = MLOG_MASK_PREFIX | (mask);				\
+	if (_m & ML_ALLOWED_BITS)					\
+		__mlog_printk(&_m, __func__, __LINE__, fmt,		\
+			      ##__VA_ARGS__);				\
 } while (0)
 
-#define mlog_errno(st) do {						\
+#define mlog_ratelimited(mask, fmt, ...)				\
+do {									\
+	static DEFINE_RATELIMIT_STATE(_rs,				\
+				      DEFAULT_RATELIMIT_INTERVAL,	\
+				      DEFAULT_RATELIMIT_BURST);		\
+	if (__ratelimit(&_rs))						\
+		mlog(mask, fmt, ##__VA_ARGS__);				\
+} while (0)
+
+#define mlog_errno(st) ({						\
 	int _st = (st);							\
 	if (_st != -ERESTARTSYS && _st != -EINTR &&			\
-	    _st != AOP_TRUNCATED_PAGE && _st != -ENOSPC)		\
+	    _st != AOP_TRUNCATED_PAGE && _st != -ENOSPC &&		\
+	    _st != -EDQUOT)						\
 		mlog(ML_ERROR, "status = %lld\n", (long long)_st);	\
-} while (0)
-
-#if defined(CONFIG_OCFS2_DEBUG_MASKLOG)
-#define mlog_entry(fmt, args...) do {					\
-	mlog(ML_ENTRY, "ENTRY:" fmt , ##args);				\
-} while (0)
-
-#define mlog_entry_void() do {						\
-	mlog(ML_ENTRY, "ENTRY:\n");					\
-} while (0)
-
-/*
- * We disable this for sparse.
- */
-#if !defined(__CHECKER__)
-#define mlog_exit(st) do {						     \
-	if (__builtin_types_compatible_p(typeof(st), unsigned long))	     \
-		mlog(ML_EXIT, "EXIT: %lu\n", (unsigned long) (st));	     \
-	else if (__builtin_types_compatible_p(typeof(st), signed long))      \
-		mlog(ML_EXIT, "EXIT: %ld\n", (signed long) (st));	     \
-	else if (__builtin_types_compatible_p(typeof(st), unsigned int)	     \
-		 || __builtin_types_compatible_p(typeof(st), unsigned short) \
-		 || __builtin_types_compatible_p(typeof(st), unsigned char)) \
-		mlog(ML_EXIT, "EXIT: %u\n", (unsigned int) (st));	     \
-	else if (__builtin_types_compatible_p(typeof(st), signed int)	     \
-		 || __builtin_types_compatible_p(typeof(st), signed short)   \
-		 || __builtin_types_compatible_p(typeof(st), signed char))   \
-		mlog(ML_EXIT, "EXIT: %d\n", (signed int) (st));		     \
-	else if (__builtin_types_compatible_p(typeof(st), long long))	     \
-		mlog(ML_EXIT, "EXIT: %lld\n", (long long) (st));	     \
-	else								     \
-		mlog(ML_EXIT, "EXIT: %llu\n", (unsigned long long) (st));    \
-} while (0)
-#else
-#define mlog_exit(st) do {						     \
-	mlog(ML_EXIT, "EXIT: %lld\n", (long long) (st));		     \
-} while (0)
-#endif
-
-#define mlog_exit_ptr(ptr) do {						\
-	mlog(ML_EXIT, "EXIT: %p\n", ptr);				\
-} while (0)
-
-#define mlog_exit_void() do {						\
-	mlog(ML_EXIT, "EXIT\n");					\
-} while (0)
-#else
-#define mlog_entry(...)  do { } while (0)
-#define mlog_entry_void(...)  do { } while (0)
-#define mlog_exit(...)  do { } while (0)
-#define mlog_exit_ptr(...)  do { } while (0)
-#define mlog_exit_void(...)  do { } while (0)
-#endif  /* defined(CONFIG_OCFS2_DEBUG_MASKLOG) */
+	_st;								\
+})
 
 #define mlog_bug_on_msg(cond, fmt, args...) do {			\
 	if (cond) {							\

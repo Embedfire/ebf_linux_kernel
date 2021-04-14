@@ -14,15 +14,9 @@
 #include <linux/module.h>
 #include <linux/suspend.h>
 #include <linux/errno.h>
-#include <linux/time.h>
+#include <linux/slab.h>
 
-#include <mach/hardware.h>
-#include <asm/memory.h>
-#include <asm/system.h>
-#include <mach/pm.h>
-#include <mach/pxa-regs.h>
-#include <mach/lubbock.h>
-#include <asm/mach/time.h>
+#include "pm.h"
 
 struct pxa_cpu_pm_fns *pxa_cpu_pm_fns;
 static unsigned long *sleep_save;
@@ -39,7 +33,7 @@ int pxa_pm_enter(suspend_state_t state)
 #endif
 
 	/* skip registers saving for standby */
-	if (state != PM_SUSPEND_STANDBY) {
+	if (state != PM_SUSPEND_STANDBY && pxa_cpu_pm_fns->save) {
 		pxa_cpu_pm_fns->save(sleep_save);
 		/* before sleeping, calculate and save a checksum */
 		for (i = 0; i < pxa_cpu_pm_fns->save_count - 1; i++)
@@ -48,18 +42,17 @@ int pxa_pm_enter(suspend_state_t state)
 
 	/* *** go zzz *** */
 	pxa_cpu_pm_fns->enter(state);
-	cpu_init();
 
-	if (state != PM_SUSPEND_STANDBY) {
+	if (state != PM_SUSPEND_STANDBY && pxa_cpu_pm_fns->restore) {
 		/* after sleeping, validate the checksum */
 		for (i = 0; i < pxa_cpu_pm_fns->save_count - 1; i++)
 			checksum += sleep_save[i];
 
 		/* if invalid, display message and wait for a hardware reset */
 		if (checksum != sleep_save_checksum) {
-#ifdef CONFIG_ARCH_LUBBOCK
-			LUB_HEXLED = 0xbadbadc5;
-#endif
+
+			lubbock_set_hexled(0xbadbadc5);
+
 			while (1)
 				pxa_cpu_pm_fns->enter(state);
 		}
@@ -73,11 +66,6 @@ int pxa_pm_enter(suspend_state_t state)
 
 EXPORT_SYMBOL_GPL(pxa_pm_enter);
 
-unsigned long sleep_phys_sp(void *sp)
-{
-	return virt_to_phys(sp);
-}
-
 static int pxa_pm_valid(suspend_state_t state)
 {
 	if (pxa_cpu_pm_fns)
@@ -86,9 +74,27 @@ static int pxa_pm_valid(suspend_state_t state)
 	return -EINVAL;
 }
 
-static struct platform_suspend_ops pxa_pm_ops = {
+int pxa_pm_prepare(void)
+{
+	int ret = 0;
+
+	if (pxa_cpu_pm_fns && pxa_cpu_pm_fns->prepare)
+		ret = pxa_cpu_pm_fns->prepare();
+
+	return ret;
+}
+
+void pxa_pm_finish(void)
+{
+	if (pxa_cpu_pm_fns && pxa_cpu_pm_fns->finish)
+		pxa_cpu_pm_fns->finish();
+}
+
+static const struct platform_suspend_ops pxa_pm_ops = {
 	.valid		= pxa_pm_valid,
 	.enter		= pxa_pm_enter,
+	.prepare	= pxa_pm_prepare,
+	.finish		= pxa_pm_finish,
 };
 
 static int __init pxa_pm_init(void)
@@ -98,12 +104,11 @@ static int __init pxa_pm_init(void)
 		return -EINVAL;
 	}
 
-	sleep_save = kmalloc(pxa_cpu_pm_fns->save_count * sizeof(unsigned long),
-			     GFP_KERNEL);
-	if (!sleep_save) {
-		printk(KERN_ERR "failed to alloc memory for pm save\n");
+	sleep_save = kmalloc_array(pxa_cpu_pm_fns->save_count,
+				   sizeof(*sleep_save),
+				   GFP_KERNEL);
+	if (!sleep_save)
 		return -ENOMEM;
-	}
 
 	suspend_set_ops(&pxa_pm_ops);
 	return 0;

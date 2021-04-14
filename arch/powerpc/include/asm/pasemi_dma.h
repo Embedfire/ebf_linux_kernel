@@ -1,22 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2006-2008 PA Semi, Inc
  *
  * Hardware register layout and descriptor formats for the on-board
  * DMA engine on PA Semi PWRficient. Used by ethernet, function and security
  * drivers.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef ASM_PASEMI_DMA_H
@@ -522,7 +510,7 @@ extern void *pasemi_dma_alloc_buf(struct pasemi_dmachan *chan, int size,
 extern void pasemi_dma_free_buf(struct pasemi_dmachan *chan, int size,
 				dma_addr_t *handle);
 
-/* Routines to allocate flags (events) for channel syncronization */
+/* Routines to allocate flags (events) for channel synchronization */
 extern int  pasemi_dma_alloc_flag(void);
 extern void pasemi_dma_free_flag(int flag);
 extern void pasemi_dma_set_flag(int flag);

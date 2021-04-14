@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Driver for the ADB controller in the Mac I/O (Hydra) chip.
  */
@@ -8,13 +9,12 @@
 #include <linux/delay.h>
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
+#include <linux/pgtable.h>
 #include <asm/prom.h>
 #include <linux/adb.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/hydra.h>
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
 
@@ -70,14 +70,13 @@ static void macio_adb_poll(void);
 static int macio_adb_reset_bus(void);
 
 struct adb_driver macio_adb_driver = {
-	"MACIO",
-	macio_probe,
-	macio_init,
-	macio_send_request,
-	/*macio_write,*/
-	macio_adb_autopoll,
-	macio_adb_poll,
-	macio_adb_reset_bus
+	.name         = "MACIO",
+	.probe        = macio_probe,
+	.init         = macio_init,
+	.send_request = macio_send_request,
+	.autopoll     = macio_adb_autopoll,
+	.poll         = macio_adb_poll,
+	.reset_bus    = macio_adb_reset_bus,
 };
 
 int macio_probe(void)
@@ -147,7 +146,7 @@ static int macio_adb_reset_bus(void)
 
 	/* Hrm... we may want to not lock interrupts for so
 	 * long ... oh well, who uses that chip anyway ? :)
-	 * That function will be seldomly used during boot
+	 * That function will be seldom used during boot
 	 * on rare machines, so...
 	 */
 	spin_lock_irqsave(&macio_lock, flags);
@@ -155,6 +154,7 @@ static int macio_adb_reset_bus(void)
 	while ((in_8(&adb->ctrl.r) & ADB_RST) != 0) {
 		if (--timeout == 0) {
 			out_8(&adb->ctrl.r, in_8(&adb->ctrl.r) & ~ADB_RST);
+			spin_unlock_irqrestore(&macio_lock, flags);
 			return -1;
 		}
 	}

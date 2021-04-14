@@ -1,5 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/kernel.h>
-#include <linux/init.h>
 #include <asm/processor.h>
 #include "cpu.h"
 
@@ -8,18 +8,19 @@
  * so no special init takes place.
  */
 
-static struct cpu_dev umc_cpu_dev __cpuinitdata = {
+static const struct cpu_dev umc_cpu_dev = {
 	.c_vendor	= "UMC",
 	.c_ident	= { "UMC UMC UMC" },
-	.c_models = {
-		{ .vendor = X86_VENDOR_UMC, .family = 4, .model_names =
+	.legacy_models	= {
+		{ .family = 4, .model_names =
 		  {
 			  [1] = "U5D",
 			  [2] = "U5S",
 		  }
 		},
 	},
+	.c_x86_vendor	= X86_VENDOR_UMC,
 };
 
-cpu_vendor_dev_register(X86_VENDOR_UMC, &umc_cpu_dev);
+cpu_dev_register(umc_cpu_dev);
 

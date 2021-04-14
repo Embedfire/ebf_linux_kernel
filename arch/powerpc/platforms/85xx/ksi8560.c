@@ -20,7 +20,6 @@
 #include <linux/seq_file.h>
 #include <linux/of_platform.h>
 
-#include <asm/system.h>
 #include <asm/time.h>
 #include <asm/machdep.h>
 #include <asm/pci-bridge.h>
@@ -35,6 +34,7 @@
 #include <asm/cpm2.h>
 #include <sysdev/cpm2_pic.h>
 
+#include "mpc85xx.h"
 
 #define KSI8560_CPLD_HVR		0x04 /* Hardware Version Register */
 #define KSI8560_CPLD_PVR		0x08 /* PLD Version Register */
@@ -44,7 +44,7 @@
 
 static void __iomem *cpld_base = NULL;
 
-static void machine_restart(char *cmd)
+static void __noreturn machine_restart(char *cmd)
 {
 	if (cpld_base)
 		out_8(cpld_base + KSI8560_CPLD_RCR1, KSI8560_CPLD_RCR1_CPUHR);
@@ -54,61 +54,14 @@ static void machine_restart(char *cmd)
 	for (;;);
 }
 
-static void cpm2_cascade(unsigned int irq, struct irq_desc *desc)
-{
-	int cascade_irq;
-
-	while ((cascade_irq = cpm2_get_irq()) >= 0)
-		generic_handle_irq(cascade_irq);
-
-	desc->chip->eoi(irq);
-}
-
 static void __init ksi8560_pic_init(void)
 {
-	struct mpic *mpic;
-	struct resource r;
-	struct device_node *np;
-#ifdef CONFIG_CPM2
-	int irq;
-#endif
-
-	np = of_find_node_by_type(NULL, "open-pic");
-
-	if (np == NULL) {
-		printk(KERN_ERR "Could not find open-pic node\n");
-		return;
-	}
-
-	if (of_address_to_resource(np, 0, &r)) {
-		printk(KERN_ERR "Could not map mpic register space\n");
-		of_node_put(np);
-		return;
-	}
-
-	mpic = mpic_alloc(np, r.start,
-			MPIC_PRIMARY | MPIC_WANTS_RESET | MPIC_BIG_ENDIAN,
+	struct mpic *mpic = mpic_alloc(NULL, 0, MPIC_BIG_ENDIAN,
 			0, 256, " OpenPIC  ");
 	BUG_ON(mpic == NULL);
-	of_node_put(np);
-
 	mpic_init(mpic);
 
-#ifdef CONFIG_CPM2
-	/* Setup CPM2 PIC */
-	np = of_find_compatible_node(NULL, NULL, "fsl,cpm2-pic");
-	if (np == NULL) {
-		printk(KERN_ERR "PIC init: can not find fsl,cpm2-pic node\n");
-		return;
-	}
-	irq = irq_of_parse_and_map(np, 0);
-
-	cpm2_pic_init(np);
-	of_node_put(np);
-	set_irq_chained_handler(irq, cpm2_cascade);
-
-	setup_irq(0, NULL);
-#endif
+	mpc85xx_cpm2_pic_init();
 }
 
 #ifdef CONFIG_CPM2
@@ -193,7 +146,6 @@ static void __init ksi8560_setup_arch(void)
 static void ksi8560_show_cpuinfo(struct seq_file *m)
 {
 	uint pvid, svid, phid1;
-	uint memsize = total_memory;
 
 	pvid = mfspr(SPRN_PVR);
 	svid = mfspr(SPRN_SVR);
@@ -215,35 +167,16 @@ static void ksi8560_show_cpuinfo(struct seq_file *m)
 	/* Display cpu Pll setting */
 	phid1 = mfspr(SPRN_HID1);
 	seq_printf(m, "PLL setting\t: 0x%x\n", ((phid1 >> 24) & 0x3f));
-
-	/* Display the amount of memory */
-	seq_printf(m, "Memory\t\t: %d MB\n", memsize / (1024 * 1024));
 }
 
-static struct of_device_id __initdata of_bus_ids[] = {
-	{ .type = "soc", },
-	{ .type = "simple-bus", },
-	{ .name = "cpm", },
-	{ .name = "localbus", },
-	{},
-};
-
-static int __init declare_of_platform_devices(void)
-{
-	of_platform_bus_probe(NULL, of_bus_ids, NULL);
-
-	return 0;
-}
-machine_device_initcall(ksi8560, declare_of_platform_devices);
+machine_device_initcall(ksi8560, mpc85xx_common_publish_devices);
 
 /*
  * Called very early, device-tree isn't unflattened
  */
 static int __init ksi8560_probe(void)
 {
-	unsigned long root = of_get_flat_dt_root();
-
-	return of_flat_dt_is_compatible(root, "emerson,KSI8560");
+	return of_machine_is_compatible("emerson,KSI8560");
 }
 
 define_machine(ksi8560) {

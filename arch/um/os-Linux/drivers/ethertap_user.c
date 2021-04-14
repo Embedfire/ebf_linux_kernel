@@ -1,9 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Copyright (C) 2001 Lennert Buytenhek (buytenh@gnu.org) and
  * James Leu (jleu@mindspring.net).
  * Copyright (C) 2001 by various other people who didn't put their name here.
- * Licensed under the GPL.
  */
 
 #include <stdio.h>
@@ -13,11 +13,9 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include "etap.h"
-#include "kern_constants.h"
-#include "os.h"
-#include "net_user.h"
-#include "um_malloc.h"
-#include "user.h"
+#include <os.h>
+#include <net_user.h>
+#include <um_malloc.h>
 
 #define MAX_PACKET ETH_MAX_PACKET
 
@@ -107,7 +105,7 @@ static int etap_tramp(char *dev, char *gate, int control_me,
 	sprintf(data_fd_buf, "%d", data_remote);
 	sprintf(version_buf, "%d", UML_NET_VERSION);
 	if (gate != NULL) {
-		strcpy(gate_buf, gate);
+		strncpy(gate_buf, gate, 15);
 		args = setup_args;
 	}
 	else args = nosetup_args;

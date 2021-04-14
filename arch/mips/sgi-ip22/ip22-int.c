@@ -1,31 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * ip22-int.c: Routines for generic manipulation of the INT[23] ASIC
- *             found on INDY and Indigo2 workstations.
+ *	       found on INDY and Indigo2 workstations.
  *
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  * Copyright (C) 1997, 1998 Ralf Baechle (ralf@gnu.org)
  * Copyright (C) 1999 Andrew R. Baker (andrewb@uab.edu)
- *                    - Indigo2 changes
- *                    - Interrupt handling fixes
+ *		      - Indigo2 changes
+ *		      - Interrupt handling fixes
  * Copyright (C) 2001, 2003 Ladislav Michl (ladis@linux-mips.org)
  */
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/kernel_stat.h>
-#include <linux/signal.h>
-#include <linux/sched.h>
 #include <linux/interrupt.h>
-#include <linux/irq.h>
+#include <linux/ftrace.h>
 
-#include <asm/mipsregs.h>
-#include <asm/addrspace.h>
 #include <asm/irq_cpu.h>
-#include <asm/sgi/ioc.h>
 #include <asm/sgi/hpc3.h>
 #include <asm/sgi/ip22.h>
-#include <asm/time.h>
-
-/* #define DEBUG_SGINT */
 
 /* So far nothing hangs here */
 #undef USE_LIO3_IRQ
@@ -39,88 +32,80 @@ static char lc3msk_to_irqnr[256];
 
 extern int ip22_eisa_init(void);
 
-static void enable_local0_irq(unsigned int irq)
+static void enable_local0_irq(struct irq_data *d)
 {
 	/* don't allow mappable interrupt to be enabled from setup_irq,
 	 * we have our own way to do so */
-	if (irq != SGI_MAP_0_IRQ)
-		sgint->imask0 |= (1 << (irq - SGINT_LOCAL0));
+	if (d->irq != SGI_MAP_0_IRQ)
+		sgint->imask0 |= (1 << (d->irq - SGINT_LOCAL0));
 }
 
-static void disable_local0_irq(unsigned int irq)
+static void disable_local0_irq(struct irq_data *d)
 {
-	sgint->imask0 &= ~(1 << (irq - SGINT_LOCAL0));
+	sgint->imask0 &= ~(1 << (d->irq - SGINT_LOCAL0));
 }
 
 static struct irq_chip ip22_local0_irq_type = {
 	.name		= "IP22 local 0",
-	.ack		= disable_local0_irq,
-	.mask		= disable_local0_irq,
-	.mask_ack	= disable_local0_irq,
-	.unmask		= enable_local0_irq,
+	.irq_mask	= disable_local0_irq,
+	.irq_unmask	= enable_local0_irq,
 };
 
-static void enable_local1_irq(unsigned int irq)
+static void enable_local1_irq(struct irq_data *d)
 {
 	/* don't allow mappable interrupt to be enabled from setup_irq,
 	 * we have our own way to do so */
-	if (irq != SGI_MAP_1_IRQ)
-		sgint->imask1 |= (1 << (irq - SGINT_LOCAL1));
+	if (d->irq != SGI_MAP_1_IRQ)
+		sgint->imask1 |= (1 << (d->irq - SGINT_LOCAL1));
 }
 
-void disable_local1_irq(unsigned int irq)
+static void disable_local1_irq(struct irq_data *d)
 {
-	sgint->imask1 &= ~(1 << (irq - SGINT_LOCAL1));
+	sgint->imask1 &= ~(1 << (d->irq - SGINT_LOCAL1));
 }
 
 static struct irq_chip ip22_local1_irq_type = {
 	.name		= "IP22 local 1",
-	.ack		= disable_local1_irq,
-	.mask		= disable_local1_irq,
-	.mask_ack	= disable_local1_irq,
-	.unmask		= enable_local1_irq,
+	.irq_mask	= disable_local1_irq,
+	.irq_unmask	= enable_local1_irq,
 };
 
-static void enable_local2_irq(unsigned int irq)
+static void enable_local2_irq(struct irq_data *d)
 {
 	sgint->imask0 |= (1 << (SGI_MAP_0_IRQ - SGINT_LOCAL0));
-	sgint->cmeimask0 |= (1 << (irq - SGINT_LOCAL2));
+	sgint->cmeimask0 |= (1 << (d->irq - SGINT_LOCAL2));
 }
 
-void disable_local2_irq(unsigned int irq)
+static void disable_local2_irq(struct irq_data *d)
 {
-	sgint->cmeimask0 &= ~(1 << (irq - SGINT_LOCAL2));
+	sgint->cmeimask0 &= ~(1 << (d->irq - SGINT_LOCAL2));
 	if (!sgint->cmeimask0)
 		sgint->imask0 &= ~(1 << (SGI_MAP_0_IRQ - SGINT_LOCAL0));
 }
 
 static struct irq_chip ip22_local2_irq_type = {
 	.name		= "IP22 local 2",
-	.ack		= disable_local2_irq,
-	.mask		= disable_local2_irq,
-	.mask_ack	= disable_local2_irq,
-	.unmask		= enable_local2_irq,
+	.irq_mask	= disable_local2_irq,
+	.irq_unmask	= enable_local2_irq,
 };
 
-static void enable_local3_irq(unsigned int irq)
+static void enable_local3_irq(struct irq_data *d)
 {
 	sgint->imask1 |= (1 << (SGI_MAP_1_IRQ - SGINT_LOCAL1));
-	sgint->cmeimask1 |= (1 << (irq - SGINT_LOCAL3));
+	sgint->cmeimask1 |= (1 << (d->irq - SGINT_LOCAL3));
 }
 
-void disable_local3_irq(unsigned int irq)
+static void disable_local3_irq(struct irq_data *d)
 {
-	sgint->cmeimask1 &= ~(1 << (irq - SGINT_LOCAL3));
+	sgint->cmeimask1 &= ~(1 << (d->irq - SGINT_LOCAL3));
 	if (!sgint->cmeimask1)
 		sgint->imask1 &= ~(1 << (SGI_MAP_1_IRQ - SGINT_LOCAL1));
 }
 
 static struct irq_chip ip22_local3_irq_type = {
 	.name		= "IP22 local 3",
-	.ack		= disable_local3_irq,
-	.mask		= disable_local3_irq,
-	.mask_ack	= disable_local3_irq,
-	.unmask		= enable_local3_irq,
+	.irq_mask	= disable_local3_irq,
+	.irq_unmask	= enable_local3_irq,
 };
 
 static void indy_local0_irqdispatch(void)
@@ -135,9 +120,14 @@ static void indy_local0_irqdispatch(void)
 	} else
 		irq = lc0msk_to_irqnr[mask];
 
-	/* if irq == 0, then the interrupt has already been cleared */
+	/*
+	 * workaround for INT2 bug; if irq == 0, INT2 has seen a fifo full
+	 * irq, but failed to latch it into status register
+	 */
 	if (irq)
 		do_IRQ(irq);
+	else
+		do_IRQ(SGINT_LOCAL0 + 0);
 }
 
 static void indy_local1_irqdispatch(void)
@@ -159,46 +149,17 @@ static void indy_local1_irqdispatch(void)
 
 extern void ip22_be_interrupt(int irq);
 
-static void indy_buserror_irq(void)
+static void __irq_entry indy_buserror_irq(void)
 {
 	int irq = SGI_BUSERR_IRQ;
 
 	irq_enter();
-	kstat_this_cpu.irqs[irq]++;
+	kstat_incr_irq_this_cpu(irq);
 	ip22_be_interrupt(irq);
 	irq_exit();
 }
 
-static struct irqaction local0_cascade = {
-	.handler	= no_action,
-	.flags		= IRQF_DISABLED,
-	.name		= "local0 cascade",
-};
-
-static struct irqaction local1_cascade = {
-	.handler	= no_action,
-	.flags		= IRQF_DISABLED,
-	.name		= "local1 cascade",
-};
-
-static struct irqaction buserr = {
-	.handler	= no_action,
-	.flags		= IRQF_DISABLED,
-	.name		= "Bus Error",
-};
-
-static struct irqaction map0_cascade = {
-	.handler	= no_action,
-	.flags		= IRQF_DISABLED,
-	.name		= "mapable0 cascade",
-};
-
 #ifdef USE_LIO3_IRQ
-static struct irqaction map1_cascade = {
-	.handler	= no_action,
-	.flags		= IRQF_DISABLED,
-	.name		= "mapable1 cascade",
-};
 #define SGI_INTERRUPTS	SGINT_END
 #else
 #define SGI_INTERRUPTS	SGINT_LOCAL3
@@ -211,24 +172,24 @@ extern void indy_8254timer_irq(void);
  * at all) like:
  *
  *	MIPS IRQ	Source
- *      --------        ------
- *             0	Software (ignored)
- *             1        Software (ignored)
- *             2        Local IRQ level zero
- *             3        Local IRQ level one
- *             4        8254 Timer zero
- *             5        8254 Timer one
- *             6        Bus Error
- *             7        R4k timer (what we use)
+ *	--------	------
+ *	       0	Software (ignored)
+ *	       1	Software (ignored)
+ *	       2	Local IRQ level zero
+ *	       3	Local IRQ level one
+ *	       4	8254 Timer zero
+ *	       5	8254 Timer one
+ *	       6	Bus Error
+ *	       7	R4k timer (what we use)
  *
  * We handle the IRQ according to _our_ priority which is:
  *
- * Highest ----     R4k Timer
- *                  Local IRQ zero
- *                  Local IRQ one
- *                  Bus Error
- *                  8254 Timer zero
- * Lowest  ----     8254 Timer one
+ * Highest ----	    R4k Timer
+ *		    Local IRQ zero
+ *		    Local IRQ one
+ *		    Bus Error
+ *		    8254 Timer zero
+ * Lowest  ----	    8254 Timer one
  *
  * then we just return, if multiple IRQs are pending then we will just take
  * another exception, big deal.
@@ -328,22 +289,32 @@ void __init arch_init_irq(void)
 		else
 			handler		= &ip22_local3_irq_type;
 
-		set_irq_chip_and_handler(i, handler, handle_level_irq);
+		irq_set_chip_and_handler(i, handler, handle_level_irq);
 	}
 
 	/* vector handler. this register the IRQ as non-sharable */
-	setup_irq(SGI_LOCAL_0_IRQ, &local0_cascade);
-	setup_irq(SGI_LOCAL_1_IRQ, &local1_cascade);
-	setup_irq(SGI_BUSERR_IRQ, &buserr);
+	if (request_irq(SGI_LOCAL_0_IRQ, no_action, IRQF_NO_THREAD,
+			"local0 cascade", NULL))
+		pr_err("Failed to register local0 cascade interrupt\n");
+	if (request_irq(SGI_LOCAL_1_IRQ, no_action, IRQF_NO_THREAD,
+			"local1 cascade", NULL))
+		pr_err("Failed to register local1 cascade interrupt\n");
+	if (request_irq(SGI_BUSERR_IRQ, no_action, IRQF_NO_THREAD,
+			"Bus Error", NULL))
+		pr_err("Failed to register Bus Error interrupt\n");
 
 	/* cascade in cascade. i love Indy ;-) */
-	setup_irq(SGI_MAP_0_IRQ, &map0_cascade);
+	if (request_irq(SGI_MAP_0_IRQ, no_action, IRQF_NO_THREAD,
+			"mapable0 cascade", NULL))
+		pr_err("Failed to register mapable0 cascade interrupt\n");
 #ifdef USE_LIO3_IRQ
-	setup_irq(SGI_MAP_1_IRQ, &map1_cascade);
+	if (request_irq(SGI_MAP_1_IRQ, no_action, IRQF_NO_THREAD,
+			"mapable1 cascade", NULL))
+		pr_err("Failed to register mapable1 cascade interrupt\n");
 #endif
 
 #ifdef CONFIG_EISA
 	if (ip22_is_fullhouse())	/* Only Indigo-2 has EISA stuff */
-	        ip22_eisa_init();
+		ip22_eisa_init();
 #endif
 }

@@ -1,24 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * c67x00-hcd.h: Cypress C67X00 USB HCD
  *
  * Copyright (C) 2006-2008 Barco N.V.
  *    Derived from the Cypress cy7c67200/300 ezusb linux driver and
  *    based on multiple host controller drivers inside the linux kernel.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- * MA  02110-1301  USA.
  */
 
 #ifndef _USB_C67X00_HCD_H
@@ -28,13 +14,13 @@
 #include <linux/spinlock.h>
 #include <linux/list.h>
 #include <linux/usb.h>
-#include "../core/hcd.h"
+#include <linux/usb/hcd.h>
 #include "c67x00.h"
 
 /*
  * The following parameters depend on the CPU speed, bus speed, ...
  * These can be tuned for specific use cases, e.g. if isochronous transfers
- * are very important, bandwith can be sacrificed to guarantee that the
+ * are very important, bandwidth can be sacrificed to guarantee that the
  * 1ms deadline will be met.
  * If bulk transfers are important, the MAX_FRAME_BW can be increased,
  * but some (or many) isochronous deadlines might not be met.
@@ -45,7 +31,7 @@
 /*
  * The current implementation switches between _STD (default) and _ISO (when
  * isochronous transfers are scheduled), in order to optimize the throughput
- * in normal cicrumstances, but also provide good isochronous behaviour.
+ * in normal circumstances, but also provide good isochronous behaviour.
  *
  * Bandwidth is described in bit time so with a 12MHz USB clock and 1ms
  * frames; there are 12000 bit times per frame.

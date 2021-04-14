@@ -178,10 +178,9 @@ ahd_linux_pci_dev_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		ahd_get_pci_bus(pci),
 		ahd_get_pci_slot(pci),
 		ahd_get_pci_function(pci));
-	name = malloc(strlen(buf) + 1, M_DEVBUF, M_NOWAIT);
+	name = kstrdup(buf, GFP_ATOMIC);
 	if (name == NULL)
 		return (-ENOMEM);
-	strcpy(name, buf);
 	ahd = ahd_alloc(NULL, name);
 	if (ahd == NULL)
 		return (-ENOMEM);
@@ -194,16 +193,16 @@ ahd_linux_pci_dev_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (sizeof(dma_addr_t) > 4) {
 		const u64 required_mask = dma_get_required_mask(dev);
 
-		if (required_mask > DMA_39BIT_MASK &&
-		    dma_set_mask(dev, DMA_64BIT_MASK) == 0)
+		if (required_mask > DMA_BIT_MASK(39) &&
+		    dma_set_mask(dev, DMA_BIT_MASK(64)) == 0)
 			ahd->flags |= AHD_64BIT_ADDRESSING;
-		else if (required_mask > DMA_32BIT_MASK &&
-			 dma_set_mask(dev, DMA_39BIT_MASK) == 0)
+		else if (required_mask > DMA_BIT_MASK(32) &&
+			 dma_set_mask(dev, DMA_BIT_MASK(39)) == 0)
 			ahd->flags |= AHD_39BIT_ADDRESSING;
 		else
-			dma_set_mask(dev, DMA_32BIT_MASK);
+			dma_set_mask(dev, DMA_BIT_MASK(32));
 	} else {
-		dma_set_mask(dev, DMA_32BIT_MASK);
+		dma_set_mask(dev, DMA_BIT_MASK(32));
 	}
 	ahd->dev_softc = pci;
 	error = ahd_pci_config(ahd, entry);
@@ -294,7 +293,7 @@ ahd_linux_pci_reserve_mem_region(struct ahd_softc *ahd,
 		if (!request_mem_region(start, 0x1000, "aic79xx"))
 			error = ENOMEM;
 		if (!error) {
-			*maddr = ioremap_nocache(base_page, base_offset + 512);
+			*maddr = ioremap(base_page, base_offset + 512);
 			if (*maddr == NULL) {
 				error = ENOMEM;
 				release_mem_region(start, 0x1000);
@@ -333,7 +332,7 @@ ahd_pci_map_registers(struct ahd_softc *ahd)
 
 		if (ahd_pci_test_register_access(ahd) != 0) {
 
-			printf("aic79xx: PCI Device %d:%d:%d "
+			printk("aic79xx: PCI Device %d:%d:%d "
 			       "failed memory mapped test.  Using PIO.\n",
 			       ahd_get_pci_bus(ahd->dev_softc),
 			       ahd_get_pci_slot(ahd->dev_softc),
@@ -346,7 +345,7 @@ ahd_pci_map_registers(struct ahd_softc *ahd)
 		} else
 			command |= PCIM_CMD_MEMEN;
 	} else if (bootverbose) {
-		printf("aic79xx: PCI%d:%d:%d MEM region 0x%llx "
+		printk("aic79xx: PCI%d:%d:%d MEM region 0x%llx "
 		       "unavailable. Cannot memory map device.\n",
 		       ahd_get_pci_bus(ahd->dev_softc),
 		       ahd_get_pci_slot(ahd->dev_softc),
@@ -365,7 +364,7 @@ ahd_pci_map_registers(struct ahd_softc *ahd)
 			ahd->bshs[1].ioport = (u_long)base2;
 			command |= PCIM_CMD_PORTEN;
 		} else {
-			printf("aic79xx: PCI%d:%d:%d IO regions 0x%llx and "
+			printk("aic79xx: PCI%d:%d:%d IO regions 0x%llx and "
 			       "0x%llx unavailable. Cannot map device.\n",
 			       ahd_get_pci_bus(ahd->dev_softc),
 			       ahd_get_pci_slot(ahd->dev_softc),

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-pxa/pxa300.c
  *
@@ -7,25 +8,19 @@
  *
  * 2007-08-21: eric miao <eric.miao@marvell.com>
  *             initial version
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
+#include <linux/io.h>
 
-#include <mach/hardware.h>
-#include <mach/pxa3xx-regs.h>
-#include <mach/mfp-pxa300.h>
+#include "pxa300.h"
 
 #include "generic.h"
 #include "devices.h"
-#include "clock.h"
 
-static struct pxa3xx_mfp_addr_map pxa300_mfp_addr_map[] __initdata = {
+static struct mfp_addr_map pxa300_mfp_addr_map[] __initdata = {
 
 	MFP_ADDR_X(GPIO0,   GPIO2,   0x00b4),
 	MFP_ADDR_X(GPIO3,   GPIO26,  0x027c),
@@ -74,7 +69,7 @@ static struct pxa3xx_mfp_addr_map pxa300_mfp_addr_map[] __initdata = {
 };
 
 /* override pxa300 MFP register addresses */
-static struct pxa3xx_mfp_addr_map pxa310_mfp_addr_map[] __initdata = {
+static struct mfp_addr_map pxa310_mfp_addr_map[] __initdata = {
 	MFP_ADDR_X(GPIO30,  GPIO98,   0x0418),
 	MFP_ADDR_X(GPIO7_2, GPIO12_2, 0x052C),
 
@@ -85,28 +80,15 @@ static struct pxa3xx_mfp_addr_map pxa310_mfp_addr_map[] __initdata = {
 	MFP_ADDR_END,
 };
 
-static struct clk common_clks[] = {
-	PXA3xx_CKEN("NANDCLK", NAND, 156000000, 0, &pxa3xx_device_nand.dev),
-};
-
-static struct clk pxa310_clks[] = {
-#ifdef CONFIG_CPU_PXA310
-	PXA3xx_CKEN("MMCCLK", MMC3, 19500000, 0, &pxa3xx_device_mci3.dev),
-#endif
-};
-
 static int __init pxa300_init(void)
 {
 	if (cpu_is_pxa300() || cpu_is_pxa310()) {
-		pxa3xx_init_mfp();
-		pxa3xx_mfp_init_addr(pxa300_mfp_addr_map);
-		clks_register(ARRAY_AND_SIZE(common_clks));
+		mfp_init_base(io_p2v(MFPR_BASE));
+		mfp_init_addr(pxa300_mfp_addr_map);
 	}
 
-	if (cpu_is_pxa310()) {
-		pxa3xx_mfp_init_addr(pxa310_mfp_addr_map);
-		clks_register(ARRAY_AND_SIZE(pxa310_clks));
-	}
+	if (cpu_is_pxa310())
+		mfp_init_addr(pxa310_mfp_addr_map);
 
 	return 0;
 }

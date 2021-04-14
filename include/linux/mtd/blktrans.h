@@ -1,14 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * (C) 2003 David Woodhouse <dwmw2@infradead.org>
- *
- * Interface to Linux block layer for MTD 'translation layers'.
- *
+ * Copyright © 2003-2010 David Woodhouse <dwmw2@infradead.org>
  */
 
 #ifndef __MTD_TRANS_H__
 #define __MTD_TRANS_H__
 
 #include <linux/mutex.h>
+#include <linux/kref.h>
+#include <linux/sysfs.h>
 
 struct hd_geometry;
 struct mtd_info;
@@ -22,12 +22,20 @@ struct mtd_blktrans_dev {
 	struct mtd_info *mtd;
 	struct mutex lock;
 	int devnum;
+	bool bg_stop;
 	unsigned long size;
 	int readonly;
-	void *blkcore_priv; /* gendisk in 2.5, devfs_handle in 2.4 */
+	int open;
+	struct kref ref;
+	struct gendisk *disk;
+	struct attribute_group *disk_attributes;
+	struct request_queue *rq;
+	struct list_head rq_list;
+	struct blk_mq_tag_set *tag_set;
+	spinlock_t queue_lock;
+	void *priv;
+	fmode_t file_mode;
 };
-
-struct blkcore_priv; /* Differs for 2.4 and 2.5 kernels; private */
 
 struct mtd_blktrans_ops {
 	char *name;
@@ -41,6 +49,9 @@ struct mtd_blktrans_ops {
 		    unsigned long block, char *buffer);
 	int (*writesect)(struct mtd_blktrans_dev *dev,
 		     unsigned long block, char *buffer);
+	int (*discard)(struct mtd_blktrans_dev *dev,
+		       unsigned long block, unsigned nr_blocks);
+	void (*background)(struct mtd_blktrans_dev *dev);
 
 	/* Block layer ioctls */
 	int (*getgeo)(struct mtd_blktrans_dev *dev, struct hd_geometry *geo);
@@ -48,7 +59,7 @@ struct mtd_blktrans_ops {
 
 	/* Called with mtd_table_mutex held; no race with add/remove */
 	int (*open)(struct mtd_blktrans_dev *dev);
-	int (*release)(struct mtd_blktrans_dev *dev);
+	void (*release)(struct mtd_blktrans_dev *dev);
 
 	/* Called on {de,}registration and on subsequent addition/removal
 	   of devices, with mtd_table_mutex held. */
@@ -58,14 +69,13 @@ struct mtd_blktrans_ops {
 	struct list_head devs;
 	struct list_head list;
 	struct module *owner;
-
-	struct mtd_blkcore_priv *blkcore_priv;
 };
 
 extern int register_mtd_blktrans(struct mtd_blktrans_ops *tr);
 extern int deregister_mtd_blktrans(struct mtd_blktrans_ops *tr);
 extern int add_mtd_blktrans_dev(struct mtd_blktrans_dev *dev);
 extern int del_mtd_blktrans_dev(struct mtd_blktrans_dev *dev);
+extern int mtd_blktrans_cease_background(struct mtd_blktrans_dev *dev);
 
 
 #endif /* __MTD_TRANS_H__ */

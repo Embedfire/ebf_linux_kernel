@@ -1,24 +1,19 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef _NET_DN_ROUTE_H
 #define _NET_DN_ROUTE_H
 
 /******************************************************************************
     (c) 1995-1998 E.M. Serrat		emserrat@geocities.com
     
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
 *******************************************************************************/
 
-extern struct sk_buff *dn_alloc_skb(struct sock *sk, int size, gfp_t pri);
-extern int dn_route_output_sock(struct dst_entry **pprt, struct flowi *, struct sock *sk, int flags);
-extern int dn_cache_dump(struct sk_buff *skb, struct netlink_callback *cb);
-extern void dn_rt_cache_flush(int delay);
+struct sk_buff *dn_alloc_skb(struct sock *sk, int size, gfp_t pri);
+int dn_route_output_sock(struct dst_entry __rcu **pprt, struct flowidn *,
+			 struct sock *sk, int flags);
+int dn_cache_dump(struct sk_buff *skb, struct netlink_callback *cb);
+void dn_rt_cache_flush(int delay);
+int dn_route_rcv(struct sk_buff *skb, struct net_device *dev,
+		 struct packet_type *pt, struct net_device *orig_dev);
 
 /* Masks for flags field */
 #define DN_RT_F_PID 0x07 /* Mask for packet type                      */
@@ -65,11 +60,12 @@ extern void dn_rt_cache_flush(int delay);
  * packets to the originating host.
  */
 struct dn_route {
-	union {
-		struct dst_entry dst;
-	} u;
+	struct dst_entry dst;
+	struct dn_route __rcu *dn_next;
 
-	struct flowi fl;
+	struct neighbour *n;
+
+	struct flowidn fld;
 
 	__le16 rt_saddr;
 	__le16 rt_daddr;
@@ -78,12 +74,22 @@ struct dn_route {
 	__le16 rt_src_map;
 	__le16 rt_dst_map;
 
-	unsigned rt_flags;
-	unsigned rt_type;
+	unsigned int rt_flags;
+	unsigned int rt_type;
 };
 
-extern void dn_route_init(void);
-extern void dn_route_cleanup(void);
+static inline bool dn_is_input_route(struct dn_route *rt)
+{
+	return rt->fld.flowidn_iif != 0;
+}
+
+static inline bool dn_is_output_route(struct dn_route *rt)
+{
+	return rt->fld.flowidn_iif == 0;
+}
+
+void dn_route_init(void);
+void dn_route_cleanup(void);
 
 #include <net/sock.h>
 #include <linux/if_arp.h>

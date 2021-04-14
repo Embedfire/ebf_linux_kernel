@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # Makefile for the Linux affs filesystem routines.
 #
 
-#EXTRA_CFLAGS=-DDEBUG=1
+#ccflags-y := -DDEBUG=1
 
 obj-$(CONFIG_AFFS_FS) += affs.o
 

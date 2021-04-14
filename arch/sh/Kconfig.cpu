@@ -1,7 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
 menu "Processor features"
 
 choice
-	prompt "Endianess selection" 
+	prompt "Endianness selection" 
 	default CPU_LITTLE_ENDIAN
 	help
 	  Some SuperH machines can be configured for either little or big
@@ -12,7 +13,6 @@ config CPU_LITTLE_ENDIAN
 
 config CPU_BIG_ENDIAN
 	bool "Big Endian"
-	depends on !CPU_SH5
 
 endchoice
 
@@ -26,14 +26,10 @@ config SH_FPU
 
 	  This option must be set in order to enable the FPU.
 
-config SH64_FPU_DENORM_FLUSH
-	bool "Flush floating point denorms to zero"
-	depends on SH_FPU && SUPERH64
-
 config SH_FPU_EMU
 	def_bool n
 	prompt "FPU emulation support"
-	depends on !SH_FPU && EXPERIMENTAL
+	depends on !SH_FPU
 	help
 	  Selecting this option will enable support for software FPU emulation.
 	  Most SH-3 users will want to say Y here, whereas most SH-4 users will
@@ -68,22 +64,13 @@ config SH_STORE_QUEUES
 
 config SPECULATIVE_EXECUTION
 	bool "Speculative subroutine return"
-	depends on CPU_SUBTYPE_SH7780 && EXPERIMENTAL
+	depends on CPU_SUBTYPE_SH7780 || CPU_SUBTYPE_SH7785 || CPU_SUBTYPE_SH7786
 	help
 	  This enables support for a speculative instruction fetch for
 	  subroutine return. There are various pitfalls associated with
 	  this, as outlined in the SH7780 hardware manual.
 
 	  If unsure, say N.
-
-config SH64_USER_MISALIGNED_FIXUP
-	def_bool y
-	prompt "Fixup misaligned loads/stores occurring in user mode"
-	depends on SUPERH64
-
-config SH64_ID2815_WORKAROUND
-	bool "Include workaround for SH5-101 cut2 silicon defect ID2815"
-	depends on CPU_SUBTYPE_SH5_101
 
 config CPU_HAS_INTEVT
 	bool
@@ -98,10 +85,10 @@ config CPU_HAS_SR_RB
 	  that are lacking this bit must have another method in place for
 	  accomplishing what is taken care of by the banked registers.
 
-	  See <file:Documentation/sh/register-banks.txt> for further
+	  See <file:Documentation/sh/register-banks.rst> for further
 	  information on SR.RB and register banking in the kernel in general.
 
-config CPU_HAS_PTEA
+config CPU_HAS_PTEAEX
 	bool
 
 config CPU_HAS_DSP

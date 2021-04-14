@@ -1,15 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # USB Storage driver configuration
 #
 
-comment "NOTE: USB_STORAGE enables SCSI, and 'SCSI disk support'"
-comment "may also be needed; see USB_STORAGE Help for more information"
-	depends on USB
+comment "NOTE: USB_STORAGE depends on SCSI but BLK_DEV_SD may"
+comment "also be needed; see USB_STORAGE Help for more info"
 
 config USB_STORAGE
 	tristate "USB Mass Storage support"
-	depends on USB && SCSI
-	---help---
+	depends on SCSI
+	help
 	  Say Y here if you want to connect USB mass storage devices to your
 	  computer's USB port. This is the driver you need for USB
 	  floppy drives, USB hard disks, USB tape drives, USB CD-ROMs,
@@ -24,31 +24,46 @@ config USB_STORAGE
 	  To compile this driver as a module, choose M here: the
 	  module will be called usb-storage.
 
+if USB_STORAGE
+
 config USB_STORAGE_DEBUG
 	bool "USB Mass Storage verbose debug"
-	depends on USB_STORAGE
 	help
 	  Say Y here in order to have the USB Mass Storage code generate
 	  verbose debugging messages.
 
+config USB_STORAGE_REALTEK
+	tristate "Realtek Card Reader support"
+	help
+	  Say Y here to include additional code to support the power-saving function
+	  for Realtek RTS51xx USB card readers.
+
+	  If this driver is compiled as a module, it will be named ums-realtek.
+
+config REALTEK_AUTOPM
+	bool "Realtek Card Reader autosuspend support"
+	depends on USB_STORAGE_REALTEK && PM
+	default y
+
 config USB_STORAGE_DATAFAB
-	bool "Datafab Compact Flash Reader support"
-	depends on USB_STORAGE
+	tristate "Datafab Compact Flash Reader support"
 	help
 	  Support for certain Datafab CompactFlash readers.
-	  Datafab has a web page at <http://www.datafabusa.com/>.
+	  Datafab has a web page at <http://www.datafab.com/>.
+
+	  If this driver is compiled as a module, it will be named ums-datafab.
 
 config USB_STORAGE_FREECOM
-	bool "Freecom USB/ATAPI Bridge support"
-	depends on USB_STORAGE
+	tristate "Freecom USB/ATAPI Bridge support"
 	help
 	  Support for the Freecom USB to IDE/ATAPI adaptor.
-	  Freecom has a web page at <http://www.freecom.de/>.
+	  Freecom has a web page at <https://www.freecom.de/>.
+
+	  If this driver is compiled as a module, it will be named ums-freecom.
 
 config USB_STORAGE_ISD200
-	bool "ISD-200 USB/ATA Bridge support"
-	depends on USB_STORAGE
-	---help---
+	tristate "ISD-200 USB/ATA Bridge support"
+	help
 	  Say Y here if you want to use USB Mass Store devices based
 	  on the In-Systems Design ISD-200 USB/ATA bridge.
 
@@ -61,16 +76,10 @@ config USB_STORAGE_ISD200
 	  - CyQ've CQ8060A CDRW drive
 	  - Planex eXtreme Drive RX-25HU USB-IDE cable (not model RX-25U)
 
-config USB_STORAGE_DPCM
-	bool "Microtech/ZiO! CompactFlash/SmartMedia support"
-	depends on USB_STORAGE
-	help
-	  Say Y here to support the Microtech/ZiO! CompactFlash reader.
-	  There is a web page at <http://www.ziocorp.com/products/>.
+	  If this driver is compiled as a module, it will be named ums-isd200.
 
 config USB_STORAGE_USBAT
-	bool "USBAT/USBAT02-based storage support"
-	depends on USB_STORAGE
+	tristate "USBAT/USBAT02-based storage support"
 	help
 	  Say Y here to include additional code to support storage devices
 	  based on the SCM/Shuttle USBAT/USBAT02 processors.
@@ -89,31 +98,35 @@ config USB_STORAGE_USBAT
 	  - RCA LYRA MP3 portable
 	  - Sandisk ImageMate SDDR-05b
 
+	  If this driver is compiled as a module, it will be named ums-usbat.
+
 config USB_STORAGE_SDDR09
-	bool "SanDisk SDDR-09 (and other SmartMedia) support"
-	depends on USB_STORAGE
+	tristate "SanDisk SDDR-09 (and other SmartMedia, including DPCM) support"
 	help
 	  Say Y here to include additional code to support the Sandisk SDDR-09
 	  SmartMedia reader in the USB Mass Storage driver.
-	  Also works for the Microtech Zio! SmartMedia reader.
+	  Also works for the Microtech Zio! CompactFlash/SmartMedia reader.
+
+	  If this driver is compiled as a module, it will be named ums-sddr09.
 
 config USB_STORAGE_SDDR55
-	bool "SanDisk SDDR-55 SmartMedia support"
-	depends on USB_STORAGE
+	tristate "SanDisk SDDR-55 SmartMedia support"
 	help
 	  Say Y here to include additional code to support the Sandisk SDDR-55
 	  SmartMedia reader in the USB Mass Storage driver.
 
+	  If this driver is compiled as a module, it will be named ums-sddr55.
+
 config USB_STORAGE_JUMPSHOT
-	bool "Lexar Jumpshot Compact Flash Reader"
-	depends on USB_STORAGE
+	tristate "Lexar Jumpshot Compact Flash Reader"
 	help
 	  Say Y here to include additional code to support the Lexar Jumpshot
 	  USB CompactFlash reader.
 
+	  If this driver is compiled as a module, it will be named ums-jumpshot.
+
 config USB_STORAGE_ALAUDA
-	bool "Olympus MAUSB-10/Fuji DPC-R1 support"
-	depends on USB_STORAGE
+	tristate "Olympus MAUSB-10/Fuji DPC-R1 support"
 	help
 	  Say Y here to include additional code to support the Olympus MAUSB-10
 	  and Fujifilm DPC-R1 USB Card reader/writer devices.
@@ -121,9 +134,10 @@ config USB_STORAGE_ALAUDA
 	  These devices are based on the Alauda chip and support both
 	  XD and SmartMedia cards.
 
+	  If this driver is compiled as a module, it will be named ums-alauda.
+
 config USB_STORAGE_ONETOUCH
-	bool "Support OneTouch Button on Maxtor Hard Drives"
-	depends on USB_STORAGE
+	tristate "Support OneTouch Button on Maxtor Hard Drives"
 	depends on INPUT=y || INPUT=USB_STORAGE
 	help
 	  Say Y here to include additional code to support the Maxtor OneTouch
@@ -134,9 +148,10 @@ config USB_STORAGE_ONETOUCH
 	  this input in any keybinding software. (e.g. gnome's keyboard short-
 	  cuts)
 
+	  If this driver is compiled as a module, it will be named ums-onetouch.
+
 config USB_STORAGE_KARMA
-	bool "Support for Rio Karma music player"
-	depends on USB_STORAGE
+	tristate "Support for Rio Karma music player"
 	help
 	  Say Y here to include additional code to support the Rio Karma
 	  USB interface.
@@ -146,22 +161,11 @@ config USB_STORAGE_KARMA
 	  on the resulting scsi device node returns the Karma to normal
 	  operation.
 
-config USB_STORAGE_SIERRA
-	bool "Sierra Wireless TRU-Install Feature Support"
-	depends on USB_STORAGE
-	help
-	  Say Y here to include additional code to support Sierra Wireless
-	  products with the TRU-Install feature (e.g., AC597E, AC881U).
-
-	  This code switches the Sierra Wireless device from being in
-	  Mass Storage mode to Modem mode. It also has the ability to
-	  support host software upgrades should full Linux support be added
-	  to TRU-Install.
+	  If this driver is compiled as a module, it will be named ums-karma.
 
 config USB_STORAGE_CYPRESS_ATACB
-	bool "SAT emulation on Cypress USB/ATA Bridge with ATACB"
-	depends on USB_STORAGE
-	---help---
+	tristate "SAT emulation on Cypress USB/ATA Bridge with ATACB"
+	help
 	  Say Y here if you want to use SAT (ata pass through) on devices based
 	  on the Cypress USB/ATA bridge supporting ATACB. This will allow you
 	  to use tools to tune and monitor your drive (like hdparm or smartctl).
@@ -169,16 +173,28 @@ config USB_STORAGE_CYPRESS_ATACB
 	  If you say no here your device will still work with the standard usb
 	  mass storage class.
 
-config USB_LIBUSUAL
-	bool "The shared table of common (or usual) storage devices"
-	depends on USB
+	  If this driver is compiled as a module, it will be named ums-cypress.
+
+config USB_STORAGE_ENE_UB6250
+	tristate "USB ENE card reader support"
 	help
-	  This module contains a table of common (or usual) devices
-	  for usb-storage and ub drivers, and allows to switch binding
-	  of these devices without rebuilding modules.
+	  Say Y here if you wish to control a ENE SD/MS Card reader.
+	  Note that this driver does not support SM cards.
 
-	  Typical syntax of /etc/modprobe.conf is:
+	  To compile this driver as a module, choose M here: the
+	  module will be called ums-eneub6250.
 
-		options libusual bias="ub"
+endif # USB_STORAGE
 
-	  If unsure, say N.
+config USB_UAS
+	tristate "USB Attached SCSI"
+	depends on SCSI && USB_STORAGE
+	help
+	  The USB Attached SCSI protocol is supported by some USB
+	  storage devices.  It permits higher performance by supporting
+	  multiple outstanding commands.
+
+	  If you don't know whether you have a UAS device, it is safe to
+	  say 'Y' or 'M' here and the kernel will use the right driver.
+
+	  If you compile this driver as a module, it will be named uas.

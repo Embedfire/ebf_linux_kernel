@@ -23,7 +23,7 @@
 #include <net/llc.h>
 
 LIST_HEAD(llc_sap_list);
-DEFINE_RWLOCK(llc_sap_list_lock);
+static DEFINE_SPINLOCK(llc_sap_list_lock);
 
 /**
  *	llc_sap_alloc - allocates and initializes sap.
@@ -33,43 +33,22 @@ DEFINE_RWLOCK(llc_sap_list_lock);
 static struct llc_sap *llc_sap_alloc(void)
 {
 	struct llc_sap *sap = kzalloc(sizeof(*sap), GFP_ATOMIC);
+	int i;
 
 	if (sap) {
 		/* sap->laddr.mac - leave as a null, it's filled by bind */
 		sap->state = LLC_SAP_STATE_ACTIVE;
-		rwlock_init(&sap->sk_list.lock);
-		atomic_set(&sap->refcnt, 1);
+		spin_lock_init(&sap->sk_lock);
+		for (i = 0; i < LLC_SK_LADDR_HASH_ENTRIES; i++)
+			INIT_HLIST_NULLS_HEAD(&sap->sk_laddr_hash[i], i);
+		refcount_set(&sap->refcnt, 1);
 	}
 	return sap;
 }
 
-/**
- *	llc_add_sap - add sap to station list
- *	@sap: Address of the sap
- *
- *	Adds a sap to the LLC's station sap list.
- */
-static void llc_add_sap(struct llc_sap *sap)
-{
-	list_add_tail(&sap->node, &llc_sap_list);
-}
-
-/**
- *	llc_del_sap - del sap from station list
- *	@sap: Address of the sap
- *
- *	Removes a sap to the LLC's station sap list.
- */
-static void llc_del_sap(struct llc_sap *sap)
-{
-	write_lock_bh(&llc_sap_list_lock);
-	list_del(&sap->node);
-	write_unlock_bh(&llc_sap_list_lock);
-}
-
 static struct llc_sap *__llc_sap_find(unsigned char sap_value)
 {
-	struct llc_sap* sap;
+	struct llc_sap *sap;
 
 	list_for_each_entry(sap, &llc_sap_list, node)
 		if (sap->laddr.lsap == sap_value)
@@ -90,13 +69,13 @@ out:
  */
 struct llc_sap *llc_sap_find(unsigned char sap_value)
 {
-	struct llc_sap* sap;
+	struct llc_sap *sap;
 
-	read_lock_bh(&llc_sap_list_lock);
+	rcu_read_lock_bh();
 	sap = __llc_sap_find(sap_value);
-	if (sap)
-		llc_sap_hold(sap);
-	read_unlock_bh(&llc_sap_list_lock);
+	if (!sap || !llc_sap_hold_safe(sap))
+		sap = NULL;
+	rcu_read_unlock_bh();
 	return sap;
 }
 
@@ -117,7 +96,7 @@ struct llc_sap *llc_sap_open(unsigned char lsap,
 {
 	struct llc_sap *sap = NULL;
 
-	write_lock_bh(&llc_sap_list_lock);
+	spin_lock_bh(&llc_sap_list_lock);
 	if (__llc_sap_find(lsap)) /* SAP already exists */
 		goto out;
 	sap = llc_sap_alloc();
@@ -125,9 +104,9 @@ struct llc_sap *llc_sap_open(unsigned char lsap,
 		goto out;
 	sap->laddr.lsap = lsap;
 	sap->rcv_func	= func;
-	llc_add_sap(sap);
+	list_add_tail_rcu(&sap->node, &llc_sap_list);
 out:
-	write_unlock_bh(&llc_sap_list_lock);
+	spin_unlock_bh(&llc_sap_list_lock);
 	return sap;
 }
 
@@ -142,29 +121,27 @@ out:
  */
 void llc_sap_close(struct llc_sap *sap)
 {
-	WARN_ON(!hlist_empty(&sap->sk_list.list));
-	llc_del_sap(sap);
-	kfree(sap);
+	WARN_ON(sap->sk_count);
+
+	spin_lock_bh(&llc_sap_list_lock);
+	list_del_rcu(&sap->node);
+	spin_unlock_bh(&llc_sap_list_lock);
+
+	kfree_rcu(sap, rcu);
 }
 
-static struct packet_type llc_packet_type = {
-	.type = __constant_htons(ETH_P_802_2),
+static struct packet_type llc_packet_type __read_mostly = {
+	.type = cpu_to_be16(ETH_P_802_2),
 	.func = llc_rcv,
 };
 
-static struct packet_type llc_tr_packet_type = {
-	.type = __constant_htons(ETH_P_TR_802_2),
+static struct packet_type llc_tr_packet_type __read_mostly = {
+	.type = cpu_to_be16(ETH_P_TR_802_2),
 	.func = llc_rcv,
 };
 
 static int __init llc_init(void)
 {
-	struct net_device *dev;
-
-	dev = first_net_device(&init_net);
-	if (dev != NULL)
-		dev = next_net_device(dev);
-
 	dev_add_pack(&llc_packet_type);
 	dev_add_pack(&llc_tr_packet_type);
 	return 0;
@@ -180,7 +157,6 @@ module_init(llc_init);
 module_exit(llc_exit);
 
 EXPORT_SYMBOL(llc_sap_list);
-EXPORT_SYMBOL(llc_sap_list_lock);
 EXPORT_SYMBOL(llc_sap_find);
 EXPORT_SYMBOL(llc_sap_open);
 EXPORT_SYMBOL(llc_sap_close);

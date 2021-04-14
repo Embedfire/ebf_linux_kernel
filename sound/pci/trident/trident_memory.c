@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Copyright (c) by Takashi Iwai <tiwai@suse.de>
@@ -5,31 +6,15 @@
  *
  *  Trident 4DWave-NX memory page allocation (TLB area)
  *  Trident chip can handle only 16MByte of the memory at the same time.
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
-#include <asm/io.h>
+#include <linux/io.h>
 #include <linux/pci.h>
 #include <linux/time.h>
 #include <linux/mutex.h>
 
 #include <sound/core.h>
-#include <sound/trident.h>
+#include "trident.h"
 
 /* page arguments of these two macros are Trident page (4096 bytes), not like
  * aligned pages in others
@@ -139,12 +124,11 @@ static inline void *offset_ptr(struct snd_trident *trident, int offset)
 static struct snd_util_memblk *
 search_empty(struct snd_util_memhdr *hdr, int size)
 {
-	struct snd_util_memblk *blk, *prev;
+	struct snd_util_memblk *blk;
 	int page, psize;
 	struct list_head *p;
 
 	psize = get_aligned_page(size + ALIGN_PAGE_SIZE -1);
-	prev = NULL;
 	page = 0;
 	list_for_each(p, &hdr->block) {
 		blk = list_entry(p, struct snd_util_memblk, list);
@@ -194,11 +178,14 @@ snd_trident_alloc_sg_pages(struct snd_trident *trident,
 	struct snd_util_memblk *blk;
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	int idx, page;
-	struct snd_sg_buf *sgbuf = snd_pcm_substream_sgbuf(substream);
 
-	snd_assert(runtime->dma_bytes > 0 && runtime->dma_bytes <= SNDRV_TRIDENT_MAX_PAGES * SNDRV_TRIDENT_PAGE_SIZE, return NULL);
+	if (snd_BUG_ON(runtime->dma_bytes <= 0 ||
+		       runtime->dma_bytes > SNDRV_TRIDENT_MAX_PAGES *
+					SNDRV_TRIDENT_PAGE_SIZE))
+		return NULL;
 	hdr = trident->tlb.memhdr;
-	snd_assert(hdr != NULL, return NULL);
+	if (snd_BUG_ON(!hdr))
+		return NULL;
 
 	
 
@@ -208,18 +195,14 @@ snd_trident_alloc_sg_pages(struct snd_trident *trident,
 		mutex_unlock(&hdr->block_mutex);
 		return NULL;
 	}
-	if (lastpg(blk) - firstpg(blk) >= sgbuf->pages) {
-		snd_printk(KERN_ERR "page calculation doesn't match: allocated pages = %d, trident = %d/%d\n", sgbuf->pages, firstpg(blk), lastpg(blk));
-		__snd_util_mem_free(hdr, blk);
-		mutex_unlock(&hdr->block_mutex);
-		return NULL;
-	}
 			   
 	/* set TLB entries */
 	idx = 0;
 	for (page = firstpg(blk); page <= lastpg(blk); page++, idx++) {
-		dma_addr_t addr = sgbuf->table[idx].addr;
-		unsigned long ptr = (unsigned long)sgbuf->table[idx].buf;
+		unsigned long ofs = idx << PAGE_SHIFT;
+		dma_addr_t addr = snd_pcm_sgbuf_get_addr(substream, ofs);
+		unsigned long ptr = (unsigned long)
+			snd_pcm_sgbuf_get_ptr(substream, ofs);
 		if (! is_valid_page(addr)) {
 			__snd_util_mem_free(hdr, blk);
 			mutex_unlock(&hdr->block_mutex);
@@ -245,9 +228,13 @@ snd_trident_alloc_cont_pages(struct snd_trident *trident,
 	dma_addr_t addr;
 	unsigned long ptr;
 
-	snd_assert(runtime->dma_bytes> 0 && runtime->dma_bytes <= SNDRV_TRIDENT_MAX_PAGES * SNDRV_TRIDENT_PAGE_SIZE, return NULL);
+	if (snd_BUG_ON(runtime->dma_bytes <= 0 ||
+		       runtime->dma_bytes > SNDRV_TRIDENT_MAX_PAGES *
+					SNDRV_TRIDENT_PAGE_SIZE))
+		return NULL;
 	hdr = trident->tlb.memhdr;
-	snd_assert(hdr != NULL, return NULL);
+	if (snd_BUG_ON(!hdr))
+		return NULL;
 
 	mutex_lock(&hdr->block_mutex);
 	blk = search_empty(hdr, runtime->dma_bytes);
@@ -279,8 +266,8 @@ struct snd_util_memblk *
 snd_trident_alloc_pages(struct snd_trident *trident,
 			struct snd_pcm_substream *substream)
 {
-	snd_assert(trident != NULL, return NULL);
-	snd_assert(substream != NULL, return NULL);
+	if (snd_BUG_ON(!trident || !substream))
+		return NULL;
 	if (substream->dma_buffer.dev.type == SNDRV_DMA_TYPE_DEV_SG)
 		return snd_trident_alloc_sg_pages(trident, substream);
 	else
@@ -297,8 +284,8 @@ int snd_trident_free_pages(struct snd_trident *trident,
 	struct snd_util_memhdr *hdr;
 	int page;
 
-	snd_assert(trident != NULL, return -EINVAL);
-	snd_assert(blk != NULL, return -EINVAL);
+	if (snd_BUG_ON(!trident || !blk))
+		return -EINVAL;
 
 	hdr = trident->tlb.memhdr;
 	mutex_lock(&hdr->block_mutex);

@@ -1,16 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
- * Licensed under the GPL
  */
 
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
-#include "kern_constants.h"
-#include "kern_util.h"
-#include "os.h"
-#include "user.h"
+#include <kern_util.h>
+#include <os.h>
 
 struct grantpt_info {
 	int fd;

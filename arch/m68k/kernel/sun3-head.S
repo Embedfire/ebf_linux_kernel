@@ -1,4 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #include <linux/linkage.h>
+#include <linux/init.h>
 
 #include <asm/entry.h>
 #include <asm/page.h>
@@ -29,7 +31,7 @@ kernel_pmd_table:              .skip 0x2000
 .globl kernel_pg_dir
 .equ    kernel_pg_dir,kernel_pmd_table
 
-	.section .text.head
+	__HEAD
 ENTRY(_stext)
 ENTRY(_start)
 
@@ -86,9 +88,3 @@ kpt:
         .long 0
 availmem:
         .long 0
-| todo: remove next two. --m
-is_medusa:
-        .long 0
-m68k_pgtable_cachemode:
-        .long 0
-

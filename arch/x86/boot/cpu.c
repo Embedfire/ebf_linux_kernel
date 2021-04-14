@@ -1,10 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* -*- linux-c -*- ------------------------------------------------------- *
  *
  *   Copyright (C) 1991, 1992 Linus Torvalds
  *   Copyright 2007-2008 rPath, Inc. - All Rights Reserved
- *
- *   This file is part of the Linux kernel, and is made available under
- *   the terms of the GNU General Public License version 2.
  *
  * ----------------------------------------------------------------------- */
 
@@ -16,7 +14,9 @@
  */
 
 #include "boot.h"
+#ifdef CONFIG_X86_FEATURE_NAMES
 #include "cpustr.h"
+#endif
 
 static char *cpu_name(int level)
 {
@@ -32,11 +32,48 @@ static char *cpu_name(int level)
 	}
 }
 
+static void show_cap_strs(u32 *err_flags)
+{
+	int i, j;
+#ifdef CONFIG_X86_FEATURE_NAMES
+	const unsigned char *msg_strs = (const unsigned char *)x86_cap_strs;
+	for (i = 0; i < NCAPINTS; i++) {
+		u32 e = err_flags[i];
+		for (j = 0; j < 32; j++) {
+			if (msg_strs[0] < i ||
+			    (msg_strs[0] == i && msg_strs[1] < j)) {
+				/* Skip to the next string */
+				msg_strs += 2;
+				while (*msg_strs++)
+					;
+			}
+			if (e & 1) {
+				if (msg_strs[0] == i &&
+				    msg_strs[1] == j &&
+				    msg_strs[2])
+					printf("%s ", msg_strs+2);
+				else
+					printf("%d:%d ", i, j);
+			}
+			e >>= 1;
+		}
+	}
+#else
+	for (i = 0; i < NCAPINTS; i++) {
+		u32 e = err_flags[i];
+		for (j = 0; j < 32; j++) {
+			if (e & 1)
+				printf("%d:%d ", i, j);
+			e >>= 1;
+		}
+	}
+#endif
+}
+
 int validate_cpu(void)
 {
 	u32 *err_flags;
 	int cpu_level, req_level;
-	const unsigned char *msg_strs;
 
 	check_cpu(&cpu_level, &req_level, &err_flags);
 
@@ -49,34 +86,12 @@ int validate_cpu(void)
 	}
 
 	if (err_flags) {
-		int i, j;
 		puts("This kernel requires the following features "
 		     "not present on the CPU:\n");
-
-		msg_strs = (const unsigned char *)x86_cap_strs;
-
-		for (i = 0; i < NCAPINTS; i++) {
-			u32 e = err_flags[i];
-
-			for (j = 0; j < 32; j++) {
-				int n = (i << 5)+j;
-				if (*msg_strs < n) {
-					/* Skip to the next string */
-					do {
-						msg_strs++;
-					} while (*msg_strs);
-					msg_strs++;
-				}
-				if (e & 1) {
-					if (*msg_strs == n && msg_strs[1])
-						printf("%s ", msg_strs+1);
-					else
-						printf("%d:%d ", i, j);
-				}
-				e >>= 1;
-			}
-		}
+		show_cap_strs(err_flags);
 		putchar('\n');
+		return -1;
+	} else if (check_knl_erratum()) {
 		return -1;
 	} else {
 		return 0;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* SCTP kernel implementation
  * (C) Copyright IBM Corp. 2001, 2004
  * Copyright (c) 1999-2000 Cisco, Inc.
@@ -9,29 +10,9 @@
  * This file converts numerical ID value to alphabetical names for SCTP
  * terms such as chunk type, parameter time, event type, etc.
  *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *                 ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, write to
- * the Free Software Foundation, 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
- *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <lksctp-developers@lists.sourceforge.net>
- *
- * Or submit a bug report through the following website:
- *    http://www.sf.net/projects/lksctp
+ *    lksctp developers <linux-sctp@vger.kernel.org>
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -40,19 +21,12 @@
  *    Jon Grimm             <jgrimm@us.ibm.com>
  *    Daisy Chang	    <daisyc@us.ibm.com>
  *    Sridhar Samudrala	    <sri@us.ibm.com>
- *
- * Any bugs reported given to us we will try to fix... any fixes shared will
- * be incorporated into the next SCTP release.
  */
 
 #include <net/sctp/sctp.h>
 
-#if SCTP_DEBUG
-int sctp_debug_flag = 1;	/* Initially enable DEBUG */
-#endif	/* SCTP_DEBUG */
-
 /* These are printable forms of Chunk ID's from section 3.1.  */
-static const char *sctp_cid_tbl[SCTP_NUM_BASE_CHUNK_TYPES] = {
+static const char *const sctp_cid_tbl[SCTP_NUM_BASE_CHUNK_TYPES] = {
 	"DATA",
 	"INIT",
 	"INIT_ACK",
@@ -71,7 +45,7 @@ static const char *sctp_cid_tbl[SCTP_NUM_BASE_CHUNK_TYPES] = {
 };
 
 /* Lookup "chunk type" debug name. */
-const char *sctp_cname(const sctp_subtype_t cid)
+const char *sctp_cname(const union sctp_subtype cid)
 {
 	if (cid.chunk <= SCTP_CID_BASE_MAX)
 		return sctp_cid_tbl[cid.chunk];
@@ -86,6 +60,18 @@ const char *sctp_cname(const sctp_subtype_t cid)
 	case SCTP_CID_FWD_TSN:
 		return "FWD_TSN";
 
+	case SCTP_CID_AUTH:
+		return "AUTH";
+
+	case SCTP_CID_RECONF:
+		return "RECONF";
+
+	case SCTP_CID_I_DATA:
+		return "I_DATA";
+
+	case SCTP_CID_I_FWD_TSN:
+		return "I_FWD_TSN";
+
 	default:
 		break;
 	}
@@ -94,8 +80,7 @@ const char *sctp_cname(const sctp_subtype_t cid)
 }
 
 /* These are printable forms of the states.  */
-const char *sctp_state_tbl[SCTP_STATE_NUM_STATES] = {
-	"STATE_EMPTY",
+const char *const sctp_state_tbl[SCTP_STATE_NUM_STATES] = {
 	"STATE_CLOSED",
 	"STATE_COOKIE_WAIT",
 	"STATE_COOKIE_ECHOED",
@@ -107,7 +92,7 @@ const char *sctp_state_tbl[SCTP_STATE_NUM_STATES] = {
 };
 
 /* Events that could change the state of an association.  */
-const char *sctp_evttype_tbl[] = {
+const char *const sctp_evttype_tbl[] = {
 	"EVENT_T_unknown",
 	"EVENT_T_CHUNK",
 	"EVENT_T_TIMEOUT",
@@ -116,7 +101,7 @@ const char *sctp_evttype_tbl[] = {
 };
 
 /* Return value of a state function */
-const char *sctp_status_tbl[] = {
+const char *const sctp_status_tbl[] = {
 	"DISPOSITION_DISCARD",
 	"DISPOSITION_CONSUME",
 	"DISPOSITION_NOMEM",
@@ -129,36 +114,37 @@ const char *sctp_status_tbl[] = {
 };
 
 /* Printable forms of primitives */
-static const char *sctp_primitive_tbl[SCTP_NUM_PRIMITIVE_TYPES] = {
+static const char *const sctp_primitive_tbl[SCTP_NUM_PRIMITIVE_TYPES] = {
 	"PRIMITIVE_ASSOCIATE",
 	"PRIMITIVE_SHUTDOWN",
 	"PRIMITIVE_ABORT",
 	"PRIMITIVE_SEND",
 	"PRIMITIVE_REQUESTHEARTBEAT",
+	"PRIMITIVE_ASCONF",
 };
 
 /* Lookup primitive debug name. */
-const char *sctp_pname(const sctp_subtype_t id)
+const char *sctp_pname(const union sctp_subtype id)
 {
 	if (id.primitive <= SCTP_EVENT_PRIMITIVE_MAX)
 		return sctp_primitive_tbl[id.primitive];
 	return "unknown_primitive";
 }
 
-static const char *sctp_other_tbl[] = {
+static const char *const sctp_other_tbl[] = {
 	"NO_PENDING_TSN",
 	"ICMP_PROTO_UNREACH",
 };
 
 /* Lookup "other" debug name. */
-const char *sctp_oname(const sctp_subtype_t id)
+const char *sctp_oname(const union sctp_subtype id)
 {
 	if (id.other <= SCTP_EVENT_OTHER_MAX)
 		return sctp_other_tbl[id.other];
 	return "unknown 'other' event";
 }
 
-static const char *sctp_timer_tbl[] = {
+static const char *const sctp_timer_tbl[] = {
 	"TIMEOUT_NONE",
 	"TIMEOUT_T1_COOKIE",
 	"TIMEOUT_T1_INIT",
@@ -167,14 +153,17 @@ static const char *sctp_timer_tbl[] = {
 	"TIMEOUT_T4_RTO",
 	"TIMEOUT_T5_SHUTDOWN_GUARD",
 	"TIMEOUT_HEARTBEAT",
+	"TIMEOUT_RECONF",
 	"TIMEOUT_SACK",
 	"TIMEOUT_AUTOCLOSE",
 };
 
 /* Lookup timer debug name. */
-const char *sctp_tname(const sctp_subtype_t id)
+const char *sctp_tname(const union sctp_subtype id)
 {
-	if (id.timeout <= SCTP_EVENT_TIMEOUT_MAX)
+	BUILD_BUG_ON(SCTP_EVENT_TIMEOUT_MAX + 1 != ARRAY_SIZE(sctp_timer_tbl));
+
+	if (id.timeout < ARRAY_SIZE(sctp_timer_tbl))
 		return sctp_timer_tbl[id.timeout];
 	return "unknown_timer";
 }

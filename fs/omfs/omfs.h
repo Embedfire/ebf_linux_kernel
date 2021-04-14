@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _OMFS_H
 #define _OMFS_H
 
@@ -19,8 +20,8 @@ struct omfs_sb_info {
 	unsigned long **s_imap;
 	int s_imap_size;
 	struct mutex s_bitmap_lock;
-	int s_uid;
-	int s_gid;
+	kuid_t s_uid;
+	kgid_t s_gid;
 	int s_dmask;
 	int s_fmask;
 };
@@ -44,22 +45,23 @@ extern int omfs_allocate_range(struct super_block *sb, int min_request,
 extern int omfs_clear_range(struct super_block *sb, u64 block, int count);
 
 /* dir.c */
-extern struct file_operations omfs_dir_operations;
-extern struct inode_operations omfs_dir_inops;
+extern const struct file_operations omfs_dir_operations;
+extern const struct inode_operations omfs_dir_inops;
 extern int omfs_make_empty(struct inode *inode, struct super_block *sb);
 extern int omfs_is_bad(struct omfs_sb_info *sbi, struct omfs_header *header,
 			u64 fsblock);
 
 /* file.c */
-extern struct file_operations omfs_file_operations;
-extern struct inode_operations omfs_file_inops;
-extern struct address_space_operations omfs_aops;
+extern const struct file_operations omfs_file_operations;
+extern const struct inode_operations omfs_file_inops;
+extern const struct address_space_operations omfs_aops;
 extern void omfs_make_empty_table(struct buffer_head *bh, int offset);
 extern int omfs_shrink_inode(struct inode *inode);
 
 /* inode.c */
+extern struct buffer_head *omfs_bread(struct super_block *sb, sector_t block);
 extern struct inode *omfs_iget(struct super_block *sb, ino_t inode);
-extern struct inode *omfs_new_inode(struct inode *dir, int mode);
+extern struct inode *omfs_new_inode(struct inode *dir, umode_t mode);
 extern int omfs_reserve_block(struct super_block *sb, sector_t block);
 extern int omfs_find_empty_block(struct super_block *sb, int mode, ino_t *ino);
 extern int omfs_sync_inode(struct inode *inode);

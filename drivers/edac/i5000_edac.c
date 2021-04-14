@@ -22,12 +22,12 @@
 #include <linux/edac.h>
 #include <asm/mmzone.h>
 
-#include "edac_core.h"
+#include "edac_module.h"
 
 /*
  * Alter this version for the I5000 module when modifications are made
  */
-#define I5000_REVISION    " Ver: 2.0.12 " __DATE__
+#define I5000_REVISION    " Ver: 2.0.12"
 #define EDAC_MOD_STR      "i5000_edac"
 
 #define i5000_printk(level, fmt, arg...) \
@@ -119,6 +119,7 @@
 #define			FERR_NF_UNCORRECTABLE	(FERR_NF_M12ERR | \
 							FERR_NF_M11ERR | \
 							FERR_NF_M10ERR | \
+							FERR_NF_M9ERR | \
 							FERR_NF_M8ERR | \
 							FERR_NF_M7ERR | \
 							FERR_NF_M6ERR | \
@@ -226,7 +227,7 @@
 #define			NREC_RDWR(x)		(((x)>>11) & 1)
 #define			NREC_RANK(x)		(((x)>>8) & 0x7)
 #define		NRECMEMB		0xC0
-#define			NREC_CAS(x)		(((x)>>16) & 0xFFFFFF)
+#define			NREC_CAS(x)		(((x)>>16) & 0xFFF)
 #define			NREC_RAS(x)		((x) & 0x7FFF)
 #define		NRECFGLOG		0xC4
 #define		NREEECFBDA		0xC8
@@ -269,9 +270,10 @@
 #define MTR3		0x8C
 
 #define NUM_MTRS		4
-#define CHANNELS_PER_BRANCH	(2)
+#define CHANNELS_PER_BRANCH	2
+#define MAX_BRANCHES		2
 
-/* Defines to extract the vaious fields from the
+/* Defines to extract the various fields from the
  *	MTRx - Memory Technology Registers
  */
 #define MTR_DIMMS_PRESENT(mtr)		((mtr) & (0x1 << 8))
@@ -285,21 +287,8 @@
 #define MTR_DIMM_COLS(mtr)		((mtr) & 0x3)
 #define MTR_DIMM_COLS_ADDR_BITS(mtr)	(MTR_DIMM_COLS(mtr) + 10)
 
-#ifdef CONFIG_EDAC_DEBUG
-static char *numrow_toString[] = {
-	"8,192 - 13 rows",
-	"16,384 - 14 rows",
-	"32,768 - 15 rows",
-	"reserved"
-};
-
-static char *numcol_toString[] = {
-	"1,024 - 10 columns",
-	"2,048 - 11 columns",
-	"4,096 - 12 columns",
-	"reserved"
-};
-#endif
+/* enables the report of miscellaneous messages as CE errors - default off */
+static int misc_messages;
 
 /* Enumeration of supported devices */
 enum i5000_chips {
@@ -339,7 +328,13 @@ struct i5000_pvt {
 	struct pci_dev *branch_1;	/* 22.0 */
 
 	u16 tolm;		/* top of low memory */
-	u64 ambase;		/* AMB BAR */
+	union {
+		u64 ambase;		/* AMB BAR */
+		struct {
+			u32 ambase_bottom;
+			u32 ambase_top;
+		} u __packed;
+	};
 
 	u16 mir0, mir1, mir2;
 
@@ -376,7 +371,7 @@ struct i5000_error_info {
 	/* These registers are input ONLY if there was a
 	 * Non-Recoverable Error */
 	u16 nrecmema;		/* Non-Recoverable Mem log A */
-	u16 nrecmemb;		/* Non-Recoverable Mem log B */
+	u32 nrecmemb;		/* Non-Recoverable Mem log B */
 
 };
 
@@ -412,7 +407,7 @@ static void i5000_get_error_info(struct mem_ctl_info *mci,
 				NERR_FAT_FBD, &info->nerr_fat_fbd);
 		pci_read_config_word(pvt->branchmap_werrors,
 				NRECMEMA, &info->nrecmema);
-		pci_read_config_word(pvt->branchmap_werrors,
+		pci_read_config_dword(pvt->branchmap_werrors,
 				NRECMEMB, &info->nrecmemb);
 
 		/* Clear the error bits, by writing them back */
@@ -466,9 +461,9 @@ static void i5000_process_fatal_error_info(struct mem_ctl_info *mci,
 					struct i5000_error_info *info,
 					int handle_errors)
 {
-	char msg[EDAC_MC_LABEL_LEN + 1 + 90];
+	char msg[EDAC_MC_LABEL_LEN + 1 + 160];
+	char *specific = NULL;
 	u32 allErrors;
-	int branch;
 	int channel;
 	int bank;
 	int rank;
@@ -480,13 +475,7 @@ static void i5000_process_fatal_error_info(struct mem_ctl_info *mci,
 	if (!allErrors)
 		return;		/* if no error, return now */
 
-	/* ONLY ONE of the possible error bits will be set, as per the docs */
-	i5000_mc_printk(mci, KERN_ERR,
-			"FATAL ERRORS Found!!! 1st FATAL Err Reg= 0x%x\n",
-			allErrors);
-
-	branch = EXTRACT_FBDCHAN_INDX(info->ferr_fat_fbd);
-	channel = branch;
+	channel = EXTRACT_FBDCHAN_INDX(info->ferr_fat_fbd);
 
 	/* Use the NON-Recoverable macros to extract data */
 	bank = NREC_BANK(info->nrecmema);
@@ -495,37 +484,51 @@ static void i5000_process_fatal_error_info(struct mem_ctl_info *mci,
 	ras = NREC_RAS(info->nrecmemb);
 	cas = NREC_CAS(info->nrecmemb);
 
-	debugf0("\t\tCSROW= %d  Channels= %d,%d  (Branch= %d "
-		"DRAM Bank= %d rdwr= %s ras= %d cas= %d)\n",
-		rank, channel, channel + 1, branch >> 1, bank,
-		rdwr ? "Write" : "Read", ras, cas);
+	edac_dbg(0, "\t\tCSROW= %d  Channel= %d (DRAM Bank= %d rdwr= %s ras= %d cas= %d)\n",
+		 rank, channel, bank,
+		 rdwr ? "Write" : "Read", ras, cas);
 
 	/* Only 1 bit will be on */
-	if (allErrors & FERR_FAT_M1ERR) {
-		i5000_mc_printk(mci, KERN_ERR,
-				"Alert on non-redundant retry or fast "
-				"reset timeout\n");
+	switch (allErrors) {
+	case FERR_FAT_M1ERR:
+		specific = "Alert on non-redundant retry or fast "
+				"reset timeout";
+		break;
+	case FERR_FAT_M2ERR:
+		specific = "Northbound CRC error on non-redundant "
+				"retry";
+		break;
+	case FERR_FAT_M3ERR:
+		{
+		static int done;
 
-	} else if (allErrors & FERR_FAT_M2ERR) {
-		i5000_mc_printk(mci, KERN_ERR,
-				"Northbound CRC error on non-redundant "
-				"retry\n");
+		/*
+		 * This error is generated to inform that the intelligent
+		 * throttling is disabled and the temperature passed the
+		 * specified middle point. Since this is something the BIOS
+		 * should take care of, we'll warn only once to avoid
+		 * worthlessly flooding the log.
+		 */
+		if (done)
+			return;
+		done++;
 
-	} else if (allErrors & FERR_FAT_M3ERR) {
-		i5000_mc_printk(mci, KERN_ERR,
-				">Tmid Thermal event with intelligent "
-				"throttling disabled\n");
+		specific = ">Tmid Thermal event with intelligent "
+			   "throttling disabled";
+		}
+		break;
 	}
 
 	/* Form out message */
 	snprintf(msg, sizeof(msg),
-		 "(Branch=%d DRAM-Bank=%d RDWR=%s RAS=%d CAS=%d "
-		 "FATAL Err=0x%x)",
-		 branch >> 1, bank, rdwr ? "Write" : "Read", ras, cas,
-		 allErrors);
+		 "Bank=%d RAS=%d CAS=%d FATAL Err=0x%x (%s)",
+		 bank, ras, cas, allErrors, specific);
 
 	/* Call the helper to output message */
-	edac_mc_handle_fbd_ue(mci, rank, channel, channel + 1, msg);
+	edac_mc_handle_error(HW_EVENT_ERR_FATAL, mci, 1, 0, 0, 0,
+			     channel >> 1, channel & 1, rank,
+			     rdwr ? "Write error" : "Read error",
+			     msg);
 }
 
 /*
@@ -539,7 +542,8 @@ static void i5000_process_nonfatal_error_info(struct mem_ctl_info *mci,
 					struct i5000_error_info *info,
 					int handle_errors)
 {
-	char msg[EDAC_MC_LABEL_LEN + 1 + 90];
+	char msg[EDAC_MC_LABEL_LEN + 1 + 170];
+	char *specific = NULL;
 	u32 allErrors;
 	u32 ue_errors;
 	u32 ce_errors;
@@ -557,43 +561,79 @@ static void i5000_process_nonfatal_error_info(struct mem_ctl_info *mci,
 		return;		/* if no error, return now */
 
 	/* ONLY ONE of the possible error bits will be set, as per the docs */
-	i5000_mc_printk(mci, KERN_WARNING,
-			"NON-FATAL ERRORS Found!!! 1st NON-FATAL Err "
-			"Reg= 0x%x\n", allErrors);
-
 	ue_errors = allErrors & FERR_NF_UNCORRECTABLE;
 	if (ue_errors) {
-		debugf0("\tUncorrected bits= 0x%x\n", ue_errors);
+		edac_dbg(0, "\tUncorrected bits= 0x%x\n", ue_errors);
 
 		branch = EXTRACT_FBDCHAN_INDX(info->ferr_nf_fbd);
-		channel = branch;
+
+		/*
+		 * According with i5000 datasheet, bit 28 has no significance
+		 * for errors M4Err-M12Err and M17Err-M21Err, on FERR_NF_FBD
+		 */
+		channel = branch & 2;
+
 		bank = NREC_BANK(info->nrecmema);
 		rank = NREC_RANK(info->nrecmema);
 		rdwr = NREC_RDWR(info->nrecmema);
 		ras = NREC_RAS(info->nrecmemb);
 		cas = NREC_CAS(info->nrecmemb);
 
-		debugf0
-			("\t\tCSROW= %d  Channels= %d,%d  (Branch= %d "
-			"DRAM Bank= %d rdwr= %s ras= %d cas= %d)\n",
-			rank, channel, channel + 1, branch >> 1, bank,
-			rdwr ? "Write" : "Read", ras, cas);
+		edac_dbg(0, "\t\tCSROW= %d  Channels= %d,%d  (Branch= %d DRAM Bank= %d rdwr= %s ras= %d cas= %d)\n",
+			 rank, channel, channel + 1, branch >> 1, bank,
+			 rdwr ? "Write" : "Read", ras, cas);
+
+		switch (ue_errors) {
+		case FERR_NF_M12ERR:
+			specific = "Non-Aliased Uncorrectable Patrol Data ECC";
+			break;
+		case FERR_NF_M11ERR:
+			specific = "Non-Aliased Uncorrectable Spare-Copy "
+					"Data ECC";
+			break;
+		case FERR_NF_M10ERR:
+			specific = "Non-Aliased Uncorrectable Mirrored Demand "
+					"Data ECC";
+			break;
+		case FERR_NF_M9ERR:
+			specific = "Non-Aliased Uncorrectable Non-Mirrored "
+					"Demand Data ECC";
+			break;
+		case FERR_NF_M8ERR:
+			specific = "Aliased Uncorrectable Patrol Data ECC";
+			break;
+		case FERR_NF_M7ERR:
+			specific = "Aliased Uncorrectable Spare-Copy Data ECC";
+			break;
+		case FERR_NF_M6ERR:
+			specific = "Aliased Uncorrectable Mirrored Demand "
+					"Data ECC";
+			break;
+		case FERR_NF_M5ERR:
+			specific = "Aliased Uncorrectable Non-Mirrored Demand "
+					"Data ECC";
+			break;
+		case FERR_NF_M4ERR:
+			specific = "Uncorrectable Data ECC on Replay";
+			break;
+		}
 
 		/* Form out message */
 		snprintf(msg, sizeof(msg),
-			 "(Branch=%d DRAM-Bank=%d RDWR=%s RAS=%d "
-			 "CAS=%d, UE Err=0x%x)",
-			 branch >> 1, bank, rdwr ? "Write" : "Read", ras, cas,
-			 ue_errors);
+			 "Rank=%d Bank=%d RAS=%d CAS=%d, UE Err=0x%x (%s)",
+			 rank, bank, ras, cas, ue_errors, specific);
 
 		/* Call the helper to output message */
-		edac_mc_handle_fbd_ue(mci, rank, channel, channel + 1, msg);
+		edac_mc_handle_error(HW_EVENT_ERR_UNCORRECTED, mci, 1, 0, 0, 0,
+				channel >> 1, -1, rank,
+				rdwr ? "Write error" : "Read error",
+				msg);
 	}
 
 	/* Check correctable errors */
 	ce_errors = allErrors & FERR_NF_CORRECTABLE;
 	if (ce_errors) {
-		debugf0("\tCorrected bits= 0x%x\n", ce_errors);
+		edac_dbg(0, "\tCorrected bits= 0x%x\n", ce_errors);
 
 		branch = EXTRACT_FBDCHAN_INDX(info->ferr_nf_fbd);
 
@@ -611,56 +651,82 @@ static void i5000_process_nonfatal_error_info(struct mem_ctl_info *mci,
 		ras = REC_RAS(info->recmemb);
 		cas = REC_CAS(info->recmemb);
 
-		debugf0("\t\tCSROW= %d Channel= %d  (Branch %d "
-			"DRAM Bank= %d rdwr= %s ras= %d cas= %d)\n",
-			rank, channel, branch >> 1, bank,
-			rdwr ? "Write" : "Read", ras, cas);
+		edac_dbg(0, "\t\tCSROW= %d Channel= %d  (Branch %d DRAM Bank= %d rdwr= %s ras= %d cas= %d)\n",
+			 rank, channel, branch >> 1, bank,
+			 rdwr ? "Write" : "Read", ras, cas);
+
+		switch (ce_errors) {
+		case FERR_NF_M17ERR:
+			specific = "Correctable Non-Mirrored Demand Data ECC";
+			break;
+		case FERR_NF_M18ERR:
+			specific = "Correctable Mirrored Demand Data ECC";
+			break;
+		case FERR_NF_M19ERR:
+			specific = "Correctable Spare-Copy Data ECC";
+			break;
+		case FERR_NF_M20ERR:
+			specific = "Correctable Patrol Data ECC";
+			break;
+		}
 
 		/* Form out message */
 		snprintf(msg, sizeof(msg),
-			 "(Branch=%d DRAM-Bank=%d RDWR=%s RAS=%d "
-			 "CAS=%d, CE Err=0x%x)", branch >> 1, bank,
-			 rdwr ? "Write" : "Read", ras, cas, ce_errors);
+			 "Rank=%d Bank=%d RDWR=%s RAS=%d "
+			 "CAS=%d, CE Err=0x%x (%s))", branch >> 1, bank,
+			 rdwr ? "Write" : "Read", ras, cas, ce_errors,
+			 specific);
 
 		/* Call the helper to output message */
-		edac_mc_handle_fbd_ce(mci, rank, channel, msg);
+		edac_mc_handle_error(HW_EVENT_ERR_CORRECTED, mci, 1, 0, 0, 0,
+				channel >> 1, channel % 2, rank,
+				rdwr ? "Write error" : "Read error",
+				msg);
 	}
 
-	/* See if any of the thermal errors have fired */
-	misc_errors = allErrors & FERR_NF_THERMAL;
-	if (misc_errors) {
-		i5000_printk(KERN_WARNING, "\tTHERMAL Error, bits= 0x%x\n",
-			misc_errors);
-	}
+	if (!misc_messages)
+		return;
 
-	/* See if any of the thermal errors have fired */
-	misc_errors = allErrors & FERR_NF_NON_RETRY;
+	misc_errors = allErrors & (FERR_NF_NON_RETRY | FERR_NF_NORTH_CRC |
+				   FERR_NF_SPD_PROTOCOL | FERR_NF_DIMM_SPARE);
 	if (misc_errors) {
-		i5000_printk(KERN_WARNING, "\tNON-Retry  Errors, bits= 0x%x\n",
-			misc_errors);
-	}
+		switch (misc_errors) {
+		case FERR_NF_M13ERR:
+			specific = "Non-Retry or Redundant Retry FBD Memory "
+					"Alert or Redundant Fast Reset Timeout";
+			break;
+		case FERR_NF_M14ERR:
+			specific = "Non-Retry or Redundant Retry FBD "
+					"Configuration Alert";
+			break;
+		case FERR_NF_M15ERR:
+			specific = "Non-Retry or Redundant Retry FBD "
+					"Northbound CRC error on read data";
+			break;
+		case FERR_NF_M21ERR:
+			specific = "FBD Northbound CRC error on "
+					"FBD Sync Status";
+			break;
+		case FERR_NF_M22ERR:
+			specific = "SPD protocol error";
+			break;
+		case FERR_NF_M27ERR:
+			specific = "DIMM-spare copy started";
+			break;
+		case FERR_NF_M28ERR:
+			specific = "DIMM-spare copy completed";
+			break;
+		}
+		branch = EXTRACT_FBDCHAN_INDX(info->ferr_nf_fbd);
 
-	/* See if any of the thermal errors have fired */
-	misc_errors = allErrors & FERR_NF_NORTH_CRC;
-	if (misc_errors) {
-		i5000_printk(KERN_WARNING,
-			"\tNORTHBOUND CRC  Error, bits= 0x%x\n",
-			misc_errors);
-	}
+		/* Form out message */
+		snprintf(msg, sizeof(msg),
+			 "Err=%#x (%s)", misc_errors, specific);
 
-	/* See if any of the thermal errors have fired */
-	misc_errors = allErrors & FERR_NF_SPD_PROTOCOL;
-	if (misc_errors) {
-		i5000_printk(KERN_WARNING,
-			"\tSPD Protocol  Error, bits= 0x%x\n",
-			misc_errors);
-	}
-
-	/* See if any of the thermal errors have fired */
-	misc_errors = allErrors & FERR_NF_DIMM_SPARE;
-	if (misc_errors) {
-		i5000_printk(KERN_WARNING, "\tDIMM-Spare  Error, bits= 0x%x\n",
-			misc_errors);
+		/* Call the helper to output message */
+		edac_mc_handle_error(HW_EVENT_ERR_CORRECTED, mci, 1, 0, 0, 0,
+				branch >> 1, -1, -1,
+				"Misc error", msg);
 	}
 }
 
@@ -699,7 +765,7 @@ static void i5000_clear_error(struct mem_ctl_info *mci)
 static void i5000_check_error(struct mem_ctl_info *mci)
 {
 	struct i5000_error_info info;
-	debugf4("MC%d: " __FILE__ ": %s()\n", mci->mc_idx, __func__);
+	edac_dbg(4, "MC%d\n", mci->mc_idx);
 	i5000_get_error_info(mci, &info);
 	i5000_process_error_info(mci, &info, 1);
 }
@@ -770,15 +836,16 @@ static int i5000_get_devices(struct mem_ctl_info *mci, int dev_idx)
 
 	pvt->fsb_error_regs = pdev;
 
-	debugf1("System Address, processor bus- PCI Bus ID: %s  %x:%x\n",
-		pci_name(pvt->system_address),
-		pvt->system_address->vendor, pvt->system_address->device);
-	debugf1("Branchmap, control and errors - PCI Bus ID: %s  %x:%x\n",
-		pci_name(pvt->branchmap_werrors),
-		pvt->branchmap_werrors->vendor, pvt->branchmap_werrors->device);
-	debugf1("FSB Error Regs - PCI Bus ID: %s  %x:%x\n",
-		pci_name(pvt->fsb_error_regs),
-		pvt->fsb_error_regs->vendor, pvt->fsb_error_regs->device);
+	edac_dbg(1, "System Address, processor bus- PCI Bus ID: %s  %x:%x\n",
+		 pci_name(pvt->system_address),
+		 pvt->system_address->vendor, pvt->system_address->device);
+	edac_dbg(1, "Branchmap, control and errors - PCI Bus ID: %s  %x:%x\n",
+		 pci_name(pvt->branchmap_werrors),
+		 pvt->branchmap_werrors->vendor,
+		 pvt->branchmap_werrors->device);
+	edac_dbg(1, "FSB Error Regs - PCI Bus ID: %s  %x:%x\n",
+		 pci_name(pvt->fsb_error_regs),
+		 pvt->fsb_error_regs->vendor, pvt->fsb_error_regs->device);
 
 	pdev = NULL;
 	pdev = pci_get_device(PCI_VENDOR_ID_INTEL,
@@ -881,14 +948,14 @@ static int determine_amb_present_reg(struct i5000_pvt *pvt, int channel)
  *
  *	return the proper MTR register as determine by the csrow and channel desired
  */
-static int determine_mtr(struct i5000_pvt *pvt, int csrow, int channel)
+static int determine_mtr(struct i5000_pvt *pvt, int slot, int channel)
 {
 	int mtr;
 
 	if (channel < CHANNELS_PER_BRANCH)
-		mtr = pvt->b0_mtr[csrow >> 1];
+		mtr = pvt->b0_mtr[slot];
 	else
-		mtr = pvt->b1_mtr[csrow >> 1];
+		mtr = pvt->b1_mtr[slot];
 
 	return mtr;
 }
@@ -901,49 +968,59 @@ static void decode_mtr(int slot_row, u16 mtr)
 
 	ans = MTR_DIMMS_PRESENT(mtr);
 
-	debugf2("\tMTR%d=0x%x:  DIMMs are %s\n", slot_row, mtr,
-		ans ? "Present" : "NOT Present");
+	edac_dbg(2, "\tMTR%d=0x%x:  DIMMs are %sPresent\n",
+		 slot_row, mtr, ans ? "" : "NOT ");
 	if (!ans)
 		return;
 
-	debugf2("\t\tWIDTH: x%d\n", MTR_DRAM_WIDTH(mtr));
-	debugf2("\t\tNUMBANK: %d bank(s)\n", MTR_DRAM_BANKS(mtr));
-	debugf2("\t\tNUMRANK: %s\n", MTR_DIMM_RANK(mtr) ? "double" : "single");
-	debugf2("\t\tNUMROW: %s\n", numrow_toString[MTR_DIMM_ROWS(mtr)]);
-	debugf2("\t\tNUMCOL: %s\n", numcol_toString[MTR_DIMM_COLS(mtr)]);
+	edac_dbg(2, "\t\tWIDTH: x%d\n", MTR_DRAM_WIDTH(mtr));
+	edac_dbg(2, "\t\tNUMBANK: %d bank(s)\n", MTR_DRAM_BANKS(mtr));
+	edac_dbg(2, "\t\tNUMRANK: %s\n",
+		 MTR_DIMM_RANK(mtr) ? "double" : "single");
+	edac_dbg(2, "\t\tNUMROW: %s\n",
+		 MTR_DIMM_ROWS(mtr) == 0 ? "8,192 - 13 rows" :
+		 MTR_DIMM_ROWS(mtr) == 1 ? "16,384 - 14 rows" :
+		 MTR_DIMM_ROWS(mtr) == 2 ? "32,768 - 15 rows" :
+		 "reserved");
+	edac_dbg(2, "\t\tNUMCOL: %s\n",
+		 MTR_DIMM_COLS(mtr) == 0 ? "1,024 - 10 columns" :
+		 MTR_DIMM_COLS(mtr) == 1 ? "2,048 - 11 columns" :
+		 MTR_DIMM_COLS(mtr) == 2 ? "4,096 - 12 columns" :
+		 "reserved");
 }
 
-static void handle_channel(struct i5000_pvt *pvt, int csrow, int channel,
+static void handle_channel(struct i5000_pvt *pvt, int slot, int channel,
 			struct i5000_dimm_info *dinfo)
 {
 	int mtr;
 	int amb_present_reg;
 	int addrBits;
 
-	mtr = determine_mtr(pvt, csrow, channel);
+	mtr = determine_mtr(pvt, slot, channel);
 	if (MTR_DIMMS_PRESENT(mtr)) {
 		amb_present_reg = determine_amb_present_reg(pvt, channel);
 
-		/* Determine if there is  a  DIMM present in this DIMM slot */
-		if (amb_present_reg & (1 << (csrow >> 1))) {
+		/* Determine if there is a DIMM present in this DIMM slot */
+		if (amb_present_reg) {
 			dinfo->dual_rank = MTR_DIMM_RANK(mtr);
 
-			if (!((dinfo->dual_rank == 0) &&
-				((csrow & 0x1) == 0x1))) {
-				/* Start with the number of bits for a Bank
-				 * on the DRAM */
-				addrBits = MTR_DRAM_BANKS_ADDR_BITS(mtr);
-				/* Add thenumber of ROW bits */
-				addrBits += MTR_DIMM_ROWS_ADDR_BITS(mtr);
-				/* add the number of COLUMN bits */
-				addrBits += MTR_DIMM_COLS_ADDR_BITS(mtr);
+			/* Start with the number of bits for a Bank
+				* on the DRAM */
+			addrBits = MTR_DRAM_BANKS_ADDR_BITS(mtr);
+			/* Add the number of ROW bits */
+			addrBits += MTR_DIMM_ROWS_ADDR_BITS(mtr);
+			/* add the number of COLUMN bits */
+			addrBits += MTR_DIMM_COLS_ADDR_BITS(mtr);
 
-				addrBits += 6;	/* add 64 bits per DIMM */
-				addrBits -= 20;	/* divide by 2^^20 */
-				addrBits -= 3;	/* 8 bits per bytes */
+			/* Dual-rank memories have twice the size */
+			if (dinfo->dual_rank)
+				addrBits++;
 
-				dinfo->megabytes = 1 << addrBits;
-			}
+			addrBits += 6;	/* add 64 bits per DIMM */
+			addrBits -= 20;	/* divide by 2^^20 */
+			addrBits -= 3;	/* 8 bits per bytes */
+
+			dinfo->megabytes = 1 << addrBits;
 		}
 	}
 }
@@ -957,10 +1034,9 @@ static void handle_channel(struct i5000_pvt *pvt, int csrow, int channel,
 static void calculate_dimm_size(struct i5000_pvt *pvt)
 {
 	struct i5000_dimm_info *dinfo;
-	int csrow, max_csrows;
+	int slot, channel, branch;
 	char *p, *mem_buffer;
 	int space, n;
-	int channel;
 
 	/* ================= Generate some debug output ================= */
 	space = PAGE_SIZE;
@@ -971,53 +1047,57 @@ static void calculate_dimm_size(struct i5000_pvt *pvt)
 		return;
 	}
 
-	n = snprintf(p, space, "\n");
-	p += n;
-	space -= n;
-
-	/* Scan all the actual CSROWS (which is # of DIMMS * 2)
+	/* Scan all the actual slots
 	 * and calculate the information for each DIMM
-	 * Start with the highest csrow first, to display it first
-	 * and work toward the 0th csrow
+	 * Start with the highest slot first, to display it first
+	 * and work toward the 0th slot
 	 */
-	max_csrows = pvt->maxdimmperch * 2;
-	for (csrow = max_csrows - 1; csrow >= 0; csrow--) {
+	for (slot = pvt->maxdimmperch - 1; slot >= 0; slot--) {
 
-		/* on an odd csrow, first output a 'boundary' marker,
+		/* on an odd slot, first output a 'boundary' marker,
 		 * then reset the message buffer  */
-		if (csrow & 0x1) {
-			n = snprintf(p, space, "---------------------------"
+		if (slot & 0x1) {
+			n = snprintf(p, space, "--------------------------"
 				"--------------------------------");
 			p += n;
 			space -= n;
-			debugf2("%s\n", mem_buffer);
+			edac_dbg(2, "%s\n", mem_buffer);
 			p = mem_buffer;
 			space = PAGE_SIZE;
 		}
-		n = snprintf(p, space, "csrow %2d    ", csrow);
+		n = snprintf(p, space, "slot %2d    ", slot);
 		p += n;
 		space -= n;
 
 		for (channel = 0; channel < pvt->maxch; channel++) {
-			dinfo = &pvt->dimm_info[csrow][channel];
-			handle_channel(pvt, csrow, channel, dinfo);
-			n = snprintf(p, space, "%4d MB   | ", dinfo->megabytes);
+			dinfo = &pvt->dimm_info[slot][channel];
+			handle_channel(pvt, slot, channel, dinfo);
+			if (dinfo->megabytes)
+				n = snprintf(p, space, "%4d MB %dR| ",
+					     dinfo->megabytes, dinfo->dual_rank + 1);
+			else
+				n = snprintf(p, space, "%4d MB   | ", 0);
 			p += n;
 			space -= n;
 		}
-		n = snprintf(p, space, "\n");
 		p += n;
 		space -= n;
+		edac_dbg(2, "%s\n", mem_buffer);
+		p = mem_buffer;
+		space = PAGE_SIZE;
 	}
 
 	/* Output the last bottom 'boundary' marker */
-	n = snprintf(p, space, "---------------------------"
-		"--------------------------------\n");
+	n = snprintf(p, space, "--------------------------"
+		"--------------------------------");
 	p += n;
 	space -= n;
+	edac_dbg(2, "%s\n", mem_buffer);
+	p = mem_buffer;
+	space = PAGE_SIZE;
 
 	/* now output the 'channel' labels */
-	n = snprintf(p, space, "            ");
+	n = snprintf(p, space, "           ");
 	p += n;
 	space -= n;
 	for (channel = 0; channel < pvt->maxch; channel++) {
@@ -1025,12 +1105,20 @@ static void calculate_dimm_size(struct i5000_pvt *pvt)
 		p += n;
 		space -= n;
 	}
-	n = snprintf(p, space, "\n");
+	edac_dbg(2, "%s\n", mem_buffer);
+	p = mem_buffer;
+	space = PAGE_SIZE;
+
+	n = snprintf(p, space, "           ");
 	p += n;
-	space -= n;
+	for (branch = 0; branch < MAX_BRANCHES; branch++) {
+		n = snprintf(p, space, "       branch %d       | ", branch);
+		p += n;
+		space -= n;
+	}
 
 	/* output the last message and free buffer */
-	debugf2("%s\n", mem_buffer);
+	edac_dbg(2, "%s\n", mem_buffer);
 	kfree(mem_buffer);
 }
 
@@ -1046,31 +1134,27 @@ static void i5000_get_mc_regs(struct mem_ctl_info *mci)
 	u32 actual_tolm;
 	u16 limit;
 	int slot_row;
-	int maxch;
-	int maxdimmperch;
 	int way0, way1;
 
 	pvt = mci->pvt_info;
 
 	pci_read_config_dword(pvt->system_address, AMBASE,
-			(u32 *) & pvt->ambase);
+			&pvt->u.ambase_bottom);
 	pci_read_config_dword(pvt->system_address, AMBASE + sizeof(u32),
-			((u32 *) & pvt->ambase) + sizeof(u32));
+			&pvt->u.ambase_top);
 
-	maxdimmperch = pvt->maxdimmperch;
-	maxch = pvt->maxch;
-
-	debugf2("AMBASE= 0x%lx  MAXCH= %d  MAX-DIMM-Per-CH= %d\n",
-		(long unsigned int)pvt->ambase, pvt->maxch, pvt->maxdimmperch);
+	edac_dbg(2, "AMBASE= 0x%lx  MAXCH= %d  MAX-DIMM-Per-CH= %d\n",
+		 (long unsigned int)pvt->ambase, pvt->maxch, pvt->maxdimmperch);
 
 	/* Get the Branch Map regs */
 	pci_read_config_word(pvt->branchmap_werrors, TOLM, &pvt->tolm);
 	pvt->tolm >>= 12;
-	debugf2("\nTOLM (number of 256M regions) =%u (0x%x)\n", pvt->tolm,
-		pvt->tolm);
+	edac_dbg(2, "TOLM (number of 256M regions) =%u (0x%x)\n",
+		 pvt->tolm, pvt->tolm);
 
 	actual_tolm = pvt->tolm << 28;
-	debugf2("Actual TOLM byte addr=%u (0x%x)\n", actual_tolm, actual_tolm);
+	edac_dbg(2, "Actual TOLM byte addr=%u (0x%x)\n",
+		 actual_tolm, actual_tolm);
 
 	pci_read_config_word(pvt->branchmap_werrors, MIR0, &pvt->mir0);
 	pci_read_config_word(pvt->branchmap_werrors, MIR1, &pvt->mir1);
@@ -1080,15 +1164,18 @@ static void i5000_get_mc_regs(struct mem_ctl_info *mci)
 	limit = (pvt->mir0 >> 4) & 0x0FFF;
 	way0 = pvt->mir0 & 0x1;
 	way1 = pvt->mir0 & 0x2;
-	debugf2("MIR0: limit= 0x%x  WAY1= %u  WAY0= %x\n", limit, way1, way0);
+	edac_dbg(2, "MIR0: limit= 0x%x  WAY1= %u  WAY0= %x\n",
+		 limit, way1, way0);
 	limit = (pvt->mir1 >> 4) & 0x0FFF;
 	way0 = pvt->mir1 & 0x1;
 	way1 = pvt->mir1 & 0x2;
-	debugf2("MIR1: limit= 0x%x  WAY1= %u  WAY0= %x\n", limit, way1, way0);
+	edac_dbg(2, "MIR1: limit= 0x%x  WAY1= %u  WAY0= %x\n",
+		 limit, way1, way0);
 	limit = (pvt->mir2 >> 4) & 0x0FFF;
 	way0 = pvt->mir2 & 0x1;
 	way1 = pvt->mir2 & 0x2;
-	debugf2("MIR2: limit= 0x%x  WAY1= %u  WAY0= %x\n", limit, way1, way0);
+	edac_dbg(2, "MIR2: limit= 0x%x  WAY1= %u  WAY0= %x\n",
+		 limit, way1, way0);
 
 	/* Get the MTR[0-3] regs */
 	for (slot_row = 0; slot_row < NUM_MTRS; slot_row++) {
@@ -1097,31 +1184,31 @@ static void i5000_get_mc_regs(struct mem_ctl_info *mci)
 		pci_read_config_word(pvt->branch_0, where,
 				&pvt->b0_mtr[slot_row]);
 
-		debugf2("MTR%d where=0x%x B0 value=0x%x\n", slot_row, where,
-			pvt->b0_mtr[slot_row]);
+		edac_dbg(2, "MTR%d where=0x%x B0 value=0x%x\n",
+			 slot_row, where, pvt->b0_mtr[slot_row]);
 
 		if (pvt->maxch >= CHANNELS_PER_BRANCH) {
 			pci_read_config_word(pvt->branch_1, where,
 					&pvt->b1_mtr[slot_row]);
-			debugf2("MTR%d where=0x%x B1 value=0x%x\n", slot_row,
-				where, pvt->b0_mtr[slot_row]);
+			edac_dbg(2, "MTR%d where=0x%x B1 value=0x%x\n",
+				 slot_row, where, pvt->b1_mtr[slot_row]);
 		} else {
 			pvt->b1_mtr[slot_row] = 0;
 		}
 	}
 
 	/* Read and dump branch 0's MTRs */
-	debugf2("\nMemory Technology Registers:\n");
-	debugf2("   Branch 0:\n");
+	edac_dbg(2, "Memory Technology Registers:\n");
+	edac_dbg(2, "   Branch 0:\n");
 	for (slot_row = 0; slot_row < NUM_MTRS; slot_row++) {
 		decode_mtr(slot_row, pvt->b0_mtr[slot_row]);
 	}
 	pci_read_config_word(pvt->branch_0, AMB_PRESENT_0,
 			&pvt->b0_ambpresent0);
-	debugf2("\t\tAMB-Branch 0-present0 0x%x:\n", pvt->b0_ambpresent0);
+	edac_dbg(2, "\t\tAMB-Branch 0-present0 0x%x:\n", pvt->b0_ambpresent0);
 	pci_read_config_word(pvt->branch_0, AMB_PRESENT_1,
 			&pvt->b0_ambpresent1);
-	debugf2("\t\tAMB-Branch 0-present1 0x%x:\n", pvt->b0_ambpresent1);
+	edac_dbg(2, "\t\tAMB-Branch 0-present1 0x%x:\n", pvt->b0_ambpresent1);
 
 	/* Only if we have 2 branchs (4 channels) */
 	if (pvt->maxch < CHANNELS_PER_BRANCH) {
@@ -1129,18 +1216,18 @@ static void i5000_get_mc_regs(struct mem_ctl_info *mci)
 		pvt->b1_ambpresent1 = 0;
 	} else {
 		/* Read and dump  branch 1's MTRs */
-		debugf2("   Branch 1:\n");
+		edac_dbg(2, "   Branch 1:\n");
 		for (slot_row = 0; slot_row < NUM_MTRS; slot_row++) {
 			decode_mtr(slot_row, pvt->b1_mtr[slot_row]);
 		}
 		pci_read_config_word(pvt->branch_1, AMB_PRESENT_0,
 				&pvt->b1_ambpresent0);
-		debugf2("\t\tAMB-Branch 1-present0 0x%x:\n",
-			pvt->b1_ambpresent0);
+		edac_dbg(2, "\t\tAMB-Branch 1-present0 0x%x:\n",
+			 pvt->b1_ambpresent0);
 		pci_read_config_word(pvt->branch_1, AMB_PRESENT_1,
 				&pvt->b1_ambpresent1);
-		debugf2("\t\tAMB-Branch 1-present1 0x%x:\n",
-			pvt->b1_ambpresent1);
+		edac_dbg(2, "\t\tAMB-Branch 1-present1 0x%x:\n",
+			 pvt->b1_ambpresent1);
 	}
 
 	/* Go and determine the size of each DIMM and place in an
@@ -1160,57 +1247,52 @@ static void i5000_get_mc_regs(struct mem_ctl_info *mci)
 static int i5000_init_csrows(struct mem_ctl_info *mci)
 {
 	struct i5000_pvt *pvt;
-	struct csrow_info *p_csrow;
-	int empty, channel_count;
+	struct dimm_info *dimm;
+	int empty;
 	int max_csrows;
 	int mtr;
 	int csrow_megs;
 	int channel;
-	int csrow;
+	int slot;
 
 	pvt = mci->pvt_info;
-
-	channel_count = pvt->maxch;
 	max_csrows = pvt->maxdimmperch * 2;
 
 	empty = 1;		/* Assume NO memory */
 
-	for (csrow = 0; csrow < max_csrows; csrow++) {
-		p_csrow = &mci->csrows[csrow];
-
-		p_csrow->csrow_idx = csrow;
-
-		/* use branch 0 for the basis */
-		mtr = pvt->b0_mtr[csrow >> 1];
-
-		/* if no DIMMS on this row, continue */
-		if (!MTR_DIMMS_PRESENT(mtr))
-			continue;
-
-		/* FAKE OUT VALUES, FIXME */
-		p_csrow->first_page = 0 + csrow * 20;
-		p_csrow->last_page = 9 + csrow * 20;
-		p_csrow->page_mask = 0xFFF;
-
-		p_csrow->grain = 8;
-
-		csrow_megs = 0;
+	/*
+	 * FIXME: The memory layout used to map slot/channel into the
+	 * real memory architecture is weird: branch+slot are "csrows"
+	 * and channel is channel. That required an extra array (dimm_info)
+	 * to map the dimms. A good cleanup would be to remove this array,
+	 * and do a loop here with branch, channel, slot
+	 */
+	for (slot = 0; slot < max_csrows; slot++) {
 		for (channel = 0; channel < pvt->maxch; channel++) {
-			csrow_megs += pvt->dimm_info[csrow][channel].megabytes;
+
+			mtr = determine_mtr(pvt, slot, channel);
+
+			if (!MTR_DIMMS_PRESENT(mtr))
+				continue;
+
+			dimm = edac_get_dimm(mci, channel / MAX_BRANCHES,
+					     channel % MAX_BRANCHES, slot);
+
+			csrow_megs = pvt->dimm_info[slot][channel].megabytes;
+			dimm->grain = 8;
+
+			/* Assume DDR2 for now */
+			dimm->mtype = MEM_FB_DDR2;
+
+			/* ask what device type on this row */
+			if (MTR_DRAM_WIDTH(mtr) == 8)
+				dimm->dtype = DEV_X8;
+			else
+				dimm->dtype = DEV_X4;
+
+			dimm->edac_mode = EDAC_S8ECD8ED;
+			dimm->nr_pages = csrow_megs << 8;
 		}
-
-		p_csrow->nr_pages = csrow_megs << 8;
-
-		/* Assume DDR2 for now */
-		p_csrow->mtype = MEM_FB_DDR2;
-
-		/* ask what device type on this row */
-		if (MTR_DRAM_WIDTH(mtr))
-			p_csrow->dtype = DEV_X8;
-		else
-			p_csrow->dtype = DEV_X4;
-
-		p_csrow->edac_mode = EDAC_S8ECD8ED;
 
 		empty = 0;
 	}
@@ -1241,7 +1323,7 @@ static void i5000_enable_error_reporting(struct mem_ctl_info *mci)
 }
 
 /*
- * i5000_get_dimm_and_channel_counts(pdev, &num_csrows, &num_channels)
+ * i5000_get_dimm_and_channel_counts(pdev, &nr_csrows, &num_channels)
  *
  *	ask the device how many channels are present and how many CSROWS
  *	 as well
@@ -1256,7 +1338,7 @@ static void i5000_get_dimm_and_channel_counts(struct pci_dev *pdev,
 	 * supported on this memory controller
 	 */
 	pci_read_config_byte(pdev, MAXDIMMPERCH, &value);
-	*num_dimms_per_channel = (int)value *2;
+	*num_dimms_per_channel = (int)value;
 
 	pci_read_config_byte(pdev, MAXCH, &value);
 	*num_channels = (int)value;
@@ -1272,15 +1354,14 @@ static void i5000_get_dimm_and_channel_counts(struct pci_dev *pdev,
 static int i5000_probe1(struct pci_dev *pdev, int dev_idx)
 {
 	struct mem_ctl_info *mci;
+	struct edac_mc_layer layers[3];
 	struct i5000_pvt *pvt;
 	int num_channels;
 	int num_dimms_per_channel;
-	int num_csrows;
 
-	debugf0("MC: " __FILE__ ": %s(), pdev bus %u dev=0x%x fn=0x%x\n",
-		__func__,
-		pdev->bus->number,
-		PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
+	edac_dbg(0, "MC: pdev bus %u dev=0x%x fn=0x%x\n",
+		 pdev->bus->number,
+		 PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
 
 	/* We only are looking for func 0 of the set */
 	if (PCI_FUNC(pdev->devfn) != 0)
@@ -1296,25 +1377,33 @@ static int i5000_probe1(struct pci_dev *pdev, int dev_idx)
 	 * actual number of slots/dimms per channel, we thus utilize the
 	 * resource as specified by the chipset. Thus, we might have
 	 * have more DIMMs per channel than actually on the mobo, but this
-	 * allows the driver to support upto the chipset max, without
+	 * allows the driver to support up to the chipset max, without
 	 * some fancy mobo determination.
 	 */
 	i5000_get_dimm_and_channel_counts(pdev, &num_dimms_per_channel,
 					&num_channels);
-	num_csrows = num_dimms_per_channel * 2;
 
-	debugf0("MC: %s(): Number of - Channels= %d  DIMMS= %d  CSROWS= %d\n",
-		__func__, num_channels, num_dimms_per_channel, num_csrows);
+	edac_dbg(0, "MC: Number of Branches=2 Channels= %d  DIMMS= %d\n",
+		 num_channels, num_dimms_per_channel);
 
 	/* allocate a new MC control structure */
-	mci = edac_mc_alloc(sizeof(*pvt), num_csrows, num_channels, 0);
 
+	layers[0].type = EDAC_MC_LAYER_BRANCH;
+	layers[0].size = MAX_BRANCHES;
+	layers[0].is_virt_csrow = false;
+	layers[1].type = EDAC_MC_LAYER_CHANNEL;
+	layers[1].size = num_channels / MAX_BRANCHES;
+	layers[1].is_virt_csrow = false;
+	layers[2].type = EDAC_MC_LAYER_SLOT;
+	layers[2].size = num_dimms_per_channel;
+	layers[2].is_virt_csrow = true;
+	mci = edac_mc_alloc(0, ARRAY_SIZE(layers), layers, sizeof(*pvt));
 	if (mci == NULL)
 		return -ENOMEM;
 
-	debugf0("MC: " __FILE__ ": %s(): mci = %p\n", __func__, mci);
+	edac_dbg(0, "MC: mci = %p\n", mci);
 
-	mci->dev = &pdev->dev;	/* record ptr  to the generic device */
+	mci->pdev = &pdev->dev;	/* record ptr  to the generic device */
 
 	pvt = mci->pvt_info;
 	pvt->system_address = pdev;	/* Record this device in our private */
@@ -1333,7 +1422,6 @@ static int i5000_probe1(struct pci_dev *pdev, int dev_idx)
 	mci->edac_ctl_cap = EDAC_FLAG_NONE;
 	mci->edac_cap = EDAC_FLAG_NONE;
 	mci->mod_name = "i5000_edac.c";
-	mci->mod_ver = I5000_REVISION;
 	mci->ctl_name = i5000_devs[dev_idx].ctl_name;
 	mci->dev_name = pci_name(pdev);
 	mci->ctl_page_to_phys = NULL;
@@ -1344,19 +1432,16 @@ static int i5000_probe1(struct pci_dev *pdev, int dev_idx)
 	/* initialize the MC control structure 'csrows' table
 	 * with the mapping and control information */
 	if (i5000_init_csrows(mci)) {
-		debugf0("MC: Setting mci->edac_cap to EDAC_FLAG_NONE\n"
-			"    because i5000_init_csrows() returned nonzero "
-			"value\n");
+		edac_dbg(0, "MC: Setting mci->edac_cap to EDAC_FLAG_NONE because i5000_init_csrows() returned nonzero value\n");
 		mci->edac_cap = EDAC_FLAG_NONE;	/* no csrows found */
 	} else {
-		debugf1("MC: Enable error reporting now\n");
+		edac_dbg(1, "MC: Enable error reporting now\n");
 		i5000_enable_error_reporting(mci);
 	}
 
 	/* add this new MC control structure to EDAC's list of MCs */
 	if (edac_mc_add_mc(mci)) {
-		debugf0("MC: " __FILE__
-			": %s(): failed edac_mc_add_mc()\n", __func__);
+		edac_dbg(0, "MC: failed edac_mc_add_mc()\n");
 		/* FIXME: perhaps some code should go here that disables error
 		 * reporting if we just enabled it
 		 */
@@ -1395,16 +1480,15 @@ fail0:
  *		negative on error
  *		count (>= 0)
  */
-static int __devinit i5000_init_one(struct pci_dev *pdev,
-				const struct pci_device_id *id)
+static int i5000_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	int rc;
 
-	debugf0("MC: " __FILE__ ": %s()\n", __func__);
+	edac_dbg(0, "MC:\n");
 
 	/* wake up device */
 	rc = pci_enable_device(pdev);
-	if (rc == -EIO)
+	if (rc)
 		return rc;
 
 	/* now probe and enable the device */
@@ -1415,11 +1499,11 @@ static int __devinit i5000_init_one(struct pci_dev *pdev,
  *	i5000_remove_one	destructor for one instance of device
  *
  */
-static void __devexit i5000_remove_one(struct pci_dev *pdev)
+static void i5000_remove_one(struct pci_dev *pdev)
 {
 	struct mem_ctl_info *mci;
 
-	debugf0(__FILE__ ": %s()\n", __func__);
+	edac_dbg(0, "\n");
 
 	if (i5000_pci)
 		edac_pci_release_generic_ctl(i5000_pci);
@@ -1429,7 +1513,6 @@ static void __devexit i5000_remove_one(struct pci_dev *pdev)
 
 	/* retrieve references to resources, and free those resources */
 	i5000_put_devices(mci);
-
 	edac_mc_free(mci);
 }
 
@@ -1438,7 +1521,7 @@ static void __devexit i5000_remove_one(struct pci_dev *pdev)
  *
  *	The "E500P" device is the first device supported.
  */
-static const struct pci_device_id i5000_pci_tbl[] __devinitdata = {
+static const struct pci_device_id i5000_pci_tbl[] = {
 	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_I5000_DEV16),
 	 .driver_data = I5000P},
 
@@ -1454,7 +1537,7 @@ MODULE_DEVICE_TABLE(pci, i5000_pci_tbl);
 static struct pci_driver i5000_driver = {
 	.name = KBUILD_BASENAME,
 	.probe = i5000_init_one,
-	.remove = __devexit_p(i5000_remove_one),
+	.remove = i5000_remove_one,
 	.id_table = i5000_pci_tbl,
 };
 
@@ -1466,10 +1549,10 @@ static int __init i5000_init(void)
 {
 	int pci_rc;
 
-	debugf2("MC: " __FILE__ ": %s()\n", __func__);
+	edac_dbg(2, "MC:\n");
 
-       /* Ensure that the OPSTATE is set correctly for POLL or NMI */
-       opstate_init();
+	/* Ensure that the OPSTATE is set correctly for POLL or NMI */
+	opstate_init();
 
 	pci_rc = pci_register_driver(&i5000_driver);
 
@@ -1482,7 +1565,7 @@ static int __init i5000_init(void)
  */
 static void __exit i5000_exit(void)
 {
-	debugf2("MC: " __FILE__ ": %s()\n", __func__);
+	edac_dbg(2, "MC:\n");
 	pci_unregister_driver(&i5000_driver);
 }
 
@@ -1497,3 +1580,6 @@ MODULE_DESCRIPTION("MC Driver for Intel I5000 memory controllers - "
 
 module_param(edac_op_state, int, 0444);
 MODULE_PARM_DESC(edac_op_state, "EDAC Error Reporting state: 0=Poll,1=NMI");
+module_param(misc_messages, int, 0444);
+MODULE_PARM_DESC(misc_messages, "Log miscellaneous non fatal messages");
+

@@ -1,24 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  PS3 virtual uart
  *
  *  Copyright (C) 2006 Sony Computer Entertainment Inc.
  *  Copyright 2006 Sony Corp.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
@@ -114,7 +103,7 @@ struct ports_bmp {
 static void __maybe_unused _dump_ports_bmp(
 	const struct ports_bmp *bmp, const char *func, int line)
 {
-	pr_debug("%s:%d: ports_bmp: %016lxh\n", func, line, bmp->status);
+	pr_debug("%s:%d: ports_bmp: %016llxh\n", func, line, bmp->status);
 }
 
 #define dump_port_params(_b) _dump_port_params(_b, __func__, __LINE__)
@@ -150,20 +139,17 @@ static void __maybe_unused _dump_port_params(unsigned int port_number,
 #endif
 }
 
-struct vuart_triggers {
-	unsigned long rx;
-	unsigned long tx;
-};
-
 int ps3_vuart_get_triggers(struct ps3_system_bus_device *dev,
 	struct vuart_triggers *trig)
 {
 	int result;
-	unsigned long size;
-	unsigned long val;
+	u64 size;
+	u64 val;
+	u64 tx;
 
 	result = lv1_get_virtual_uart_param(dev->port_number,
-		PARAM_TX_TRIGGER, &trig->tx);
+		PARAM_TX_TRIGGER, &tx);
+	trig->tx = tx;
 
 	if (result) {
 		dev_dbg(&dev->core, "%s:%d: tx_trigger failed: %s\n",
@@ -201,7 +187,7 @@ int ps3_vuart_set_triggers(struct ps3_system_bus_device *dev, unsigned int tx,
 	unsigned int rx)
 {
 	int result;
-	unsigned long size;
+	u64 size;
 
 	result = lv1_set_virtual_uart_param(dev->port_number,
 		PARAM_TX_TRIGGER, tx);
@@ -248,7 +234,7 @@ static int ps3_vuart_get_rx_bytes_waiting(struct ps3_system_bus_device *dev,
 		dev_dbg(&dev->core, "%s:%d: rx_bytes failed: %s\n",
 			__func__, __LINE__, ps3_result(result));
 
-	dev_dbg(&dev->core, "%s:%d: %lxh\n", __func__, __LINE__,
+	dev_dbg(&dev->core, "%s:%d: %llxh\n", __func__, __LINE__,
 		*bytes_waiting);
 	return result;
 }
@@ -295,7 +281,7 @@ static int ps3_vuart_get_interrupt_status(struct ps3_system_bus_device *dev,
 
 	*status = tmp & priv->interrupt_mask;
 
-	dev_dbg(&dev->core, "%s:%d: m %lxh, s %lxh, m&s %lxh\n",
+	dev_dbg(&dev->core, "%s:%d: m %llxh, s %llxh, m&s %lxh\n",
 		__func__, __LINE__, priv->interrupt_mask, tmp, *status);
 
 	return result;
@@ -363,7 +349,7 @@ int ps3_vuart_disable_interrupt_disconnect(struct ps3_system_bus_device *dev)
  */
 
 static int ps3_vuart_raw_write(struct ps3_system_bus_device *dev,
-	const void *buf, unsigned int bytes, unsigned long *bytes_written)
+	const void *buf, unsigned int bytes, u64 *bytes_written)
 {
 	int result;
 	struct ps3_vuart_port_priv *priv = to_port_priv(dev);
@@ -379,7 +365,7 @@ static int ps3_vuart_raw_write(struct ps3_system_bus_device *dev,
 
 	priv->stats.bytes_written += *bytes_written;
 
-	dev_dbg(&dev->core, "%s:%d: wrote %lxh/%xh=>%lxh\n", __func__, __LINE__,
+	dev_dbg(&dev->core, "%s:%d: wrote %llxh/%xh=>%lxh\n", __func__, __LINE__,
 		*bytes_written, bytes, priv->stats.bytes_written);
 
 	return result;
@@ -393,7 +379,7 @@ static int ps3_vuart_raw_write(struct ps3_system_bus_device *dev,
  */
 
 static int ps3_vuart_raw_read(struct ps3_system_bus_device *dev, void *buf,
-	unsigned int bytes, unsigned long *bytes_read)
+	unsigned int bytes, u64 *bytes_read)
 {
 	int result;
 	struct ps3_vuart_port_priv *priv = to_port_priv(dev);
@@ -411,7 +397,7 @@ static int ps3_vuart_raw_read(struct ps3_system_bus_device *dev, void *buf,
 
 	priv->stats.bytes_read += *bytes_read;
 
-	dev_dbg(&dev->core, "%s:%d: read %lxh/%xh=>%lxh\n", __func__, __LINE__,
+	dev_dbg(&dev->core, "%s:%d: read %llxh/%xh=>%lxh\n", __func__, __LINE__,
 		*bytes_read, bytes, priv->stats.bytes_read);
 
 	return result;
@@ -500,7 +486,7 @@ int ps3_vuart_write(struct ps3_system_bus_device *dev, const void *buf,
 	spin_lock_irqsave(&priv->tx_list.lock, flags);
 
 	if (list_empty(&priv->tx_list.head)) {
-		unsigned long bytes_written;
+		u64 bytes_written;
 
 		result = ps3_vuart_raw_write(dev, buf, bytes, &bytes_written);
 
@@ -592,7 +578,7 @@ static int ps3_vuart_queue_rx_bytes(struct ps3_system_bus_device *dev,
 	list_add_tail(&lb->link, &priv->rx_list.head);
 	priv->rx_list.bytes_held += bytes;
 
-	dev_dbg(&dev->core, "%s:%d: buf_%lu: queued %lxh bytes\n",
+	dev_dbg(&dev->core, "%s:%d: buf_%lu: queued %llxh bytes\n",
 		__func__, __LINE__, lb->dbg_number, bytes);
 
 	*bytes_queued = bytes;
@@ -696,8 +682,6 @@ int ps3_vuart_read_async(struct ps3_system_bus_device *dev, unsigned int bytes)
 
 	BUG_ON(!bytes);
 
-	PREPARE_WORK(&priv->rx_list.work.work, ps3_vuart_work);
-
 	spin_lock_irqsave(&priv->rx_list.lock, flags);
 	if (priv->rx_list.bytes_held >= bytes) {
 		dev_dbg(&dev->core, "%s:%d: schedule_work %xh bytes\n",
@@ -745,7 +729,7 @@ static int ps3_vuart_handle_interrupt_tx(struct ps3_system_bus_device *dev)
 
 	list_for_each_entry_safe(lb, n, &priv->tx_list.head, link) {
 
-		unsigned long bytes_written;
+		u64 bytes_written;
 
 		result = ps3_vuart_raw_write(dev, lb->head, lb->tail - lb->head,
 			&bytes_written);
@@ -762,7 +746,7 @@ static int ps3_vuart_handle_interrupt_tx(struct ps3_system_bus_device *dev)
 		if (bytes_written < lb->tail - lb->head) {
 			lb->head += bytes_written;
 			dev_dbg(&dev->core,
-				"%s:%d cleared buf_%lu, %lxh bytes\n",
+				"%s:%d cleared buf_%lu, %llxh bytes\n",
 				__func__, __LINE__, lb->dbg_number,
 				bytes_written);
 			goto port_full;
@@ -874,13 +858,13 @@ static int ps3_vuart_handle_port_interrupt(struct ps3_system_bus_device *dev)
 	return 0;
 }
 
-struct vuart_bus_priv {
+static struct vuart_bus_priv {
 	struct ports_bmp *bmp;
 	unsigned int virq;
 	struct mutex probe_mutex;
 	int use_count;
 	struct ps3_system_bus_device *devices[PORT_COUNT];
-} static vuart_bus_priv;
+} vuart_bus_priv;
 
 /**
  * ps3_vuart_irq_handler - first stage interrupt handler
@@ -933,7 +917,6 @@ static int ps3_vuart_bus_interrupt_get(void)
 	vuart_bus_priv.bmp = kzalloc(sizeof(struct ports_bmp), GFP_KERNEL);
 
 	if (!vuart_bus_priv.bmp) {
-		pr_debug("%s:%d: kzalloc failed.\n", __func__, __LINE__);
 		result = -ENOMEM;
 		goto fail_bmp_malloc;
 	}
@@ -949,7 +932,7 @@ static int ps3_vuart_bus_interrupt_get(void)
 	}
 
 	result = request_irq(vuart_bus_priv.virq, ps3_vuart_irq_handler,
-		IRQF_DISABLED, "vuart", &vuart_bus_priv);
+		0, "vuart", &vuart_bus_priv);
 
 	if (result) {
 		pr_debug("%s:%d: request_irq failed (%d)\n",
@@ -962,7 +945,7 @@ static int ps3_vuart_bus_interrupt_get(void)
 
 fail_request_irq:
 	ps3_vuart_irq_destroy(vuart_bus_priv.virq);
-	vuart_bus_priv.virq = NO_IRQ;
+	vuart_bus_priv.virq = 0;
 fail_alloc_irq:
 	kfree(vuart_bus_priv.bmp);
 	vuart_bus_priv.bmp = NULL;
@@ -986,7 +969,7 @@ static int ps3_vuart_bus_interrupt_put(void)
 	free_irq(vuart_bus_priv.virq, &vuart_bus_priv);
 
 	ps3_vuart_irq_destroy(vuart_bus_priv.virq);
-	vuart_bus_priv.virq = NO_IRQ;
+	vuart_bus_priv.virq = 0;
 
 	kfree(vuart_bus_priv.bmp);
 	vuart_bus_priv.bmp = NULL;
@@ -1004,11 +987,10 @@ static int ps3_vuart_probe(struct ps3_system_bus_device *dev)
 	dev_dbg(&dev->core, "%s:%d\n", __func__, __LINE__);
 
 	drv = ps3_system_bus_dev_to_vuart_drv(dev);
+	BUG_ON(!drv);
 
 	dev_dbg(&dev->core, "%s:%d: (%s)\n", __func__, __LINE__,
 		drv->core.core.name);
-
-	BUG_ON(!drv);
 
 	if (dev->port_number >= PORT_COUNT) {
 		BUG();
@@ -1049,7 +1031,7 @@ static int ps3_vuart_probe(struct ps3_system_bus_device *dev)
 	INIT_LIST_HEAD(&priv->rx_list.head);
 	spin_lock_init(&priv->rx_list.lock);
 
-	INIT_WORK(&priv->rx_list.work.work, NULL);
+	INIT_WORK(&priv->rx_list.work.work, ps3_vuart_work);
 	priv->rx_list.work.trigger = 0;
 	priv->rx_list.work.dev = dev;
 

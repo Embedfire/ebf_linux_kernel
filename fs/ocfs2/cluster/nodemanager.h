@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* -*- mode: c; c-basic-offset: 8; -*-
  * vim: noexpandtab sw=8 ts=8 sts=0:
  *
@@ -6,22 +7,6 @@
  * Function prototypes
  *
  * Copyright (C) 2004 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
- *
  */
 
 #ifndef O2CLUSTER_NODEMANAGER_H
@@ -32,6 +17,12 @@
 /* This totally doesn't belong here. */
 #include <linux/configfs.h>
 #include <linux/rbtree.h>
+
+enum o2nm_fence_method {
+	O2NM_FENCE_RESET	= 0,
+	O2NM_FENCE_PANIC,
+	O2NM_FENCE_METHODS,	/* Number of fence methods */
+};
 
 struct o2nm_node {
 	spinlock_t		nd_lock;
@@ -58,6 +49,7 @@ struct o2nm_cluster {
 	unsigned int		cl_idle_timeout_ms;
 	unsigned int		cl_keepalive_delay_ms;
 	unsigned int		cl_reconnect_delay_ms;
+	enum o2nm_fence_method	cl_fence_method;
 
 	/* this bitmap is part of a hack for disk bitmap.. will go eventually. - zab */
 	unsigned long	cl_nodes_bitmap[BITS_TO_LONGS(O2NM_MAX_NODES)];

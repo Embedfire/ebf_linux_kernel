@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * support.c - standard functions for the use of pnp protocol drivers
  *
@@ -69,56 +70,23 @@ char *pnp_resource_type_name(struct resource *res)
 		return "irq";
 	case IORESOURCE_DMA:
 		return "dma";
+	case IORESOURCE_BUS:
+		return "bus";
 	}
-	return NULL;
+	return "unknown";
 }
 
 void dbg_pnp_show_resources(struct pnp_dev *dev, char *desc)
 {
-#ifdef DEBUG
-	char buf[128];
-	int len;
 	struct pnp_resource *pnp_res;
-	struct resource *res;
 
-	if (list_empty(&dev->resources)) {
-		dev_dbg(&dev->dev, "%s: no current resources\n", desc);
-		return;
+	if (list_empty(&dev->resources))
+		pnp_dbg(&dev->dev, "%s: no current resources\n", desc);
+	else {
+		pnp_dbg(&dev->dev, "%s: current resources:\n", desc);
+		list_for_each_entry(pnp_res, &dev->resources, list)
+			pnp_dbg(&dev->dev, "%pr\n", &pnp_res->res);
 	}
-
-	dev_dbg(&dev->dev, "%s: current resources:\n", desc);
-	list_for_each_entry(pnp_res, &dev->resources, list) {
-		res = &pnp_res->res;
-		len = 0;
-
-		len += scnprintf(buf + len, sizeof(buf) - len, "  %-3s ",
-				 pnp_resource_type_name(res));
-
-		if (res->flags & IORESOURCE_DISABLED) {
-			dev_dbg(&dev->dev, "%sdisabled\n", buf);
-			continue;
-		}
-
-		switch (pnp_resource_type(res)) {
-		case IORESOURCE_IO:
-		case IORESOURCE_MEM:
-			len += scnprintf(buf + len, sizeof(buf) - len,
-					 "%#llx-%#llx flags %#lx",
-					 (unsigned long long) res->start,
-					 (unsigned long long) res->end,
-					 res->flags);
-			break;
-		case IORESOURCE_IRQ:
-		case IORESOURCE_DMA:
-			len += scnprintf(buf + len, sizeof(buf) - len,
-					 "%lld flags %#lx",
-					 (unsigned long long) res->start,
-					 res->flags);
-			break;
-		}
-		dev_dbg(&dev->dev, "%s\n", buf);
-	}
-#endif
 }
 
 char *pnp_option_priority_name(struct pnp_option *option)
@@ -136,7 +104,6 @@ char *pnp_option_priority_name(struct pnp_option *option)
 
 void dbg_pnp_show_option(struct pnp_dev *dev, struct pnp_option *option)
 {
-#ifdef DEBUG
 	char buf[128];
 	int len = 0, i;
 	struct pnp_port *port;
@@ -208,6 +175,5 @@ void dbg_pnp_show_option(struct pnp_dev *dev, struct pnp_option *option)
 				 "flags %#x", dma->map, dma->flags);
 		break;
 	}
-	dev_dbg(&dev->dev, "%s\n", buf);
-#endif
+	pnp_dbg(&dev->dev, "%s\n", buf);
 }

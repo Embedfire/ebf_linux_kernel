@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* inode.c: /proc/openprom handling routines
  *
  * Copyright (C) 1996-1999 Jakub Jelinek  (jakub@redhat.com)
@@ -8,6 +9,7 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/fs.h>
+#include <linux/fs_context.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/seq_file.h>
@@ -16,7 +18,7 @@
 #include <asm/openprom.h>
 #include <asm/oplib.h>
 #include <asm/prom.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 static DEFINE_MUTEX(op_mutex);
 
@@ -162,20 +164,21 @@ static const struct file_operations openpromfs_prop_ops = {
 	.release	= seq_release,
 };
 
-static int openpromfs_readdir(struct file *, void *, filldir_t);
+static int openpromfs_readdir(struct file *, struct dir_context *);
 
 static const struct file_operations openprom_operations = {
 	.read		= generic_read_dir,
-	.readdir	= openpromfs_readdir,
+	.iterate_shared	= openpromfs_readdir,
+	.llseek		= generic_file_llseek,
 };
 
-static struct dentry *openpromfs_lookup(struct inode *, struct dentry *, struct nameidata *);
+static struct dentry *openpromfs_lookup(struct inode *, struct dentry *, unsigned int);
 
 static const struct inode_operations openprom_inode_operations = {
 	.lookup		= openpromfs_lookup,
 };
 
-static struct dentry *openpromfs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
+static struct dentry *openpromfs_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 {
 	struct op_inode_info *ent_oi, *oi = OP_I(dir);
 	struct device_node *dp, *child;
@@ -198,10 +201,11 @@ static struct dentry *openpromfs_lookup(struct inode *dir, struct dentry *dentry
 
 	child = dp->child;
 	while (child) {
-		int n = strlen(child->path_component_name);
+		const char *node_name = kbasename(child->full_name);
+		int n = strlen(node_name);
 
 		if (len == n &&
-		    !strncmp(child->path_component_name, name, len)) {
+		    !strncmp(node_name, name, len)) {
 			ent_type = op_inode_node;
 			ent_data.node = child;
 			ino = child->unique_id;
@@ -241,92 +245,81 @@ found:
 		inode->i_mode = S_IFDIR | S_IRUGO | S_IXUGO;
 		inode->i_op = &openprom_inode_operations;
 		inode->i_fop = &openprom_operations;
-		inode->i_nlink = 2;
+		set_nlink(inode, 2);
 		break;
 	case op_inode_prop:
-		if (!strcmp(dp->name, "options") && (len == 17) &&
+		if (of_node_name_eq(dp, "options") && (len == 17) &&
 		    !strncmp (name, "security-password", 17))
 			inode->i_mode = S_IFREG | S_IRUSR | S_IWUSR;
 		else
 			inode->i_mode = S_IFREG | S_IRUGO;
 		inode->i_fop = &openpromfs_prop_ops;
-		inode->i_nlink = 1;
+		set_nlink(inode, 1);
 		inode->i_size = ent_oi->u.prop->length;
 		break;
 	}
 
-	inode->i_gid = 0;
-	inode->i_uid = 0;
-
-	d_add(dentry, inode);
-	return NULL;
+	return d_splice_alias(inode, dentry);
 }
 
-static int openpromfs_readdir(struct file * filp, void * dirent, filldir_t filldir)
+static int openpromfs_readdir(struct file *file, struct dir_context *ctx)
 {
-	struct inode *inode = filp->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(file);
 	struct op_inode_info *oi = OP_I(inode);
 	struct device_node *dp = oi->u.node;
 	struct device_node *child;
 	struct property *prop;
-	unsigned int ino;
 	int i;
 
 	mutex_lock(&op_mutex);
 	
-	ino = inode->i_ino;
-	i = filp->f_pos;
-	switch (i) {
-	case 0:
-		if (filldir(dirent, ".", 1, i, ino, DT_DIR) < 0)
+	if (ctx->pos == 0) {
+		if (!dir_emit(ctx, ".", 1, inode->i_ino, DT_DIR))
 			goto out;
-		i++;
-		filp->f_pos++;
-		/* fall thru */
-	case 1:
-		if (filldir(dirent, "..", 2, i,
+		ctx->pos = 1;
+	}
+	if (ctx->pos == 1) {
+		if (!dir_emit(ctx, "..", 2,
 			    (dp->parent == NULL ?
 			     OPENPROM_ROOT_INO :
-			     dp->parent->unique_id), DT_DIR) < 0) 
+			     dp->parent->unique_id), DT_DIR))
 			goto out;
-		i++;
-		filp->f_pos++;
-		/* fall thru */
-	default:
-		i -= 2;
-
-		/* First, the children nodes as directories.  */
-		child = dp->child;
-		while (i && child) {
-			child = child->sibling;
-			i--;
-		}
-		while (child) {
-			if (filldir(dirent,
-				    child->path_component_name,
-				    strlen(child->path_component_name),
-				    filp->f_pos, child->unique_id, DT_DIR) < 0)
-				goto out;
-
-			filp->f_pos++;
-			child = child->sibling;
-		}
-
-		/* Next, the properties as files.  */
-		prop = dp->properties;
-		while (i && prop) {
-			prop = prop->next;
-			i--;
-		}
-		while (prop) {
-			if (filldir(dirent, prop->name, strlen(prop->name),
-				    filp->f_pos, prop->unique_id, DT_REG) < 0)
-				goto out;
-
-			filp->f_pos++;
-			prop = prop->next;
-		}
+		ctx->pos = 2;
 	}
+	i = ctx->pos - 2;
+
+	/* First, the children nodes as directories.  */
+	child = dp->child;
+	while (i && child) {
+		child = child->sibling;
+		i--;
+	}
+	while (child) {
+		if (!dir_emit(ctx,
+			    kbasename(child->full_name),
+			    strlen(kbasename(child->full_name)),
+			    child->unique_id, DT_DIR))
+			goto out;
+
+		ctx->pos++;
+		child = child->sibling;
+	}
+
+	/* Next, the properties as files.  */
+	prop = dp->properties;
+	while (i && prop) {
+		prop = prop->next;
+		i--;
+	}
+	while (prop) {
+		if (!dir_emit(ctx, prop->name, strlen(prop->name),
+			    prop->unique_id, DT_REG))
+			goto out;
+
+		ctx->pos++;
+		prop = prop->next;
+	}
+
 out:
 	mutex_unlock(&op_mutex);
 	return 0;
@@ -345,7 +338,7 @@ static struct inode *openprom_alloc_inode(struct super_block *sb)
 	return &oi->vfs_inode;
 }
 
-static void openprom_destroy_inode(struct inode *inode)
+static void openprom_free_inode(struct inode *inode)
 {
 	kmem_cache_free(op_inode_cachep, OP_I(inode));
 }
@@ -358,7 +351,7 @@ static struct inode *openprom_iget(struct super_block *sb, ino_t ino)
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 	if (inode->i_state & I_NEW) {
-		inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
+		inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
 		if (inode->i_ino == OPENPROM_ROOT_INO) {
 			inode->i_op = &openprom_inode_operations;
 			inode->i_fop = &openprom_operations;
@@ -371,24 +364,25 @@ static struct inode *openprom_iget(struct super_block *sb, ino_t ino)
 
 static int openprom_remount(struct super_block *sb, int *flags, char *data)
 {
-	*flags |= MS_NOATIME;
+	sync_filesystem(sb);
+	*flags |= SB_NOATIME;
 	return 0;
 }
 
 static const struct super_operations openprom_sops = {
 	.alloc_inode	= openprom_alloc_inode,
-	.destroy_inode	= openprom_destroy_inode,
+	.free_inode	= openprom_free_inode,
 	.statfs		= simple_statfs,
 	.remount_fs	= openprom_remount,
 };
 
-static int openprom_fill_super(struct super_block *s, void *data, int silent)
+static int openprom_fill_super(struct super_block *s, struct fs_context *fc)
 {
 	struct inode *root_inode;
 	struct op_inode_info *oi;
 	int ret;
 
-	s->s_flags |= MS_NOATIME;
+	s->s_flags |= SB_NOATIME;
 	s->s_blocksize = 1024;
 	s->s_blocksize_bits = 10;
 	s->s_magic = OPENPROM_SUPER_MAGIC;
@@ -404,31 +398,40 @@ static int openprom_fill_super(struct super_block *s, void *data, int silent)
 	oi->type = op_inode_node;
 	oi->u.node = of_find_node_by_path("/");
 
-	s->s_root = d_alloc_root(root_inode);
+	s->s_root = d_make_root(root_inode);
 	if (!s->s_root)
 		goto out_no_root_dentry;
 	return 0;
 
 out_no_root_dentry:
-	iput(root_inode);
 	ret = -ENOMEM;
 out_no_root:
 	printk("openprom_fill_super: get root inode failed\n");
 	return ret;
 }
 
-static int openprom_get_sb(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data, struct vfsmount *mnt)
+static int openpromfs_get_tree(struct fs_context *fc)
 {
-	return get_sb_single(fs_type, flags, data, openprom_fill_super, mnt);
+	return get_tree_single(fc, openprom_fill_super);
+}
+
+static const struct fs_context_operations openpromfs_context_ops = {
+	.get_tree	= openpromfs_get_tree,
+};
+
+static int openpromfs_init_fs_context(struct fs_context *fc)
+{
+	fc->ops = &openpromfs_context_ops;
+	return 0;
 }
 
 static struct file_system_type openprom_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "openpromfs",
-	.get_sb		= openprom_get_sb,
+	.init_fs_context = openpromfs_init_fs_context,
 	.kill_sb	= kill_anon_super,
 };
+MODULE_ALIAS_FS("openpromfs");
 
 static void op_inode_init_once(void *data)
 {
@@ -445,7 +448,7 @@ static int __init init_openprom_fs(void)
 					    sizeof(struct op_inode_info),
 					    0,
 					    (SLAB_RECLAIM_ACCOUNT |
-					     SLAB_MEM_SPREAD),
+					     SLAB_MEM_SPREAD | SLAB_ACCOUNT),
 					    op_inode_init_once);
 	if (!op_inode_cachep)
 		return -ENOMEM;
@@ -460,6 +463,11 @@ static int __init init_openprom_fs(void)
 static void __exit exit_openprom_fs(void)
 {
 	unregister_filesystem(&openprom_fs_type);
+	/*
+	 * Make sure all delayed rcu free inodes are flushed before we
+	 * destroy cache.
+	 */
+	rcu_barrier();
 	kmem_cache_destroy(op_inode_cachep);
 }
 

@@ -1,16 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  arch/arm/mach-rpc/include/mach/uncompress.h
  *
  *  Copyright (C) 1996 Russell King
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #define VIDMEM ((char *)SCREEN_START)
  
+#include <linux/io.h>
 #include <mach/hardware.h>
-#include <asm/io.h>
 #include <asm/setup.h>
 #include <asm/page.h>
 
@@ -66,17 +63,17 @@ extern __attribute__((pure)) struct param_struct *params(void);
 #define params (params())
 
 #ifndef STANDALONE_DEBUG 
-static unsigned long video_num_cols;
-static unsigned long video_num_rows;
-static unsigned long video_x;
-static unsigned long video_y;
-static unsigned char bytes_per_char_v;
-static int white;
+unsigned long video_num_cols;
+unsigned long video_num_rows;
+unsigned long video_x;
+unsigned long video_y;
+unsigned char bytes_per_char_v;
+int white;
 
 /*
  * This does not append a newline
  */
-static void putc(int c)
+static inline void putc(int c)
 {
 	extern void ll_write_char(char *, char c, char white);
 	int x,y;
@@ -109,8 +106,6 @@ static inline void flush(void)
 {
 }
 
-static void error(char *x);
-
 /*
  * Setup for decompression
  */
@@ -120,29 +115,22 @@ static void arch_decomp_setup(void)
 	struct tag *t = (struct tag *)params;
 	unsigned int nr_pages = 0, page_size = PAGE_SIZE;
 
-	if (t->hdr.tag == ATAG_CORE)
-	{
-		for (; t->hdr.size; t = tag_next(t))
-		{
-			if (t->hdr.tag == ATAG_VIDEOTEXT)
-			{
+	if (t->hdr.tag == ATAG_CORE) {
+		for (; t->hdr.size; t = tag_next(t)) {
+			if (t->hdr.tag == ATAG_VIDEOTEXT) {
 				video_num_rows = t->u.videotext.video_lines;
 				video_num_cols = t->u.videotext.video_cols;
-				bytes_per_char_h = t->u.videotext.video_points;
-				bytes_per_char_v = t->u.videotext.video_points;
 				video_x = t->u.videotext.x;
 				video_y = t->u.videotext.y;
-			}
-
-			if (t->hdr.tag == ATAG_MEM)
-			{
+			} else if (t->hdr.tag == ATAG_VIDEOLFB) {
+				bytes_per_char_h = t->u.videolfb.lfb_depth;
+				bytes_per_char_v = 8;
+			} else if (t->hdr.tag == ATAG_MEM) {
 				page_size = PAGE_SIZE;
 				nr_pages += (t->u.mem.size / PAGE_SIZE);
 			}
 		}
-	}
-	else
-	{
+	} else {
 		nr_pages = params->nr_pages;
 		page_size = params->page_size;
 		video_num_rows = params->video_num_rows;
@@ -191,8 +179,3 @@ static void arch_decomp_setup(void)
 	if (nr_pages * page_size < 4096*1024) error("<4M of mem\n");
 }
 #endif
-
-/*
- * nothing to do
- */
-#define arch_decomp_wdog()

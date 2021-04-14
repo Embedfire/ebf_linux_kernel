@@ -1,20 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   pata-legacy.c - Legacy port PATA/SATA controller driver.
- *   Copyright 2005/2006 Red Hat <alan@redhat.com>, all rights reserved.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2, or (at your option)
- *  any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; see the file COPYING.  If not, write to
- *  the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
+ *   Copyright 2005/2006 Red Hat, all rights reserved.
  *
  *   An ATA driver for the legacy ATA ports.
  *
@@ -25,6 +12,13 @@
  *		http://www.ryston.cz/petr/vlb/pdc20230b.html
  *		http://www.ryston.cz/petr/vlb/pdc20230c.html
  *		http://www.ryston.cz/petr/vlb/pdc20630.html
+ *	QDI65x0:
+ *		http://www.ryston.cz/petr/vlb/qd6500.html
+ *		http://www.ryston.cz/petr/vlb/qd6580.html
+ *
+ *	QDI65x0 probe code based on drivers/ide/legacy/qd65xx.c
+ *	Rewritten from the work of Colten Edwards <pje120@cs.usask.ca> by
+ *	Samuel Thibault <samuel.thibault@ens-lyon.org>
  *
  *  Unsupported but docs exist:
  *	Appian/Adaptec AIC25VL01/Cirrus Logic PD7220
@@ -35,7 +29,10 @@
  *  the MPIIX where the tuning is PCI side but the IDE is "ISA side".
  *
  *  Specific support is included for the ht6560a/ht6560b/opti82c611a/
- *  opti82c465mv/promise 20230c/20630/winbond83759A
+ *  opti82c465mv/promise 20230c/20630/qdi65x0/winbond83759A
+ *
+ *  Support for the Winbond 83759A when operating in advanced mode.
+ *  Multichip mode is not currently supported.
  *
  *  Use the autospeed and pio_mask options with:
  *	Appian ADI/2 aka CLPD7220 or AIC25VL01.
@@ -45,9 +42,9 @@
  *
  *  For now use autospeed and pio_mask as above with the W83759A. This may
  *  change.
- *
  */
 
+#include <linux/async.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -68,15 +65,6 @@ static int all;
 module_param(all, int, 0444);
 MODULE_PARM_DESC(all, "Grab all legacy port devices, even if PCI(0=off, 1=on)");
 
-struct legacy_data {
-	unsigned long timing;
-	u8 clock[2];
-	u8 last;
-	int fast;
-	struct platform_device *platform_dev;
-
-};
-
 enum controller {
 	BIOS = 0,
 	SNOOP = 1,
@@ -93,6 +81,14 @@ enum controller {
 	UNKNOWN = -1
 };
 
+struct legacy_data {
+	unsigned long timing;
+	u8 clock[2];
+	u8 last;
+	int fast;
+	enum controller type;
+	struct platform_device *platform_dev;
+};
 
 struct legacy_probe {
 	unsigned char *name;
@@ -108,6 +104,7 @@ struct legacy_controller {
 	struct ata_port_operations *ops;
 	unsigned int pio_mask;
 	unsigned int flags;
+	unsigned int pflags;
 	int (*setup)(struct platform_device *, struct legacy_probe *probe,
 		struct legacy_data *data);
 };
@@ -125,12 +122,24 @@ static int ht6560a;		/* HT 6560A on primary 1, second 2, both 3 */
 static int ht6560b;		/* HT 6560A on primary 1, second 2, both 3 */
 static int opti82c611a;		/* Opti82c611A on primary 1, sec 2, both 3 */
 static int opti82c46x;		/* Opti 82c465MV present(pri/sec autodetect) */
-static int qdi;			/* Set to probe QDI controllers */
+static int autospeed;		/* Chip present which snoops speed changes */
+static int pio_mask = ATA_PIO4;	/* PIO range for autospeed devices */
+static int iordy_mask = 0xFFFFFFFF;	/* Use iordy if available */
+
+/* Set to probe QDI controllers */
+#ifdef CONFIG_PATA_QDI_MODULE
+static int qdi = 1;
+#else
+static int qdi;
+#endif
+
+#ifdef CONFIG_PATA_WINBOND_VLB_MODULE
+static int winbond = 1;		/* Set to probe Winbond controllers,
+					give I/O port if non standard */
+#else
 static int winbond;		/* Set to probe Winbond controllers,
 					give I/O port if non standard */
-static int autospeed;		/* Chip present which snoops speed changes */
-static int pio_mask = 0x1F;	/* PIO range for autospeed devices */
-static int iordy_mask = 0xFFFFFFFF;	/* Use iordy if available */
+#endif
 
 /**
  *	legacy_probe_add	-	Add interface to probe list
@@ -194,15 +203,12 @@ static int legacy_set_mode(struct ata_link *link, struct ata_device **unused)
 {
 	struct ata_device *dev;
 
-	ata_link_for_each_dev(dev, link) {
-		if (ata_dev_enabled(dev)) {
-			ata_dev_printk(dev, KERN_INFO,
-						"configured for PIO\n");
-			dev->pio_mode = XFER_PIO_0;
-			dev->xfer_mode = XFER_PIO_0;
-			dev->xfer_shift = ATA_SHIFT_PIO;
-			dev->flags |= ATA_DFLAG_PIO;
-		}
+	ata_for_each_dev(dev, link, ENABLED) {
+		ata_dev_info(dev, "configured for PIO\n");
+		dev->pio_mode = XFER_PIO_0;
+		dev->xfer_mode = XFER_PIO_0;
+		dev->xfer_shift = ATA_SHIFT_PIO;
+		dev->flags |= ATA_DFLAG_PIO;
 	}
 	return 0;
 }
@@ -226,12 +232,12 @@ static const struct ata_port_operations legacy_base_port_ops = {
 
 static struct ata_port_operations simple_port_ops = {
 	.inherits	= &legacy_base_port_ops,
-	.sff_data_xfer	= ata_sff_data_xfer_noirq,
+	.sff_data_xfer	= ata_sff_data_xfer32,
 };
 
 static struct ata_port_operations legacy_port_ops = {
 	.inherits	= &legacy_base_port_ops,
-	.sff_data_xfer	= ata_sff_data_xfer_noirq,
+	.sff_data_xfer	= ata_sff_data_xfer32,
 	.set_mode	= legacy_set_mode,
 };
 
@@ -283,12 +289,16 @@ static void pdc20230_set_piomode(struct ata_port *ap, struct ata_device *adev)
 
 }
 
-static unsigned int pdc_data_xfer_vlb(struct ata_device *dev,
+static unsigned int pdc_data_xfer_vlb(struct ata_queued_cmd *qc,
 			unsigned char *buf, unsigned int buflen, int rw)
 {
-	if (ata_id_has_dword_io(dev->id)) {
-		struct ata_port *ap = dev->link->ap;
-		int slop = buflen & 3;
+	struct ata_device *dev = qc->dev;
+	struct ata_port *ap = dev->link->ap;
+	int slop = buflen & 3;
+
+	/* 32bit I/O capable *and* we need to write a whole number of dwords */
+	if (ata_id_has_dword_io(dev->id) && (slop == 0 || slop == 3)
+					&& (ap->pflags & ATA_PFLAG_PIO32)) {
 		unsigned long flags;
 
 		local_irq_save(flags);
@@ -317,7 +327,7 @@ static unsigned int pdc_data_xfer_vlb(struct ata_device *dev,
 		}
 		local_irq_restore(flags);
 	} else
-		buflen = ata_sff_data_xfer_noirq(dev, buf, buflen, rw);
+		buflen = ata_sff_data_xfer32(qc, buf, buflen, rw);
 
 	return buflen;
 }
@@ -378,8 +388,7 @@ static void ht6560b_set_piomode(struct ata_port *ap, struct ata_device *adev)
 	ata_timing_compute(adev, adev->pio_mode, &t, 20000, 1000);
 
 	active = clamp_val(t.active, 2, 15);
-	recover = clamp_val(t.recover, 2, 16);
-	recover &= 0x15;
+	recover = clamp_val(t.recover, 2, 16) & 0x0F;
 
 	inb(0x3E6);
 	inb(0x3E6);
@@ -520,7 +529,7 @@ static void opti82c46x_set_piomode(struct ata_port *ap, struct ata_device *adev)
 	u8 sysclk;
 
 	/* Get the clock */
-	sysclk = opti_syscfg(0xAC) & 0xC0;	/* BIOS set */
+	sysclk = (opti_syscfg(0xAC) & 0xC0) >> 6;	/* BIOS set */
 
 	/* Enter configuration mode */
 	ioread16(ap->ioaddr.error_addr);
@@ -613,78 +622,20 @@ static struct ata_port_operations opti82c46x_port_ops = {
 	.qc_issue	= opti82c46x_qc_issue,
 };
 
-static void qdi6500_set_piomode(struct ata_port *ap, struct ata_device *adev)
-{
-	struct ata_timing t;
-	struct legacy_data *ld_qdi = ap->host->private_data;
-	int active, recovery;
-	u8 timing;
-
-	/* Get the timing data in cycles */
-	ata_timing_compute(adev, adev->pio_mode, &t, 30303, 1000);
-
-	if (ld_qdi->fast) {
-		active = 8 - clamp_val(t.active, 1, 8);
-		recovery = 18 - clamp_val(t.recover, 3, 18);
-	} else {
-		active = 9 - clamp_val(t.active, 2, 9);
-		recovery = 15 - clamp_val(t.recover, 0, 15);
-	}
-	timing = (recovery << 4) | active | 0x08;
-
-	ld_qdi->clock[adev->devno] = timing;
-
-	outb(timing, ld_qdi->timing);
-}
-
 /**
- *	qdi6580dp_set_piomode		-	PIO setup for dual channel
- *	@ap: Port
- *	@adev: Device
- *	@irq: interrupt line
- *
- *	In dual channel mode the 6580 has one clock per channel and we have
- *	to software clockswitch in qc_issue.
- */
-
-static void qdi6580dp_set_piomode(struct ata_port *ap, struct ata_device *adev)
-{
-	struct ata_timing t;
-	struct legacy_data *ld_qdi = ap->host->private_data;
-	int active, recovery;
-	u8 timing;
-
-	/* Get the timing data in cycles */
-	ata_timing_compute(adev, adev->pio_mode, &t, 30303, 1000);
-
-	if (ld_qdi->fast) {
-		active = 8 - clamp_val(t.active, 1, 8);
-		recovery = 18 - clamp_val(t.recover, 3, 18);
-	} else {
-		active = 9 - clamp_val(t.active, 2, 9);
-		recovery = 15 - clamp_val(t.recover, 0, 15);
-	}
-	timing = (recovery << 4) | active | 0x08;
-
-	ld_qdi->clock[adev->devno] = timing;
-
-	outb(timing, ld_qdi->timing + 2 * ap->port_no);
-	/* Clear the FIFO */
-	if (adev->class != ATA_DEV_ATA)
-		outb(0x5F, ld_qdi->timing + 3);
-}
-
-/**
- *	qdi6580_set_piomode		-	PIO setup for single channel
+ *	qdi65x0_set_piomode		-	PIO setup for QDI65x0
  *	@ap: Port
  *	@adev: Device
  *
  *	In single channel mode the 6580 has one clock per device and we can
  *	avoid the requirement to clock switch. We also have to load the timing
  *	into the right clock according to whether we are master or slave.
+ *
+ *	In dual channel mode the 6580 has one clock per channel and we have
+ *	to software clockswitch in qc_issue.
  */
 
-static void qdi6580_set_piomode(struct ata_port *ap, struct ata_device *adev)
+static void qdi65x0_set_piomode(struct ata_port *ap, struct ata_device *adev)
 {
 	struct ata_timing t;
 	struct legacy_data *ld_qdi = ap->host->private_data;
@@ -703,10 +654,15 @@ static void qdi6580_set_piomode(struct ata_port *ap, struct ata_device *adev)
 	}
 	timing = (recovery << 4) | active | 0x08;
 	ld_qdi->clock[adev->devno] = timing;
-	outb(timing, ld_qdi->timing + 2 * adev->devno);
+
+	if (ld_qdi->type == QDI6580)
+		outb(timing, ld_qdi->timing + 2 * adev->devno);
+	else
+		outb(timing, ld_qdi->timing + 2 * ap->port_no);
+
 	/* Clear the FIFO */
-	if (adev->class != ATA_DEV_ATA)
-		outb(0x5F, ld_qdi->timing + 3);
+	if (ld_qdi->type != QDI6500 && adev->class != ATA_DEV_ATA)
+		outb(0x5F, (ld_qdi->timing & 0xFFF0) + 3);
 }
 
 /**
@@ -733,13 +689,16 @@ static unsigned int qdi_qc_issue(struct ata_queued_cmd *qc)
 	return ata_sff_qc_issue(qc);
 }
 
-static unsigned int vlb32_data_xfer(struct ata_device *adev, unsigned char *buf,
-					unsigned int buflen, int rw)
+static unsigned int vlb32_data_xfer(struct ata_queued_cmd *qc,
+				    unsigned char *buf,
+				    unsigned int buflen, int rw)
 {
+	struct ata_device *adev = qc->dev;
 	struct ata_port *ap = adev->link->ap;
 	int slop = buflen & 3;
 
-	if (ata_id_has_dword_io(adev->id)) {
+	if (ata_id_has_dword_io(adev->id) && (slop == 0 || slop == 3)
+					&& (ap->pflags & ATA_PFLAG_PIO32)) {
 		if (rw == WRITE)
 			iowrite32_rep(ap->ioaddr.data_addr, buf, buflen >> 2);
 		else
@@ -757,7 +716,7 @@ static unsigned int vlb32_data_xfer(struct ata_device *adev, unsigned char *buf,
 		}
 		return (buflen + 3) & ~3;
 	} else
-		return ata_sff_data_xfer(adev, buf, buflen, rw);
+		return ata_sff_data_xfer(qc, buf, buflen, rw);
 }
 
 static int qdi_port(struct platform_device *dev,
@@ -771,20 +730,21 @@ static int qdi_port(struct platform_device *dev,
 
 static struct ata_port_operations qdi6500_port_ops = {
 	.inherits	= &legacy_base_port_ops,
-	.set_piomode	= qdi6500_set_piomode,
+	.set_piomode	= qdi65x0_set_piomode,
 	.qc_issue	= qdi_qc_issue,
 	.sff_data_xfer	= vlb32_data_xfer,
 };
 
 static struct ata_port_operations qdi6580_port_ops = {
 	.inherits	= &legacy_base_port_ops,
-	.set_piomode	= qdi6580_set_piomode,
+	.set_piomode	= qdi65x0_set_piomode,
 	.sff_data_xfer	= vlb32_data_xfer,
 };
 
 static struct ata_port_operations qdi6580dp_port_ops = {
 	.inherits	= &legacy_base_port_ops,
-	.set_piomode	= qdi6580dp_set_piomode,
+	.set_piomode	= qdi65x0_set_piomode,
+	.qc_issue	= qdi_qc_issue,
 	.sff_data_xfer	= vlb32_data_xfer,
 };
 
@@ -860,28 +820,31 @@ static struct ata_port_operations winbond_port_ops = {
 };
 
 static struct legacy_controller controllers[] = {
-	{"BIOS",	&legacy_port_ops, 	0x1F,
-						ATA_FLAG_NO_IORDY,	NULL },
-	{"Snooping", 	&simple_port_ops, 	0x1F,
-						0	       ,	NULL },
-	{"PDC20230",	&pdc20230_port_ops,	0x7,
-						ATA_FLAG_NO_IORDY,	NULL },
-	{"HT6560A",	&ht6560a_port_ops,	0x07,
-						ATA_FLAG_NO_IORDY,	NULL },
-	{"HT6560B",	&ht6560b_port_ops,	0x1F,
-						ATA_FLAG_NO_IORDY,	NULL },
-	{"OPTI82C611A",	&opti82c611a_port_ops,	0x0F,
-						0	       ,	NULL },
-	{"OPTI82C46X",	&opti82c46x_port_ops,	0x0F,
-						0	       ,	NULL },
-	{"QDI6500",	&qdi6500_port_ops,	0x07,
-					ATA_FLAG_NO_IORDY,	qdi_port },
-	{"QDI6580",	&qdi6580_port_ops,	0x1F,
-					0	       ,	qdi_port },
-	{"QDI6580DP",	&qdi6580dp_port_ops,	0x1F,
-					0	       ,	qdi_port },
-	{"W83759A",	&winbond_port_ops,	0x1F,
-					0	       ,	winbond_port }
+	{"BIOS",	&legacy_port_ops, 	ATA_PIO4,
+			ATA_FLAG_NO_IORDY,	0,			NULL },
+	{"Snooping", 	&simple_port_ops, 	ATA_PIO4,
+			0,			0,			NULL },
+	{"PDC20230",	&pdc20230_port_ops,	ATA_PIO2,
+			ATA_FLAG_NO_IORDY,
+			ATA_PFLAG_PIO32 | ATA_PFLAG_PIO32CHANGE,	NULL },
+	{"HT6560A",	&ht6560a_port_ops,	ATA_PIO2,
+			ATA_FLAG_NO_IORDY,	0,			NULL },
+	{"HT6560B",	&ht6560b_port_ops,	ATA_PIO4,
+			ATA_FLAG_NO_IORDY,	0,			NULL },
+	{"OPTI82C611A",	&opti82c611a_port_ops,	ATA_PIO3,
+			0,			0,			NULL },
+	{"OPTI82C46X",	&opti82c46x_port_ops,	ATA_PIO3,
+			0,			0,			NULL },
+	{"QDI6500",	&qdi6500_port_ops,	ATA_PIO2,
+			ATA_FLAG_NO_IORDY,
+			ATA_PFLAG_PIO32 | ATA_PFLAG_PIO32CHANGE,    qdi_port },
+	{"QDI6580",	&qdi6580_port_ops,	ATA_PIO4,
+			0, ATA_PFLAG_PIO32 | ATA_PFLAG_PIO32CHANGE, qdi_port },
+	{"QDI6580DP",	&qdi6580dp_port_ops,	ATA_PIO4,
+			0, ATA_PFLAG_PIO32 | ATA_PFLAG_PIO32CHANGE, qdi_port },
+	{"W83759A",	&winbond_port_ops,	ATA_PIO4,
+			0, ATA_PFLAG_PIO32 | ATA_PFLAG_PIO32CHANGE,
+								winbond_port }
 };
 
 /**
@@ -942,7 +905,6 @@ static __init int probe_chip_type(struct legacy_probe *probe)
 			local_irq_restore(flags);
 			return BIOS;
 		}
-		local_irq_restore(flags);
 	}
 
 	if (ht6560a & mask)
@@ -1000,6 +962,7 @@ static __init int legacy_init_one(struct legacy_probe *probe)
 	ctrl_addr = devm_ioport_map(&pdev->dev, io + 0x0206, 1);
 	if (!io_addr || !ctrl_addr)
 		goto fail;
+	ld->type = probe->type;
 	if (controller->setup)
 		if (controller->setup(pdev, probe, ld) < 0)
 			goto fail;
@@ -1011,6 +974,7 @@ static __init int legacy_init_one(struct legacy_probe *probe)
 	ap->ops = ops;
 	ap->pio_mask = pio_modes;
 	ap->flags |= ATA_FLAG_SLAVE_POSS | iordy;
+	ap->pflags |= controller->pflags;
 	ap->ioaddr.cmd_addr = io_addr;
 	ap->ioaddr.altstatus_addr = ctrl_addr;
 	ap->ioaddr.ctl_addr = ctrl_addr;
@@ -1023,18 +987,20 @@ static __init int legacy_init_one(struct legacy_probe *probe)
 				&legacy_sht);
 	if (ret)
 		goto fail;
+	async_synchronize_full();
 	ld->platform_dev = pdev;
 
 	/* Nothing found means we drop the port as its probably not there */
 
 	ret = -ENODEV;
-	ata_link_for_each_dev(dev, &ap->link) {
+	ata_for_each_dev(dev, &ap->link, ALL) {
 		if (!ata_dev_absent(dev)) {
 			legacy_host[probe->slot] = host;
 			ld->platform_dev = pdev;
 			return 0;
 		}
 	}
+	ata_host_detach(host);
 fail:
 	platform_device_unregister(pdev);
 	return ret;
@@ -1281,6 +1247,8 @@ MODULE_AUTHOR("Alan Cox");
 MODULE_DESCRIPTION("low-level driver for legacy ATA");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(DRV_VERSION);
+MODULE_ALIAS("pata_qdi");
+MODULE_ALIAS("pata_winbond");
 
 module_param(probe_all, int, 0);
 module_param(autospeed, int, 0);
@@ -1289,6 +1257,7 @@ module_param(ht6560b, int, 0);
 module_param(opti82c611a, int, 0);
 module_param(opti82c46x, int, 0);
 module_param(qdi, int, 0);
+module_param(winbond, int, 0);
 module_param(pio_mask, int, 0);
 module_param(iordy_mask, int, 0);
 

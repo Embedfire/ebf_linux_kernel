@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_POWERPC_DMA_H
 #define _ASM_POWERPC_DMA_H
 #ifdef __KERNEL__
@@ -16,15 +17,10 @@
  *
  * None of this really applies for Power Macintoshes.  There is
  * basically just enough here to get kernel/dma.c to compile.
- *
- * There may be some comments or restrictions made here which are
- * not valid for the PReP platform.  Take what you read
- * with a grain of salt.
  */
 
 #include <asm/io.h>
 #include <linux/spinlock.h>
-#include <asm/system.h>
 
 #ifndef MAX_DMA_CHANNELS
 #define MAX_DMA_CHANNELS	8
@@ -33,8 +29,6 @@
 /* The maximum address that we can perform a DMA transfer to on this platform */
 /* Doesn't really apply... */
 #define MAX_DMA_ADDRESS		(~0UL)
-
-#if !defined(CONFIG_PPC_ISERIES) || defined(CONFIG_PCI)
 
 #ifdef HAVE_REALLY_SLOW_DMA_CONTROLLER
 #define dma_outb	outb_p
@@ -60,7 +54,6 @@
  *  - page registers for 5-7 don't use data bit 0, represent 128K pages
  *  - page registers for 0-3 use bit 0, represent 64K pages
  *
- * On PReP, DMA transfers are limited to the lower 16MB of _physical_ memory.
  * On CHRP, the W83C553F (and VLSI Tollgate?) support full 32 bit addressing.
  * Note that addresses loaded into registers must be _physical_ addresses,
  * not logical addresses (which may differ if paging is active).
@@ -158,10 +151,9 @@
 #define DMA2_EXT_REG		0x4D6
 
 #ifndef __powerpc64__
-    /* in arch/ppc/kernel/setup.c -- Cort */
+    /* in arch/powerpc/kernel/setup_32.c -- Cort */
     extern unsigned int DMA_MODE_WRITE;
     extern unsigned int DMA_MODE_READ;
-    extern unsigned long ISA_DMA_THRESHOLD;
 #else
     #define DMA_MODE_READ	0x44	/* I/O to memory, no autoinit, increment, single mode */
     #define DMA_MODE_WRITE	0x48	/* memory to I/O, no autoinit, increment, single mode */
@@ -353,8 +345,6 @@ extern int isa_dma_bridge_buggy;
 #else
 #define isa_dma_bridge_buggy	(0)
 #endif
-
-#endif	/* !defined(CONFIG_PPC_ISERIES) || defined(CONFIG_PCI) */
 
 #endif /* __KERNEL__ */
 #endif	/* _ASM_POWERPC_DMA_H */

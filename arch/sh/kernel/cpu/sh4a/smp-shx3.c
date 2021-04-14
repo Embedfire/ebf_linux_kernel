@@ -1,26 +1,54 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * SH-X3 SMP
  *
- *  Copyright (C) 2007  Paul Mundt
+ *  Copyright (C) 2007 - 2010  Paul Mundt
  *  Copyright (C) 2007  Magnus Damm
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
+#include <linux/kernel.h>
 #include <linux/cpumask.h>
 #include <linux/smp.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/sched.h>
+#include <linux/delay.h>
+#include <linux/cpu.h>
+#include <asm/sections.h>
 
-void __init plat_smp_setup(void)
+#define STBCR_REG(phys_id) (0xfe400004 | (phys_id << 12))
+#define RESET_REG(phys_id) (0xfe400008 | (phys_id << 12))
+
+#define STBCR_MSTP	0x00000001
+#define STBCR_RESET	0x00000002
+#define STBCR_SLEEP	0x00000004
+#define STBCR_LTSLP	0x80000000
+
+static irqreturn_t ipi_interrupt_handler(int irq, void *arg)
+{
+	unsigned int message = (unsigned int)(long)arg;
+	unsigned int cpu = hard_smp_processor_id();
+	unsigned int offs = 4 * cpu;
+	unsigned int x;
+
+	x = __raw_readl(0xfe410070 + offs); /* C0INITICI..CnINTICI */
+	x &= (1 << (message << 2));
+	__raw_writel(x, 0xfe410080 + offs); /* C0INTICICLR..CnINTICICLR */
+
+	smp_message_recv(message);
+
+	return IRQ_HANDLED;
+}
+
+static void shx3_smp_setup(void)
 {
 	unsigned int cpu = 0;
 	int i, num;
 
-	cpus_clear(cpu_possible_map);
-	cpu_set(cpu, cpu_possible_map);
+	init_cpu_possible(cpumask_of(cpu));
+
+	/* Enable light sleep for the boot CPU */
+	__raw_writel(__raw_readl(STBCR_REG(cpu)) | STBCR_LTSLP, STBCR_REG(cpu));
 
 	__cpu_number_map[0] = 0;
 	__cpu_logical_map[0] = 0;
@@ -30,7 +58,7 @@ void __init plat_smp_setup(void)
 	 * for the total number of cores.
 	 */
 	for (i = 1, num = 0; i < NR_CPUS; i++) {
-		cpu_set(i, cpu_possible_map);
+		set_cpu_possible(i, true);
 		__cpu_number_map[i] = ++num;
 		__cpu_logical_map[num] = i;
 	}
@@ -38,83 +66,80 @@ void __init plat_smp_setup(void)
         printk(KERN_INFO "Detected %i available secondary CPU(s)\n", num);
 }
 
-void __init plat_prepare_cpus(unsigned int max_cpus)
+static void shx3_prepare_cpus(unsigned int max_cpus)
 {
+	int i;
+
+	BUILD_BUG_ON(SMP_MSG_NR >= 8);
+
+	for (i = 0; i < SMP_MSG_NR; i++)
+		request_irq(104 + i, ipi_interrupt_handler,
+			    IRQF_PERCPU, "IPI", (void *)(long)i);
+
+	for (i = 0; i < max_cpus; i++)
+		set_cpu_present(i, true);
 }
 
-#define STBCR_REG(phys_id) (0xfe400004 | (phys_id << 12))
-#define RESET_REG(phys_id) (0xfe400008 | (phys_id << 12))
-
-#define STBCR_MSTP	0x00000001
-#define STBCR_RESET	0x00000002
-#define STBCR_LTSLP	0x80000000
-
-#define STBCR_AP_VAL	(STBCR_RESET | STBCR_LTSLP)
-
-void plat_start_cpu(unsigned int cpu, unsigned long entry_point)
+static void shx3_start_cpu(unsigned int cpu, unsigned long entry_point)
 {
-	ctrl_outl(entry_point, RESET_REG(cpu));
+	if (__in_29bit_mode())
+		__raw_writel(entry_point, RESET_REG(cpu));
+	else
+		__raw_writel(virt_to_phys(entry_point), RESET_REG(cpu));
 
-	if (!(ctrl_inl(STBCR_REG(cpu)) & STBCR_MSTP))
-		ctrl_outl(STBCR_MSTP, STBCR_REG(cpu));
+	if (!(__raw_readl(STBCR_REG(cpu)) & STBCR_MSTP))
+		__raw_writel(STBCR_MSTP, STBCR_REG(cpu));
 
-	while (!(ctrl_inl(STBCR_REG(cpu)) & STBCR_MSTP))
-		;
+	while (!(__raw_readl(STBCR_REG(cpu)) & STBCR_MSTP))
+		cpu_relax();
 
 	/* Start up secondary processor by sending a reset */
-	ctrl_outl(STBCR_AP_VAL, STBCR_REG(cpu));
+	__raw_writel(STBCR_RESET | STBCR_LTSLP, STBCR_REG(cpu));
 }
 
-int plat_smp_processor_id(void)
+static unsigned int shx3_smp_processor_id(void)
 {
-	return ctrl_inl(0xff000048); /* CPIDR */
+	return __raw_readl(0xff000048); /* CPIDR */
 }
 
-void plat_send_ipi(unsigned int cpu, unsigned int message)
+static void shx3_send_ipi(unsigned int cpu, unsigned int message)
 {
 	unsigned long addr = 0xfe410070 + (cpu * 4);
 
 	BUG_ON(cpu >= 4);
-	BUG_ON(message >= SMP_MSG_NR);
 
-	ctrl_outl(1 << (message << 2), addr); /* C0INTICI..CnINTICI */
+	__raw_writel(1 << (message << 2), addr); /* C0INTICI..CnINTICI */
 }
 
-struct ipi_data {
-	void (*handler)(void *);
-	void *arg;
-	unsigned int message;
+static void shx3_update_boot_vector(unsigned int cpu)
+{
+	__raw_writel(STBCR_MSTP, STBCR_REG(cpu));
+	while (!(__raw_readl(STBCR_REG(cpu)) & STBCR_MSTP))
+		cpu_relax();
+	__raw_writel(STBCR_RESET, STBCR_REG(cpu));
+}
+
+static int shx3_cpu_prepare(unsigned int cpu)
+{
+	shx3_update_boot_vector(cpu);
+	return 0;
+}
+
+static int register_shx3_cpu_notifier(void)
+{
+	cpuhp_setup_state_nocalls(CPUHP_SH_SH3X_PREPARE, "sh/shx3:prepare",
+				  shx3_cpu_prepare, NULL);
+	return 0;
+}
+late_initcall(register_shx3_cpu_notifier);
+
+struct plat_smp_ops shx3_smp_ops = {
+	.smp_setup		= shx3_smp_setup,
+	.prepare_cpus		= shx3_prepare_cpus,
+	.start_cpu		= shx3_start_cpu,
+	.smp_processor_id	= shx3_smp_processor_id,
+	.send_ipi		= shx3_send_ipi,
+	.cpu_die		= native_cpu_die,
+	.cpu_disable		= native_cpu_disable,
+	.play_dead		= native_play_dead,
 };
-
-static irqreturn_t ipi_interrupt_handler(int irq, void *arg)
-{
-	struct ipi_data *id = arg;
-	unsigned int cpu = hard_smp_processor_id();
-	unsigned int offs = 4 * cpu;
-	unsigned int x;
-
-	x = ctrl_inl(0xfe410070 + offs); /* C0INITICI..CnINTICI */
-	x &= (1 << (id->message << 2));
-	ctrl_outl(x, 0xfe410080 + offs); /* C0INTICICLR..CnINTICICLR */
-
-	id->handler(id->arg);
-
-	return IRQ_HANDLED;
-}
-
-static struct ipi_data ipi_handlers[SMP_MSG_NR];
-
-int plat_register_ipi_handler(unsigned int message,
-			      void (*handler)(void *), void *arg)
-{
-	struct ipi_data *id = &ipi_handlers[message];
-
-	BUG_ON(SMP_MSG_NR >= 8);
-	BUG_ON(message >= SMP_MSG_NR);
-
-	id->handler = handler;
-	id->arg = arg;
-	id->message = message;
-
-	return request_irq(104 + message, ipi_interrupt_handler, 0, "IPI", id);
-}

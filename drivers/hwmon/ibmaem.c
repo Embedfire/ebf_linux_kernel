@@ -1,24 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * A hwmon driver for the IBM System Director Active Energy Manager (AEM)
  * temperature/power/energy sensors and capping functionality.
  * Copyright (C) 2008 IBM
  *
- * Author: Darrick J. Wong <djwong@us.ibm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * Author: Darrick J. Wong <darrick.wong@oracle.com>
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/ipmi.h>
 #include <linux/module.h>
@@ -29,10 +18,12 @@
 #include <linux/kdev_t.h>
 #include <linux/spinlock.h>
 #include <linux/idr.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/platform_device.h>
 #include <linux/math64.h>
 #include <linux/time.h>
+#include <linux/err.h>
 
 #define REFRESH_INTERVAL	(HZ)
 #define IPMI_TIMEOUT		(30 * HZ)
@@ -85,18 +76,19 @@
 #define AEM_MIN_POWER_INTERVAL	200
 #define UJ_PER_MJ		1000L
 
-static DEFINE_IDR(aem_idr);
-static DEFINE_SPINLOCK(aem_idr_lock);
+static DEFINE_IDA(aem_ida);
 
-static struct device_driver aem_driver = {
-	.name = DRVNAME,
-	.bus = &platform_bus_type,
+static struct platform_driver aem_driver = {
+	.driver = {
+		.name = DRVNAME,
+		.bus = &platform_bus_type,
+	}
 };
 
 struct aem_ipmi_data {
 	struct completion	read_complete;
 	struct ipmi_addr	address;
-	ipmi_user_t		user;
+	struct ipmi_user	*user;
 	int			interface;
 
 	struct kernel_ipmi_msg	tx_message;
@@ -143,8 +135,9 @@ struct aem_data {
 	int			id;
 	struct aem_ipmi_data	ipmi;
 
-	/* Function to update sensors */
+	/* Function and buffer to update sensors */
 	void (*update)(struct aem_data *data);
+	struct aem_read_sensor_resp *rs_resp;
 
 	/*
 	 * AEM 1.x sensors:
@@ -226,7 +219,7 @@ struct aem_read_sensor_req {
 
 struct aem_read_sensor_resp {
 	struct aem_iana_id	id;
-	u8			bytes[0];
+	u8			bytes[];
 } __packed;
 
 /* Data structures to talk to the IPMI layer */
@@ -241,8 +234,6 @@ static void aem_bmc_gone(int iface);
 static void aem_msg_handler(struct ipmi_recv_msg *msg, void *user_msg_data);
 
 static void aem_remove_sensors(struct aem_data *data);
-static int aem_init_aem1(struct aem_ipmi_data *probe);
-static int aem_init_aem2(struct aem_ipmi_data *probe);
 static int aem1_find_sensors(struct aem_data *data);
 static int aem2_find_sensors(struct aem_data *data);
 static void update_aem1_sensors(struct aem_data *data);
@@ -285,9 +276,10 @@ static int aem_init_ipmi_data(struct aem_ipmi_data *data, int iface,
 	err = ipmi_create_user(data->interface, &driver_data.ipmi_hndlrs,
 			       data, &data->user);
 	if (err < 0) {
-		dev_err(bmc, "Unable to register user with IPMI "
-			"interface %d\n", data->interface);
-		return -EACCES;
+		dev_err(bmc,
+			"Unable to register user with IPMI interface %d\n",
+			data->interface);
+		return err;
 	}
 
 	return 0;
@@ -324,8 +316,8 @@ static void aem_msg_handler(struct ipmi_recv_msg *msg, void *user_msg_data)
 	struct aem_ipmi_data *data = user_msg_data;
 
 	if (msg->msgid != data->tx_msgid) {
-		dev_err(data->bmc_device, "Mismatch between received msgid "
-			"(%02x) and transmitted msgid (%02x)!\n",
+		dev_err(data->bmc_device,
+			"Mismatch between received msgid (%02x) and transmitted msgid (%02x)!\n",
 			(int)msg->msgid,
 			(int)data->tx_msgid);
 		ipmi_free_recv_msg(msg);
@@ -351,47 +343,16 @@ static void aem_msg_handler(struct ipmi_recv_msg *msg, void *user_msg_data)
 	complete(&data->read_complete);
 }
 
-/* ID functions */
-
-/* Obtain an id */
-static int aem_idr_get(int *id)
-{
-	int i, err;
-
-again:
-	if (unlikely(!idr_pre_get(&aem_idr, GFP_KERNEL)))
-		return -ENOMEM;
-
-	spin_lock(&aem_idr_lock);
-	err = idr_get_new(&aem_idr, NULL, &i);
-	spin_unlock(&aem_idr_lock);
-
-	if (unlikely(err == -EAGAIN))
-		goto again;
-	else if (unlikely(err))
-		return err;
-
-	*id = i & MAX_ID_MASK;
-	return 0;
-}
-
-/* Release an object ID */
-static void aem_idr_put(int id)
-{
-	spin_lock(&aem_idr_lock);
-	idr_remove(&aem_idr, id);
-	spin_unlock(&aem_idr_lock);
-}
-
 /* Sensor support functions */
 
-/* Read a sensor value */
+/* Read a sensor value; must be called with data->lock held */
 static int aem_read_sensor(struct aem_data *data, u8 elt, u8 reg,
 			   void *buf, size_t size)
 {
 	int rs_size, res;
 	struct aem_read_sensor_req rs_req;
-	struct aem_read_sensor_resp *rs_resp;
+	/* Use preallocated rx buffer */
+	struct aem_read_sensor_resp *rs_resp = data->rs_resp;
 	struct aem_ipmi_data *ipmi = &data->ipmi;
 
 	/* AEM registers are 1, 2, 4 or 8 bytes */
@@ -417,23 +378,21 @@ static int aem_read_sensor(struct aem_data *data, u8 elt, u8 reg,
 	ipmi->tx_message.data_len = sizeof(rs_req);
 
 	rs_size = sizeof(*rs_resp) + size;
-	rs_resp = kzalloc(rs_size, GFP_KERNEL);
-	if (!rs_resp)
-		return -ENOMEM;
-
 	ipmi->rx_msg_data = rs_resp;
 	ipmi->rx_msg_len = rs_size;
 
 	aem_send_message(ipmi);
 
 	res = wait_for_completion_timeout(&ipmi->read_complete, IPMI_TIMEOUT);
-	if (!res)
-		return -ETIMEDOUT;
+	if (!res) {
+		res = -ETIMEDOUT;
+		goto out;
+	}
 
 	if (ipmi->rx_result || ipmi->rx_msg_len != rs_size ||
 	    memcmp(&rs_resp->id, &system_x_id, sizeof(system_x_id))) {
-		kfree(rs_resp);
-		return -ENOENT;
+		res = -ENOENT;
+		goto out;
 	}
 
 	switch (size) {
@@ -458,8 +417,10 @@ static int aem_read_sensor(struct aem_data *data, u8 elt, u8 reg,
 		break;
 	}
 	}
+	res = 0;
 
-	return 0;
+out:
+	return res;
 }
 
 /* Update AEM energy registers */
@@ -516,11 +477,12 @@ static void aem_delete(struct aem_data *data)
 {
 	list_del(&data->list);
 	aem_remove_sensors(data);
+	kfree(data->rs_resp);
 	hwmon_device_unregister(data->hwmon_dev);
 	ipmi_destroy_user(data->ipmi.user);
-	dev_set_drvdata(&data->pdev->dev, NULL);
+	platform_set_drvdata(data->pdev, NULL);
 	platform_device_unregister(data->pdev);
-	aem_idr_put(data->id);
+	ida_simple_remove(&aem_ida, data->id);
 	kfree(data);
 }
 
@@ -577,39 +539,47 @@ static int aem_init_aem1_inst(struct aem_ipmi_data *probe, u8 module_handle)
 		data->power_period[i] = AEM_DEFAULT_POWER_INTERVAL;
 
 	/* Create sub-device for this fw instance */
-	if (aem_idr_get(&data->id))
+	data->id = ida_simple_get(&aem_ida, 0, 0, GFP_KERNEL);
+	if (data->id < 0)
 		goto id_err;
 
 	data->pdev = platform_device_alloc(DRVNAME, data->id);
 	if (!data->pdev)
 		goto dev_err;
-	data->pdev->dev.driver = &aem_driver;
+	data->pdev->dev.driver = &aem_driver.driver;
 
 	res = platform_device_add(data->pdev);
 	if (res)
 		goto ipmi_err;
 
-	dev_set_drvdata(&data->pdev->dev, data);
+	platform_set_drvdata(data->pdev, data);
 
 	/* Set up IPMI interface */
-	if (aem_init_ipmi_data(&data->ipmi, probe->interface,
-			       probe->bmc_device))
+	res = aem_init_ipmi_data(&data->ipmi, probe->interface,
+				 probe->bmc_device);
+	if (res)
 		goto ipmi_err;
 
 	/* Register with hwmon */
 	data->hwmon_dev = hwmon_device_register(&data->pdev->dev);
-
 	if (IS_ERR(data->hwmon_dev)) {
-		dev_err(&data->pdev->dev, "Unable to register hwmon "
-			"device for IPMI interface %d\n",
+		dev_err(&data->pdev->dev,
+			"Unable to register hwmon device for IPMI interface %d\n",
 			probe->interface);
+		res = PTR_ERR(data->hwmon_dev);
 		goto hwmon_reg_err;
 	}
 
 	data->update = update_aem1_sensors;
+	data->rs_resp = kzalloc(sizeof(*(data->rs_resp)) + 8, GFP_KERNEL);
+	if (!data->rs_resp) {
+		res = -ENOMEM;
+		goto alloc_resp_err;
+	}
 
 	/* Find sensors */
-	if (aem1_find_sensors(data))
+	res = aem1_find_sensors(data);
+	if (res)
 		goto sensor_err;
 
 	/* Add to our list of AEM devices */
@@ -621,14 +591,16 @@ static int aem_init_aem1_inst(struct aem_ipmi_data *probe, u8 module_handle)
 	return 0;
 
 sensor_err:
+	kfree(data->rs_resp);
+alloc_resp_err:
 	hwmon_device_unregister(data->hwmon_dev);
 hwmon_reg_err:
 	ipmi_destroy_user(data->ipmi.user);
 ipmi_err:
-	dev_set_drvdata(&data->pdev->dev, NULL);
+	platform_set_drvdata(data->pdev, NULL);
 	platform_device_unregister(data->pdev);
 dev_err:
-	aem_idr_put(data->id);
+	ida_simple_remove(&aem_ida, data->id);
 id_err:
 	kfree(data);
 
@@ -636,7 +608,7 @@ id_err:
 }
 
 /* Find and initialize all AEM1 instances */
-static int aem_init_aem1(struct aem_ipmi_data *probe)
+static void aem_init_aem1(struct aem_ipmi_data *probe)
 {
 	int num, i, err;
 
@@ -647,11 +619,8 @@ static int aem_init_aem1(struct aem_ipmi_data *probe)
 			dev_err(probe->bmc_device,
 				"Error %d initializing AEM1 0x%X\n",
 				err, i);
-			return err;
 		}
 	}
-
-	return 0;
 }
 
 /* Probe functions for AEM2 devices */
@@ -710,39 +679,47 @@ static int aem_init_aem2_inst(struct aem_ipmi_data *probe,
 		data->power_period[i] = AEM_DEFAULT_POWER_INTERVAL;
 
 	/* Create sub-device for this fw instance */
-	if (aem_idr_get(&data->id))
+	data->id = ida_simple_get(&aem_ida, 0, 0, GFP_KERNEL);
+	if (data->id < 0)
 		goto id_err;
 
 	data->pdev = platform_device_alloc(DRVNAME, data->id);
 	if (!data->pdev)
 		goto dev_err;
-	data->pdev->dev.driver = &aem_driver;
+	data->pdev->dev.driver = &aem_driver.driver;
 
 	res = platform_device_add(data->pdev);
 	if (res)
 		goto ipmi_err;
 
-	dev_set_drvdata(&data->pdev->dev, data);
+	platform_set_drvdata(data->pdev, data);
 
 	/* Set up IPMI interface */
-	if (aem_init_ipmi_data(&data->ipmi, probe->interface,
-			       probe->bmc_device))
+	res = aem_init_ipmi_data(&data->ipmi, probe->interface,
+				 probe->bmc_device);
+	if (res)
 		goto ipmi_err;
 
 	/* Register with hwmon */
 	data->hwmon_dev = hwmon_device_register(&data->pdev->dev);
-
 	if (IS_ERR(data->hwmon_dev)) {
-		dev_err(&data->pdev->dev, "Unable to register hwmon "
-			"device for IPMI interface %d\n",
+		dev_err(&data->pdev->dev,
+			"Unable to register hwmon device for IPMI interface %d\n",
 			probe->interface);
+		res = PTR_ERR(data->hwmon_dev);
 		goto hwmon_reg_err;
 	}
 
 	data->update = update_aem2_sensors;
+	data->rs_resp = kzalloc(sizeof(*(data->rs_resp)) + 8, GFP_KERNEL);
+	if (!data->rs_resp) {
+		res = -ENOMEM;
+		goto alloc_resp_err;
+	}
 
 	/* Find sensors */
-	if (aem2_find_sensors(data))
+	res = aem2_find_sensors(data);
+	if (res)
 		goto sensor_err;
 
 	/* Add to our list of AEM devices */
@@ -754,14 +731,16 @@ static int aem_init_aem2_inst(struct aem_ipmi_data *probe,
 	return 0;
 
 sensor_err:
+	kfree(data->rs_resp);
+alloc_resp_err:
 	hwmon_device_unregister(data->hwmon_dev);
 hwmon_reg_err:
 	ipmi_destroy_user(data->ipmi.user);
 ipmi_err:
-	dev_set_drvdata(&data->pdev->dev, NULL);
+	platform_set_drvdata(data->pdev, NULL);
 	platform_device_unregister(data->pdev);
 dev_err:
-	aem_idr_put(data->id);
+	ida_simple_remove(&aem_ida, data->id);
 id_err:
 	kfree(data);
 
@@ -769,7 +748,7 @@ id_err:
 }
 
 /* Find and initialize all AEM2 instances */
-static int aem_init_aem2(struct aem_ipmi_data *probe)
+static void aem_init_aem2(struct aem_ipmi_data *probe)
 {
 	struct aem_find_instance_resp fi_resp;
 	int err;
@@ -777,8 +756,8 @@ static int aem_init_aem2(struct aem_ipmi_data *probe)
 
 	while (!aem_find_aem2(probe, &fi_resp, i)) {
 		if (fi_resp.major != 2) {
-			dev_err(probe->bmc_device, "Unknown AEM v%d; please "
-				"report this to the maintainer.\n",
+			dev_err(probe->bmc_device,
+				"Unknown AEM v%d; please report this to the maintainer.\n",
 				fi_resp.major);
 			i++;
 			continue;
@@ -788,12 +767,9 @@ static int aem_init_aem2(struct aem_ipmi_data *probe)
 			dev_err(probe->bmc_device,
 				"Error %d initializing AEM2 0x%X\n",
 				err, fi_resp.module_handle);
-			return err;
 		}
 		i++;
 	}
-
-	return 0;
 }
 
 /* Probe a BMC for AEM firmware instances */
@@ -824,25 +800,24 @@ static void aem_bmc_gone(int iface)
 /* sysfs support functions */
 
 /* AEM device name */
-static ssize_t show_name(struct device *dev, struct device_attribute *devattr,
+static ssize_t name_show(struct device *dev, struct device_attribute *devattr,
 			 char *buf)
 {
 	struct aem_data *data = dev_get_drvdata(dev);
 
 	return sprintf(buf, "%s%d\n", DRVNAME, data->ver_major);
 }
-static SENSOR_DEVICE_ATTR(name, S_IRUGO, show_name, NULL, 0);
+static SENSOR_DEVICE_ATTR_RO(name, name, 0);
 
 /* AEM device version */
-static ssize_t show_version(struct device *dev,
-			    struct device_attribute *devattr,
-			    char *buf)
+static ssize_t version_show(struct device *dev,
+			    struct device_attribute *devattr, char *buf)
 {
 	struct aem_data *data = dev_get_drvdata(dev);
 
 	return sprintf(buf, "%d.%d\n", data->ver_major, data->ver_minor);
 }
-static SENSOR_DEVICE_ATTR(version, S_IRUGO, show_version, NULL, 0);
+static SENSOR_DEVICE_ATTR_RO(version, version, 0);
 
 /* Display power use */
 static ssize_t aem_show_power(struct device *dev,
@@ -853,11 +828,10 @@ static ssize_t aem_show_power(struct device *dev,
 	struct aem_data *data = dev_get_drvdata(dev);
 	u64 before, after, delta, time;
 	signed long leftover;
-	struct timespec b, a;
 
 	mutex_lock(&data->lock);
 	update_aem_energy_one(data, attr->index);
-	getnstimeofday(&b);
+	time = ktime_get_ns();
 	before = data->energy[attr->index];
 
 	leftover = schedule_timeout_interruptible(
@@ -869,11 +843,10 @@ static ssize_t aem_show_power(struct device *dev,
 	}
 
 	update_aem_energy_one(data, attr->index);
-	getnstimeofday(&a);
+	time = ktime_get_ns() - time;
 	after = data->energy[attr->index];
 	mutex_unlock(&data->lock);
 
-	time = timespec_to_ns(&a) - timespec_to_ns(&b);
 	delta = (after - before) * UJ_PER_MJ;
 
 	return sprintf(buf, "%llu\n",
@@ -917,7 +890,7 @@ static ssize_t aem_set_power_period(struct device *dev,
 	unsigned long temp;
 	int res;
 
-	res = strict_strtoul(buf, 10, &temp);
+	res = kstrtoul(buf, 10, &temp);
 	if (res)
 		return res;
 
@@ -933,8 +906,8 @@ static ssize_t aem_set_power_period(struct device *dev,
 
 /* Discover sensors on an AEM device */
 static int aem_register_sensors(struct aem_data *data,
-				struct aem_ro_sensor_template *ro,
-				struct aem_rw_sensor_template *rw)
+				const struct aem_ro_sensor_template *ro,
+				const struct aem_rw_sensor_template *rw)
 {
 	struct device *dev = &data->pdev->dev;
 	struct sensor_device_attribute *sensors = data->sensors;
@@ -942,8 +915,9 @@ static int aem_register_sensors(struct aem_data *data,
 
 	/* Set up read-only sensors */
 	while (ro->label) {
+		sysfs_attr_init(&sensors->dev_attr.attr);
 		sensors->dev_attr.attr.name = ro->label;
-		sensors->dev_attr.attr.mode = S_IRUGO;
+		sensors->dev_attr.attr.mode = 0444;
 		sensors->dev_attr.show = ro->show;
 		sensors->index = ro->index;
 
@@ -958,8 +932,9 @@ static int aem_register_sensors(struct aem_data *data,
 
 	/* Set up read-write sensors */
 	while (rw->label) {
+		sysfs_attr_init(&sensors->dev_attr.attr);
 		sensors->dev_attr.attr.name = rw->label;
-		sensors->dev_attr.attr.mode = S_IRUGO | S_IWUSR;
+		sensors->dev_attr.attr.mode = 0644;
 		sensors->dev_attr.show = rw->show;
 		sensors->dev_attr.store = rw->set;
 		sensors->index = rw->index;
@@ -1031,19 +1006,19 @@ static void aem_remove_sensors(struct aem_data *data)
 /* Sensor probe functions */
 
 /* Description of AEM1 sensors */
-static struct aem_ro_sensor_template aem1_ro_sensors[] = {
+static const struct aem_ro_sensor_template aem1_ro_sensors[] = {
 {"energy1_input",  aem_show_energy, 0},
 {"power1_average", aem_show_power,  0},
 {NULL,		   NULL,	    0},
 };
 
-static struct aem_rw_sensor_template aem1_rw_sensors[] = {
+static const struct aem_rw_sensor_template aem1_rw_sensors[] = {
 {"power1_average_interval", aem_show_power_period, aem_set_power_period, 0},
 {NULL,			    NULL,                  NULL,                 0},
 };
 
 /* Description of AEM2 sensors */
-static struct aem_ro_sensor_template aem2_ro_sensors[] = {
+static const struct aem_ro_sensor_template aem2_ro_sensors[] = {
 {"energy1_input",	  aem_show_energy,	0},
 {"energy2_input",	  aem_show_energy,	1},
 {"power1_average",	  aem_show_power,	0},
@@ -1056,12 +1031,12 @@ static struct aem_ro_sensor_template aem2_ro_sensors[] = {
 {"power6_average",	  aem2_show_pcap_value,	POWER_CAP_MIN_WARNING},
 {"power7_average",	  aem2_show_pcap_value,	POWER_CAP_MIN},
 
-{"power3_average", 	  aem2_show_pcap_value,	POWER_AUX},
+{"power3_average",	  aem2_show_pcap_value,	POWER_AUX},
 {"power_cap",		  aem2_show_pcap_value,	POWER_CAP},
 {NULL,                    NULL,                 0},
 };
 
-static struct aem_rw_sensor_template aem2_rw_sensors[] = {
+static const struct aem_rw_sensor_template aem2_rw_sensors[] = {
 {"power1_average_interval", aem_show_power_period, aem_set_power_period, 0},
 {"power2_average_interval", aem_show_power_period, aem_set_power_period, 1},
 {NULL,			    NULL,                  NULL,                 0},
@@ -1085,9 +1060,9 @@ static int __init aem_init(void)
 {
 	int res;
 
-	res = driver_register(&aem_driver);
+	res = driver_register(&aem_driver.driver);
 	if (res) {
-		printk(KERN_ERR "Can't register aem driver\n");
+		pr_err("Can't register aem driver\n");
 		return res;
 	}
 
@@ -1097,7 +1072,7 @@ static int __init aem_init(void)
 	return 0;
 
 ipmi_reg_err:
-	driver_unregister(&aem_driver);
+	driver_unregister(&aem_driver.driver);
 	return res;
 
 }
@@ -1107,14 +1082,22 @@ static void __exit aem_exit(void)
 	struct aem_data *p1, *next1;
 
 	ipmi_smi_watcher_unregister(&driver_data.bmc_events);
-	driver_unregister(&aem_driver);
+	driver_unregister(&aem_driver.driver);
 	list_for_each_entry_safe(p1, next1, &driver_data.aem_devices, list)
 		aem_delete(p1);
 }
 
-MODULE_AUTHOR("Darrick J. Wong <djwong@us.ibm.com>");
+MODULE_AUTHOR("Darrick J. Wong <darrick.wong@oracle.com>");
 MODULE_DESCRIPTION("IBM AEM power/temp/energy sensor driver");
 MODULE_LICENSE("GPL");
 
 module_init(aem_init);
 module_exit(aem_exit);
+
+MODULE_ALIAS("dmi:bvnIBM:*:pnIBMSystemx3350-*");
+MODULE_ALIAS("dmi:bvnIBM:*:pnIBMSystemx3550-*");
+MODULE_ALIAS("dmi:bvnIBM:*:pnIBMSystemx3650-*");
+MODULE_ALIAS("dmi:bvnIBM:*:pnIBMSystemx3655-*");
+MODULE_ALIAS("dmi:bvnIBM:*:pnIBMSystemx3755-*");
+MODULE_ALIAS("dmi:bvnIBM:*:pnIBM3850M2/x3950M2-*");
+MODULE_ALIAS("dmi:bvnIBM:*:pnIBMBladeHC10-*");

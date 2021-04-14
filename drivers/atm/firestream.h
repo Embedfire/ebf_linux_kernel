@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* drivers/atm/firestream.h - FireStream 155 (MB86697) and
  *                            FireStream  50 (MB86695) device driver 
  */
@@ -8,22 +9,6 @@
  */
 
 /*
-  This program is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 2 of the License, or
-  (at your option) any later version.
-
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-
-  The GNU GPL is contained in /usr/doc/copyright/GPL on a Debian
-  system and in the file COPYING in the Linux kernel source.
 */
 
 
@@ -420,7 +405,6 @@ struct fs_transmit_config {
 #define RC_FLAGS_BFPS_BFP27 (0xd << 17)
 #define RC_FLAGS_BFPS_BFP47 (0xe << 17)
 
-#define RC_FLAGS_BFPS       (0x1 << 17)
 #define RC_FLAGS_BFPP       (0x1 << 21)
 #define RC_FLAGS_TEVC       (0x1 << 22)
 #define RC_FLAGS_TEP        (0x1 << 23)

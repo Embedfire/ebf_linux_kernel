@@ -1,51 +1,99 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#include <asm-generic/vmlinux.lds.h>
+
+#ifdef CONFIG_PPC64_BOOT_WRAPPER
+OUTPUT_ARCH(powerpc:common64)
+#else
 OUTPUT_ARCH(powerpc:common)
+#endif
 ENTRY(_zimage_start)
 EXTERN(_zimage_start)
 SECTIONS
 {
-  _start = .;
   .text      :
   {
+    _start = .;
     *(.text)
     *(.fixup)
+    _etext = .;
   }
-  _etext = .;
   . = ALIGN(4096);
   .data    :
   {
     *(.rodata*)
     *(.data*)
     *(.sdata*)
-    __got2_start = .;
+#ifndef CONFIG_PPC64_BOOT_WRAPPER
     *(.got2)
-    __got2_end = .;
+#endif
+  }
+  .dynsym : { *(.dynsym) }
+  .dynstr : { *(.dynstr) }
+  .dynamic :
+  {
+    __dynamic_start = .;
+    *(.dynamic)
+  }
+  .hash : { *(.hash) }
+  .interp : { *(.interp) }
+  .rela.dyn :
+  {
+#ifdef CONFIG_PPC64_BOOT_WRAPPER
+    __rela_dyn_start = .;
+#endif
+    *(.rela*)
   }
 
   . = ALIGN(8);
-  _dtb_start = .;
-  .kernel:dtb : { *(.kernel:dtb) }
-  _dtb_end = .;
+  .kernel:dtb :
+  {
+    _dtb_start = .;
+    *(.kernel:dtb)
+    _dtb_end = .;
+  }
 
   . = ALIGN(4096);
-  _vmlinux_start =  .;
-  .kernel:vmlinux.strip : { *(.kernel:vmlinux.strip) }
-  _vmlinux_end =  .;
+  .kernel:vmlinux.strip :
+  {
+    _vmlinux_start =  .;
+    *(.kernel:vmlinux.strip)
+    _vmlinux_end =  .;
+  }
 
   . = ALIGN(4096);
-  _initrd_start =  .;
-  .kernel:initrd : { *(.kernel:initrd) }
-  _initrd_end =  .;
+  .kernel:initrd :
+  {
+    _initrd_start =  .;
+    *(.kernel:initrd)
+    _initrd_end =  .;
+  }
 
   . = ALIGN(4096);
-  _edata  =  .;
+  .kernel:esm_blob :
+  {
+    _esm_blob_start =  .;
+    *(.kernel:esm_blob)
+    _esm_blob_end =  .;
+  }
+
+#ifdef CONFIG_PPC64_BOOT_WRAPPER
+  . = ALIGN(256);
+  .got :
+  {
+    __toc_start = .;
+    *(.got)
+    *(.toc)
+  }
+#endif
 
   . = ALIGN(4096);
-  __bss_start = .;
   .bss       :
   {
-   *(.sbss)
-   *(.bss)
+    _edata  =  .;
+    __bss_start = .;
+    *(.sbss)
+    *(.bss)
+    *(COMMON)
+    _end = . ;
   }
-  . = ALIGN(4096);
-  _end = . ;
 }

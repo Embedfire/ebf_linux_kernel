@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/drivers/input/serio/pcips2.c
  *
  *  Copyright (C) 2003 Russell King, All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License.
  *
  *  I'm not sure if this is a generic PS/2 PCI interface or specific to
  *  the Mobility Electronics docking station.
@@ -15,7 +12,7 @@
 #include <linux/ioport.h>
 #include <linux/input.h>
 #include <linux/pci.h>
-#include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/serio.h>
 #include <linux/delay.h>
 #include <asm/io.h>
@@ -126,7 +123,7 @@ static void pcips2_close(struct serio *io)
 	free_irq(ps2if->dev->irq, ps2if);
 }
 
-static int __devinit pcips2_probe(struct pci_dev *dev, const struct pci_device_id *id)
+static int pcips2_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct pcips2_data *ps2if;
 	struct serio *serio;
@@ -153,7 +150,7 @@ static int __devinit pcips2_probe(struct pci_dev *dev, const struct pci_device_i
 	serio->open		= pcips2_open;
 	serio->close		= pcips2_close;
 	strlcpy(serio->name, pci_name(dev), sizeof(serio->name));
-	strlcpy(serio->phys, dev->dev.bus_id, sizeof(serio->phys));
+	strlcpy(serio->phys, dev_name(&dev->dev), sizeof(serio->phys));
 	serio->port_data	= ps2if;
 	serio->dev.parent	= &dev->dev;
 	ps2if->io		= serio;
@@ -175,18 +172,17 @@ static int __devinit pcips2_probe(struct pci_dev *dev, const struct pci_device_i
 	return ret;
 }
 
-static void __devexit pcips2_remove(struct pci_dev *dev)
+static void pcips2_remove(struct pci_dev *dev)
 {
 	struct pcips2_data *ps2if = pci_get_drvdata(dev);
 
 	serio_unregister_port(ps2if->io);
-	pci_set_drvdata(dev, NULL);
 	kfree(ps2if);
 	pci_release_regions(dev);
 	pci_disable_device(dev);
 }
 
-static struct pci_device_id pcips2_ids[] = {
+static const struct pci_device_id pcips2_ids[] = {
 	{
 		.vendor		= 0x14f2,	/* MOBILITY */
 		.device		= 0x0123,	/* Keyboard */
@@ -205,28 +201,17 @@ static struct pci_device_id pcips2_ids[] = {
 	},
 	{ 0, }
 };
+MODULE_DEVICE_TABLE(pci, pcips2_ids);
 
 static struct pci_driver pcips2_driver = {
 	.name			= "pcips2",
 	.id_table		= pcips2_ids,
 	.probe			= pcips2_probe,
-	.remove			= __devexit_p(pcips2_remove),
+	.remove			= pcips2_remove,
 };
 
-static int __init pcips2_init(void)
-{
-	return pci_register_driver(&pcips2_driver);
-}
-
-static void __exit pcips2_exit(void)
-{
-	pci_unregister_driver(&pcips2_driver);
-}
-
-module_init(pcips2_init);
-module_exit(pcips2_exit);
+module_pci_driver(pcips2_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Russell King <rmk@arm.linux.org.uk>");
 MODULE_DESCRIPTION("PCI PS/2 keyboard/mouse driver");
-MODULE_DEVICE_TABLE(pci, pcips2_ids);

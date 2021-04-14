@@ -1,164 +1,78 @@
-#config BUBINGA
-#	bool "Bubinga"
-#	depends on 40x
-#	default n
-#	select 405EP
-#	help
-#	  This option enables support for the IBM 405EP evaluation board.
-
-#config CPCI405
-#	bool "CPCI405"
-#	depends on 40x
-#	default n
-#	select 405GP
-#	help
-#	  This option enables support for the CPCI405 board.
-
-config EP405
-	bool "EP405/EP405PC"
+# SPDX-License-Identifier: GPL-2.0
+config ACADIA
+	bool "Acadia"
 	depends on 40x
-	default n
-	select 405GP
-	select PCI
+	select PPC40x_SIMPLE
+	select 405EZ
 	help
-	  This option enables support for the EP405/EP405PC boards.
+	  This option enables support for the AMCC 405EZ Acadia evaluation board.
+
+config HOTFOOT
+	bool "Hotfoot"
+	depends on 40x
+	select PPC40x_SIMPLE
+	select FORCE_PCI
+	help
+	  This option enables support for the ESTEEM 195E Hotfoot board.
 
 config KILAUEA
 	bool "Kilauea"
 	depends on 40x
-	default n
 	select 405EX
+	select PPC40x_SIMPLE
 	select PPC4xx_PCI_EXPRESS
+	select FORCE_PCI
+	select PCI_MSI
+	select PPC4xx_MSI
 	help
 	  This option enables support for the AMCC PPC405EX evaluation board.
 
 config MAKALU
 	bool "Makalu"
 	depends on 40x
-	default n
 	select 405EX
-	select PCI
+	select FORCE_PCI
 	select PPC4xx_PCI_EXPRESS
+	select PPC40x_SIMPLE
 	help
 	  This option enables support for the AMCC PPC405EX board.
 
-#config REDWOOD_5
-#	bool "Redwood-5"
-#	depends on 40x
-#	default n
-#	select STB03xxx
-#	help
-#	  This option enables support for the IBM STB04 evaluation board.
-
-#config REDWOOD_6
-#	bool "Redwood-6"
-#	depends on 40x
-#	default n
-#	select STB03xxx
-#	help
-#	  This option enables support for the IBM STBx25xx evaluation board.
-
-#config SYCAMORE
-#	bool "Sycamore"
-#	depends on 40x
-#	default n
-#	select 405GPR
-#	help
-#	  This option enables support for the IBM PPC405GPr evaluation board.
-
-config WALNUT
-	bool "Walnut"
+config OBS600
+	bool "OpenBlockS 600"
 	depends on 40x
-	default y
-	select 405GP
-	select PCI
-	select OF_RTC
+	select 405EX
+	select PPC40x_SIMPLE
 	help
-	  This option enables support for the IBM PPC405GP evaluation board.
+	  This option enables support for PlatHome OpenBlockS 600 server
 
-config XILINX_VIRTEX_GENERIC_BOARD
-	bool "Generic Xilinx Virtex board"
+config PPC40x_SIMPLE
+	bool "Simple PowerPC 40x board support"
 	depends on 40x
-	default n
-	select XILINX_VIRTEX_II_PRO
-	select XILINX_VIRTEX_4_FX
 	help
-	  This option enables generic support for Xilinx Virtex based boards.
-
-	  The generic virtex board support matches any device tree which
-	  specifies 'xilinx,virtex' in its compatible field.  This includes
-	  the Xilinx ML3xx and ML4xx reference designs using the powerpc
-	  core.
-
-	  Most Virtex designs should use this unless it needs to do some
-	  special configuration at board probe time.
-
-# 40x specific CPU modules, selected based on the board above.
-config NP405H
-	bool
-	#depends on ASH
-
-# OAK doesn't exist but wanted to keep this around for any future 403GCX boards
-config 403GCX
-	bool
-	#depends on OAK
-	select IBM405_ERR51
-
-config 405GP
-	bool
-	select IBM405_ERR77
-	select IBM405_ERR51
-	select IBM_NEW_EMAC_ZMII
-
-config 405EP
-	bool
+	  This option enables the simple PowerPC 40x platform support.
 
 config 405EX
 	bool
-	select IBM_NEW_EMAC_EMAC4
-	select IBM_NEW_EMAC_RGMII
+	select IBM_EMAC_EMAC4 if IBM_EMAC
+	select IBM_EMAC_RGMII if IBM_EMAC
 
-config 405GPR
+config 405EZ
 	bool
+	select IBM_EMAC_NO_FLOW_CTRL if IBM_EMAC
+	select IBM_EMAC_MAL_CLR_ICINTSTAT if IBM_EMAC
+	select IBM_EMAC_MAL_COMMON_ERR if IBM_EMAC
 
-config XILINX_VIRTEX
-	bool
+config PPC4xx_GPIO
+	bool "PPC4xx GPIO support"
+	depends on 40x
+	select GPIOLIB
+	help
+	  Enable gpiolib support for ppc40x based boards
 
-config XILINX_VIRTEX_II_PRO
-	bool
-	select XILINX_VIRTEX
-	select IBM405_ERR77
-	select IBM405_ERR51
-
-config XILINX_VIRTEX_4_FX
-	bool
-	select XILINX_VIRTEX
-
-config STB03xxx
-	bool
-	select IBM405_ERR77
-	select IBM405_ERR51
-
-# 40x errata/workaround config symbols, selected by the CPU models above
-
-# All 405-based cores up until the 405GPR and 405EP have this errata.
-config IBM405_ERR77
-	bool
-
-# All 40x-based cores, up until the 405GPR and 405EP have this errata.
-config IBM405_ERR51
-	bool
-
-#config BIOS_FIXUP
-#	bool
-#	depends on BUBINGA || EP405 || SYCAMORE || WALNUT
-#	default y
-
-#config PPC4xx_DMA
-#	bool "PPC4xx DMA controller support"
-#	depends on 4xx
-
-#config PPC4xx_EDMA
-#	bool
-#	depends on !STB03xxx && PPC4xx_DMA
-#	default y
+config APM8018X
+	bool "APM8018X"
+	depends on 40x
+	select PPC40x_SIMPLE
+	help
+	  This option enables support for the AppliedMicro APM8018X evaluation
+	  board.

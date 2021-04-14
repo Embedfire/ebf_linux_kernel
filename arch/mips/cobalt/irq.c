@@ -45,18 +45,20 @@ asmlinkage void plat_irq_dispatch(void)
 		spurious_interrupt();
 }
 
-static struct irqaction cascade = {
-	.handler	= no_action,
-	.mask		= CPU_MASK_NONE,
-	.name		= "cascade",
-};
-
 void __init arch_init_irq(void)
 {
 	mips_cpu_irq_init();
 	gt641xx_irq_init();
 	init_i8259_irqs();
 
-	setup_irq(GT641XX_CASCADE_IRQ, &cascade);
-	setup_irq(I8259_CASCADE_IRQ, &cascade);
+	if (request_irq(GT641XX_CASCADE_IRQ, no_action, IRQF_NO_THREAD,
+			"cascade", NULL)) {
+		pr_err("Failed to request irq %d (cascade)\n",
+		       GT641XX_CASCADE_IRQ);
+	}
+	if (request_irq(I8259_CASCADE_IRQ, no_action, IRQF_NO_THREAD,
+			"cascade", NULL)) {
+		pr_err("Failed to request irq %d (cascade)\n",
+		       I8259_CASCADE_IRQ);
+	}
 }

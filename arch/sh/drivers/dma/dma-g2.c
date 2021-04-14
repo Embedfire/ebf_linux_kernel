@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/drivers/dma/dma-g2.c
  *
  * G2 bus DMA support
  *
  * Copyright (C) 2003 - 2006  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -170,7 +167,7 @@ static int __init g2_dma_init(void)
 {
 	int ret;
 
-	ret = request_irq(HW_EVENT_G2_DMA, g2_dma_interrupt, IRQF_DISABLED,
+	ret = request_irq(HW_EVENT_G2_DMA, g2_dma_interrupt, 0,
 			  "g2 DMA handler", &g2_dma_info);
 	if (unlikely(ret))
 		return -EINVAL;
@@ -181,14 +178,14 @@ static int __init g2_dma_init(void)
 
 	ret = register_dmac(&g2_dma_info);
 	if (unlikely(ret != 0))
-		free_irq(HW_EVENT_G2_DMA, 0);
+		free_irq(HW_EVENT_G2_DMA, &g2_dma_info);
 
 	return ret;
 }
 
 static void __exit g2_dma_exit(void)
 {
-	free_irq(HW_EVENT_G2_DMA, 0);
+	free_irq(HW_EVENT_G2_DMA, &g2_dma_info);
 	unregister_dmac(&g2_dma_info);
 }
 
@@ -197,4 +194,4 @@ module_exit(g2_dma_exit);
 
 MODULE_AUTHOR("Paul Mundt <lethal@linux-sh.org>");
 MODULE_DESCRIPTION("G2 bus DMA driver");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");

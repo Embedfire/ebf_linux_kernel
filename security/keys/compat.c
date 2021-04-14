@@ -1,29 +1,21 @@
-/* compat.c: 32-bit compatibility syscall for 64-bit systems
+// SPDX-License-Identifier: GPL-2.0-or-later
+/* 32-bit compatibility syscall for 64-bit systems
  *
  * Copyright (C) 2004-5 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/syscalls.h>
 #include <linux/keyctl.h>
 #include <linux/compat.h>
+#include <linux/slab.h>
 #include "internal.h"
 
-/*****************************************************************************/
 /*
- * the key control system call, 32-bit compatibility version for 64-bit archs
- * - this should only be called if the 64-bit arch uses weird pointers in
- *   32-bit mode or doesn't guarantee that the top 32-bits of the argument
- *   registers on taking a 32-bit syscall are zero
- * - if you can, you should call sys_keyctl directly
+ * The key control system call, 32-bit compatibility version for 64-bit archs
  */
-asmlinkage long compat_sys_keyctl(u32 option,
-				  u32 arg2, u32 arg3, u32 arg4, u32 arg5)
+COMPAT_SYSCALL_DEFINE5(keyctl, u32, option,
+		       u32, arg2, u32, arg3, u32, arg4, u32, arg5)
 {
 	switch (option) {
 	case KEYCTL_GET_KEYRING_ID:
@@ -82,8 +74,59 @@ asmlinkage long compat_sys_keyctl(u32 option,
 	case KEYCTL_GET_SECURITY:
 		return keyctl_get_security(arg2, compat_ptr(arg3), arg4);
 
+	case KEYCTL_SESSION_TO_PARENT:
+		return keyctl_session_to_parent();
+
+	case KEYCTL_REJECT:
+		return keyctl_reject_key(arg2, arg3, arg4, arg5);
+
+	case KEYCTL_INSTANTIATE_IOV:
+		return keyctl_instantiate_key_iov(arg2, compat_ptr(arg3), arg4,
+						  arg5);
+
+	case KEYCTL_INVALIDATE:
+		return keyctl_invalidate_key(arg2);
+
+	case KEYCTL_GET_PERSISTENT:
+		return keyctl_get_persistent(arg2, arg3);
+
+	case KEYCTL_DH_COMPUTE:
+		return compat_keyctl_dh_compute(compat_ptr(arg2),
+						compat_ptr(arg3),
+						arg4, compat_ptr(arg5));
+
+	case KEYCTL_RESTRICT_KEYRING:
+		return keyctl_restrict_keyring(arg2, compat_ptr(arg3),
+					       compat_ptr(arg4));
+
+	case KEYCTL_PKEY_QUERY:
+		if (arg3 != 0)
+			return -EINVAL;
+		return keyctl_pkey_query(arg2,
+					 compat_ptr(arg4),
+					 compat_ptr(arg5));
+
+	case KEYCTL_PKEY_ENCRYPT:
+	case KEYCTL_PKEY_DECRYPT:
+	case KEYCTL_PKEY_SIGN:
+		return keyctl_pkey_e_d_s(option,
+					 compat_ptr(arg2), compat_ptr(arg3),
+					 compat_ptr(arg4), compat_ptr(arg5));
+
+	case KEYCTL_PKEY_VERIFY:
+		return keyctl_pkey_verify(compat_ptr(arg2), compat_ptr(arg3),
+					  compat_ptr(arg4), compat_ptr(arg5));
+
+	case KEYCTL_MOVE:
+		return keyctl_keyring_move(arg2, arg3, arg4, arg5);
+
+	case KEYCTL_CAPABILITIES:
+		return keyctl_capabilities(compat_ptr(arg2), arg3);
+
+	case KEYCTL_WATCH_KEY:
+		return keyctl_watch_key(arg2, arg3, arg4);
+
 	default:
 		return -EOPNOTSUPP;
 	}
-
-} /* end compat_sys_keyctl() */
+}

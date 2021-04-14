@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * DSM-G600 board-setup
  *
@@ -16,7 +17,7 @@
  * Author: Rod Whitby <rod@whitby.id.au>
  * Maintainers: http://www.nslu2-linux.org/
  */
-
+#include <linux/gpio.h>
 #include <linux/irq.h>
 #include <linux/jiffies.h>
 #include <linux/timer.h>
@@ -25,13 +26,33 @@
 #include <linux/leds.h>
 #include <linux/reboot.h>
 #include <linux/i2c.h>
-#include <linux/i2c-gpio.h>
+#include <linux/gpio/machine.h>
+
+#include <mach/hardware.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
 #include <asm/mach/time.h>
-#include <asm/gpio.h>
+
+#include "irqs.h"
+
+#define DSMG600_SDA_PIN		5
+#define DSMG600_SCL_PIN		4
+
+/* DSM-G600 Timer Setting */
+#define DSMG600_FREQ		66000000
+
+/* Buttons */
+#define DSMG600_PB_GPIO		15	/* power button */
+#define DSMG600_RB_GPIO		3	/* reset button */
+
+/* Power control */
+#define DSMG600_PO_GPIO		2	/* power off */
+
+/* LEDs */
+#define DSMG600_LED_PWR_GPIO	0
+#define DSMG600_LED_WLAN_GPIO	14
 
 static struct flash_platform_data dsmg600_flash_data = {
 	.map_name		= "cfi_probe",
@@ -50,16 +71,21 @@ static struct platform_device dsmg600_flash = {
 	.resource		= &dsmg600_flash_resource,
 };
 
-static struct i2c_gpio_platform_data dsmg600_i2c_gpio_data = {
-	.sda_pin		= DSMG600_SDA_PIN,
-	.scl_pin		= DSMG600_SCL_PIN,
+static struct gpiod_lookup_table dsmg600_i2c_gpiod_table = {
+	.dev_id		= "i2c-gpio.0",
+	.table		= {
+		GPIO_LOOKUP_IDX("IXP4XX_GPIO_CHIP", DSMG600_SDA_PIN,
+				NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+		GPIO_LOOKUP_IDX("IXP4XX_GPIO_CHIP", DSMG600_SCL_PIN,
+				NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+	},
 };
 
 static struct platform_device dsmg600_i2c_gpio = {
 	.name			= "i2c-gpio",
 	.id			= 0,
 	.dev	 = {
-		.platform_data	= &dsmg600_i2c_gpio_data,
+		.platform_data	= NULL,
 	},
 };
 
@@ -143,11 +169,8 @@ static struct platform_device *dsmg600_devices[] __initdata = {
 
 static void dsmg600_power_off(void)
 {
-	/* enable the pwr cntl gpio */
-	gpio_line_config(DSMG600_PO_GPIO, IXP4XX_GPIO_OUT);
-
-	/* poweroff */
-	gpio_line_set(DSMG600_PO_GPIO, IXP4XX_GPIO_HIGH);
+	/* enable the pwr cntl and drive it high */
+	gpio_direction_output(DSMG600_PO_GPIO, 1);
 }
 
 /* This is used to make sure the power-button pusher is serious.  The button
@@ -158,10 +181,10 @@ static int power_button_countdown;
 /* Must hold the button down for at least this many counts to be processed */
 #define PBUTTON_HOLDDOWN_COUNT 4 /* 2 secs */
 
-static void dsmg600_power_handler(unsigned long data);
-static DEFINE_TIMER(dsmg600_power_timer, dsmg600_power_handler, 0, 0);
+static void dsmg600_power_handler(struct timer_list *unused);
+static DEFINE_TIMER(dsmg600_power_timer, dsmg600_power_handler);
 
-static void dsmg600_power_handler(unsigned long data)
+static void dsmg600_power_handler(struct timer_list *unused)
 {
 	/* This routine is called twice per second to check the
 	 * state of the power button.
@@ -184,7 +207,7 @@ static void dsmg600_power_handler(unsigned long data)
 			ctrl_alt_del();
 
 			/* Change the state of the power LED to "blink" */
-			gpio_line_set(DSMG600_LED_PWR_GPIO, IXP4XX_GPIO_LOW);
+			gpio_set_value(DSMG600_LED_PWR_GPIO, 0);
 		} else {
 			power_button_countdown = PBUTTON_HOLDDOWN_COUNT;
 		}
@@ -210,21 +233,48 @@ static void __init dsmg600_timer_init(void)
     ixp4xx_timer_init();
 }
 
-static struct sys_timer dsmg600_timer = {
-    .init   = dsmg600_timer_init,
-};
+static int __init dsmg600_gpio_init(void)
+{
+	if (!machine_is_dsmg600())
+		return 0;
+
+	gpio_request(DSMG600_RB_GPIO, "reset button");
+	if (request_irq(gpio_to_irq(DSMG600_RB_GPIO), &dsmg600_reset_handler,
+		IRQF_TRIGGER_LOW, "DSM-G600 reset button", NULL) < 0) {
+
+		printk(KERN_DEBUG "Reset Button IRQ %d not available\n",
+			gpio_to_irq(DSMG600_RB_GPIO));
+	}
+
+	/*
+	 * The power button on the D-Link DSM-G600 is on GPIO 15, but
+	 * it cannot handle interrupts on that GPIO line.  So we'll
+	 * have to poll it with a kernel timer.
+	 */
+
+	/* Make sure that the power button GPIO is set up as an input */
+	gpio_request(DSMG600_PB_GPIO, "power button");
+	gpio_direction_input(DSMG600_PB_GPIO);
+	/* Request poweroff GPIO line */
+	gpio_request(DSMG600_PO_GPIO, "power off button");
+
+	/* Set the initial value for the power button IRQ handler */
+	power_button_countdown = PBUTTON_HOLDDOWN_COUNT;
+
+	mod_timer(&dsmg600_power_timer, jiffies + msecs_to_jiffies(500));
+	return 0;
+}
+device_initcall(dsmg600_gpio_init);
 
 static void __init dsmg600_init(void)
 {
 	ixp4xx_sys_init();
 
-	/* Make sure that GPIO14 and GPIO15 are not used as clocks */
-	*IXP4XX_GPIO_GPCLKR = 0;
-
 	dsmg600_flash_resource.start = IXP4XX_EXP_BUS_BASE(0);
 	dsmg600_flash_resource.end =
 		IXP4XX_EXP_BUS_BASE(0) + ixp4xx_exp_bus_size - 1;
 
+	gpiod_add_lookup_table(&dsmg600_i2c_gpiod_table);
 	i2c_register_board_info(0, dsmg600_i2c_board_info,
 				ARRAY_SIZE(dsmg600_i2c_board_info));
 
@@ -237,36 +287,18 @@ static void __init dsmg600_init(void)
 	platform_add_devices(dsmg600_devices, ARRAY_SIZE(dsmg600_devices));
 
 	pm_power_off = dsmg600_power_off;
-
-	if (request_irq(gpio_to_irq(DSMG600_RB_GPIO), &dsmg600_reset_handler,
-		IRQF_DISABLED | IRQF_TRIGGER_LOW,
-		"DSM-G600 reset button", NULL) < 0) {
-
-		printk(KERN_DEBUG "Reset Button IRQ %d not available\n",
-			gpio_to_irq(DSMG600_RB_GPIO));
-	}
-
-	/* The power button on the D-Link DSM-G600 is on GPIO 15, but
-	 * it cannot handle interrupts on that GPIO line.  So we'll
-	 * have to poll it with a kernel timer.
-	 */
-
-	/* Make sure that the power button GPIO is set up as an input */
-	gpio_line_config(DSMG600_PB_GPIO, IXP4XX_GPIO_IN);
-
-	/* Set the initial value for the power button IRQ handler */
-	power_button_countdown = PBUTTON_HOLDDOWN_COUNT;
-
-	mod_timer(&dsmg600_power_timer, jiffies + msecs_to_jiffies(500));
 }
 
 MACHINE_START(DSMG600, "D-Link DSM-G600 RevA")
 	/* Maintainer: www.nslu2-linux.org */
-	.phys_io	= IXP4XX_PERIPHERAL_BASE_PHYS,
-	.io_pg_offst	= ((IXP4XX_PERIPHERAL_BASE_VIRT) >> 18) & 0xFFFC,
-	.boot_params	= 0x00000100,
+	.atag_offset	= 0x100,
 	.map_io		= ixp4xx_map_io,
+	.init_early	= ixp4xx_init_early,
 	.init_irq	= ixp4xx_init_irq,
-	.timer          = &dsmg600_timer,
+	.init_time	= dsmg600_timer_init,
 	.init_machine	= dsmg600_init,
+#if defined(CONFIG_PCI)
+	.dma_zone_size	= SZ_64M,
+#endif
+	.restart	= ixp4xx_restart,
 MACHINE_END

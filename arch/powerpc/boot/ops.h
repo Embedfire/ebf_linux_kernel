@@ -15,7 +15,7 @@
 #include "types.h"
 #include "string.h"
 
-#define	COMMAND_LINE_SIZE	512
+#define	BOOT_COMMAND_LINE_SIZE	2048
 #define	MAX_PATH_LEN		256
 #define	MAX_PROP_LEN		256 /* What should this be? */
 
@@ -30,6 +30,7 @@ struct platform_ops {
 	void *	(*realloc)(void *ptr, unsigned long size);
 	void	(*exit)(void);
 	void *	(*vmlinux_alloc)(unsigned long size);
+	void  	(*kentry)(unsigned long fdt_addr, void *vmlinux_addr);
 };
 extern struct platform_ops platform_ops;
 
@@ -40,6 +41,7 @@ struct dt_ops {
 			const int buflen);
 	int	(*setprop)(const void *phandle, const char *name,
 			const void *buf, const int buflen);
+	int (*del_node)(const void *phandle);
 	void *(*get_parent)(const void *phandle);
 	/* The node must not already exist. */
 	void *(*create_node)(const void *parent, const char *name);
@@ -57,7 +59,7 @@ extern struct dt_ops dt_ops;
 struct console_ops {
 	int	(*open)(void);
 	void	(*write)(const char *buf, int len);
-	void	(*edit_cmdline)(char *buf, int len);
+	void	(*edit_cmdline)(char *buf, int len, unsigned int getline_timeout);
 	void	(*close)(void);
 	void	*data;
 };
@@ -84,10 +86,9 @@ void start(void);
 void fdt_init(void *blob);
 int serial_console_init(void);
 int ns16550_console_init(void *devp, struct serial_console_data *scdp);
-int mpsc_console_init(void *devp, struct serial_console_data *scdp);
 int cpm_console_init(void *devp, struct serial_console_data *scdp);
 int mpc5200_psc_console_init(void *devp, struct serial_console_data *scdp);
-int uartlite_console_init(void *devp, struct serial_console_data *scdp);
+int opal_console_init(void *devp, struct serial_console_data *scdp);
 void *simple_alloc_init(char *base, unsigned long heap_size,
 			unsigned long granularity, unsigned long max_allocs);
 extern void flush_cache(void *, unsigned long);
@@ -124,6 +125,11 @@ static inline int setprop_str(void *devp, const char *name, const char *buf)
 		return dt_ops.setprop(devp, name, buf, strlen(buf) + 1);
 
 	return -1;
+}
+
+static inline int del_node(const void *devp)
+{
+	return dt_ops.del_node ? dt_ops.del_node(devp) : -1;
 }
 
 static inline void *get_parent(const char *devp)
@@ -244,6 +250,8 @@ extern char _initrd_start[];
 extern char _initrd_end[];
 extern char _dtb_start[];
 extern char _dtb_end[];
+extern char _esm_blob_start[];
+extern char _esm_blob_end[];
 
 static inline __attribute__((const))
 int __ilog2_u32(u32 n)
@@ -252,5 +260,8 @@ int __ilog2_u32(u32 n)
 	asm ("cntlzw %0,%1" : "=r" (bit) : "r" (n));
 	return 31 - bit;
 }
+
+long partial_decompress(void *inbuf, unsigned long input_size, void *outbuf,
+	unsigned long output_size, unsigned long skip);
 
 #endif /* _PPC_BOOT_OPS_H_ */

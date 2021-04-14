@@ -1,31 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef __SOUND_SB_H
 #define __SOUND_SB_H
 
 /*
  *  Header file for SoundBlaster cards
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
-#include "pcm.h"
-#include "rawmidi.h"
+#include <sound/pcm.h>
+#include <sound/rawmidi.h>
 #include <linux/interrupt.h>
-#include <asm/io.h>
+#include <linux/io.h>
 
 enum sb_hw_type {
 	SB_HW_AUTO,
@@ -33,6 +18,7 @@ enum sb_hw_type {
 	SB_HW_20,
 	SB_HW_201,
 	SB_HW_PRO,
+	SB_HW_JAZZ16,		/* Media Vision Jazz16 */
 	SB_HW_16,
 	SB_HW_16CSP,		/* SB16 with CSP chip */
 	SB_HW_ALS100,		/* Avance Logic ALS100 chip */
@@ -240,11 +226,16 @@ struct snd_sb {
 #define SB_DT019X_CAP_MAIN	0x07
 
 #define SB_ALS4000_MONO_IO_CTRL	0x4b
+#define SB_ALS4000_OUT_MIXER_CTRL_2	0x4c
 #define SB_ALS4000_MIC_IN_GAIN	0x4d
+#define SB_ALS4000_ANALOG_REFRNC_VOLT_CTRL 0x4e
 #define SB_ALS4000_FMDAC	0x4f
 #define SB_ALS4000_3D_SND_FX	0x50
 #define SB_ALS4000_3D_TIME_DELAY	0x51
 #define SB_ALS4000_3D_AUTO_MUTE	0x52
+#define SB_ALS4000_ANALOG_BLOCK_CTRL 0x53
+#define SB_ALS4000_3D_DELAYLINE_PATTERN 0x54
+#define SB_ALS4000_CR3_CONFIGURATION	0xc3 /* bit 7 is Digital Loop Enable */
 #define SB_ALS4000_QSOUND	0xdb
 
 /* IRQ setting bitmap */
@@ -257,6 +248,7 @@ struct snd_sb {
 #define SB_IRQTYPE_8BIT		0x01
 #define SB_IRQTYPE_16BIT	0x02
 #define SB_IRQTYPE_MPUIN	0x04
+#define ALS4K_IRQTYPE_CR1E_DMA	0x20
 
 /* DMA setting bitmap */
 #define SB_DMASETUP_DMA0	0x01
@@ -301,7 +293,7 @@ void snd_sbmixer_resume(struct snd_sb *chip);
 #endif
 
 /* sb8_init.c */
-int snd_sb8dsp_pcm(struct snd_sb *chip, int device, struct snd_pcm ** rpcm);
+int snd_sb8dsp_pcm(struct snd_sb *chip, int device);
 /* sb8.c */
 irqreturn_t snd_sb8dsp_interrupt(struct snd_sb *chip);
 int snd_sb8_playback_open(struct snd_pcm_substream *substream);
@@ -310,10 +302,10 @@ int snd_sb8_playback_close(struct snd_pcm_substream *substream);
 int snd_sb8_capture_close(struct snd_pcm_substream *substream);
 /* midi8.c */
 irqreturn_t snd_sb8dsp_midi_interrupt(struct snd_sb *chip);
-int snd_sb8dsp_midi(struct snd_sb *chip, int device, struct snd_rawmidi ** rrawmidi);
+int snd_sb8dsp_midi(struct snd_sb *chip, int device);
 
 /* sb16_init.c */
-int snd_sb16dsp_pcm(struct snd_sb *chip, int device, struct snd_pcm ** rpcm);
+int snd_sb16dsp_pcm(struct snd_sb *chip, int device);
 const struct snd_pcm_ops *snd_sb16dsp_get_pcm_ops(int direction);
 int snd_sb16dsp_configure(struct snd_sb *chip);
 /* sb16.c */
@@ -325,7 +317,8 @@ enum {
 	SB_MIX_DOUBLE,
 	SB_MIX_INPUT_SW,
 	SB_MIX_CAPTURE_PRO,
-	SB_MIX_CAPTURE_DT019X
+	SB_MIX_CAPTURE_DT019X,
+	SB_MIX_MONO_CAPTURE_ALS4K
 };
 
 #define SB_MIXVAL_DOUBLE(left_reg, right_reg, left_shift, right_shift, mask) \

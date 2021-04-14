@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/arm/mach-ixp4xx/gateway7001-setup.c
  *
@@ -17,7 +18,6 @@
 #include <linux/serial.h>
 #include <linux/tty.h>
 #include <linux/serial_8250.h>
-#include <linux/slab.h>
 
 #include <asm/types.h>
 #include <asm/setup.h>
@@ -27,6 +27,8 @@
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
+
+#include "irqs.h"
 
 static struct flash_platform_data gateway7001_flash_data = {
 	.map_name	= "cfi_probe",
@@ -97,12 +99,15 @@ static void __init gateway7001_init(void)
 #ifdef CONFIG_MACH_GATEWAY7001
 MACHINE_START(GATEWAY7001, "Gateway 7001 AP")
 	/* Maintainer: Imre Kaloz <kaloz@openwrt.org> */
-	.phys_io	= IXP4XX_PERIPHERAL_BASE_PHYS,
-	.io_pg_offst	= ((IXP4XX_PERIPHERAL_BASE_VIRT) >> 18) & 0xfffc,
 	.map_io		= ixp4xx_map_io,
+	.init_early	= ixp4xx_init_early,
 	.init_irq	= ixp4xx_init_irq,
-	.timer		= &ixp4xx_timer,
-	.boot_params	= 0x0100,
+	.init_time	= ixp4xx_timer_init,
+	.atag_offset	= 0x100,
 	.init_machine	= gateway7001_init,
+#if defined(CONFIG_PCI)
+	.dma_zone_size	= SZ_64M,
+#endif
+	.restart	= ixp4xx_restart,
 MACHINE_END
 #endif

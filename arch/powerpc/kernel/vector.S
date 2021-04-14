@@ -1,5 +1,142 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#include <asm/processor.h>
 #include <asm/ppc_asm.h>
 #include <asm/reg.h>
+#include <asm/asm-offsets.h>
+#include <asm/cputable.h>
+#include <asm/thread_info.h>
+#include <asm/page.h>
+#include <asm/ptrace.h>
+#include <asm/export.h>
+#include <asm/asm-compat.h>
+
+/*
+ * Load state from memory into VMX registers including VSCR.
+ * Assumes the caller has enabled VMX in the MSR.
+ */
+_GLOBAL(load_vr_state)
+	li	r4,VRSTATE_VSCR
+	lvx	v0,r4,r3
+	mtvscr	v0
+	REST_32VRS(0,r4,r3)
+	blr
+EXPORT_SYMBOL(load_vr_state)
+_ASM_NOKPROBE_SYMBOL(load_vr_state); /* used by restore_math */
+
+/*
+ * Store VMX state into memory, including VSCR.
+ * Assumes the caller has enabled VMX in the MSR.
+ */
+_GLOBAL(store_vr_state)
+	SAVE_32VRS(0, r4, r3)
+	mfvscr	v0
+	li	r4, VRSTATE_VSCR
+	stvx	v0, r4, r3
+	blr
+EXPORT_SYMBOL(store_vr_state)
+
+/*
+ * Disable VMX for the task which had it previously,
+ * and save its vector registers in its thread_struct.
+ * Enables the VMX for use in the kernel on return.
+ * On SMP we know the VMX is free, since we give it up every
+ * switch (ie, no lazy save of the vector registers).
+ *
+ * Note that on 32-bit this can only use registers that will be
+ * restored by fast_exception_return, i.e. r3 - r6, r10 and r11.
+ */
+_GLOBAL(load_up_altivec)
+	mfmsr	r5			/* grab the current MSR */
+	oris	r5,r5,MSR_VEC@h
+	MTMSRD(r5)			/* enable use of AltiVec now */
+	isync
+
+	/*
+	 * While userspace in general ignores VRSAVE, glibc uses it as a boolean
+	 * to optimise userspace context save/restore. Whenever we take an
+	 * altivec unavailable exception we must set VRSAVE to something non
+	 * zero. Set it to all 1s. See also the programming note in the ISA.
+	 */
+	mfspr	r4,SPRN_VRSAVE
+	cmpwi	0,r4,0
+	bne+	1f
+	li	r4,-1
+	mtspr	SPRN_VRSAVE,r4
+1:
+	/* enable use of VMX after return */
+#ifdef CONFIG_PPC32
+	mfspr	r5,SPRN_SPRG_THREAD		/* current task's THREAD (phys) */
+	oris	r9,r9,MSR_VEC@h
+#ifdef CONFIG_VMAP_STACK
+	tovirt(r5, r5)
+#endif
+#else
+	ld	r4,PACACURRENT(r13)
+	addi	r5,r4,THREAD		/* Get THREAD */
+	oris	r12,r12,MSR_VEC@h
+	std	r12,_MSR(r1)
+#endif
+	li	r4,1
+	stb	r4,THREAD_LOAD_VEC(r5)
+	addi	r6,r5,THREAD_VRSTATE
+	li	r4,1
+	li	r10,VRSTATE_VSCR
+	stw	r4,THREAD_USED_VR(r5)
+	lvx	v0,r10,r6
+	mtvscr	v0
+	REST_32VRS(0,r4,r6)
+	/* restore registers and return */
+	blr
+_ASM_NOKPROBE_SYMBOL(load_up_altivec)
+
+/*
+ * save_altivec(tsk)
+ * Save the vector registers to its thread_struct
+ */
+_GLOBAL(save_altivec)
+	addi	r3,r3,THREAD		/* want THREAD of task */
+	PPC_LL	r7,THREAD_VRSAVEAREA(r3)
+	PPC_LL	r5,PT_REGS(r3)
+	PPC_LCMPI	0,r7,0
+	bne	2f
+	addi	r7,r3,THREAD_VRSTATE
+2:	SAVE_32VRS(0,r4,r7)
+	mfvscr	v0
+	li	r4,VRSTATE_VSCR
+	stvx	v0,r4,r7
+	blr
+
+#ifdef CONFIG_VSX
+
+#ifdef CONFIG_PPC32
+#error This asm code isn't ready for 32-bit kernels
+#endif
+
+/*
+ * load_up_vsx(unused, unused, tsk)
+ * Disable VSX for the task which had it previously,
+ * and save its vector registers in its thread_struct.
+ * Reuse the fp and vsx saves, but first check to see if they have
+ * been saved already.
+ */
+_GLOBAL(load_up_vsx)
+/* Load FP and VSX registers if they haven't been done yet */
+	andi.	r5,r12,MSR_FP
+	beql+	load_up_fpu		/* skip if already loaded */
+	andis.	r5,r12,MSR_VEC@h
+	beql+	load_up_altivec		/* skip if already loaded */
+
+	ld	r4,PACACURRENT(r13)
+	addi	r4,r4,THREAD		/* Get THREAD */
+	li	r6,1
+	stw	r6,THREAD_USED_VSR(r4) /* ... also set thread used vsr */
+	/* enable use of VSX after return */
+	oris	r12,r12,MSR_VSX@h
+	std	r12,_MSR(r1)
+	b	fast_interrupt_return
+
+#endif /* CONFIG_VSX */
+
 
 /*
  * The routines below are in assembler so we can closely control the

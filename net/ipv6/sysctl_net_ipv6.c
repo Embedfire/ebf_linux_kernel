@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * sysctl_net_ipv6.c: sysctl interface to net IPV6 subsystem.
  *
@@ -9,90 +10,239 @@
 #include <linux/sysctl.h>
 #include <linux/in6.h>
 #include <linux/ipv6.h>
+#include <linux/slab.h>
+#include <linux/export.h>
 #include <net/ndisc.h>
 #include <net/ipv6.h>
 #include <net/addrconf.h>
 #include <net/inet_frag.h>
+#include <net/netevent.h>
+#ifdef CONFIG_NETLABEL
+#include <net/calipso.h>
+#endif
 
-static ctl_table ipv6_table_template[] = {
+static int two = 2;
+static int flowlabel_reflect_max = 0x7;
+static int auto_flowlabels_min;
+static int auto_flowlabels_max = IP6_AUTO_FLOW_LABEL_MAX;
+
+static int proc_rt6_multipath_hash_policy(struct ctl_table *table, int write,
+					  void *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct net *net;
+	int ret;
+
+	net = container_of(table->data, struct net,
+			   ipv6.sysctl.multipath_hash_policy);
+	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+	if (write && ret == 0)
+		call_netevent_notifiers(NETEVENT_IPV6_MPATH_HASH_UPDATE, net);
+
+	return ret;
+}
+
+static struct ctl_table ipv6_table_template[] = {
 	{
-		.ctl_name	= NET_IPV6_ROUTE,
-		.procname	= "route",
-		.maxlen		= 0,
-		.mode		= 0555,
-		.child		= ipv6_route_table_template
-	},
-	{
-		.ctl_name	= NET_IPV6_ICMP,
-		.procname	= "icmp",
-		.maxlen		= 0,
-		.mode		= 0555,
-		.child		= ipv6_icmp_table_template
-	},
-	{
-		.ctl_name	= NET_IPV6_BINDV6ONLY,
 		.procname	= "bindv6only",
 		.data		= &init_net.ipv6.sysctl.bindv6only,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
+		.proc_handler	= proc_dointvec
 	},
-	{ .ctl_name = 0 }
+	{
+		.procname	= "anycast_src_echo_reply",
+		.data		= &init_net.ipv6.sysctl.anycast_src_echo_reply,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "flowlabel_consistency",
+		.data		= &init_net.ipv6.sysctl.flowlabel_consistency,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "auto_flowlabels",
+		.data		= &init_net.ipv6.sysctl.auto_flowlabels,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &auto_flowlabels_min,
+		.extra2		= &auto_flowlabels_max
+	},
+	{
+		.procname	= "fwmark_reflect",
+		.data		= &init_net.ipv6.sysctl.fwmark_reflect,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "idgen_retries",
+		.data		= &init_net.ipv6.sysctl.idgen_retries,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "idgen_delay",
+		.data		= &init_net.ipv6.sysctl.idgen_delay,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_jiffies,
+	},
+	{
+		.procname	= "flowlabel_state_ranges",
+		.data		= &init_net.ipv6.sysctl.flowlabel_state_ranges,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "ip_nonlocal_bind",
+		.data		= &init_net.ipv6.sysctl.ip_nonlocal_bind,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "flowlabel_reflect",
+		.data		= &init_net.ipv6.sysctl.flowlabel_reflect,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= &flowlabel_reflect_max,
+	},
+	{
+		.procname	= "max_dst_opts_number",
+		.data		= &init_net.ipv6.sysctl.max_dst_opts_cnt,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "max_hbh_opts_number",
+		.data		= &init_net.ipv6.sysctl.max_hbh_opts_cnt,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "max_dst_opts_length",
+		.data		= &init_net.ipv6.sysctl.max_dst_opts_len,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "max_hbh_length",
+		.data		= &init_net.ipv6.sysctl.max_hbh_opts_len,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "fib_multipath_hash_policy",
+		.data		= &init_net.ipv6.sysctl.multipath_hash_policy,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler   = proc_rt6_multipath_hash_policy,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= &two,
+	},
+	{
+		.procname	= "seg6_flowlabel",
+		.data		= &init_net.ipv6.sysctl.seg6_flowlabel,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{ }
 };
 
-static ctl_table ipv6_table[] = {
+static struct ctl_table ipv6_rotable[] = {
 	{
-		.ctl_name	= NET_IPV6_MLD_MAX_MSF,
 		.procname	= "mld_max_msf",
 		.data		= &sysctl_mld_max_msf,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
+		.proc_handler	= proc_dointvec
 	},
-	{ .ctl_name = 0 }
+	{
+		.procname	= "mld_qrv",
+		.data		= &sysctl_mld_qrv,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE
+	},
+#ifdef CONFIG_NETLABEL
+	{
+		.procname	= "calipso_cache_enable",
+		.data		= &calipso_cache_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "calipso_cache_bucket_size",
+		.data		= &calipso_cache_bucketsize,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+#endif /* CONFIG_NETLABEL */
+	{ }
 };
 
-struct ctl_path net_ipv6_ctl_path[] = {
-	{ .procname = "net", .ctl_name = CTL_NET, },
-	{ .procname = "ipv6", .ctl_name = NET_IPV6, },
-	{ },
-};
-EXPORT_SYMBOL_GPL(net_ipv6_ctl_path);
-
-static int ipv6_sysctl_net_init(struct net *net)
+static int __net_init ipv6_sysctl_net_init(struct net *net)
 {
 	struct ctl_table *ipv6_table;
 	struct ctl_table *ipv6_route_table;
 	struct ctl_table *ipv6_icmp_table;
-	int err;
+	int err, i;
 
 	err = -ENOMEM;
 	ipv6_table = kmemdup(ipv6_table_template, sizeof(ipv6_table_template),
 			     GFP_KERNEL);
 	if (!ipv6_table)
 		goto out;
+	/* Update the variables to point into the current struct net */
+	for (i = 0; i < ARRAY_SIZE(ipv6_table_template) - 1; i++)
+		ipv6_table[i].data += (void *)net - (void *)&init_net;
 
 	ipv6_route_table = ipv6_route_sysctl_init(net);
 	if (!ipv6_route_table)
 		goto out_ipv6_table;
-	ipv6_table[0].child = ipv6_route_table;
 
 	ipv6_icmp_table = ipv6_icmp_sysctl_init(net);
 	if (!ipv6_icmp_table)
 		goto out_ipv6_route_table;
-	ipv6_table[1].child = ipv6_icmp_table;
 
-	ipv6_table[2].data = &net->ipv6.sysctl.bindv6only;
-
-	net->ipv6.sysctl.table = register_net_sysctl_table(net, net_ipv6_ctl_path,
-							   ipv6_table);
-	if (!net->ipv6.sysctl.table)
+	net->ipv6.sysctl.hdr = register_net_sysctl(net, "net/ipv6", ipv6_table);
+	if (!net->ipv6.sysctl.hdr)
 		goto out_ipv6_icmp_table;
+
+	net->ipv6.sysctl.route_hdr =
+		register_net_sysctl(net, "net/ipv6/route", ipv6_route_table);
+	if (!net->ipv6.sysctl.route_hdr)
+		goto out_unregister_ipv6_table;
+
+	net->ipv6.sysctl.icmp_hdr =
+		register_net_sysctl(net, "net/ipv6/icmp", ipv6_icmp_table);
+	if (!net->ipv6.sysctl.icmp_hdr)
+		goto out_unregister_route_table;
 
 	err = 0;
 out:
 	return err;
-
+out_unregister_route_table:
+	unregister_net_sysctl_table(net->ipv6.sysctl.route_hdr);
+out_unregister_ipv6_table:
+	unregister_net_sysctl_table(net->ipv6.sysctl.hdr);
 out_ipv6_icmp_table:
 	kfree(ipv6_icmp_table);
 out_ipv6_route_table:
@@ -102,17 +252,19 @@ out_ipv6_table:
 	goto out;
 }
 
-static void ipv6_sysctl_net_exit(struct net *net)
+static void __net_exit ipv6_sysctl_net_exit(struct net *net)
 {
 	struct ctl_table *ipv6_table;
 	struct ctl_table *ipv6_route_table;
 	struct ctl_table *ipv6_icmp_table;
 
-	ipv6_table = net->ipv6.sysctl.table->ctl_table_arg;
-	ipv6_route_table = ipv6_table[0].child;
-	ipv6_icmp_table = ipv6_table[1].child;
+	ipv6_table = net->ipv6.sysctl.hdr->ctl_table_arg;
+	ipv6_route_table = net->ipv6.sysctl.route_hdr->ctl_table_arg;
+	ipv6_icmp_table = net->ipv6.sysctl.icmp_hdr->ctl_table_arg;
 
-	unregister_net_sysctl_table(net->ipv6.sysctl.table);
+	unregister_net_sysctl_table(net->ipv6.sysctl.icmp_hdr);
+	unregister_net_sysctl_table(net->ipv6.sysctl.route_hdr);
+	unregister_net_sysctl_table(net->ipv6.sysctl.hdr);
 
 	kfree(ipv6_table);
 	kfree(ipv6_route_table);
@@ -128,10 +280,10 @@ static struct ctl_table_header *ip6_header;
 
 int ipv6_sysctl_register(void)
 {
-	int err = -ENOMEM;;
+	int err = -ENOMEM;
 
-	ip6_header = register_net_sysctl_rotable(net_ipv6_ctl_path, ipv6_table);
-	if (ip6_header == NULL)
+	ip6_header = register_net_sysctl(&init_net, "net/ipv6", ipv6_rotable);
+	if (!ip6_header)
 		goto out;
 
 	err = register_pernet_subsys(&ipv6_sysctl_net_ops);
@@ -149,20 +301,4 @@ void ipv6_sysctl_unregister(void)
 {
 	unregister_net_sysctl_table(ip6_header);
 	unregister_pernet_subsys(&ipv6_sysctl_net_ops);
-}
-
-static struct ctl_table_header *ip6_base;
-
-int ipv6_static_sysctl_register(void)
-{
-	static struct ctl_table empty[1];
-	ip6_base = register_sysctl_paths(net_ipv6_ctl_path, empty);
-	if (ip6_base == NULL)
-		return -ENOMEM;
-	return 0;
-}
-
-void ipv6_static_sysctl_unregister(void)
-{
-	unregister_net_sysctl_table(ip6_base);
 }

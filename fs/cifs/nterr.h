@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
    Unix SMB/Netbios implementation.
    Version 1.9.
@@ -7,19 +8,6 @@
    Copyright (C) Luke Kenneth Casson Leighton 1996-2000
    Copyright (C) Paul Ashton                  1998-2000
 
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; either version 2 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
 
@@ -35,21 +23,28 @@ struct nt_err_code_struct {
 extern const struct nt_err_code_struct nt_errs[];
 
 /* Win32 Status codes. */
+#define NT_STATUS_MORE_ENTRIES         0x0105
+#define NT_ERROR_INVALID_PARAMETER     0x0057
+#define NT_ERROR_INSUFFICIENT_BUFFER   0x007a
+#define NT_STATUS_1804                 0x070c
+#define NT_STATUS_NOTIFY_ENUM_DIR      0x010c
 
-#define STATUS_BUFFER_OVERFLOW            0x80000005
-#define STATUS_MORE_ENTRIES               0x0105
-#define ERROR_INVALID_PARAMETER		  0x0057
-#define ERROR_INSUFFICIENT_BUFFER	  0x007a
-#define STATUS_1804	                  0x070c
-#define STATUS_NOTIFY_ENUM_DIR            0x010c
+/*
+ * Win32 Error codes extracted using a loop in smbclient then printing a netmon
+ * sniff to a file.
+ */
 
-/* Win32 Error codes extracted using a loop in smbclient then printing a
-   netmon sniff to a file. */
-
-#define NT_STATUS_OK 0x0000
-#define STATUS_SOME_UNMAPPED       0x0107
-#define STATUS_BUFFER_OVERFLOW     0x80000005
+#define NT_STATUS_OK                   0x0000
+#define NT_STATUS_SOME_UNMAPPED        0x0107
+#define NT_STATUS_BUFFER_OVERFLOW  0x80000005
 #define NT_STATUS_NO_MORE_ENTRIES  0x8000001a
+#define NT_STATUS_MEDIA_CHANGED    0x8000001c
+#define NT_STATUS_END_OF_MEDIA     0x8000001e
+#define NT_STATUS_MEDIA_CHECK      0x80000020
+#define NT_STATUS_NO_DATA_DETECTED 0x8000001c
+#define NT_STATUS_STOPPED_ON_SYMLINK 0x8000002d
+#define NT_STATUS_DEVICE_REQUIRES_CLEANING 0x80000288
+#define NT_STATUS_DEVICE_DOOR_OPEN 0x80000288
 #define NT_STATUS_UNSUCCESSFUL 0xC0000000 | 0x0001
 #define NT_STATUS_NOT_IMPLEMENTED 0xC0000000 | 0x0002
 #define NT_STATUS_INVALID_INFO_CLASS 0xC0000000 | 0x0003

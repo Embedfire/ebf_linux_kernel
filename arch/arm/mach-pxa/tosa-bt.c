@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Bluetooth built-in chip control
  *
  * Copyright (c) 2008 Dmitry Baryshkov
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/kernel.h>
@@ -16,7 +12,7 @@
 #include <linux/delay.h>
 #include <linux/rfkill.h>
 
-#include <mach/tosa_bt.h>
+#include "tosa_bt.h"
 
 static void tosa_bt_on(struct tosa_bt_data *data)
 {
@@ -35,20 +31,24 @@ static void tosa_bt_off(struct tosa_bt_data *data)
 	gpio_set_value(data->gpio_reset, 0);
 }
 
-static int tosa_bt_toggle_radio(void *data, enum rfkill_state state)
+static int tosa_bt_set_block(void *data, bool blocked)
 {
-	pr_info("BT_RADIO going: %s\n",
-			state == RFKILL_STATE_ON ? "on" : "off");
+	pr_info("BT_RADIO going: %s\n", blocked ? "off" : "on");
 
-	if (state == RFKILL_STATE_ON) {
+	if (!blocked) {
 		pr_info("TOSA_BT: going ON\n");
 		tosa_bt_on(data);
 	} else {
 		pr_info("TOSA_BT: going OFF\n");
 		tosa_bt_off(data);
 	}
+
 	return 0;
 }
+
+static const struct rfkill_ops tosa_bt_rfkill_ops = {
+	.set_block = tosa_bt_set_block,
+};
 
 static int tosa_bt_probe(struct platform_device *dev)
 {
@@ -70,18 +70,12 @@ static int tosa_bt_probe(struct platform_device *dev)
 	if (rc)
 		goto err_pwr_dir;
 
-	rfk = rfkill_allocate(&dev->dev, RFKILL_TYPE_BLUETOOTH);
+	rfk = rfkill_alloc("tosa-bt", &dev->dev, RFKILL_TYPE_BLUETOOTH,
+			   &tosa_bt_rfkill_ops, data);
 	if (!rfk) {
 		rc = -ENOMEM;
 		goto err_rfk_alloc;
 	}
-
-	rfk->name = "tosa-bt";
-	rfk->toggle_radio = tosa_bt_toggle_radio;
-	rfk->data = data;
-#ifdef CONFIG_RFKILL_LEDS
-	rfk->led_trigger.name = "tosa-bt";
-#endif
 
 	rc = rfkill_register(rfk);
 	if (rc)
@@ -92,9 +86,7 @@ static int tosa_bt_probe(struct platform_device *dev)
 	return 0;
 
 err_rfkill:
-	if (rfk)
-		rfkill_free(rfk);
-	rfk = NULL;
+	rfkill_destroy(rfk);
 err_rfk_alloc:
 	tosa_bt_off(data);
 err_pwr_dir:
@@ -106,15 +98,17 @@ err_reset:
 	return rc;
 }
 
-static int __devexit tosa_bt_remove(struct platform_device *dev)
+static int tosa_bt_remove(struct platform_device *dev)
 {
 	struct tosa_bt_data *data = dev->dev.platform_data;
 	struct rfkill *rfk = platform_get_drvdata(dev);
 
 	platform_set_drvdata(dev, NULL);
 
-	if (rfk)
+	if (rfk) {
 		rfkill_unregister(rfk);
+		rfkill_destroy(rfk);
+	}
 	rfk = NULL;
 
 	tosa_bt_off(data);
@@ -127,24 +121,14 @@ static int __devexit tosa_bt_remove(struct platform_device *dev)
 
 static struct platform_driver tosa_bt_driver = {
 	.probe = tosa_bt_probe,
-	.remove = __devexit_p(tosa_bt_remove),
+	.remove = tosa_bt_remove,
 
 	.driver = {
 		.name = "tosa-bt",
-		.owner = THIS_MODULE,
 	},
 };
+module_platform_driver(tosa_bt_driver);
 
-
-static int __init tosa_bt_init(void)
-{
-	return platform_driver_register(&tosa_bt_driver);
-}
-
-static void __exit tosa_bt_exit(void)
-{
-	platform_driver_unregister(&tosa_bt_driver);
-}
-
-module_init(tosa_bt_init);
-module_exit(tosa_bt_exit);
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Dmitry Baryshkov");
+MODULE_DESCRIPTION("Bluetooth built-in chip control");

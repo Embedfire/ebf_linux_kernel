@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * TLB support routines.
  *
@@ -21,11 +22,11 @@
 #include <linux/sched.h>
 #include <linux/smp.h>
 #include <linux/mm.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
+#include <linux/slab.h>
 
 #include <asm/delay.h>
 #include <asm/mmu_context.h>
-#include <asm/pgalloc.h>
 #include <asm/pal.h>
 #include <asm/tlbflush.h>
 #include <asm/dma.h>
@@ -34,7 +35,7 @@
 #include <asm/tlb.h>
 
 static struct {
-	unsigned long mask;	/* mask of supported purge page-sizes */
+	u64 mask;		/* mask of supported purge page-sizes */
 	unsigned long max_bits;	/* log2 of largest supported purge page-size */
 } purge;
 
@@ -48,7 +49,7 @@ DEFINE_PER_CPU(u8, ia64_need_tlb_flush);
 DEFINE_PER_CPU(u8, ia64_tr_num);  /*Number of TR slots in current processor*/
 DEFINE_PER_CPU(u8, ia64_tr_used); /*Max Slot number used by kernel*/
 
-struct ia64_tr_entry __per_cpu_idtrs[NR_CPUS][2][IA64_TR_ALLOC_MAX];
+struct ia64_tr_entry *ia64_idtrs[NR_CPUS];
 
 /*
  * Initializes the ia64_ctx.bitmap array based on max_ctx+1.
@@ -58,8 +59,16 @@ struct ia64_tr_entry __per_cpu_idtrs[NR_CPUS][2][IA64_TR_ALLOC_MAX];
 void __init
 mmu_context_init (void)
 {
-	ia64_ctx.bitmap = alloc_bootmem((ia64_ctx.max_ctx+1)>>3);
-	ia64_ctx.flushmap = alloc_bootmem((ia64_ctx.max_ctx+1)>>3);
+	ia64_ctx.bitmap = memblock_alloc((ia64_ctx.max_ctx + 1) >> 3,
+					 SMP_CACHE_BYTES);
+	if (!ia64_ctx.bitmap)
+		panic("%s: Failed to allocate %u bytes\n", __func__,
+		      (ia64_ctx.max_ctx + 1) >> 3);
+	ia64_ctx.flushmap = memblock_alloc((ia64_ctx.max_ctx + 1) >> 3,
+					   SMP_CACHE_BYTES);
+	if (!ia64_ctx.flushmap)
+		panic("%s: Failed to allocate %u bytes\n", __func__,
+		      (ia64_ctx.max_ctx + 1) >> 3);
 }
 
 /*
@@ -100,24 +109,36 @@ wrap_mmu_context (struct mm_struct *mm)
  * this primitive it can be moved up to a spinaphore.h header.
  */
 struct spinaphore {
-	atomic_t	cur;
+	unsigned long	ticket;
+	unsigned long	serve;
 };
 
 static inline void spinaphore_init(struct spinaphore *ss, int val)
 {
-	atomic_set(&ss->cur, val);
+	ss->ticket = 0;
+	ss->serve = val;
 }
 
 static inline void down_spin(struct spinaphore *ss)
 {
-	while (unlikely(!atomic_add_unless(&ss->cur, -1, 0)))
-		while (atomic_read(&ss->cur) == 0)
-			cpu_relax();
+	unsigned long t = ia64_fetchadd(1, &ss->ticket, acq), serve;
+
+	if (time_before(t, ss->serve))
+		return;
+
+	ia64_invala();
+
+	for (;;) {
+		asm volatile ("ld8.c.nc %0=[%1]" : "=r"(serve) : "r"(&ss->serve) : "memory");
+		if (time_before(t, serve))
+			return;
+		cpu_relax();
+	}
 }
 
 static inline void up_spin(struct spinaphore *ss)
 {
-	atomic_add(1, &ss->cur);
+	ia64_fetchadd(1, &ss->serve, rel);
 }
 
 static struct spinaphore ptcg_sem;
@@ -223,7 +244,8 @@ resetsema:
 	spinaphore_init(&ptcg_sem, max_purges);
 }
 
-void
+#ifdef CONFIG_SMP
+static void
 ia64_global_tlb_purge (struct mm_struct *mm, unsigned long start,
 		       unsigned long end, unsigned long nbits)
 {
@@ -260,6 +282,7 @@ ia64_global_tlb_purge (struct mm_struct *mm, unsigned long start,
                 activate_context(active_mm);
         }
 }
+#endif /* CONFIG_SMP */
 
 void
 local_flush_tlb_all (void)
@@ -284,8 +307,8 @@ local_flush_tlb_all (void)
 	ia64_srlz_i();			/* srlz.i implies srlz.d */
 }
 
-void
-flush_tlb_range (struct vm_area_struct *vma, unsigned long start,
+static void
+__flush_tlb_range (struct vm_area_struct *vma, unsigned long start,
 		 unsigned long end)
 {
 	struct mm_struct *mm = vma->vm_mm;
@@ -309,8 +332,8 @@ flush_tlb_range (struct vm_area_struct *vma, unsigned long start,
 
 	preempt_disable();
 #ifdef CONFIG_SMP
-	if (mm != current->active_mm || cpus_weight(mm->cpu_vm_mask) != 1) {
-		platform_global_tlb_purge(mm, start, end, nbits);
+	if (mm != current->active_mm || cpumask_weight(mm_cpumask(mm)) != 1) {
+		ia64_global_tlb_purge(mm, start, end, nbits);
 		preempt_enable();
 		return;
 	}
@@ -322,13 +345,31 @@ flush_tlb_range (struct vm_area_struct *vma, unsigned long start,
 	preempt_enable();
 	ia64_srlz_i();			/* srlz.i implies srlz.d */
 }
+
+void flush_tlb_range(struct vm_area_struct *vma,
+		unsigned long start, unsigned long end)
+{
+	if (unlikely(end - start >= 1024*1024*1024*1024UL
+			|| REGION_NUMBER(start) != REGION_NUMBER(end - 1))) {
+		/*
+		 * If we flush more than a tera-byte or across regions, we're
+		 * probably better off just flushing the entire TLB(s).  This
+		 * should be very rare and is not worth optimizing for.
+		 */
+		flush_tlb_all();
+	} else {
+		/* flush the address range from the tlb */
+		__flush_tlb_range(vma, start, end);
+		/* flush the virt. page-table area mapping the addr range */
+		__flush_tlb_range(vma, ia64_thash(start), ia64_thash(end));
+	}
+}
 EXPORT_SYMBOL(flush_tlb_range);
 
-void __devinit
-ia64_tlb_init (void)
+void ia64_tlb_init(void)
 {
-	ia64_ptce_info_t uninitialized_var(ptce_info); /* GCC be quiet */
-	unsigned long tr_pgbits;
+	ia64_ptce_info_t ptce_info;
+	u64 tr_pgbits;
 	long status;
 	pal_vm_info_1_u_t vm_info_1;
 	pal_vm_info_2_u_t vm_info_2;
@@ -362,9 +403,13 @@ ia64_tlb_init (void)
 		per_cpu(ia64_tr_num, cpu) =
 				vm_info_1.pal_vm_info_1_s.max_dtr_entry+1;
 	if (per_cpu(ia64_tr_num, cpu) > IA64_TR_ALLOC_MAX) {
+		static int justonce = 1;
 		per_cpu(ia64_tr_num, cpu) = IA64_TR_ALLOC_MAX;
-		printk(KERN_DEBUG "TR register number exceeds IA64_TR_ALLOC_MAX!"
-			"IA64_TR_ALLOC_MAX should be extended\n");
+		if (justonce) {
+			justonce = 0;
+			printk(KERN_DEBUG "TR register number exceeds "
+			       "IA64_TR_ALLOC_MAX!\n");
+		}
 	}
 }
 
@@ -413,28 +458,35 @@ int ia64_itr_entry(u64 target_mask, u64 va, u64 pte, u64 log_size)
 	struct ia64_tr_entry *p;
 	int cpu = smp_processor_id();
 
+	if (!ia64_idtrs[cpu]) {
+		ia64_idtrs[cpu] = kmalloc_array(2 * IA64_TR_ALLOC_MAX,
+						sizeof(struct ia64_tr_entry),
+						GFP_KERNEL);
+		if (!ia64_idtrs[cpu])
+			return -ENOMEM;
+	}
 	r = -EINVAL;
 	/*Check overlap with existing TR entries*/
 	if (target_mask & 0x1) {
-		p = &__per_cpu_idtrs[cpu][0][0];
+		p = ia64_idtrs[cpu];
 		for (i = IA64_TR_ALLOC_BASE; i <= per_cpu(ia64_tr_used, cpu);
 								i++, p++) {
 			if (p->pte & 0x1)
 				if (is_tr_overlap(p, va, log_size)) {
 					printk(KERN_DEBUG "Overlapped Entry"
-						"Inserted for TR Reigster!!\n");
+						"Inserted for TR Register!!\n");
 					goto out;
 			}
 		}
 	}
 	if (target_mask & 0x2) {
-		p = &__per_cpu_idtrs[cpu][1][0];
+		p = ia64_idtrs[cpu] + IA64_TR_ALLOC_MAX;
 		for (i = IA64_TR_ALLOC_BASE; i <= per_cpu(ia64_tr_used, cpu);
 								i++, p++) {
 			if (p->pte & 0x1)
 				if (is_tr_overlap(p, va, log_size)) {
 					printk(KERN_DEBUG "Overlapped Entry"
-						"Inserted for TR Reigster!!\n");
+						"Inserted for TR Register!!\n");
 					goto out;
 				}
 		}
@@ -443,16 +495,16 @@ int ia64_itr_entry(u64 target_mask, u64 va, u64 pte, u64 log_size)
 	for (i = IA64_TR_ALLOC_BASE; i < per_cpu(ia64_tr_num, cpu); i++) {
 		switch (target_mask & 0x3) {
 		case 1:
-			if (!(__per_cpu_idtrs[cpu][0][i].pte & 0x1))
+			if (!((ia64_idtrs[cpu] + i)->pte & 0x1))
 				goto found;
 			continue;
 		case 2:
-			if (!(__per_cpu_idtrs[cpu][1][i].pte & 0x1))
+			if (!((ia64_idtrs[cpu] + IA64_TR_ALLOC_MAX + i)->pte & 0x1))
 				goto found;
 			continue;
 		case 3:
-			if (!(__per_cpu_idtrs[cpu][0][i].pte & 0x1) &&
-				!(__per_cpu_idtrs[cpu][1][i].pte & 0x1))
+			if (!((ia64_idtrs[cpu] + i)->pte & 0x1) &&
+			    !((ia64_idtrs[cpu] + IA64_TR_ALLOC_MAX + i)->pte & 0x1))
 				goto found;
 			continue;
 		default:
@@ -472,7 +524,7 @@ found:
 	if (target_mask & 0x1) {
 		ia64_itr(0x1, i, va, pte, log_size);
 		ia64_srlz_i();
-		p = &__per_cpu_idtrs[cpu][0][i];
+		p = ia64_idtrs[cpu] + i;
 		p->ifa = va;
 		p->pte = pte;
 		p->itir = log_size << 2;
@@ -481,7 +533,7 @@ found:
 	if (target_mask & 0x2) {
 		ia64_itr(0x2, i, va, pte, log_size);
 		ia64_srlz_i();
-		p = &__per_cpu_idtrs[cpu][1][i];
+		p = ia64_idtrs[cpu] + IA64_TR_ALLOC_MAX + i;
 		p->ifa = va;
 		p->pte = pte;
 		p->itir = log_size << 2;
@@ -512,7 +564,7 @@ void ia64_ptr_entry(u64 target_mask, int slot)
 		return;
 
 	if (target_mask & 0x1) {
-		p = &__per_cpu_idtrs[cpu][0][slot];
+		p = ia64_idtrs[cpu] + slot;
 		if ((p->pte&0x1) && is_tr_overlap(p, p->ifa, p->itir>>2)) {
 			p->pte = 0;
 			ia64_ptr(0x1, p->ifa, p->itir>>2);
@@ -521,7 +573,7 @@ void ia64_ptr_entry(u64 target_mask, int slot)
 	}
 
 	if (target_mask & 0x2) {
-		p = &__per_cpu_idtrs[cpu][1][slot];
+		p = ia64_idtrs[cpu] + IA64_TR_ALLOC_MAX + slot;
 		if ((p->pte & 0x1) && is_tr_overlap(p, p->ifa, p->itir>>2)) {
 			p->pte = 0;
 			ia64_ptr(0x2, p->ifa, p->itir>>2);
@@ -530,8 +582,8 @@ void ia64_ptr_entry(u64 target_mask, int slot)
 	}
 
 	for (i = per_cpu(ia64_tr_used, cpu); i >= IA64_TR_ALLOC_BASE; i--) {
-		if ((__per_cpu_idtrs[cpu][0][i].pte & 0x1) ||
-				(__per_cpu_idtrs[cpu][1][i].pte & 0x1))
+		if (((ia64_idtrs[cpu] + i)->pte & 0x1) ||
+		    ((ia64_idtrs[cpu] + IA64_TR_ALLOC_MAX + i)->pte & 0x1))
 			break;
 	}
 	per_cpu(ia64_tr_used, cpu) = i;

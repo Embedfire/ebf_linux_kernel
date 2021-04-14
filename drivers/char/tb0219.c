@@ -1,34 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Driver for TANBAC TB0219 base board.
  *
- *  Copyright (C) 2005  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *  Copyright (C) 2005  Yoichi Yuasa <yuasa@linux-mips.org>
  */
 #include <linux/platform_device.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/smp_lock.h>
+#include <linux/uaccess.h>
 
 #include <asm/io.h>
 #include <asm/reboot.h>
 #include <asm/vr41xx/giu.h>
 #include <asm/vr41xx/tb0219.h>
 
-MODULE_AUTHOR("Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>");
+MODULE_AUTHOR("Yoichi Yuasa <yuasa@linux-mips.org>");
 MODULE_DESCRIPTION("TANBAC TB0219 base board driver");
 MODULE_LICENSE("GPL");
 
@@ -38,7 +25,7 @@ MODULE_PARM_DESC(major, "Major device number");
 
 static void (*old_machine_restart)(char *command);
 static void __iomem *tb0219_base;
-static spinlock_t tb0219_lock;
+static DEFINE_SPINLOCK(tb0219_lock);
 
 #define tb0219_read(offset)		readw(tb0219_base + (offset))
 #define tb0219_write(offset, value)	writew((value), tb0219_base + (offset))
@@ -165,7 +152,7 @@ static ssize_t tanbac_tb0219_read(struct file *file, char __user *buf, size_t le
 	unsigned int minor;
 	char value;
 
-	minor = iminor(file->f_path.dentry->d_inode);
+	minor = iminor(file_inode(file));
 	switch (minor) {
 	case 0:
 		value = get_led();
@@ -201,7 +188,7 @@ static ssize_t tanbac_tb0219_write(struct file *file, const char __user *data,
 	int retval = 0;
 	char c;
 
-	minor = iminor(file->f_path.dentry->d_inode);
+	minor = iminor(file_inode(file));
 	switch (minor) {
 	case 0:
 		type = TYPE_LED;
@@ -237,14 +224,13 @@ static int tanbac_tb0219_open(struct inode *inode, struct file *file)
 {
 	unsigned int minor;
 
-	cycle_kernel_lock();
 	minor = iminor(inode);
 	switch (minor) {
 	case 0:
 	case 16 ... 23:
 	case 32 ... 39:
 	case 48 ... 55:
-		return nonseekable_open(inode, file);
+		return stream_open(inode, file);
 	default:
 		break;
 	}
@@ -263,6 +249,7 @@ static const struct file_operations tb0219_fops = {
 	.write		= tanbac_tb0219_write,
 	.open		= tanbac_tb0219_open,
 	.release	= tanbac_tb0219_release,
+	.llseek		= no_llseek,
 };
 
 static void tb0219_restart(char *command)
@@ -285,7 +272,7 @@ static void tb0219_pci_irq_init(void)
 	vr41xx_set_irq_level(TB0219_PCI_SLOT3_PIN, IRQ_LEVEL_LOW);
 }
 
-static int __devinit tb0219_probe(struct platform_device *dev)
+static int tb0219_probe(struct platform_device *dev)
 {
 	int retval;
 
@@ -306,8 +293,6 @@ static int __devinit tb0219_probe(struct platform_device *dev)
 		return retval;
 	}
 
-	spin_lock_init(&tb0219_lock);
-
 	old_machine_restart = _machine_restart;
 	_machine_restart = tb0219_restart;
 
@@ -321,7 +306,7 @@ static int __devinit tb0219_probe(struct platform_device *dev)
 	return 0;
 }
 
-static int __devexit tb0219_remove(struct platform_device *dev)
+static int tb0219_remove(struct platform_device *dev)
 {
 	_machine_restart = old_machine_restart;
 
@@ -337,10 +322,9 @@ static struct platform_device *tb0219_platform_device;
 
 static struct platform_driver tb0219_device_driver = {
 	.probe		= tb0219_probe,
-	.remove		= __devexit_p(tb0219_remove),
+	.remove		= tb0219_remove,
 	.driver		= {
 		.name	= "TB0219",
-		.owner	= THIS_MODULE,
 	},
 };
 

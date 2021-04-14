@@ -1,18 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Renesas Solutions Highlander R7780RP-1 Support.
  *
  * Copyright (C) 2002  Atom Create Engineering Co., Ltd.
  * Copyright (C) 2006  Paul Mundt
  * Copyright (C) 2008  Magnus Damm
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/io.h>
-#include <asm/r7780rp.h>
+#include <mach/highlander.h>
 
 enum {
 	UNUSED = 0,
@@ -57,7 +54,7 @@ static DECLARE_INTC_DESC(intc_desc, "r7780rp", vectors,
 
 unsigned char * __init highlander_plat_irq_setup(void)
 {
-	if (ctrl_inw(0xa5000600)) {
+	if (__raw_readw(0xa5000600)) {
 		printk(KERN_INFO "Using r7780rp interrupt controller.\n");
 		register_intc_controller(&intc_desc);
 		return irl2irq;

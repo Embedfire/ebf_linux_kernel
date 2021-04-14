@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Soundfont generic routines.
  *	It is intended that these should be used by any driver that is willing
@@ -5,28 +6,15 @@
  *
  *  Copyright (C) 1999 Steve Ratcliffe
  *  Copyright (c) 1999-2000 Takashi Iwai <tiwai@suse.de>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 /*
  * Deal with reading in of a soundfont.  Code follows the OSS way
  * of doing things so that the old sfxload utility can be used.
  * Everything may change when there is an alsa way of doing things.
  */
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/slab.h>
+#include <linux/export.h>
 #include <sound/core.h>
 #include <sound/soundfont.h>
 #include <sound/seq_oss_legacy.h>
@@ -133,7 +121,7 @@ snd_soundfont_load(struct snd_sf_list *sflist, const void __user *data,
 	int  rc;
 
 	if (count < (long)sizeof(patch)) {
-		snd_printk("patch record too small %ld\n", count);
+		snd_printk(KERN_ERR "patch record too small %ld\n", count);
 		return -EINVAL;
 	}
 	if (copy_from_user(&patch, data, sizeof(patch)))
@@ -143,15 +131,16 @@ snd_soundfont_load(struct snd_sf_list *sflist, const void __user *data,
 	data += sizeof(patch);
 
 	if (patch.key != SNDRV_OSS_SOUNDFONT_PATCH) {
-		snd_printk("'The wrong kind of patch' %x\n", patch.key);
+		snd_printk(KERN_ERR "The wrong kind of patch %x\n", patch.key);
 		return -EINVAL;
 	}
 	if (count < patch.len) {
-		snd_printk("Patch too short %ld, need %d\n", count, patch.len);
+		snd_printk(KERN_ERR "Patch too short %ld, need %d\n",
+			   count, patch.len);
 		return -EINVAL;
 	}
 	if (patch.len < 0) {
-		snd_printk("poor length %d\n", patch.len);
+		snd_printk(KERN_ERR "poor length %d\n", patch.len);
 		return -EINVAL;
 	}
 
@@ -195,7 +184,8 @@ snd_soundfont_load(struct snd_sf_list *sflist, const void __user *data,
 	case SNDRV_SFNT_REMOVE_INFO:
 		/* patch must be opened */
 		if (!sflist->currsf) {
-			snd_printk("soundfont: remove_info: patch not opened\n");
+			snd_printk(KERN_ERR "soundfont: remove_info: "
+				   "patch not opened\n");
 			rc = -EINVAL;
 		} else {
 			int bank, instr;
@@ -372,7 +362,7 @@ sf_zone_new(struct snd_sf_list *sflist, struct snd_soundfont *sf)
 
 
 /*
- * increment sample couter
+ * increment sample counter
  */
 static void
 set_sample_counter(struct snd_sf_list *sflist, struct snd_soundfont *sf,
@@ -531,7 +521,7 @@ load_info(struct snd_sf_list *sflist, const void __user *data, long count)
 		return -EINVAL;
 
 	if (count < (long)sizeof(hdr)) {
-		printk("Soundfont error: invalid patch zone length\n");
+		printk(KERN_ERR "Soundfont error: invalid patch zone length\n");
 		return -EINVAL;
 	}
 	if (copy_from_user((char*)&hdr, data, sizeof(hdr)))
@@ -541,12 +531,14 @@ load_info(struct snd_sf_list *sflist, const void __user *data, long count)
 	count -= sizeof(hdr);
 
 	if (hdr.nvoices <= 0 || hdr.nvoices >= 100) {
-		printk("Soundfont error: Illegal voice number %d\n", hdr.nvoices);
+		printk(KERN_ERR "Soundfont error: Illegal voice number %d\n",
+		       hdr.nvoices);
 		return -EINVAL;
 	}
 
 	if (count < (long)sizeof(struct soundfont_voice_info) * hdr.nvoices) {
-		printk("Soundfont Error: patch length(%ld) is smaller than nvoices(%d)\n",
+		printk(KERN_ERR "Soundfont Error: "
+		       "patch length(%ld) is smaller than nvoices(%d)\n",
 		       count, hdr.nvoices);
 		return -EINVAL;
 	}
@@ -759,7 +751,7 @@ load_data(struct snd_sf_list *sflist, const void __user *data, long count)
 
 
 /* log2_tbl[i] = log2(i+128) * 0x10000 */
-static int log_tbl[129] = {
+static const int log_tbl[129] = {
 	0x70000, 0x702df, 0x705b9, 0x7088e, 0x70b5d, 0x70e26, 0x710eb, 0x713aa,
 	0x71663, 0x71918, 0x71bc8, 0x71e72, 0x72118, 0x723b9, 0x72655, 0x728ed,
 	0x72b80, 0x72e0e, 0x73098, 0x7331d, 0x7359e, 0x7381b, 0x73a93, 0x73d08,
@@ -851,6 +843,8 @@ calc_gus_envelope_time(int rate, int start, int end)
 	int r, p, t;
 	r = (3 - ((rate >> 6) & 3)) * 3;
 	p = rate & 0x3f;
+	if (!p)
+		p = 1;
 	t = end - start;
 	if (t < 0) t = -t;
 	if (13 > r)
@@ -863,7 +857,7 @@ calc_gus_envelope_time(int rate, int start, int end)
 /* convert envelope time parameter to soundfont parameters */
 
 /* attack & decay/release time table (msec) */
-static short attack_time_tbl[128] = {
+static const short attack_time_tbl[128] = {
 32767, 32767, 5989, 4235, 2994, 2518, 2117, 1780, 1497, 1373, 1259, 1154, 1058, 970, 890, 816,
 707, 691, 662, 634, 607, 581, 557, 533, 510, 489, 468, 448, 429, 411, 393, 377,
 361, 345, 331, 317, 303, 290, 278, 266, 255, 244, 234, 224, 214, 205, 196, 188,
@@ -874,7 +868,7 @@ static short attack_time_tbl[128] = {
 11, 11, 10, 10, 10, 9, 9, 8, 8, 8, 8, 7, 7, 7, 6, 0,
 };
 
-static short decay_time_tbl[128] = {
+static const short decay_time_tbl[128] = {
 32767, 32767, 22614, 15990, 11307, 9508, 7995, 6723, 5653, 5184, 4754, 4359, 3997, 3665, 3361, 3082,
 2828, 2765, 2648, 2535, 2428, 2325, 2226, 2132, 2042, 1955, 1872, 1793, 1717, 1644, 1574, 1507,
 1443, 1382, 1324, 1267, 1214, 1162, 1113, 1066, 978, 936, 897, 859, 822, 787, 754, 722,
@@ -897,7 +891,7 @@ snd_sf_calc_parm_hold(int msec)
 
 /* search an index for specified time from given time table */
 static int
-calc_parm_search(int msec, short *table)
+calc_parm_search(int msec, const short *table)
 {
 	int left = 1, right = 127, mid;
 	while (left < right) {
@@ -952,7 +946,7 @@ load_guspatch(struct snd_sf_list *sflist, const char __user *data,
 	int rc;
 
 	if (count < (long)sizeof(patch)) {
-		snd_printk("patch record too small %ld\n", count);
+		snd_printk(KERN_ERR "patch record too small %ld\n", count);
 		return -EINVAL;
 	}
 	if (copy_from_user(&patch, data, sizeof(patch)))
@@ -1016,6 +1010,7 @@ load_guspatch(struct snd_sf_list *sflist, const char __user *data,
 			 data, count);
 		if (rc < 0) {
 			sf_sample_delete(sflist, sf, smp);
+			kfree(zone);
 			return rc;
 		}
 		/* memory offset is updated after */
@@ -1034,7 +1029,8 @@ load_guspatch(struct snd_sf_list *sflist, const char __user *data,
 	/* panning position; -128 - 127 => 0-127 */
 	zone->v.pan = (patch.panning + 128) / 2;
 #if 0
-	snd_printk("gus: basefrq=%d (ofs=%d) root=%d,tune=%d, range:%d-%d\n",
+	snd_printk(KERN_DEBUG
+		   "gus: basefrq=%d (ofs=%d) root=%d,tune=%d, range:%d-%d\n",
 		   (int)patch.base_freq, zone->v.rate_offset,
 		   zone->v.root, zone->v.tune, zone->v.low, zone->v.high);
 #endif
@@ -1068,7 +1064,8 @@ load_guspatch(struct snd_sf_list *sflist, const char __user *data,
 		zone->v.parm.volrelease = 0x8000 | snd_sf_calc_parm_decay(release);
 		zone->v.attenuation = calc_gus_attenuation(patch.env_offset[0]);
 #if 0
-		snd_printk("gus: atkhld=%x, dcysus=%x, volrel=%x, att=%d\n",
+		snd_printk(KERN_DEBUG
+			   "gus: atkhld=%x, dcysus=%x, volrel=%x, att=%d\n",
 			   zone->v.parm.volatkhld,
 			   zone->v.parm.voldcysus,
 			   zone->v.parm.volrelease,

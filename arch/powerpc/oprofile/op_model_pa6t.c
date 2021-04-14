@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2006-2007 PA Semi, Inc
  *
@@ -6,23 +7,9 @@
  * Maintained by: Olof Johansson <olof@lixom.net>
  *
  * Based on arch/powerpc/oprofile/op_model_power4.c
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/oprofile.h>
-#include <linux/init.h>
 #include <linux/smp.h>
 #include <linux/percpu.h>
 #include <asm/processor.h>
@@ -132,7 +119,7 @@ static int pa6t_reg_setup(struct op_counter_config *ctr,
 	for (pmc = 0; pmc < cur_cpu_spec->num_pmcs; pmc++) {
 		/* counters are 40 bit. Move to cputable at some point? */
 		reset_value[pmc] = (0x1UL << 39) - ctr[pmc].count;
-		pr_debug("reset_value for pmc%u inited to 0x%lx\n",
+		pr_debug("reset_value for pmc%u inited to 0x%llx\n",
 				 pmc, reset_value[pmc]);
 	}
 
@@ -177,7 +164,7 @@ static int pa6t_start(struct op_counter_config *ctr)
 
 	oprofile_running = 1;
 
-	pr_debug("start on cpu %d, mmcr0 %lx\n", smp_processor_id(), mmcr0);
+	pr_debug("start on cpu %d, mmcr0 %llx\n", smp_processor_id(), mmcr0);
 
 	return 0;
 }
@@ -193,7 +180,7 @@ static void pa6t_stop(void)
 
 	oprofile_running = 0;
 
-	pr_debug("stop on cpu %d, mmcr0 %lx\n", smp_processor_id(), mmcr0);
+	pr_debug("stop on cpu %d, mmcr0 %llx\n", smp_processor_id(), mmcr0);
 }
 
 /* handle the perfmon overflow vector */

@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Old U-boot compatibility for 85xx
  *
  * Author: Scott Wood <scottwood@freescale.com>
  *
  * Copyright (c) 2007 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
  */
 
 #include "ops.h"
@@ -15,6 +12,7 @@
 #include "cuboot.h"
 
 #define TARGET_85xx
+#define TARGET_HAS_ETH3
 #include "ppcboot.h"
 
 static bd_t bd;
@@ -27,6 +25,7 @@ static void platform_fixups(void)
 	dt_fixup_mac_address_by_alias("ethernet0", bd.bi_enetaddr);
 	dt_fixup_mac_address_by_alias("ethernet1", bd.bi_enet1addr);
 	dt_fixup_mac_address_by_alias("ethernet2", bd.bi_enet2addr);
+	dt_fixup_mac_address_by_alias("ethernet3", bd.bi_enet3addr);
 	dt_fixup_cpu_clocks(bd.bi_intfreq, bd.bi_busfreq / 8, bd.bi_busfreq);
 
 	/* Unfortunately, the specific model number is encoded in the

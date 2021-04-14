@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * OpRegion handler to allow AML to call native firmware
  *
  * (c) Copyright 2007 Hewlett-Packard Development Company, L.P.
  *	Bjorn Helgaas <bjorn.helgaas@hp.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * This driver implements HP Open Source Review Board proposal 1842,
  * which was approved on 9/20/2006.
@@ -23,15 +20,14 @@
  */
 
 #include <linux/module.h>
-#include <acpi/acpi_bus.h>
-#include <acpi/acpi_drivers.h>
+#include <linux/acpi.h>
 #include <asm/sal.h>
 
 MODULE_AUTHOR("Bjorn Helgaas <bjorn.helgaas@hp.com>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("ACPI opregion handler for native firmware calls");
 
-static int force_register;
+static bool force_register;
 module_param_named(force, force_register, bool, 0);
 MODULE_PARM_DESC(force, "Install opregion handler even without HPQ5001 device");
 
@@ -77,7 +73,7 @@ static void aml_nfw_execute(struct ia64_nfw_context *c)
 		     c->arg[4], c->arg[5], c->arg[6], c->arg[7]);
 }
 
-static void aml_nfw_read_arg(u8 *offset, u32 bit_width, acpi_integer *value)
+static void aml_nfw_read_arg(u8 *offset, u32 bit_width, u64 *value)
 {
 	switch (bit_width) {
 	case 8:
@@ -95,7 +91,7 @@ static void aml_nfw_read_arg(u8 *offset, u32 bit_width, acpi_integer *value)
 	}
 }
 
-static void aml_nfw_write_arg(u8 *offset, u32 bit_width, acpi_integer *value)
+static void aml_nfw_write_arg(u8 *offset, u32 bit_width, u64 *value)
 {
 	switch (bit_width) {
 	case 8:
@@ -114,7 +110,7 @@ static void aml_nfw_write_arg(u8 *offset, u32 bit_width, acpi_integer *value)
 }
 
 static acpi_status aml_nfw_handler(u32 function, acpi_physical_address address,
-	u32 bit_width, acpi_integer *value, void *handler_context,
+	u32 bit_width, u64 *value, void *handler_context,
 	void *region_context)
 {
 	struct ia64_nfw_context *context = handler_context;
@@ -191,7 +187,7 @@ static int aml_nfw_add(struct acpi_device *device)
 	return aml_nfw_add_global_handler();
 }
 
-static int aml_nfw_remove(struct acpi_device *device, int type)
+static int aml_nfw_remove(struct acpi_device *device)
 {
 	return aml_nfw_remove_global_handler();
 }

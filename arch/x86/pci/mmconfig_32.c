@@ -1,8 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2004 Matthew Wilcox <matthew@wil.cx>
  * Copyright (C) 2004 Intel Corp.
- *
- * This code is released under the GNU General Public License version 2.
  */
 
 /*
@@ -11,9 +10,9 @@
 
 #include <linux/pci.h>
 #include <linux/init.h>
-#include <linux/acpi.h>
-#include <asm/e820.h>
-#include "pci.h"
+#include <linux/rcupdate.h>
+#include <asm/e820/api.h>
+#include <asm/pci_x86.h>
 
 /* Assume systems with more busses have correct MCFG */
 #define mmcfg_virt_addr ((void __iomem *) fix_to_virt(FIX_PCIE_MCFG))
@@ -27,18 +26,10 @@ static int mmcfg_last_accessed_cpu;
  */
 static u32 get_base_addr(unsigned int seg, int bus, unsigned devfn)
 {
-	struct acpi_mcfg_allocation *cfg;
-	int cfg_num;
+	struct pci_mmcfg_region *cfg = pci_mmconfig_lookup(seg, bus);
 
-	for (cfg_num = 0; cfg_num < pci_mmcfg_config_num; cfg_num++) {
-		cfg = &pci_mmcfg_config[cfg_num];
-		if (cfg->pci_segment == seg &&
-		    (cfg->start_bus_number <= bus) &&
-		    (cfg->end_bus_number >= bus))
-			return cfg->address;
-	}
-
-	/* Fall back to type 0 */
+	if (cfg)
+		return cfg->address;
 	return 0;
 }
 
@@ -47,7 +38,7 @@ static u32 get_base_addr(unsigned int seg, int bus, unsigned devfn)
  */
 static void pci_exp_set_dev_base(unsigned int base, int bus, int devfn)
 {
-	u32 dev_base = base | (bus << 20) | (devfn << 12);
+	u32 dev_base = base | PCI_MMCFG_BUS_OFFSET(bus) | (devfn << 12);
 	int cpu = smp_processor_id();
 	if (dev_base != mmcfg_last_accessed_device ||
 	    cpu != mmcfg_last_accessed_cpu) {
@@ -68,11 +59,14 @@ err:		*value = -1;
 		return -EINVAL;
 	}
 
+	rcu_read_lock();
 	base = get_base_addr(seg, bus, devfn);
-	if (!base)
+	if (!base) {
+		rcu_read_unlock();
 		goto err;
+	}
 
-	spin_lock_irqsave(&pci_config_lock, flags);
+	raw_spin_lock_irqsave(&pci_config_lock, flags);
 
 	pci_exp_set_dev_base(base, bus, devfn);
 
@@ -87,7 +81,8 @@ err:		*value = -1;
 		*value = mmio_config_readl(mmcfg_virt_addr + reg);
 		break;
 	}
-	spin_unlock_irqrestore(&pci_config_lock, flags);
+	raw_spin_unlock_irqrestore(&pci_config_lock, flags);
+	rcu_read_unlock();
 
 	return 0;
 }
@@ -101,11 +96,14 @@ static int pci_mmcfg_write(unsigned int seg, unsigned int bus,
 	if ((bus > 255) || (devfn > 255) || (reg > 4095))
 		return -EINVAL;
 
+	rcu_read_lock();
 	base = get_base_addr(seg, bus, devfn);
-	if (!base)
+	if (!base) {
+		rcu_read_unlock();
 		return -EINVAL;
+	}
 
-	spin_lock_irqsave(&pci_config_lock, flags);
+	raw_spin_lock_irqsave(&pci_config_lock, flags);
 
 	pci_exp_set_dev_base(base, bus, devfn);
 
@@ -120,12 +118,13 @@ static int pci_mmcfg_write(unsigned int seg, unsigned int bus,
 		mmio_config_writel(mmcfg_virt_addr + reg, value);
 		break;
 	}
-	spin_unlock_irqrestore(&pci_config_lock, flags);
+	raw_spin_unlock_irqrestore(&pci_config_lock, flags);
+	rcu_read_unlock();
 
 	return 0;
 }
 
-static struct pci_raw_ops pci_mmcfg = {
+const struct pci_raw_ops pci_mmcfg = {
 	.read =		pci_mmcfg_read,
 	.write =	pci_mmcfg_write,
 };
@@ -139,4 +138,19 @@ int __init pci_mmcfg_arch_init(void)
 
 void __init pci_mmcfg_arch_free(void)
 {
+}
+
+int pci_mmcfg_arch_map(struct pci_mmcfg_region *cfg)
+{
+	return 0;
+}
+
+void pci_mmcfg_arch_unmap(struct pci_mmcfg_region *cfg)
+{
+	unsigned long flags;
+
+	/* Invalidate the cached mmcfg map entry. */
+	raw_spin_lock_irqsave(&pci_config_lock, flags);
+	mmcfg_last_accessed_device = 0;
+	raw_spin_unlock_irqrestore(&pci_config_lock, flags);
 }

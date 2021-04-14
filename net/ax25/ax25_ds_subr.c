@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  * Copyright (C) Joerg Reuter DL1BKE (jreuter@yaina.de)
@@ -17,13 +14,13 @@
 #include <linux/sockios.h>
 #include <linux/spinlock.h>
 #include <linux/net.h>
+#include <linux/gfp.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
+#include <linux/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -39,7 +36,6 @@ void ax25_ds_nr_error_recovery(ax25_cb *ax25)
 void ax25_ds_enquiry_response(ax25_cb *ax25)
 {
 	ax25_cb *ax25o;
-	struct hlist_node *node;
 
 	/* Please note that neither DK4EG's nor DG2FEF's
 	 * DAMA spec mention the following behaviour as seen
@@ -80,7 +76,7 @@ void ax25_ds_enquiry_response(ax25_cb *ax25)
 	ax25_ds_set_timer(ax25->ax25_dev);
 
 	spin_lock(&ax25_list_lock);
-	ax25_for_each(ax25o, node, &ax25_list) {
+	ax25_for_each(ax25o, &ax25_list) {
 		if (ax25o == ax25)
 			continue;
 
@@ -159,10 +155,9 @@ static int ax25_check_dama_slave(ax25_dev *ax25_dev)
 {
 	ax25_cb *ax25;
 	int res = 0;
-	struct hlist_node *node;
 
 	spin_lock(&ax25_list_lock);
-	ax25_for_each(ax25, node, &ax25_list)
+	ax25_for_each(ax25, &ax25_list)
 		if (ax25->ax25_dev == ax25_dev && (ax25->condition & AX25_COND_DAMA_MODE) && ax25->state > AX25_STATE_1) {
 			res = 1;
 			break;
@@ -207,4 +202,3 @@ void ax25_dama_off(ax25_cb *ax25)
 	ax25->condition &= ~AX25_COND_DAMA_MODE;
 	ax25_dev_dama_off(ax25->ax25_dev);
 }
-

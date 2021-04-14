@@ -1,10 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	w1_ds2433.c - w1 family 23 (DS2433) driver
  *
  * Copyright (c) 2005 Ben Gardner <bgardner@wabtec.com>
- *
- * This source code is licensed under the GNU General Public License,
- * Version 2. See the file COPYING for more details.
  */
 
 #include <linux/kernel.h>
@@ -13,6 +11,7 @@
 #include <linux/device.h>
 #include <linux/types.h>
 #include <linux/delay.h>
+#include <linux/slab.h>
 #ifdef CONFIG_W1_SLAVE_DS2433_CRC
 #include <linux/crc16.h>
 
@@ -21,13 +20,9 @@
 
 #endif
 
-#include "../w1.h"
-#include "../w1_int.h"
-#include "../w1_family.h"
+#include <linux/w1.h>
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Ben Gardner <bgardner@wabtec.com>");
-MODULE_DESCRIPTION("w1 family 23 driver for DS2433, 4kb EEPROM");
+#define W1_EEPROM_DS2433	0x23
 
 #define W1_EEPROM_SIZE		512
 #define W1_PAGE_COUNT		16
@@ -91,9 +86,9 @@ static int w1_f23_refresh_block(struct w1_slave *sl, struct w1_f23_data *data,
 }
 #endif	/* CONFIG_W1_SLAVE_DS2433_CRC */
 
-static ssize_t w1_f23_read_bin(struct kobject *kobj,
-			       struct bin_attribute *bin_attr,
-			       char *buf, loff_t off, size_t count)
+static ssize_t eeprom_read(struct file *filp, struct kobject *kobj,
+			   struct bin_attribute *bin_attr, char *buf,
+			   loff_t off, size_t count)
 {
 	struct w1_slave *sl = kobj_to_w1_slave(kobj);
 #ifdef CONFIG_W1_SLAVE_DS2433_CRC
@@ -106,7 +101,7 @@ static ssize_t w1_f23_read_bin(struct kobject *kobj,
 	if ((count = w1_f23_fix_count(off, count, W1_EEPROM_SIZE)) == 0)
 		return 0;
 
-	mutex_lock(&sl->master->mutex);
+	mutex_lock(&sl->master->bus_mutex);
 
 #ifdef CONFIG_W1_SLAVE_DS2433_CRC
 
@@ -137,7 +132,7 @@ static ssize_t w1_f23_read_bin(struct kobject *kobj,
 #endif	/* CONFIG_W1_SLAVE_DS2433_CRC */
 
 out_up:
-	mutex_unlock(&sl->master->mutex);
+	mutex_unlock(&sl->master->bus_mutex);
 
 	return count;
 }
@@ -156,6 +151,9 @@ out_up:
  */
 static int w1_f23_write(struct w1_slave *sl, int addr, int len, const u8 *data)
 {
+#ifdef CONFIG_W1_SLAVE_DS2433_CRC
+	struct w1_f23_data *f23 = sl->family_data;
+#endif
 	u8 wrbuf[4];
 	u8 rdbuf[W1_PAGE_SIZE + 3];
 	u8 es = (addr + len - 1) & 0x1f;
@@ -196,13 +194,15 @@ static int w1_f23_write(struct w1_slave *sl, int addr, int len, const u8 *data)
 
 	/* Reset the bus to wake up the EEPROM (this may not be needed) */
 	w1_reset_bus(sl->master);
-
+#ifdef CONFIG_W1_SLAVE_DS2433_CRC
+	f23->validcrc &= ~(1 << (addr >> W1_PAGE_BITS));
+#endif
 	return 0;
 }
 
-static ssize_t w1_f23_write_bin(struct kobject *kobj,
-				struct bin_attribute *bin_attr,
-				char *buf, loff_t off, size_t count)
+static ssize_t eeprom_write(struct file *filp, struct kobject *kobj,
+			    struct bin_attribute *bin_attr, char *buf,
+			    loff_t off, size_t count)
 {
 	struct w1_slave *sl = kobj_to_w1_slave(kobj);
 	int addr, len, idx;
@@ -227,7 +227,7 @@ static ssize_t w1_f23_write_bin(struct kobject *kobj,
 	}
 #endif	/* CONFIG_W1_SLAVE_DS2433_CRC */
 
-	mutex_lock(&sl->master->mutex);
+	mutex_lock(&sl->master->bus_mutex);
 
 	/* Can only write data to one page at a time */
 	idx = 0;
@@ -245,24 +245,29 @@ static ssize_t w1_f23_write_bin(struct kobject *kobj,
 	}
 
 out_up:
-	mutex_unlock(&sl->master->mutex);
+	mutex_unlock(&sl->master->bus_mutex);
 
 	return count;
 }
 
-static struct bin_attribute w1_f23_bin_attr = {
-	.attr = {
-		.name = "eeprom",
-		.mode = S_IRUGO | S_IWUSR,
-	},
-	.size = W1_EEPROM_SIZE,
-	.read = w1_f23_read_bin,
-	.write = w1_f23_write_bin,
+static BIN_ATTR_RW(eeprom, W1_EEPROM_SIZE);
+
+static struct bin_attribute *w1_f23_bin_attributes[] = {
+	&bin_attr_eeprom,
+	NULL,
+};
+
+static const struct attribute_group w1_f23_group = {
+	.bin_attrs = w1_f23_bin_attributes,
+};
+
+static const struct attribute_group *w1_f23_groups[] = {
+	&w1_f23_group,
+	NULL,
 };
 
 static int w1_f23_add_slave(struct w1_slave *sl)
 {
-	int err;
 #ifdef CONFIG_W1_SLAVE_DS2433_CRC
 	struct w1_f23_data *data;
 
@@ -272,15 +277,7 @@ static int w1_f23_add_slave(struct w1_slave *sl)
 	sl->family_data = data;
 
 #endif	/* CONFIG_W1_SLAVE_DS2433_CRC */
-
-	err = sysfs_create_bin_file(&sl->dev.kobj, &w1_f23_bin_attr);
-
-#ifdef CONFIG_W1_SLAVE_DS2433_CRC
-	if (err)
-		kfree(data);
-#endif	/* CONFIG_W1_SLAVE_DS2433_CRC */
-
-	return err;
+	return 0;
 }
 
 static void w1_f23_remove_slave(struct w1_slave *sl)
@@ -289,28 +286,21 @@ static void w1_f23_remove_slave(struct w1_slave *sl)
 	kfree(sl->family_data);
 	sl->family_data = NULL;
 #endif	/* CONFIG_W1_SLAVE_DS2433_CRC */
-	sysfs_remove_bin_file(&sl->dev.kobj, &w1_f23_bin_attr);
 }
 
-static struct w1_family_ops w1_f23_fops = {
+static const struct w1_family_ops w1_f23_fops = {
 	.add_slave      = w1_f23_add_slave,
 	.remove_slave   = w1_f23_remove_slave,
+	.groups		= w1_f23_groups,
 };
 
 static struct w1_family w1_family_23 = {
 	.fid = W1_EEPROM_DS2433,
 	.fops = &w1_f23_fops,
 };
+module_w1_family(w1_family_23);
 
-static int __init w1_f23_init(void)
-{
-	return w1_register_family(&w1_family_23);
-}
-
-static void __exit w1_f23_fini(void)
-{
-	w1_unregister_family(&w1_family_23);
-}
-
-module_init(w1_f23_init);
-module_exit(w1_f23_fini);
+MODULE_AUTHOR("Ben Gardner <bgardner@wabtec.com>");
+MODULE_DESCRIPTION("w1 family 23 driver for DS2433, 4kb EEPROM");
+MODULE_LICENSE("GPL");
+MODULE_ALIAS("w1-family-" __stringify(W1_EEPROM_DS2433));

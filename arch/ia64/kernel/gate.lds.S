@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Linker script for gate DSO.  The gate pages are an ELF shared object
  * prelinked to its virtual address, with only one read-only segment and
@@ -5,8 +6,7 @@
  * its layout.
  */
 
-
-#include <asm/system.h>
+#include <asm/page.h>
 
 SECTIONS
 {
@@ -32,21 +32,21 @@ SECTIONS
 	 */
 	. = GATE_ADDR + 0x600;
 
-	.data.patch		: {
+	.data..patch		: {
 		__start_gate_mckinley_e9_patchlist = .;
-		*(.data.patch.mckinley_e9)
+		*(.data..patch.mckinley_e9)
 		__end_gate_mckinley_e9_patchlist = .;
 
 		__start_gate_vtop_patchlist = .;
-		*(.data.patch.vtop)
+		*(.data..patch.vtop)
 		__end_gate_vtop_patchlist = .;
 
 		__start_gate_fsyscall_patchlist = .;
-		*(.data.patch.fsyscall_table)
+		*(.data..patch.fsyscall_table)
 		__end_gate_fsyscall_patchlist = .;
 
 		__start_gate_brl_fsys_bubble_down_patchlist = .;
-		*(.data.patch.brl_fsys_bubble_down)
+		*(.data..patch.brl_fsys_bubble_down)
 		__end_gate_brl_fsys_bubble_down_patchlist = .;
 	}						:readable
 

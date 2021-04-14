@@ -1,21 +1,29 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* ld script to make s390 Linux kernel
  * Written by Martin Schwidefsky (schwidefsky@de.ibm.com)
  */
 
+#include <asm/thread_info.h>
 #include <asm/page.h>
-#include <asm-generic/vmlinux.lds.h>
 
-#ifndef CONFIG_64BIT
-OUTPUT_FORMAT("elf32-s390", "elf32-s390", "elf32-s390")
-OUTPUT_ARCH(s390)
-ENTRY(_start)
-jiffies = jiffies_64 + 4;
-#else
+/*
+ * Put .bss..swapper_pg_dir as the first thing in .bss. This will
+ * make sure it has 16k alignment.
+ */
+#define BSS_FIRST_SECTIONS *(.bss..swapper_pg_dir)
+
+/* Handle ro_after_init data on our own. */
+#define RO_AFTER_INIT_DATA
+
+#define EMITS_PT_NOTE
+
+#include <asm-generic/vmlinux.lds.h>
+#include <asm/vmlinux.lds.h>
+
 OUTPUT_FORMAT("elf64-s390", "elf64-s390", "elf64-s390")
 OUTPUT_ARCH(s390:64-bit)
-ENTRY(_start)
+ENTRY(startup_continue)
 jiffies = jiffies_64;
-#endif
 
 PHDRS {
 	text PT_LOAD FLAGS(5);	/* R_E */
@@ -25,80 +33,57 @@ PHDRS {
 
 SECTIONS
 {
-	. = 0x00000000;
+	. = 0x100000;
 	.text : {
-	_text = .;		/* Text and read-only data */
-		*(.text.head)
-	TEXT_TEXT
+		_stext = .;		/* Start of text section */
+		_text = .;		/* Text and read-only data */
+		HEAD_TEXT
+		TEXT_TEXT
 		SCHED_TEXT
+		CPUIDLE_TEXT
 		LOCK_TEXT
 		KPROBES_TEXT
+		IRQENTRY_TEXT
+		SOFTIRQENTRY_TEXT
+		*(.text.*_indirect_*)
 		*(.fixup)
 		*(.gnu.warning)
+		. = ALIGN(PAGE_SIZE);
+		_etext = .;		/* End of text section */
 	} :text = 0x0700
 
-	_etext = .;		/* End of text section */
-
-	NOTES :text :note
-
-	RODATA
-
-#ifdef CONFIG_SHARED_KERNEL
-	. = ALIGN(0x100000);	/* VM shared segments are 1MB aligned */
-#endif
+	RO_DATA(PAGE_SIZE)
 
 	. = ALIGN(PAGE_SIZE);
-	_eshared = .;		/* End of shareable data */
+	_sdata = .;		/* Start of data section */
 
-	. = ALIGN(16);		/* Exception table */
-	__ex_table : {
-		__start___ex_table = .;
-		*(__ex_table)
-		__stop___ex_table = .;
+	. = ALIGN(PAGE_SIZE);
+	__start_ro_after_init = .;
+	.data..ro_after_init : {
+		 *(.data..ro_after_init)
+		JUMP_TABLE_DATA
 	} :data
-
-	.data : {		/* Data */
-		DATA_DATA
-		CONSTRUCTORS
-	}
-
+	EXCEPTION_TABLE(16)
 	. = ALIGN(PAGE_SIZE);
-	.data_nosave : {
-	__nosave_begin = .;
-		*(.data.nosave)
-	}
-	. = ALIGN(PAGE_SIZE);
-	__nosave_end = .;
+	__end_ro_after_init = .;
 
-	. = ALIGN(PAGE_SIZE);
-	.data.page_aligned : {
-		*(.data.idt)
-	}
+	RW_DATA(0x100, PAGE_SIZE, THREAD_SIZE)
+	BOOT_DATA_PRESERVED
 
-	. = ALIGN(0x100);
-	.data.cacheline_aligned : {
-		*(.data.cacheline_aligned)
-	}
-
-	. = ALIGN(0x100);
-	.data.read_mostly : {
-		*(.data.read_mostly)
-	}
 	_edata = .;		/* End of data section */
-
-	. = ALIGN(2 * PAGE_SIZE);	/* init_task */
-	.data.init_task : {
-		*(.data.init_task)
-	}
 
 	/* will be freed after init */
 	. = ALIGN(PAGE_SIZE);	/* Init code and data */
 	__init_begin = .;
-	.init.text : {
+
+	. = ALIGN(PAGE_SIZE);
+	.init.text : AT(ADDR(.init.text) - LOAD_OFFSET) {
 		_sinittext = .;
 		INIT_TEXT
+		. = ALIGN(PAGE_SIZE);
 		_einittext = .;
 	}
+
 	/*
 	 * .exit.text is discarded at runtime, not link time,
 	 * to deal with references from __bug_table
@@ -107,59 +92,100 @@ SECTIONS
 		EXIT_TEXT
 	}
 
-	.init.data : {
-		INIT_DATA
-	}
-	. = ALIGN(0x100);
-	.init.setup : {
-		__setup_start = .;
-		*(.init.setup)
-		__setup_end = .;
-	}
-	.initcall.init : {
-		__initcall_start = .;
-		INITCALLS
-		__initcall_end = .;
+	.exit.data : {
+		EXIT_DATA
 	}
 
-	.con_initcall.init : {
-		__con_initcall_start = .;
-		*(.con_initcall.init)
-		__con_initcall_end = .;
+	/*
+	 * struct alt_inst entries. From the header (alternative.h):
+	 * "Alternative instructions for different CPU types or capabilities"
+	 * Think locking instructions on spinlocks.
+	 * Note, that it is a part of __init region.
+	 */
+	. = ALIGN(8);
+	.altinstructions : {
+		__alt_instructions = .;
+		*(.altinstructions)
+		__alt_instructions_end = .;
 	}
-	SECURITY_INIT
 
-#ifdef CONFIG_BLK_DEV_INITRD
-	. = ALIGN(0x100);
-	.init.ramfs : {
-		__initramfs_start = .;
-		*(.init.ramfs)
-		. = ALIGN(2);
-		__initramfs_end = .;
+	/*
+	 * And here are the replacement instructions. The linker sticks
+	 * them as binary blobs. The .altinstructions has enough data to
+	 * get the address and the length of them to patch the kernel safely.
+	 * Note, that it is a part of __init region.
+	 */
+	.altinstr_replacement : {
+		*(.altinstr_replacement)
 	}
-#endif
 
-	PERCPU(PAGE_SIZE)
+	/*
+	 * Table with the patch locations to undo expolines
+	*/
+	.nospec_call_table : {
+		__nospec_call_start = . ;
+		*(.s390_indirect*)
+		__nospec_call_end = . ;
+	}
+	.nospec_return_table : {
+		__nospec_return_start = . ;
+		*(.s390_return*)
+		__nospec_return_end = . ;
+	}
+
+	BOOT_DATA
+
+	/* early.c uses stsi, which requires page aligned data. */
+	. = ALIGN(PAGE_SIZE);
+	INIT_DATA_SECTION(0x100)
+
+	PERCPU_SECTION(0x100)
+
+	.dynsym ALIGN(8) : {
+		__dynsym_start = .;
+		*(.dynsym)
+		__dynsym_end = .;
+	}
+	.rela.dyn ALIGN(8) : {
+		__rela_dyn_start = .;
+		*(.rela*)
+		__rela_dyn_end = .;
+	}
+
 	. = ALIGN(PAGE_SIZE);
 	__init_end = .;		/* freed after init ends here */
 
-	/* BSS */
-	.bss : {
-		__bss_start = .;
-		*(.bss)
-		. = ALIGN(2);
-		__bss_stop = .;
-	}
+	BSS_SECTION(PAGE_SIZE, 4 * PAGE_SIZE, PAGE_SIZE)
 
 	_end = . ;
 
-	/* Sections to be discarded */
-	/DISCARD/ : {
-		EXIT_DATA
-		*(.exitcall.exit)
-	}
+	/*
+	 * uncompressed image info used by the decompressor
+	 * it should match struct vmlinux_info
+	 */
+	.vmlinux.info 0 (INFO) : {
+		QUAD(_stext)					/* default_lma */
+		QUAD(startup_continue)				/* entry */
+		QUAD(__bss_start - _stext)			/* image_size */
+		QUAD(__bss_stop - __bss_start)			/* bss_size */
+		QUAD(__boot_data_start)				/* bootdata_off */
+		QUAD(__boot_data_end - __boot_data_start)	/* bootdata_size */
+		QUAD(__boot_data_preserved_start)		/* bootdata_preserved_off */
+		QUAD(__boot_data_preserved_end -
+		     __boot_data_preserved_start)		/* bootdata_preserved_size */
+		QUAD(__dynsym_start)				/* dynsym_start */
+		QUAD(__rela_dyn_start)				/* rela_dyn_start */
+		QUAD(__rela_dyn_end)				/* rela_dyn_end */
+	} :NONE
 
 	/* Debugging sections.	*/
 	STABS_DEBUG
 	DWARF_DEBUG
+	ELF_DETAILS
+
+	/* Sections to be discarded */
+	DISCARDS
+	/DISCARD/ : {
+		*(.eh_frame)
+	}
 }

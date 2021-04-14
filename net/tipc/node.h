@@ -1,8 +1,8 @@
 /*
  * net/tipc/node.h: Include file for TIPC node management routines
  *
- * Copyright (c) 2000-2006, Ericsson AB
- * Copyright (c) 2005, Wind River Systems
+ * Copyright (c) 2000-2006, 2014-2016, Ericsson AB
+ * Copyright (c) 2005, 2010-2014, Wind River Systems
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -37,110 +37,95 @@
 #ifndef _TIPC_NODE_H
 #define _TIPC_NODE_H
 
-#include "node_subscr.h"
 #include "addr.h"
-#include "cluster.h"
+#include "net.h"
 #include "bearer.h"
+#include "msg.h"
 
-/**
- * struct tipc_node - TIPC node structure
- * @addr: network address of node
- * @lock: spinlock governing access to structure
- * @owner: pointer to cluster that node belongs to
- * @next: pointer to next node in sorted list of cluster's nodes
- * @nsub: list of "node down" subscriptions monitoring node
- * @active_links: pointers to active links to node
- * @links: pointers to all links to node
- * @working_links: number of working links to node (both active and standby)
- * @link_cnt: number of links to node
- * @permit_changeover: non-zero if node has redundant links to this system
- * @routers: bitmap (used for multicluster communication)
- * @last_router: (used for multicluster communication)
- * @bclink: broadcast-related info
- *    @supported: non-zero if node supports TIPC b'cast capability
- *    @acked: sequence # of last outbound b'cast message acknowledged by node
- *    @last_in: sequence # of last in-sequence b'cast message received from node
- *    @gap_after: sequence # of last message not requiring a NAK request
- *    @gap_to: sequence # of last message requiring a NAK request
- *    @nack_sync: counter that determines when NAK requests should be sent
- *    @deferred_head: oldest OOS b'cast message received from node
- *    @deferred_tail: newest OOS b'cast message received from node
- *    @defragm: list of partially reassembled b'cast message fragments from node
+/* Optional capabilities supported by this code version
  */
-
-struct tipc_node {
-	u32 addr;
-	spinlock_t lock;
-	struct cluster *owner;
-	struct tipc_node *next;
-	struct list_head nsub;
-	struct link *active_links[2];
-	struct link *links[MAX_BEARERS];
-	int link_cnt;
-	int working_links;
-	int permit_changeover;
-	u32 routers[512/32];
-	int last_router;
-	struct {
-		int supported;
-		u32 acked;
-		u32 last_in;
-		u32 gap_after;
-		u32 gap_to;
-		u32 nack_sync;
-		struct sk_buff *deferred_head;
-		struct sk_buff *deferred_tail;
-		struct sk_buff *defragm;
-	} bclink;
+enum {
+	TIPC_SYN_BIT          = (1),
+	TIPC_BCAST_SYNCH      = (1 << 1),
+	TIPC_BCAST_STATE_NACK = (1 << 2),
+	TIPC_BLOCK_FLOWCTL    = (1 << 3),
+	TIPC_BCAST_RCAST      = (1 << 4),
+	TIPC_NODE_ID128       = (1 << 5),
+	TIPC_LINK_PROTO_SEQNO = (1 << 6),
+	TIPC_MCAST_RBCTL      = (1 << 7),
+	TIPC_GAP_ACK_BLOCK    = (1 << 8),
+	TIPC_TUNNEL_ENHANCED  = (1 << 9),
+	TIPC_NAGLE            = (1 << 10),
+	TIPC_NAMED_BCAST      = (1 << 11)
 };
 
-extern struct tipc_node *tipc_nodes;
-extern u32 tipc_own_tag;
+#define TIPC_NODE_CAPABILITIES (TIPC_SYN_BIT           |  \
+				TIPC_BCAST_SYNCH       |   \
+				TIPC_BCAST_STATE_NACK  |   \
+				TIPC_BCAST_RCAST       |   \
+				TIPC_BLOCK_FLOWCTL     |   \
+				TIPC_NODE_ID128        |   \
+				TIPC_LINK_PROTO_SEQNO  |   \
+				TIPC_MCAST_RBCTL       |   \
+				TIPC_GAP_ACK_BLOCK     |   \
+				TIPC_TUNNEL_ENHANCED   |   \
+				TIPC_NAGLE             |   \
+				TIPC_NAMED_BCAST)
 
-struct tipc_node *tipc_node_create(u32 addr);
-void tipc_node_delete(struct tipc_node *n_ptr);
-struct tipc_node *tipc_node_attach_link(struct link *l_ptr);
-void tipc_node_detach_link(struct tipc_node *n_ptr, struct link *l_ptr);
-void tipc_node_link_down(struct tipc_node *n_ptr, struct link *l_ptr);
-void tipc_node_link_up(struct tipc_node *n_ptr, struct link *l_ptr);
-int tipc_node_has_active_links(struct tipc_node *n_ptr);
-int tipc_node_has_redundant_links(struct tipc_node *n_ptr);
-u32 tipc_node_select_router(struct tipc_node *n_ptr, u32 ref);
-struct tipc_node *tipc_node_select_next_hop(u32 addr, u32 selector);
-int tipc_node_is_up(struct tipc_node *n_ptr);
-void tipc_node_add_router(struct tipc_node *n_ptr, u32 router);
-void tipc_node_remove_router(struct tipc_node *n_ptr, u32 router);
-struct sk_buff *tipc_node_get_links(const void *req_tlv_area, int req_tlv_space);
-struct sk_buff *tipc_node_get_nodes(const void *req_tlv_area, int req_tlv_space);
+#define INVALID_BEARER_ID -1
 
-static inline struct tipc_node *tipc_node_find(u32 addr)
-{
-	if (likely(in_own_cluster(addr)))
-		return tipc_local_nodes[tipc_node(addr)];
-	else if (tipc_addr_domain_valid(addr)) {
-		struct cluster *c_ptr = tipc_cltr_find(addr);
+void tipc_node_stop(struct net *net);
+bool tipc_node_get_id(struct net *net, u32 addr, u8 *id);
+u32 tipc_node_get_addr(struct tipc_node *node);
+char *tipc_node_get_id_str(struct tipc_node *node);
+void tipc_node_put(struct tipc_node *node);
+void tipc_node_get(struct tipc_node *node);
+struct tipc_node *tipc_node_create(struct net *net, u32 addr, u8 *peer_id,
+				   u16 capabilities, u32 hash_mixes,
+				   bool preliminary);
+#ifdef CONFIG_TIPC_CRYPTO
+struct tipc_crypto *tipc_node_crypto_rx(struct tipc_node *__n);
+struct tipc_crypto *tipc_node_crypto_rx_by_list(struct list_head *pos);
+struct tipc_crypto *tipc_node_crypto_rx_by_addr(struct net *net, u32 addr);
+#endif
+u32 tipc_node_try_addr(struct net *net, u8 *id, u32 addr);
+void tipc_node_check_dest(struct net *net, u32 onode, u8 *peer_id128,
+			  struct tipc_bearer *bearer,
+			  u16 capabilities, u32 signature, u32 hash_mixes,
+			  struct tipc_media_addr *maddr,
+			  bool *respond, bool *dupl_addr);
+void tipc_node_delete_links(struct net *net, int bearer_id);
+void tipc_node_apply_property(struct net *net, struct tipc_bearer *b, int prop);
+int tipc_node_get_linkname(struct net *net, u32 bearer_id, u32 node,
+			   char *linkname, size_t len);
+int tipc_node_xmit(struct net *net, struct sk_buff_head *list, u32 dnode,
+		   int selector);
+int tipc_node_distr_xmit(struct net *net, struct sk_buff_head *list);
+int tipc_node_xmit_skb(struct net *net, struct sk_buff *skb, u32 dest,
+		       u32 selector);
+void tipc_node_subscribe(struct net *net, struct list_head *subscr, u32 addr);
+void tipc_node_unsubscribe(struct net *net, struct list_head *subscr, u32 addr);
+void tipc_node_broadcast(struct net *net, struct sk_buff *skb, int rc_dests);
+int tipc_node_add_conn(struct net *net, u32 dnode, u32 port, u32 peer_port);
+void tipc_node_remove_conn(struct net *net, u32 dnode, u32 port);
+int tipc_node_get_mtu(struct net *net, u32 addr, u32 sel, bool connected);
+bool tipc_node_is_up(struct net *net, u32 addr);
+u16 tipc_node_get_capabilities(struct net *net, u32 addr);
+int tipc_nl_node_dump(struct sk_buff *skb, struct netlink_callback *cb);
+int tipc_nl_node_dump_link(struct sk_buff *skb, struct netlink_callback *cb);
+int tipc_nl_node_reset_link_stats(struct sk_buff *skb, struct genl_info *info);
+int tipc_nl_node_get_link(struct sk_buff *skb, struct genl_info *info);
+int tipc_nl_node_set_link(struct sk_buff *skb, struct genl_info *info);
+int tipc_nl_peer_rm(struct sk_buff *skb, struct genl_info *info);
 
-		if (c_ptr)
-			return c_ptr->nodes[tipc_node(addr)];
-	}
-	return NULL;
-}
-
-static inline struct tipc_node *tipc_node_select(u32 addr, u32 selector)
-{
-	if (likely(in_own_cluster(addr)))
-		return tipc_local_nodes[tipc_node(addr)];
-	return tipc_node_select_next_hop(addr, selector);
-}
-
-static inline void tipc_node_lock(struct tipc_node *n_ptr)
-{
-	spin_lock_bh(&n_ptr->lock);
-}
-
-static inline void tipc_node_unlock(struct tipc_node *n_ptr)
-{
-	spin_unlock_bh(&n_ptr->lock);
-}
-
+int tipc_nl_node_set_monitor(struct sk_buff *skb, struct genl_info *info);
+int tipc_nl_node_get_monitor(struct sk_buff *skb, struct genl_info *info);
+int tipc_nl_node_dump_monitor(struct sk_buff *skb, struct netlink_callback *cb);
+int tipc_nl_node_dump_monitor_peer(struct sk_buff *skb,
+				   struct netlink_callback *cb);
+#ifdef CONFIG_TIPC_CRYPTO
+int tipc_nl_node_set_key(struct sk_buff *skb, struct genl_info *info);
+int tipc_nl_node_flush_key(struct sk_buff *skb, struct genl_info *info);
+#endif
+void tipc_node_pre_cleanup_net(struct net *exit_net);
 #endif

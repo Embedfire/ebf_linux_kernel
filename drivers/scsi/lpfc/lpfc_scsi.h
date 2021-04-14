@@ -1,9 +1,11 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2004-2006 Emulex.  All rights reserved.           *
+ * Copyright (C) 2017-2019 Broadcom. All Rights Reserved. The term *
+ * “Broadcom” refers to Broadcom Inc and/or its subsidiaries.  *
+ * Copyright (C) 2004-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
- * www.emulex.com                                                  *
+ * www.broadcom.com                                                *
  *                                                                 *
  * This program is free software; you can redistribute it and/or   *
  * modify it under the terms of version 2 of the GNU General       *
@@ -21,6 +23,7 @@
 #include <asm/byteorder.h>
 
 struct lpfc_hba;
+#define LPFC_FCP_CDB_LEN 16
 
 #define list_remove_head(list, entry, type, member)		\
 	do {							\
@@ -38,6 +41,21 @@ struct lpfc_hba;
 /* per-port data that is allocated in the FC transport for us */
 struct lpfc_rport_data {
 	struct lpfc_nodelist *pnode;	/* Pointer to the node structure. */
+};
+
+struct lpfc_device_id {
+	struct lpfc_name vport_wwpn;
+	struct lpfc_name target_wwpn;
+	uint64_t lun;
+};
+
+struct lpfc_device_data {
+	struct list_head listentry;
+	struct lpfc_rport_data *rport_data;
+	struct lpfc_device_id device_id;
+	uint8_t priority;
+	bool oas_enabled;
+	bool available;
 };
 
 struct fcp_rsp {
@@ -72,6 +90,7 @@ struct fcp_rsp {
 #define RSP_RO_MISMATCH_ERR  0x03
 #define RSP_TM_NOT_SUPPORTED 0x04	/* Task mgmt function not supported */
 #define RSP_TM_NOT_COMPLETED 0x05	/* Task mgmt function not performed */
+#define RSP_TM_INVALID_LU    0x09	/* Task mgmt function to invalid LU */
 
 	uint32_t rspInfoRsvd;	/* FCP_RSP_INFO bytes 4-7 (reserved) */
 
@@ -102,46 +121,29 @@ struct fcp_cmnd {
 #define  WRITE_DATA      0x01	/* Bit 0 */
 #define  READ_DATA       0x02	/* Bit 1 */
 
-	uint8_t fcpCdb[16];	/* SRB cdb field is copied here */
+	uint8_t fcpCdb[LPFC_FCP_CDB_LEN]; /* SRB cdb field is copied here */
 	uint32_t fcpDl;		/* Total transfer length */
 
 };
 
-struct lpfc_scsi_buf {
-	struct list_head list;
-	struct scsi_cmnd *pCmd;
-	struct lpfc_rport_data *rdata;
-
-	uint32_t timeout;
-
-	uint16_t status;	/* From IOCB Word 7- ulpStatus */
-	uint32_t result;	/* From IOCB Word 4. */
-
-	uint32_t   seg_cnt;	/* Number of scatter-gather segments returned by
-				 * dma_map_sg.  The driver needs this for calls
-				 * to dma_unmap_sg. */
-	dma_addr_t nonsg_phys;	/* Non scatter-gather physical address. */
-
-	/*
-	 * data and dma_handle are the kernel virutal and bus address of the
-	 * dma-able buffer containing the fcp_cmd, fcp_rsp and a scatter
-	 * gather bde list that supports the sg_tablesize value.
-	 */
-	void *data;
-	dma_addr_t dma_handle;
-
-	struct fcp_cmnd *fcp_cmnd;
-	struct fcp_rsp *fcp_rsp;
-	struct ulp_bde64 *fcp_bpl;
-
-	/* cur_iocbq has phys of the dma-able buffer.
-	 * Iotag is in here
-	 */
-	struct lpfc_iocbq cur_iocbq;
-	wait_queue_head_t *waitq;
+struct lpfc_scsicmd_bkt {
+	uint32_t cmd_count;
 };
 
-#define LPFC_SCSI_DMA_EXT_SIZE 264
-#define LPFC_BPL_SIZE          1024
+#define LPFC_SCSI_DMA_EXT_SIZE	264
+#define LPFC_BPL_SIZE		1024
+#define MDAC_DIRECT_CMD		0x22
 
-#define MDAC_DIRECT_CMD                  0x22
+#define FIND_FIRST_OAS_LUN	0
+#define NO_MORE_OAS_LUN		-1
+#define NOT_OAS_ENABLED_LUN	NO_MORE_OAS_LUN
+
+#ifndef FC_PORTSPEED_128GBIT
+#define FC_PORTSPEED_128GBIT	0x2000
+#endif
+
+#define TXRDY_PAYLOAD_LEN	12
+
+/* For sysfs/debugfs tmp string max len */
+#define LPFC_MAX_SCSI_INFO_TMP_LEN	79
+

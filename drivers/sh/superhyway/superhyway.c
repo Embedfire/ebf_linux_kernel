@@ -22,7 +22,7 @@
 static int superhyway_devices;
 
 static struct device superhyway_bus_device = {
-	.bus_id = "superhyway",
+	.init_name = "superhyway",
 };
 
 static void superhyway_device_release(struct device *dev)
@@ -66,7 +66,7 @@ int superhyway_add_device(unsigned long base, struct superhyway_device *sdev,
 	superhyway_read_vcr(dev, base, &dev->vcr);
 
 	if (!dev->resource) {
-		dev->resource = kmalloc(sizeof(struct resource), GFP_KERNEL);
+		dev->resource = kzalloc(sizeof(struct resource), GFP_KERNEL);
 		if (!dev->resource) {
 			kfree(dev);
 			return -ENOMEM;
@@ -83,7 +83,7 @@ int superhyway_add_device(unsigned long base, struct superhyway_device *sdev,
 	dev->id.id		= dev->vcr.mod_id;
 
 	sprintf(dev->name, "SuperHyway device %04x", dev->id.id);
-	sprintf(dev->dev.bus_id, "%02x", superhyway_devices);
+	dev_set_name(&dev->dev, "%02x", superhyway_devices);
 
 	superhyway_devices++;
 
@@ -209,7 +209,7 @@ struct bus_type superhyway_bus_type = {
 	.name		= "superhyway",
 	.match		= superhyway_bus_match,
 #ifdef CONFIG_SYSFS
-	.dev_attrs	= superhyway_dev_attrs,
+	.dev_groups	= superhyway_dev_groups,
 #endif
 	.probe		= superhyway_device_probe,
 	.remove		= superhyway_device_remove,

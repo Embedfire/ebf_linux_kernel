@@ -1,23 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  synth callback routines for Emu10k1
  *
  *  Copyright (C) 2000 Takashi Iwai <tiwai@suse.de>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
+#include <linux/export.h>
 #include "emu10k1_synth_local.h"
 #include <sound/asoundef.h>
 
@@ -60,7 +48,7 @@ static void set_filterQ(struct snd_emu10k1 *hw, struct snd_emux_voice *vp);
 /*
  * set up operators
  */
-static struct snd_emux_operators emu10k1_ops = {
+static const struct snd_emux_operators emu10k1_ops = {
 	.owner =	THIS_MODULE,
 	.get_voice =	get_voice,
 	.prepare =	start_voice,
@@ -84,6 +72,8 @@ snd_emu10k1_ops_setup(struct snd_emux *emux)
  * get more voice for pcm
  *
  * terminate most inactive voice and give it as a pcm voice.
+ *
+ * voice_lock is already held.
  */
 int
 snd_emu10k1_synth_get_voice(struct snd_emu10k1 *hw)
@@ -91,29 +81,28 @@ snd_emu10k1_synth_get_voice(struct snd_emu10k1 *hw)
 	struct snd_emux *emu;
 	struct snd_emux_voice *vp;
 	struct best_voice best[V_END];
-	unsigned long flags;
 	int i;
 
 	emu = hw->synth;
 
-	spin_lock_irqsave(&emu->voice_lock, flags);
 	lookup_voices(emu, hw, best, 1); /* no OFF voices */
 	for (i = 0; i < V_END; i++) {
 		if (best[i].voice >= 0) {
 			int ch;
 			vp = &emu->voices[best[i].voice];
 			if ((ch = vp->ch) < 0) {
-				//printk("synth_get_voice: ch < 0 (%d) ??", i);
+				/*
+				dev_warn(emu->card->dev,
+				       "synth_get_voice: ch < 0 (%d) ??", i);
+				*/
 				continue;
 			}
 			vp->emu->num_voices--;
 			vp->ch = -1;
 			vp->state = SNDRV_EMUX_ST_OFF;
-			spin_unlock_irqrestore(&emu->voice_lock, flags);
 			return ch;
 		}
 	}
-	spin_unlock_irqrestore(&emu->voice_lock, flags);
 
 	/* not found */
 	return -ENOMEM;
@@ -145,7 +134,8 @@ terminate_voice(struct snd_emux_voice *vp)
 {
 	struct snd_emu10k1 *hw;
 	
-	snd_assert(vp, return);
+	if (snd_BUG_ON(!vp))
+		return;
 	hw = vp->hw;
 	snd_emu10k1_ptr_write(hw, DCYSUSV, vp->ch, 0x807f | DCYSUSV_CHANNELENABLE_MASK);
 	if (vp->block) {
@@ -223,7 +213,7 @@ lookup_voices(struct snd_emux *emu, struct snd_emu10k1 *hw,
 	int  i;
 
 	for (i = 0; i < V_END; i++) {
-		best[i].time = (unsigned int)-1; /* XXX MAX_?INT really */;
+		best[i].time = (unsigned int)-1; /* XXX MAX_?INT really */
 		best[i].voice = -1;
 	}
 
@@ -325,7 +315,8 @@ start_voice(struct snd_emux_voice *vp)
 	
 	hw = vp->hw;
 	ch = vp->ch;
-	snd_assert(ch >= 0, return -EINVAL);
+	if (snd_BUG_ON(ch < 0))
+		return -EINVAL;
 	chan = vp->chan;
 
 	emem = (struct snd_emu10k1_memblk *)vp->block;
@@ -333,7 +324,7 @@ start_voice(struct snd_emux_voice *vp)
 		return -EINVAL;
 	emem->map_locked++;
 	if (snd_emu10k1_memblk_map(hw, emem) < 0) {
-		// printk("emu: cannot map!\n");
+		/* dev_err(hw->card->devK, "emu: cannot map!\n"); */
 		return -ENOMEM;
 	}
 	mapped_offset = snd_emu10k1_memblk_offset(emem) >> 1;
@@ -411,7 +402,7 @@ start_voice(struct snd_emux_voice *vp)
 	snd_emu10k1_ptr_write(hw, Z2, ch, 0);
 
 	/* invalidate maps */
-	temp = (hw->silent_page.addr << 1) | MAP_PTI_MASK;
+	temp = (hw->silent_page.addr << hw->address_mode) | (hw->address_mode ? MAP_PTI_MASK1 : MAP_PTI_MASK0);
 	snd_emu10k1_ptr_write(hw, MAPA, ch, temp);
 	snd_emu10k1_ptr_write(hw, MAPB, ch, temp);
 #if 0
@@ -432,7 +423,7 @@ start_voice(struct snd_emux_voice *vp)
 		snd_emu10k1_ptr_write(hw, CDF, ch, sample);
 
 		/* invalidate maps */
-		temp = ((unsigned int)hw->silent_page.addr << 1) | MAP_PTI_MASK;
+		temp = ((unsigned int)hw->silent_page.addr << hw_address_mode) | (hw->address_mode ? MAP_PTI_MASK1 : MAP_PTI_MASK0);
 		snd_emu10k1_ptr_write(hw, MAPA, ch, temp);
 		snd_emu10k1_ptr_write(hw, MAPB, ch, temp);
 		

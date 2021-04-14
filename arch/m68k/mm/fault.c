@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/m68k/mm/fault.c
  *
@@ -10,60 +11,42 @@
 #include <linux/ptrace.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/uaccess.h>
+#include <linux/perf_event.h>
 
 #include <asm/setup.h>
 #include <asm/traps.h>
-#include <asm/system.h>
-#include <asm/uaccess.h>
-#include <asm/pgalloc.h>
 
 extern void die_if_kernel(char *, struct pt_regs *, long);
-extern const int frame_extra_sizes[]; /* in m68k/kernel/signal.c */
 
 int send_fault_sig(struct pt_regs *regs)
 {
-	siginfo_t siginfo = { 0, 0, 0, };
+	int signo, si_code;
+	void __user *addr;
 
-	siginfo.si_signo = current->thread.signo;
-	siginfo.si_code = current->thread.code;
-	siginfo.si_addr = (void *)current->thread.faddr;
-#ifdef DEBUG
-	printk("send_fault_sig: %p,%d,%d\n", siginfo.si_addr, siginfo.si_signo, siginfo.si_code);
-#endif
+	signo = current->thread.signo;
+	si_code = current->thread.code;
+	addr = (void __user *)current->thread.faddr;
+	pr_debug("send_fault_sig: %p,%d,%d\n", addr, signo, si_code);
 
 	if (user_mode(regs)) {
-		force_sig_info(siginfo.si_signo,
-			       &siginfo, current);
+		force_sig_fault(signo, si_code, addr);
 	} else {
-		const struct exception_table_entry *fixup;
-
-		/* Are we prepared to handle this kernel fault? */
-		if ((fixup = search_exception_tables(regs->pc))) {
-			struct pt_regs *tregs;
-			/* Create a new four word stack frame, discarding the old
-			   one.  */
-			regs->stkadj = frame_extra_sizes[regs->format];
-			tregs =	(struct pt_regs *)((ulong)regs + regs->stkadj);
-			tregs->vector = regs->vector;
-			tregs->format = 0;
-			tregs->pc = fixup->fixup;
-			tregs->sr = regs->sr;
+		if (fixup_exception(regs))
 			return -1;
-		}
 
-		//if (siginfo.si_signo == SIGBUS)
-		//	force_sig_info(siginfo.si_signo,
-		//		       &siginfo, current);
+		//if (signo == SIGBUS)
+		//	force_sig_fault(si_signo, si_code, addr);
 
 		/*
 		 * Oops. The kernel tried to access some bad page. We'll have to
 		 * terminate things with extreme prejudice.
 		 */
-		if ((unsigned long)siginfo.si_addr < PAGE_SIZE)
-			printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
+		if ((unsigned long)addr < PAGE_SIZE)
+			pr_alert("Unable to handle kernel NULL pointer dereference");
 		else
-			printk(KERN_ALERT "Unable to handle kernel access");
-		printk(" at virtual address %p\n", siginfo.si_addr);
+			pr_alert("Unable to handle kernel access");
+		pr_cont(" at virtual address %p\n", addr);
 		die_if_kernel("Oops", regs, 0 /*error_code*/);
 		do_exit(SIGKILL);
 	}
@@ -87,22 +70,25 @@ int do_page_fault(struct pt_regs *regs, unsigned long address,
 {
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct * vma;
-	int write, fault;
+	vm_fault_t fault;
+	unsigned int flags = FAULT_FLAG_DEFAULT;
 
-#ifdef DEBUG
-	printk ("do page fault:\nregs->sr=%#x, regs->pc=%#lx, address=%#lx, %ld, %p\n",
-		regs->sr, regs->pc, address, error_code,
-		current->mm->pgd);
-#endif
+	pr_debug("do page fault:\nregs->sr=%#x, regs->pc=%#lx, address=%#lx, %ld, %p\n",
+		regs->sr, regs->pc, address, error_code, mm ? mm->pgd : NULL);
 
 	/*
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_atomic() || !mm)
+	if (faulthandler_disabled() || !mm)
 		goto no_context;
 
-	down_read(&mm->mmap_sem);
+	if (user_mode(regs))
+		flags |= FAULT_FLAG_USER;
+
+	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);
+retry:
+	mmap_read_lock(mm);
 
 	vma = find_vma(mm, address);
 	if (!vma)
@@ -129,22 +115,19 @@ int do_page_fault(struct pt_regs *regs, unsigned long address,
  * we can handle it..
  */
 good_area:
-#ifdef DEBUG
-	printk("do_page_fault: good_area\n");
-#endif
-	write = 0;
+	pr_debug("do_page_fault: good_area\n");
 	switch (error_code & 3) {
 		default:	/* 3: write, present */
-			/* fall through */
+			fallthrough;
 		case 2:		/* write, not present */
 			if (!(vma->vm_flags & VM_WRITE))
 				goto acc_err;
-			write++;
+			flags |= FAULT_FLAG_WRITE;
 			break;
 		case 1:		/* read, present */
 			goto acc_err;
 		case 0:		/* read, not present */
-			if (!(vma->vm_flags & (VM_READ | VM_EXEC | VM_WRITE)))
+			if (unlikely(!vma_is_accessible(vma)))
 				goto acc_err;
 	}
 
@@ -154,24 +137,37 @@ good_area:
 	 * the fault.
 	 */
 
- survive:
-	fault = handle_mm_fault(mm, vma, address, write);
-#ifdef DEBUG
-	printk("handle_mm_fault returns %d\n",fault);
-#endif
+	fault = handle_mm_fault(vma, address, flags, regs);
+	pr_debug("handle_mm_fault returns %x\n", fault);
+
+	if (fault_signal_pending(fault, regs))
+		return 0;
+
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		if (fault & VM_FAULT_OOM)
 			goto out_of_memory;
+		else if (fault & VM_FAULT_SIGSEGV)
+			goto map_err;
 		else if (fault & VM_FAULT_SIGBUS)
 			goto bus_err;
 		BUG();
 	}
-	if (fault & VM_FAULT_MAJOR)
-		current->maj_flt++;
-	else
-		current->min_flt++;
 
-	up_read(&mm->mmap_sem);
+	if (flags & FAULT_FLAG_ALLOW_RETRY) {
+		if (fault & VM_FAULT_RETRY) {
+			flags |= FAULT_FLAG_TRIED;
+
+			/*
+			 * No need to mmap_read_unlock(mm) as we would
+			 * have already released it in __lock_page_or_retry
+			 * in mm/filemap.c.
+			 */
+
+			goto retry;
+		}
+	}
+
+	mmap_read_unlock(mm);
 	return 0;
 
 /*
@@ -179,16 +175,11 @@ good_area:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up_read(&mm->mmap_sem);
-	if (is_global_init(current)) {
-		yield();
-		down_read(&mm->mmap_sem);
-		goto survive;
-	}
-
-	printk("VM: killing process %s\n", current->comm);
-	if (user_mode(regs))
-		do_group_exit(SIGKILL);
+	mmap_read_unlock(mm);
+	if (!user_mode(regs))
+		goto no_context;
+	pagefault_out_of_memory();
+	return 0;
 
 no_context:
 	current->thread.signo = SIGBUS;
@@ -213,6 +204,6 @@ acc_err:
 	current->thread.faddr = address;
 
 send_sig:
-	up_read(&mm->mmap_sem);
+	mmap_read_unlock(mm);
 	return send_fault_sig(regs);
 }

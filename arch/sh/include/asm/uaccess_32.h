@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * User space memory access functions
  *
@@ -24,6 +25,9 @@ do {								\
 		break;						\
 	case 4:							\
 		__get_user_asm(x, ptr, retval, "l");		\
+		break;						\
+	case 8:							\
+		__get_user_u64(x, ptr, retval);			\
 		break;						\
 	default:						\
 		__get_user_unknown();				\
@@ -64,6 +68,56 @@ do {							\
 #endif /* CONFIG_MMU */
 
 extern void __get_user_unknown(void);
+
+#if defined(CONFIG_CPU_LITTLE_ENDIAN)
+#define __get_user_u64(x, addr, err) \
+({ \
+__asm__ __volatile__( \
+	"1:\n\t" \
+	"mov.l	%2,%R1\n\t" \
+	"mov.l	%T2,%S1\n\t" \
+	"2:\n" \
+	".section	.fixup,\"ax\"\n" \
+	"3:\n\t" \
+	"mov  #0,%R1\n\t"   \
+	"mov  #0,%S1\n\t"   \
+	"mov.l	4f, %0\n\t" \
+	"jmp	@%0\n\t" \
+	" mov	%3, %0\n\t" \
+	".balign	4\n" \
+	"4:	.long	2b\n\t" \
+	".previous\n" \
+	".section	__ex_table,\"a\"\n\t" \
+	".long	1b, 3b\n\t" \
+	".long	1b + 2, 3b\n\t" \
+	".previous" \
+	:"=&r" (err), "=&r" (x) \
+	:"m" (__m(addr)), "i" (-EFAULT), "0" (err)); })
+#else
+#define __get_user_u64(x, addr, err) \
+({ \
+__asm__ __volatile__( \
+	"1:\n\t" \
+	"mov.l	%2,%S1\n\t" \
+	"mov.l	%T2,%R1\n\t" \
+	"2:\n" \
+	".section	.fixup,\"ax\"\n" \
+	"3:\n\t" \
+	"mov  #0,%S1\n\t"   \
+	"mov  #0,%R1\n\t"   \
+	"mov.l	4f, %0\n\t" \
+	"jmp	@%0\n\t" \
+	" mov	%3, %0\n\t" \
+	".balign	4\n" \
+	"4:	.long	2b\n\t" \
+	".previous\n" \
+	".section	__ex_table,\"a\"\n\t" \
+	".long	1b, 3b\n\t" \
+	".long	1b + 2, 3b\n\t" \
+	".previous" \
+	:"=&r" (err), "=&r" (x) \
+	:"m" (__m(addr)), "i" (-EFAULT), "0" (err)); })
+#endif
 
 #define __put_user_size(x,ptr,size,retval)		\
 do {							\
@@ -169,80 +223,5 @@ __asm__ __volatile__( \
 #endif
 
 extern void __put_user_unknown(void);
-
-static inline int
-__strncpy_from_user(unsigned long __dest, unsigned long __user __src, int __count)
-{
-	__kernel_size_t res;
-	unsigned long __dummy, _d, _s, _c;
-
-	__asm__ __volatile__(
-		"9:\n"
-		"mov.b	@%2+, %1\n\t"
-		"cmp/eq	#0, %1\n\t"
-		"bt/s	2f\n"
-		"1:\n"
-		"mov.b	%1, @%3\n\t"
-		"dt	%4\n\t"
-		"bf/s	9b\n\t"
-		" add	#1, %3\n\t"
-		"2:\n\t"
-		"sub	%4, %0\n"
-		"3:\n"
-		".section .fixup,\"ax\"\n"
-		"4:\n\t"
-		"mov.l	5f, %1\n\t"
-		"jmp	@%1\n\t"
-		" mov	%9, %0\n\t"
-		".balign 4\n"
-		"5:	.long 3b\n"
-		".previous\n"
-		".section __ex_table,\"a\"\n"
-		"	.balign 4\n"
-		"	.long 9b,4b\n"
-		".previous"
-		: "=r" (res), "=&z" (__dummy), "=r" (_s), "=r" (_d), "=r"(_c)
-		: "0" (__count), "2" (__src), "3" (__dest), "4" (__count),
-		  "i" (-EFAULT)
-		: "memory", "t");
-
-	return res;
-}
-
-/*
- * Return the size of a string (including the ending 0 even when we have
- * exceeded the maximum string length).
- */
-static inline long __strnlen_user(const char __user *__s, long __n)
-{
-	unsigned long res;
-	unsigned long __dummy;
-
-	__asm__ __volatile__(
-		"1:\t"
-		"mov.b	@(%0,%3), %1\n\t"
-		"cmp/eq	%4, %0\n\t"
-		"bt/s	2f\n\t"
-		" add	#1, %0\n\t"
-		"tst	%1, %1\n\t"
-		"bf	1b\n\t"
-		"2:\n"
-		".section .fixup,\"ax\"\n"
-		"3:\n\t"
-		"mov.l	4f, %1\n\t"
-		"jmp	@%1\n\t"
-		" mov	#0, %0\n"
-		".balign 4\n"
-		"4:	.long 2b\n"
-		".previous\n"
-		".section __ex_table,\"a\"\n"
-		"	.balign 4\n"
-		"	.long 1b,3b\n"
-		".previous"
-		: "=z" (res), "=&r" (__dummy)
-		: "0" (0), "r" (__s), "r" (__n)
-		: "t");
-	return res;
-}
 
 #endif /* __ASM_SH_UACCESS_32_H */

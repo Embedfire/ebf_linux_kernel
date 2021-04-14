@@ -1,8 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * QLogic iSCSI HBA Driver
- * Copyright (c)  2003-2006 QLogic Corporation
- *
- * See LICENSE.qla4xxx for copyright and licensing details.
+ * Copyright (c)  2003-2013 QLogic Corporation
  */
 
 /*
@@ -29,7 +28,7 @@ qla4xxx_lookup_ddb_by_fw_index(struct scsi_qla_host *ha, uint32_t fw_ddb_index)
 		ddb_entry = ha->fw_ddb_index_map[fw_ddb_index];
 	}
 
-	DEBUG3(printk("scsi%d: %s: index [%d], ddb_entry = %p\n",
+	DEBUG3(printk("scsi%d: %s: ddb [%d], ddb_entry = %p\n",
 	    ha->host_no, __func__, fw_ddb_index, ddb_entry));
 
 	return ddb_entry;
@@ -81,4 +80,16 @@ qla4xxx_disable_intrs(struct scsi_qla_host *ha)
 	spin_lock_irqsave(&ha->hardware_lock, flags);
 	__qla4xxx_disable_intrs(ha);
 	spin_unlock_irqrestore(&ha->hardware_lock, flags);
+}
+
+static inline int qla4xxx_get_chap_type(struct ql4_chap_table *chap_entry)
+{
+	int type;
+
+	if (chap_entry->flags & BIT_7)
+		type = LOCAL_CHAP;
+	else
+		type = BIDI_CHAP;
+
+	return type;
 }

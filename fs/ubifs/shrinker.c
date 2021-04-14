@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of UBIFS.
  *
  * Copyright (C) 2006-2008 Nokia Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 51
- * Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  *
  * Authors: Artem Bityutskiy (Битюцкий Артём)
  *          Adrian Hunter
@@ -71,10 +59,10 @@ static int shrink_tnc(struct ubifs_info *c, int nr, int age, int *contention)
 {
 	int total_freed = 0;
 	struct ubifs_znode *znode, *zprev;
-	int time = get_seconds();
+	time64_t time = ktime_get_seconds();
 
-	ubifs_assert(mutex_is_locked(&c->umount_mutex));
-	ubifs_assert(mutex_is_locked(&c->tnc_mutex));
+	ubifs_assert(c, mutex_is_locked(&c->umount_mutex));
+	ubifs_assert(c, mutex_is_locked(&c->tnc_mutex));
 
 	if (!c->zroot.znode || atomic_long_read(&c->clean_zn_cnt) == 0)
 		return 0;
@@ -89,7 +77,7 @@ static int shrink_tnc(struct ubifs_info *c, int nr, int age, int *contention)
 	 * changed only when the 'c->tnc_mutex' is held.
 	 */
 	zprev = NULL;
-	znode = ubifs_tnc_levelorder_next(c->zroot.znode, NULL);
+	znode = ubifs_tnc_levelorder_next(c, c->zroot.znode, NULL);
 	while (znode && total_freed < nr &&
 	       atomic_long_read(&c->clean_zn_cnt) > 0) {
 		int freed;
@@ -125,10 +113,9 @@ static int shrink_tnc(struct ubifs_info *c, int nr, int age, int *contention)
 			else
 				c->zroot.znode = NULL;
 
-			freed = ubifs_destroy_tnc_subtree(znode);
+			freed = ubifs_destroy_tnc_subtree(c, znode);
 			atomic_long_sub(freed, &ubifs_clean_zn_cnt);
 			atomic_long_sub(freed, &c->clean_zn_cnt);
-			ubifs_assert(atomic_long_read(&c->clean_zn_cnt) >= 0);
 			total_freed += freed;
 			znode = zprev;
 		}
@@ -137,7 +124,7 @@ static int shrink_tnc(struct ubifs_info *c, int nr, int age, int *contention)
 			break;
 
 		zprev = znode;
-		znode = ubifs_tnc_levelorder_next(c->zroot.znode, znode);
+		znode = ubifs_tnc_levelorder_next(c, c->zroot.znode, znode);
 		cond_resched();
 	}
 
@@ -151,7 +138,7 @@ static int shrink_tnc(struct ubifs_info *c, int nr, int age, int *contention)
  * @contention: if any contention, this is set to %1
  *
  * This function walks the list of mounted UBIFS file-systems and frees clean
- * znodes which are older then @age, until at least @nr znodes are freed.
+ * znodes which are older than @age, until at least @nr znodes are freed.
  * Returns the number of freed znodes.
  */
 static int shrink_tnc_trees(int nr, int age, int *contention)
@@ -206,8 +193,7 @@ static int shrink_tnc_trees(int nr, int age, int *contention)
 		 * Move this one to the end of the list to provide some
 		 * fairness.
 		 */
-		list_del(&c->infos_list);
-		list_add_tail(&c->infos_list, &ubifs_infos);
+		list_move_tail(&c->infos_list, &ubifs_infos);
 		mutex_unlock(&c->umount_mutex);
 		if (freed >= nr)
 			break;
@@ -251,7 +237,7 @@ static int kick_a_thread(void)
 			dirty_zn_cnt = atomic_long_read(&c->dirty_zn_cnt);
 
 			if (!dirty_zn_cnt || c->cmt_state == COMMIT_BROKEN ||
-			    c->ro_media) {
+			    c->ro_mount || c->ro_error) {
 				mutex_unlock(&c->umount_mutex);
 				continue;
 			}
@@ -263,8 +249,7 @@ static int kick_a_thread(void)
 			}
 
 			if (i == 1) {
-				list_del(&c->infos_list);
-				list_add_tail(&c->infos_list, &ubifs_infos);
+				list_move_tail(&c->infos_list, &ubifs_infos);
 				spin_unlock(&ubifs_infos_lock);
 
 				ubifs_request_bg_commit(c);
@@ -279,13 +264,25 @@ static int kick_a_thread(void)
 	return 0;
 }
 
-int ubifs_shrinker(int nr, gfp_t gfp_mask)
+unsigned long ubifs_shrink_count(struct shrinker *shrink,
+				 struct shrink_control *sc)
 {
-	int freed, contention = 0;
 	long clean_zn_cnt = atomic_long_read(&ubifs_clean_zn_cnt);
 
-	if (nr == 0)
-		return clean_zn_cnt;
+	/*
+	 * Due to the way UBIFS updates the clean znode counter it may
+	 * temporarily be negative.
+	 */
+	return clean_zn_cnt >= 0 ? clean_zn_cnt : 1;
+}
+
+unsigned long ubifs_shrink_scan(struct shrinker *shrink,
+				struct shrink_control *sc)
+{
+	unsigned long nr = sc->nr_to_scan;
+	int contention = 0;
+	unsigned long freed;
+	long clean_zn_cnt = atomic_long_read(&ubifs_clean_zn_cnt);
 
 	if (!clean_zn_cnt) {
 		/*
@@ -313,10 +310,10 @@ int ubifs_shrinker(int nr, gfp_t gfp_mask)
 
 	if (!freed && contention) {
 		dbg_tnc("freed nothing, but contention");
-		return -1;
+		return SHRINK_STOP;
 	}
 
 out:
-	dbg_tnc("%d znodes were freed, requested %d", freed, nr);
+	dbg_tnc("%lu znodes were freed, requested %lu", freed, nr);
 	return freed;
 }

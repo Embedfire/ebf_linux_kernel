@@ -1,4 +1,6 @@
-/* Driver for USB Mass Storage compliant devices
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Driver for USB Mass Storage compliant devices
  * Debugging Functions Source Code File
  *
  * Current development and maintenance by:
@@ -23,38 +25,23 @@
  *
  * Also, for certain devices, the interrupt endpoint is used to convey
  * status of a command.
- *
- * Please see http://www.one-eyed-alien.net/~mdharm/linux-usb for more
- * information about this driver.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#include <linux/device.h>
 #include <linux/cdrom.h>
+#include <linux/export.h>
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_dbg.h>
 
+#include "usb.h"
 #include "debug.h"
 #include "scsi.h"
 
 
-void usb_stor_show_command(struct scsi_cmnd *srb)
+void usb_stor_show_command(const struct us_data *us, struct scsi_cmnd *srb)
 {
 	char *what = NULL;
-	int i;
 
 	switch (srb->cmnd[0]) {
 	case TEST_UNIT_READY: what = "TEST_UNIT_READY"; break;
@@ -149,29 +136,40 @@ void usb_stor_show_command(struct scsi_cmnd *srb)
 	case WRITE_LONG_2: what = "WRITE_LONG_2"; break;
 	default: what = "(unknown command)"; break;
 	}
-	US_DEBUGP("Command %s (%d bytes)\n", what, srb->cmd_len);
-	US_DEBUGP("");
-	for (i = 0; i < srb->cmd_len && i < 16; i++)
-		US_DEBUGPX(" %02x", srb->cmnd[i]);
-	US_DEBUGPX("\n");
+	usb_stor_dbg(us, "Command %s (%d bytes)\n", what, srb->cmd_len);
+	usb_stor_dbg(us, "bytes: %*ph\n", min_t(int, srb->cmd_len, 16),
+		     (const unsigned char *)srb->cmnd);
 }
 
-void usb_stor_show_sense(
-		unsigned char key,
-		unsigned char asc,
-		unsigned char ascq) {
-
-	const char *what, *keystr;
+void usb_stor_show_sense(const struct us_data *us,
+			 unsigned char key,
+			 unsigned char asc,
+			 unsigned char ascq)
+{
+	const char *what, *keystr, *fmt;
 
 	keystr = scsi_sense_key_string(key);
-	what = scsi_extd_sense_format(asc, ascq);
+	what = scsi_extd_sense_format(asc, ascq, &fmt);
 
 	if (keystr == NULL)
 		keystr = "(Unknown Key)";
 	if (what == NULL)
 		what = "(unknown ASC/ASCQ)";
 
-	US_DEBUGP("%s: ", keystr);
-	US_DEBUGPX(what, ascq);
-	US_DEBUGPX("\n");
+	if (fmt)
+		usb_stor_dbg(us, "%s: %s (%s%x)\n", keystr, what, fmt, ascq);
+	else
+		usb_stor_dbg(us, "%s: %s\n", keystr, what);
 }
+
+void usb_stor_dbg(const struct us_data *us, const char *fmt, ...)
+{
+	va_list args;
+
+	va_start(args, fmt);
+
+	dev_vprintk_emit(LOGLEVEL_DEBUG, &us->pusb_dev->dev, fmt, args);
+
+	va_end(args);
+}
+EXPORT_SYMBOL_GPL(usb_stor_dbg);

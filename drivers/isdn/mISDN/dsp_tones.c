@@ -8,6 +8,7 @@
  *
  */
 
+#include <linux/gfp.h>
 #include <linux/mISDNif.h>
 #include <linux/mISDNdsp.h>
 #include "core.h"
@@ -231,121 +232,127 @@ dsp_audio_generate_ulaw_samples(void)
  * tone sequence definition *
  ****************************/
 
-struct pattern {
+static struct pattern {
 	int tone;
 	u8 *data[10];
 	u32 *siz[10];
 	u32 seq[10];
 } pattern[] = {
 	{TONE_GERMAN_DIALTONE,
-	{DATA_GA, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_GA, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-	{1900, 0, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GA, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GA, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {1900, 0, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_OLDDIALTONE,
-	{DATA_GO, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_GO, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-	{1998, 0, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GO, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GO, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {1998, 0, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_AMERICAN_DIALTONE,
-	{DATA_DT, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_DT, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-	{8000, 0, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_DT, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_DT, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {8000, 0, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_DIALPBX,
-	{DATA_GA, DATA_S, DATA_GA, DATA_S, DATA_GA, DATA_S, 0, 0, 0, 0},
-	{SIZE_GA, SIZE_S, SIZE_GA, SIZE_S, SIZE_GA, SIZE_S, 0, 0, 0, 0},
-	{2000, 2000, 2000, 2000, 2000, 12000, 0, 0, 0, 0} },
+	 {DATA_GA, DATA_S, DATA_GA, DATA_S, DATA_GA, DATA_S, NULL, NULL, NULL,
+	  NULL},
+	 {SIZE_GA, SIZE_S, SIZE_GA, SIZE_S, SIZE_GA, SIZE_S, NULL, NULL, NULL,
+	  NULL},
+	 {2000, 2000, 2000, 2000, 2000, 12000, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_OLDDIALPBX,
-	{DATA_GO, DATA_S, DATA_GO, DATA_S, DATA_GO, DATA_S, 0, 0, 0, 0},
-	{SIZE_GO, SIZE_S, SIZE_GO, SIZE_S, SIZE_GO, SIZE_S, 0, 0, 0, 0},
-	{2000, 2000, 2000, 2000, 2000, 12000, 0, 0, 0, 0} },
+	 {DATA_GO, DATA_S, DATA_GO, DATA_S, DATA_GO, DATA_S, NULL, NULL, NULL,
+	  NULL},
+	 {SIZE_GO, SIZE_S, SIZE_GO, SIZE_S, SIZE_GO, SIZE_S, NULL, NULL, NULL,
+	  NULL},
+	 {2000, 2000, 2000, 2000, 2000, 12000, 0, 0, 0, 0} },
 
 	{TONE_AMERICAN_DIALPBX,
-	{DATA_DT, DATA_S, DATA_DT, DATA_S, DATA_DT, DATA_S, 0, 0, 0, 0},
-	{SIZE_DT, SIZE_S, SIZE_DT, SIZE_S, SIZE_DT, SIZE_S, 0, 0, 0, 0},
-	{2000, 2000, 2000, 2000, 2000, 12000, 0, 0, 0, 0} },
+	 {DATA_DT, DATA_S, DATA_DT, DATA_S, DATA_DT, DATA_S, NULL, NULL, NULL,
+	  NULL},
+	 {SIZE_DT, SIZE_S, SIZE_DT, SIZE_S, SIZE_DT, SIZE_S, NULL, NULL, NULL,
+	  NULL},
+	 {2000, 2000, 2000, 2000, 2000, 12000, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_RINGING,
-	{DATA_GA, DATA_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_GA, SIZE_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{8000, 32000, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GA, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GA, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {8000, 32000, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_OLDRINGING,
-	{DATA_GO, DATA_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_GO, SIZE_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{8000, 40000, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GO, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GO, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {8000, 40000, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_AMERICAN_RINGING,
-	{DATA_RI, DATA_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_RI, SIZE_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{8000, 32000, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_RI, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_RI, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {8000, 32000, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_RINGPBX,
-	{DATA_GA, DATA_S, DATA_GA, DATA_S, 0, 0, 0, 0, 0, 0},
-	{SIZE_GA, SIZE_S, SIZE_GA, SIZE_S, 0, 0, 0, 0, 0, 0},
-	{4000, 4000, 4000, 28000, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GA, DATA_S, DATA_GA, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GA, SIZE_S, SIZE_GA, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {4000, 4000, 4000, 28000, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_OLDRINGPBX,
-	{DATA_GO, DATA_S, DATA_GO, DATA_S, 0, 0, 0, 0, 0, 0},
-	{SIZE_GO, SIZE_S, SIZE_GO, SIZE_S, 0, 0, 0, 0, 0, 0},
-	{4000, 4000, 4000, 28000, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GO, DATA_S, DATA_GO, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GO, SIZE_S, SIZE_GO, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {4000, 4000, 4000, 28000, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_AMERICAN_RINGPBX,
-	{DATA_RI, DATA_S, DATA_RI, DATA_S, 0, 0, 0, 0, 0, 0},
-	{SIZE_RI, SIZE_S, SIZE_RI, SIZE_S, 0, 0, 0, 0, 0, 0},
-	{4000, 4000, 4000, 28000, 0, 0, 0, 0, 0, 0} },
+	 {DATA_RI, DATA_S, DATA_RI, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_RI, SIZE_S, SIZE_RI, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {4000, 4000, 4000, 28000, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_BUSY,
-	{DATA_GA, DATA_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_GA, SIZE_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{4000, 4000, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GA, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GA, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {4000, 4000, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_OLDBUSY,
-	{DATA_GO, DATA_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_GO, SIZE_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{1000, 5000, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GO, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GO, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {1000, 5000, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_AMERICAN_BUSY,
-	{DATA_BU, DATA_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_BU, SIZE_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{4000, 4000, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_BU, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_BU, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {4000, 4000, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_HANGUP,
-	{DATA_GA, DATA_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_GA, SIZE_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{4000, 4000, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GA, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GA, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {4000, 4000, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_OLDHANGUP,
-	{DATA_GO, DATA_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_GO, SIZE_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{1000, 5000, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GO, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GO, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {1000, 5000, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_AMERICAN_HANGUP,
-	{DATA_DT, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_DT, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-	{8000, 0, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_DT, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_DT, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {8000, 0, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_SPECIAL_INFO,
-	{DATA_S1, DATA_S2, DATA_S3, DATA_S, 0, 0, 0, 0, 0, 0},
-	{SIZE_S1, SIZE_S2, SIZE_S3, SIZE_S, 0, 0, 0, 0, 0, 0},
-	{2666, 2666, 2666, 8002, 0, 0, 0, 0, 0, 0} },
+	 {DATA_S1, DATA_S2, DATA_S3, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_S1, SIZE_S2, SIZE_S3, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {2666, 2666, 2666, 8002, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_GASSENBESETZT,
-	{DATA_GA, DATA_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{SIZE_GA, SIZE_S, 0, 0, 0, 0, 0, 0, 0, 0},
-	{2000, 2000, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GA, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GA, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {2000, 2000, 0, 0, 0, 0, 0, 0, 0, 0} },
 
 	{TONE_GERMAN_AUFSCHALTTON,
-	{DATA_GO, DATA_S, DATA_GO, DATA_S, 0, 0, 0, 0, 0, 0},
-	{SIZE_GO, SIZE_S, SIZE_GO, SIZE_S, 0, 0, 0, 0, 0, 0},
-	{1000, 5000, 1000, 17000, 0, 0, 0, 0, 0, 0} },
+	 {DATA_GO, DATA_S, DATA_GO, DATA_S, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {SIZE_GO, SIZE_S, SIZE_GO, SIZE_S, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {1000, 5000, 1000, 17000, 0, 0, 0, 0, 0, 0} },
 
 	{0,
-	{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-	{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-	{0, 0, 0, 0, 0, 0, 0, 0, 0, 0} },
+	 {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+	 {0, 0, 0, 0, 0, 0, 0, 0, 0, 0} },
 };
 
 /******************
@@ -379,7 +386,7 @@ void dsp_tone_copy(struct dsp *dsp, u8 *data, int len)
 
 	/* process pattern */
 	pat = (struct pattern *)tone->pattern;
-		/* points to the current pattern */
+	/* points to the current pattern */
 	index = tone->index; /* gives current sequence index */
 	count = tone->count; /* gives current sample */
 
@@ -387,7 +394,7 @@ void dsp_tone_copy(struct dsp *dsp, u8 *data, int len)
 	while (len) {
 		/* find sample to start with */
 		while (42) {
-			/* warp arround */
+			/* wrap around */
 			if (!pat->seq[index]) {
 				count = 0;
 				index = 0;
@@ -397,19 +404,19 @@ void dsp_tone_copy(struct dsp *dsp, u8 *data, int len)
 				break;
 			if (dsp_debug & DEBUG_DSP_TONE)
 				printk(KERN_DEBUG "%s: reaching next sequence "
-					"(index=%d)\n", __func__, index);
+				       "(index=%d)\n", __func__, index);
 			count -= pat->seq[index];
 			index++;
 		}
 		/* calculate start and number of samples */
 		start = count % (*(pat->siz[index]));
 		num = len;
-		if (num+count > pat->seq[index])
+		if (num + count > pat->seq[index])
 			num = pat->seq[index] - count;
-		if (num+start > (*(pat->siz[index])))
+		if (num + start > (*(pat->siz[index])))
 			num = (*(pat->siz[index])) - start;
 		/* copy memory */
-		memcpy(data, pat->data[index]+start, num);
+		memcpy(data, pat->data[index] + start, num);
 		/* reduce length */
 		data += num;
 		count += num;
@@ -434,8 +441,8 @@ dsp_tone_hw_message(struct dsp *dsp, u8 *sample, int len)
 
 	/* unlocking is not required, because we don't expect a response */
 	nskb = _alloc_mISDN_skb(PH_CONTROL_REQ,
-		(len)?HFC_SPL_LOOP_ON:HFC_SPL_LOOP_OFF, len, sample,
-		GFP_ATOMIC);
+				(len) ? HFC_SPL_LOOP_ON : HFC_SPL_LOOP_OFF, len, sample,
+				GFP_ATOMIC);
 	if (nskb) {
 		if (dsp->ch.peer) {
 			if (dsp->ch.recv(dsp->ch.peer, nskb))
@@ -450,9 +457,9 @@ dsp_tone_hw_message(struct dsp *dsp, u8 *sample, int len)
  * timer expires *
  *****************/
 void
-dsp_tone_timeout(void *arg)
+dsp_tone_timeout(struct timer_list *t)
 {
-	struct dsp *dsp = arg;
+	struct dsp *dsp = from_timer(dsp, t, tone.tl);
 	struct dsp_tone *tone = &dsp->tone;
 	struct pattern *pat = (struct pattern *)tone->pattern;
 	int index = tone->index;
@@ -467,11 +474,10 @@ dsp_tone_timeout(void *arg)
 
 	/* set next tone */
 	if (pat->data[index] == DATA_S)
-		dsp_tone_hw_message(dsp, 0, 0);
+		dsp_tone_hw_message(dsp, NULL, 0);
 	else
 		dsp_tone_hw_message(dsp, pat->data[index], *(pat->siz[index]));
 	/* set timer */
-	init_timer(&tone->tl);
 	tone->tl.expires = jiffies + (pat->seq[index] * HZ) / 8000;
 	add_timer(&tone->tl);
 }
@@ -498,8 +504,7 @@ dsp_tone(struct dsp *dsp, int tone)
 
 	/* we turn off the tone */
 	if (!tone) {
-		if (dsp->features.hfc_loops)
-		if (timer_pending(&tonet->tl))
+		if (dsp->features.hfc_loops && timer_pending(&tonet->tl))
 			del_timer(&tonet->tl);
 		if (dsp->features.hfc_loops)
 			dsp_tone_hw_message(dsp, NULL, 0);
@@ -522,7 +527,7 @@ dsp_tone(struct dsp *dsp, int tone)
 	}
 	if (dsp_debug & DEBUG_DSP_TONE)
 		printk(KERN_DEBUG "%s: now starting tone %d (index=%d)\n",
-			__func__, tone, 0);
+		       __func__, tone, 0);
 	tonet->tone = tone;
 	tonet->pattern = pat;
 	tonet->index = 0;
@@ -535,7 +540,6 @@ dsp_tone(struct dsp *dsp, int tone)
 		/* set timer */
 		if (timer_pending(&tonet->tl))
 			del_timer(&tonet->tl);
-		init_timer(&tonet->tl);
 		tonet->tl.expires = jiffies + (pat->seq[0] * HZ) / 8000;
 		add_timer(&tonet->tl);
 	} else {
@@ -544,8 +548,3 @@ dsp_tone(struct dsp *dsp, int tone)
 
 	return 0;
 }
-
-
-
-
-

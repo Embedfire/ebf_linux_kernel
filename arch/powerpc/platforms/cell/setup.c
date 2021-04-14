@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  linux/arch/powerpc/platforms/cell/cell_setup.c
  *
@@ -6,11 +7,6 @@
  *  Modified by Cort Dougan (cort@cs.nmt.edu)
  *  Modified by PPC64 Team, IBM Corp
  *  Modified by Cell Team, IBM Deutschland Entwicklung GmbH
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #undef DEBUG
 
@@ -18,8 +14,8 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/stddef.h>
+#include <linux/export.h>
 #include <linux/unistd.h>
-#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
@@ -35,8 +31,6 @@
 #include <asm/mmu.h>
 #include <asm/processor.h>
 #include <asm/io.h>
-#include <asm/kexec.h>
-#include <asm/pgtable.h>
 #include <asm/prom.h>
 #include <asm/rtas.h>
 #include <asm/pci-bridge.h>
@@ -53,11 +47,12 @@
 #include <asm/udbg.h>
 #include <asm/mpic.h>
 #include <asm/cell-regs.h>
+#include <asm/io-workarounds.h>
 
+#include "cell.h"
 #include "interrupt.h"
 #include "pervasive.h"
 #include "ras.h"
-#include "io-workarounds.h"
 
 #ifdef DEBUG
 #define DBG(fmt...) udbg_printf(fmt)
@@ -118,7 +113,7 @@ static void cell_fixup_pcie_rootcomplex(struct pci_dev *dev)
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_ANY_ID, PCI_ANY_ID, cell_fixup_pcie_rootcomplex);
 
-static int __devinit cell_setup_phb(struct pci_controller *phb)
+static int cell_setup_phb(struct pci_controller *phb)
 {
 	const char *model;
 	struct device_node *np;
@@ -127,9 +122,11 @@ static int __devinit cell_setup_phb(struct pci_controller *phb)
 	if (rc)
 		return rc;
 
+	phb->controller_ops = cell_pci_controller_ops;
+
 	np = phb->dn;
 	model = of_get_property(np, "model", NULL);
-	if (model == NULL || strcmp(np->name, "pci"))
+	if (model == NULL || !of_node_name_eq(np, "pci"))
 		return 0;
 
 	/* Setup workarounds for spider */
@@ -138,10 +135,20 @@ static int __devinit cell_setup_phb(struct pci_controller *phb)
 
 	iowa_register_bus(phb, &spiderpci_ops, &spiderpci_iowa_init,
 				  (void *)SPIDER_PCI_REG_BASE);
-	io_workaround_init();
-
 	return 0;
 }
+
+static const struct of_device_id cell_bus_ids[] __initconst = {
+	{ .type = "soc", },
+	{ .compatible = "soc", },
+	{ .type = "spider", },
+	{ .type = "axon", },
+	{ .type = "plb5", },
+	{ .type = "plb4", },
+	{ .type = "opb", },
+	{ .type = "ebc", },
+	{},
+};
 
 static int __init cell_publish_devices(void)
 {
@@ -150,14 +157,13 @@ static int __init cell_publish_devices(void)
 	int node;
 
 	/* Publish OF platform devices for southbridge IOs */
-	of_platform_bus_probe(NULL, NULL, NULL);
+	of_platform_bus_probe(NULL, cell_bus_ids, NULL);
 
 	/* On spider based blades, we need to manually create the OF
 	 * platform devices for the PCI host bridges
 	 */
 	for_each_child_of_node(root, np) {
-		if (np->type == NULL || (strcmp(np->type, "pci") != 0 &&
-					 strcmp(np->type, "pciex") != 0))
+		if (!of_node_is_type(np, "pci") && !of_node_is_type(np, "pciex"))
 			continue;
 		of_platform_device_create(np, NULL, NULL);
 	}
@@ -175,44 +181,23 @@ static int __init cell_publish_devices(void)
 }
 machine_subsys_initcall(cell, cell_publish_devices);
 
-static void cell_mpic_cascade(unsigned int irq, struct irq_desc *desc)
-{
-	struct mpic *mpic = desc->handler_data;
-	unsigned int virq;
-
-	virq = mpic_get_one_irq(mpic);
-	if (virq != NO_IRQ)
-		generic_handle_irq(virq);
-	desc->chip->eoi(irq);
-}
-
 static void __init mpic_init_IRQ(void)
 {
 	struct device_node *dn;
 	struct mpic *mpic;
-	unsigned int virq;
 
-	for (dn = NULL;
-	     (dn = of_find_node_by_name(dn, "interrupt-controller"));) {
+	for_each_node_by_name(dn, "interrupt-controller") {
 		if (!of_device_is_compatible(dn, "CBEA,platform-open-pic"))
 			continue;
 
 		/* The MPIC driver will get everything it needs from the
 		 * device-tree, just pass 0 to all arguments
 		 */
-		mpic = mpic_alloc(dn, 0, 0, 0, 0, " MPIC     ");
+		mpic = mpic_alloc(dn, 0, MPIC_SECONDARY | MPIC_NO_RESET,
+				0, 0, " MPIC     ");
 		if (mpic == NULL)
 			continue;
 		mpic_init(mpic);
-
-		virq = irq_of_parse_and_map(dn, 0);
-		if (virq == NO_IRQ)
-			continue;
-
-		printk(KERN_INFO "%s : hooking up to IRQ %d\n",
-		       dn->full_name, virq);
-		set_irq_data(virq, mpic);
-		set_irq_chained_handler(virq, cell_mpic_cascade);
 	}
 }
 
@@ -254,22 +239,17 @@ static void __init cell_setup_arch(void)
 	init_pci_config_tokens();
 
 	cbe_pervasive_init();
-#ifdef CONFIG_DUMMY_CONSOLE
-	conswitchp = &dummy_con;
-#endif
 
 	mmio_nvram_init();
 }
 
 static int __init cell_probe(void)
 {
-	unsigned long root = of_get_flat_dt_root();
-
-	if (!of_flat_dt_is_compatible(root, "IBM,CBEA") &&
-	    !of_flat_dt_is_compatible(root, "IBM,CPBW-1.0"))
+	if (!of_machine_is_compatible("IBM,CBEA") &&
+	    !of_machine_is_compatible("IBM,CPBW-1.0"))
 		return 0;
 
-	hpte_init_native();
+	pm_power_off = rtas_power_off;
 
 	return 1;
 }
@@ -280,7 +260,6 @@ define_machine(cell) {
 	.setup_arch		= cell_setup_arch,
 	.show_cpuinfo		= cell_show_cpuinfo,
 	.restart		= rtas_restart,
-	.power_off		= rtas_power_off,
 	.halt			= rtas_halt,
 	.get_boot_time		= rtas_get_boot_time,
 	.get_rtc_time		= rtas_get_rtc_time,
@@ -289,9 +268,6 @@ define_machine(cell) {
 	.progress		= cell_progress,
 	.init_IRQ       	= cell_init_irq,
 	.pci_setup_phb		= cell_setup_phb,
-#ifdef CONFIG_KEXEC
-	.machine_kexec		= default_machine_kexec,
-	.machine_kexec_prepare	= default_machine_kexec_prepare,
-	.machine_crash_shutdown	= default_machine_crash_shutdown,
-#endif
 };
+
+struct pci_controller_ops cell_pci_controller_ops;

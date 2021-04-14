@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for audio on multifunction CS5535 companion device
  * Copyright (C) Jaya Kumar
@@ -5,25 +6,10 @@
  * Based on Jaroslav Kysela and Takashi Iwai's examples.
  * This work was sponsored by CIS(M) Sdn Bhd.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  * todo: add be fmt support, spdif, pm
  */
 
 #include <linux/init.h>
-#include <linux/slab.h>
 #include <linux/pci.h>
 #include <sound/core.h>
 #include <sound/control.h>
@@ -34,7 +20,7 @@
 #include <sound/ac97_codec.h>
 #include "cs5535audio.h"
 
-static struct snd_pcm_hardware snd_cs5535audio_playback =
+static const struct snd_pcm_hardware snd_cs5535audio_playback =
 {
 	.info =			(
 				SNDRV_PCM_INFO_MMAP |
@@ -63,7 +49,7 @@ static struct snd_pcm_hardware snd_cs5535audio_playback =
 	.fifo_size =		0,
 };
 
-static struct snd_pcm_hardware snd_cs5535audio_capture =
+static const struct snd_pcm_hardware snd_cs5535audio_capture =
 {
 	.info =			(
 				SNDRV_PCM_INFO_MMAP |
@@ -131,7 +117,7 @@ static int cs5535audio_build_dma_packets(struct cs5535audio *cs5535au,
 
 	if (dma->desc_buf.area == NULL) {
 		if (snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV,
-					snd_dma_pci_data(cs5535au->pci),
+					&cs5535au->pci->dev,
 					CS5535AUDIO_DESC_LIST_SIZE+1,
 					&dma->desc_buf) < 0)
 			return -ENOMEM;
@@ -149,8 +135,8 @@ static int cs5535audio_build_dma_packets(struct cs5535audio *cs5535au,
 		struct cs5535audio_dma_desc *desc =
 			&((struct cs5535audio_dma_desc *) dma->desc_buf.area)[i];
 		desc->addr = cpu_to_le32(addr);
-		desc->size = cpu_to_le32(period_bytes);
-		desc->ctlreserved = cpu_to_le32(PRD_EOP);
+		desc->size = cpu_to_le16(period_bytes);
+		desc->ctlreserved = cpu_to_le16(PRD_EOP);
 		desc_addr += sizeof(struct cs5535audio_dma_desc);
 		addr += period_bytes;
 	}
@@ -158,9 +144,9 @@ static int cs5535audio_build_dma_packets(struct cs5535audio *cs5535au,
 	lastdesc = &((struct cs5535audio_dma_desc *) dma->desc_buf.area)[periods];
 	lastdesc->addr = cpu_to_le32((u32) dma->desc_buf.addr);
 	lastdesc->size = 0;
-	lastdesc->ctlreserved = cpu_to_le32(PRD_JMP);
-	jmpprd_addr = cpu_to_le32(lastdesc->addr +
-				  (sizeof(struct cs5535audio_dma_desc)*periods));
+	lastdesc->ctlreserved = cpu_to_le16(PRD_JMP);
+	jmpprd_addr = (u32)dma->desc_buf.addr +
+		sizeof(struct cs5535audio_dma_desc) * periods;
 
 	dma->substream = substream;
 	dma->period_bytes = period_bytes;
@@ -250,16 +236,15 @@ static int snd_cs5535audio_hw_params(struct snd_pcm_substream *substream,
 	struct cs5535audio_dma *dma = substream->runtime->private_data;
 	int err;
 
-	err = snd_pcm_lib_malloc_pages(substream,
-					params_buffer_bytes(hw_params));
-	if (err < 0)
-		return err;
 	dma->buf_addr = substream->runtime->dma_addr;
 	dma->buf_bytes = params_buffer_bytes(hw_params);
 
 	err = cs5535audio_build_dma_packets(cs5535au, dma, substream,
 					    params_periods(hw_params),
 					    params_period_bytes(hw_params));
+	if (!err)
+		dma->pcm_open_flag = 1;
+
 	return err;
 }
 
@@ -268,8 +253,17 @@ static int snd_cs5535audio_hw_free(struct snd_pcm_substream *substream)
 	struct cs5535audio *cs5535au = snd_pcm_substream_chip(substream);
 	struct cs5535audio_dma *dma = substream->runtime->private_data;
 
+	if (dma->pcm_open_flag) {
+		if (substream == cs5535au->playback_substream)
+			snd_ac97_update_power(cs5535au->ac97,
+					AC97_PCM_FRONT_DAC_RATE, 0);
+		else
+			snd_ac97_update_power(cs5535au->ac97,
+					AC97_PCM_LR_ADC_RATE, 0);
+		dma->pcm_open_flag = 0;
+	}
 	cs5535audio_clear_dma_packets(cs5535au, dma, substream);
-	return snd_pcm_lib_free_pages(substream);
+	return 0;
 }
 
 static int snd_cs5535audio_playback_prepare(struct snd_pcm_substream *substream)
@@ -306,7 +300,7 @@ static int snd_cs5535audio_trigger(struct snd_pcm_substream *substream, int cmd)
 		dma->ops->disable_dma(cs5535au);
 		break;
 	default:
-		snd_printk(KERN_ERR "unhandled trigger\n");
+		dev_err(cs5535au->card->dev, "unhandled trigger\n");
 		err = -EINVAL;
 		break;
 	}
@@ -324,13 +318,13 @@ static snd_pcm_uframes_t snd_cs5535audio_pcm_pointer(struct snd_pcm_substream
 	dma = substream->runtime->private_data;
 	curdma = dma->ops->read_dma_pntr(cs5535au);
 	if (curdma < dma->buf_addr) {
-		snd_printk(KERN_ERR "curdma=%x < %x bufaddr.\n",
+		dev_err(cs5535au->card->dev, "curdma=%x < %x bufaddr.\n",
 					curdma, dma->buf_addr);
 		return 0;
 	}
 	curdma -= dma->buf_addr;
 	if (curdma >= dma->buf_bytes) {
-		snd_printk(KERN_ERR "diff=%x >= %x buf_bytes.\n",
+		dev_err(cs5535au->card->dev, "diff=%x >= %x buf_bytes.\n",
 					curdma, dma->buf_bytes);
 		return 0;
 	}
@@ -351,11 +345,14 @@ static int snd_cs5535audio_capture_open(struct snd_pcm_substream *substream)
 	if ((err = snd_pcm_hw_constraint_integer(runtime,
 					 SNDRV_PCM_HW_PARAM_PERIODS)) < 0)
 		return err;
+	olpc_capture_open(cs5535au->ac97);
 	return 0;
 }
 
 static int snd_cs5535audio_capture_close(struct snd_pcm_substream *substream)
 {
+	struct cs5535audio *cs5535au = snd_pcm_substream_chip(substream);
+	olpc_capture_close(cs5535au->ac97);
 	return 0;
 }
 
@@ -366,10 +363,9 @@ static int snd_cs5535audio_capture_prepare(struct snd_pcm_substream *substream)
 				 substream->runtime->rate);
 }
 
-static struct snd_pcm_ops snd_cs5535audio_playback_ops = {
+static const struct snd_pcm_ops snd_cs5535audio_playback_ops = {
 	.open =		snd_cs5535audio_playback_open,
 	.close =	snd_cs5535audio_playback_close,
-	.ioctl =	snd_pcm_lib_ioctl,
 	.hw_params =	snd_cs5535audio_hw_params,
 	.hw_free =	snd_cs5535audio_hw_free,
 	.prepare =	snd_cs5535audio_playback_prepare,
@@ -377,10 +373,9 @@ static struct snd_pcm_ops snd_cs5535audio_playback_ops = {
 	.pointer =	snd_cs5535audio_pcm_pointer,
 };
 
-static struct snd_pcm_ops snd_cs5535audio_capture_ops = {
+static const struct snd_pcm_ops snd_cs5535audio_capture_ops = {
 	.open =		snd_cs5535audio_capture_open,
 	.close =	snd_cs5535audio_capture_close,
-	.ioctl =	snd_pcm_lib_ioctl,
 	.hw_params =	snd_cs5535audio_hw_params,
 	.hw_free =	snd_cs5535audio_hw_free,
 	.prepare =	snd_cs5535audio_capture_prepare,
@@ -388,7 +383,7 @@ static struct snd_pcm_ops snd_cs5535audio_capture_ops = {
 	.pointer =	snd_cs5535audio_pcm_pointer,
 };
 
-static struct cs5535audio_dma_ops snd_cs5535audio_playback_dma_ops = {
+static const struct cs5535audio_dma_ops snd_cs5535audio_playback_dma_ops = {
         .type = CS5535AUDIO_DMA_PLAYBACK,
         .enable_dma = cs5535audio_playback_enable_dma,
         .disable_dma = cs5535audio_playback_disable_dma,
@@ -398,7 +393,7 @@ static struct cs5535audio_dma_ops snd_cs5535audio_playback_dma_ops = {
         .read_dma_pntr = cs5535audio_playback_read_dma_pntr,
 };
 
-static struct cs5535audio_dma_ops snd_cs5535audio_capture_dma_ops = {
+static const struct cs5535audio_dma_ops snd_cs5535audio_capture_dma_ops = {
         .type = CS5535AUDIO_DMA_CAPTURE,
         .enable_dma = cs5535audio_capture_enable_dma,
         .disable_dma = cs5535audio_capture_disable_dma,
@@ -408,7 +403,7 @@ static struct cs5535audio_dma_ops snd_cs5535audio_capture_dma_ops = {
         .read_dma_pntr = cs5535audio_capture_read_dma_pntr,
 };
 
-int __devinit snd_cs5535audio_pcm(struct cs5535audio *cs5535au)
+int snd_cs5535audio_pcm(struct cs5535audio *cs5535au)
 {
 	struct snd_pcm *pcm;
 	int err;
@@ -430,9 +425,9 @@ int __devinit snd_cs5535audio_pcm(struct cs5535audio *cs5535au)
 	pcm->info_flags = 0;
 	strcpy(pcm->name, "CS5535 Audio");
 
-	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
-					snd_dma_pci_data(cs5535au->pci),
-					64*1024, 128*1024);
+	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV,
+				       &cs5535au->pci->dev,
+				       64*1024, 128*1024);
 	cs5535au->pcm = pcm;
 
 	return 0;

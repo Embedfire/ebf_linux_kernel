@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * zfcp device driver
  *
  * Module interface and handling of zfcp data structures.
  *
- * Copyright IBM Corporation 2002, 2008
+ * Copyright IBM Corp. 2002, 2020
  */
 
 /*
@@ -23,225 +24,160 @@
  *            Christof Schmitt
  *            Martin Petermann
  *            Sven Schuetz
+ *            Steffen Maier
+ *	      Benjamin Block
  */
 
-#include <linux/miscdevice.h>
-#include "zfcp_ext.h"
+#define KMSG_COMPONENT "zfcp"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
-static char *device;
+#include <linux/seq_file.h>
+#include <linux/slab.h>
+#include <linux/module.h>
+#include "zfcp_ext.h"
+#include "zfcp_fc.h"
+#include "zfcp_reqlist.h"
+#include "zfcp_diag.h"
+
+#define ZFCP_BUS_ID_SIZE	20
 
 MODULE_AUTHOR("IBM Deutschland Entwicklung GmbH - linux390@de.ibm.com");
 MODULE_DESCRIPTION("FCP HBA driver");
 MODULE_LICENSE("GPL");
 
-module_param(device, charp, 0400);
+static char *init_device;
+module_param_named(device, init_device, charp, 0400);
 MODULE_PARM_DESC(device, "specify initial device");
 
-static int zfcp_reqlist_alloc(struct zfcp_adapter *adapter)
+static struct kmem_cache * __init zfcp_cache_hw_align(const char *name,
+						      unsigned long size)
 {
-	int idx;
-
-	adapter->req_list = kcalloc(REQUEST_LIST_SIZE, sizeof(struct list_head),
-				    GFP_KERNEL);
-	if (!adapter->req_list)
-		return -ENOMEM;
-
-	for (idx = 0; idx < REQUEST_LIST_SIZE; idx++)
-		INIT_LIST_HEAD(&adapter->req_list[idx]);
-	return 0;
+	return kmem_cache_create(name, size, roundup_pow_of_two(size), 0, NULL);
 }
 
-/**
- * zfcp_reqlist_isempty - is the request list empty
- * @adapter: pointer to struct zfcp_adapter
- *
- * Returns: true if list is empty, false otherwise
- */
-int zfcp_reqlist_isempty(struct zfcp_adapter *adapter)
+static void __init zfcp_init_device_configure(char *busid, u64 wwpn, u64 lun)
 {
-	unsigned int idx;
-
-	for (idx = 0; idx < REQUEST_LIST_SIZE; idx++)
-		if (!list_empty(&adapter->req_list[idx]))
-			return 0;
-	return 1;
-}
-
-static int __init zfcp_device_setup(char *devstr)
-{
-	char *token;
-	char *str;
-
-	if (!devstr)
-		return 0;
-
-	/* duplicate devstr and keep the original for sysfs presentation*/
-	str = kmalloc(strlen(devstr) + 1, GFP_KERNEL);
-	if (!str)
-		return 0;
-
-	strcpy(str, devstr);
-
-	token = strsep(&str, ",");
-	if (!token || strlen(token) >= BUS_ID_SIZE)
-		goto err_out;
-	strncpy(zfcp_data.init_busid, token, BUS_ID_SIZE);
-
-	token = strsep(&str, ",");
-	if (!token || strict_strtoull(token, 0, &zfcp_data.init_wwpn))
-		goto err_out;
-
-	token = strsep(&str, ",");
-	if (!token || strict_strtoull(token, 0, &zfcp_data.init_fcp_lun))
-		goto err_out;
-
-	kfree(str);
-	return 1;
-
- err_out:
-	kfree(str);
-	pr_err("zfcp: Parse error for device parameter string %s, "
-	       "device not attached.\n", devstr);
-	return 0;
-}
-
-static struct zfcp_adapter *zfcp_get_adapter_by_busid(char *bus_id)
-{
-	struct zfcp_adapter *adapter;
-
-	list_for_each_entry(adapter, &zfcp_data.adapter_list_head, list)
-		if ((strncmp(bus_id, adapter->ccw_device->dev.bus_id,
-			     BUS_ID_SIZE) == 0) &&
-		    !(atomic_read(&adapter->status) &
-		      ZFCP_STATUS_COMMON_REMOVE))
-		    return adapter;
-	return NULL;
-}
-
-static void __init zfcp_init_device_configure(void)
-{
+	struct ccw_device *cdev;
 	struct zfcp_adapter *adapter;
 	struct zfcp_port *port;
-	struct zfcp_unit *unit;
 
-	down(&zfcp_data.config_sema);
-	read_lock_irq(&zfcp_data.config_lock);
-	adapter = zfcp_get_adapter_by_busid(zfcp_data.init_busid);
-	if (adapter)
-		zfcp_adapter_get(adapter);
-	read_unlock_irq(&zfcp_data.config_lock);
+	cdev = get_ccwdev_by_busid(&zfcp_ccw_driver, busid);
+	if (!cdev)
+		return;
 
+	if (ccw_device_set_online(cdev))
+		goto out_ccw_device;
+
+	adapter = zfcp_ccw_adapter_by_cdev(cdev);
 	if (!adapter)
-		goto out_adapter;
-	port = zfcp_port_enqueue(adapter, zfcp_data.init_wwpn, 0, 0);
-	if (IS_ERR(port))
+		goto out_ccw_device;
+
+	port = zfcp_get_port_by_wwpn(adapter, wwpn);
+	if (!port)
 		goto out_port;
-	unit = zfcp_unit_enqueue(port, zfcp_data.init_fcp_lun);
-	if (IS_ERR(unit))
-		goto out_unit;
-	up(&zfcp_data.config_sema);
-	ccw_device_set_online(adapter->ccw_device);
-	zfcp_erp_wait(adapter);
-	down(&zfcp_data.config_sema);
-	zfcp_unit_put(unit);
-out_unit:
-	zfcp_port_put(port);
+	flush_work(&port->rport_work);
+
+	zfcp_unit_add(port, lun);
+	put_device(&port->dev);
+
 out_port:
-	zfcp_adapter_put(adapter);
-out_adapter:
-	up(&zfcp_data.config_sema);
+	zfcp_ccw_adapter_put(adapter);
+out_ccw_device:
+	put_device(&cdev->dev);
 	return;
 }
 
-static struct kmem_cache *zfcp_cache_create(int size, char *name)
+static void __init zfcp_init_device_setup(char *devstr)
 {
-	int align = 1;
-	while ((size - align) > 0)
-		align <<= 1;
-	return kmem_cache_create(name , size, align, 0, NULL);
+	char *token;
+	char *str, *str_saved;
+	char busid[ZFCP_BUS_ID_SIZE];
+	u64 wwpn, lun;
+
+	/* duplicate devstr and keep the original for sysfs presentation*/
+	str_saved = kstrdup(devstr, GFP_KERNEL);
+	str = str_saved;
+	if (!str)
+		return;
+
+	token = strsep(&str, ",");
+	if (!token || strlen(token) >= ZFCP_BUS_ID_SIZE)
+		goto err_out;
+	strlcpy(busid, token, ZFCP_BUS_ID_SIZE);
+
+	token = strsep(&str, ",");
+	if (!token || kstrtoull(token, 0, (unsigned long long *) &wwpn))
+		goto err_out;
+
+	token = strsep(&str, ",");
+	if (!token || kstrtoull(token, 0, (unsigned long long *) &lun))
+		goto err_out;
+
+	kfree(str_saved);
+	zfcp_init_device_configure(busid, wwpn, lun);
+	return;
+
+err_out:
+	kfree(str_saved);
+	pr_err("%s is not a valid SCSI device\n", devstr);
 }
 
 static int __init zfcp_module_init(void)
 {
 	int retval = -ENOMEM;
 
-	zfcp_data.fsf_req_qtcb_cache = zfcp_cache_create(
-			sizeof(struct zfcp_fsf_req_qtcb), "zfcp_fsf");
-	if (!zfcp_data.fsf_req_qtcb_cache)
-		goto out;
+	if (zfcp_experimental_dix)
+		pr_warn("DIX is enabled. It is experimental and might cause problems\n");
 
-	zfcp_data.sr_buffer_cache = zfcp_cache_create(
-			sizeof(struct fsf_status_read_buffer), "zfcp_sr");
-	if (!zfcp_data.sr_buffer_cache)
-		goto out_sr_cache;
+	zfcp_fsf_qtcb_cache = zfcp_cache_hw_align("zfcp_fsf_qtcb",
+						  sizeof(struct fsf_qtcb));
+	if (!zfcp_fsf_qtcb_cache)
+		goto out_qtcb_cache;
 
-	zfcp_data.gid_pn_cache = zfcp_cache_create(
-			sizeof(struct zfcp_gid_pn_data), "zfcp_gid");
-	if (!zfcp_data.gid_pn_cache)
-		goto out_gid_cache;
+	zfcp_fc_req_cache = zfcp_cache_hw_align("zfcp_fc_req",
+						sizeof(struct zfcp_fc_req));
+	if (!zfcp_fc_req_cache)
+		goto out_fc_cache;
 
-	INIT_LIST_HEAD(&zfcp_data.adapter_list_head);
-	INIT_LIST_HEAD(&zfcp_data.adapter_remove_lh);
-
-	sema_init(&zfcp_data.config_sema, 1);
-	rwlock_init(&zfcp_data.config_lock);
-
-	zfcp_data.scsi_transport_template =
+	zfcp_scsi_transport_template =
 		fc_attach_transport(&zfcp_transport_functions);
-	if (!zfcp_data.scsi_transport_template)
+	if (!zfcp_scsi_transport_template)
 		goto out_transport;
+	scsi_transport_reserve_device(zfcp_scsi_transport_template,
+				      sizeof(struct zfcp_scsi_dev));
 
-	retval = misc_register(&zfcp_cfdc_misc);
+	retval = ccw_driver_register(&zfcp_ccw_driver);
 	if (retval) {
-		pr_err("zfcp: registration of misc device zfcp_cfdc failed\n");
-		goto out_misc;
-	}
-
-	retval = zfcp_ccw_register();
-	if (retval) {
-		pr_err("zfcp: Registration with common I/O layer failed.\n");
+		pr_err("The zfcp device driver could not register with "
+		       "the common I/O layer\n");
 		goto out_ccw_register;
 	}
 
-	if (zfcp_device_setup(device))
-		zfcp_init_device_configure();
-
-	goto out;
+	if (init_device)
+		zfcp_init_device_setup(init_device);
+	return 0;
 
 out_ccw_register:
-	misc_deregister(&zfcp_cfdc_misc);
-out_misc:
-	fc_release_transport(zfcp_data.scsi_transport_template);
+	fc_release_transport(zfcp_scsi_transport_template);
 out_transport:
-	kmem_cache_destroy(zfcp_data.gid_pn_cache);
-out_gid_cache:
-	kmem_cache_destroy(zfcp_data.sr_buffer_cache);
-out_sr_cache:
-	kmem_cache_destroy(zfcp_data.fsf_req_qtcb_cache);
-out:
+	kmem_cache_destroy(zfcp_fc_req_cache);
+out_fc_cache:
+	kmem_cache_destroy(zfcp_fsf_qtcb_cache);
+out_qtcb_cache:
 	return retval;
 }
 
 module_init(zfcp_module_init);
 
-/**
- * zfcp_get_unit_by_lun - find unit in unit list of port by FCP LUN
- * @port: pointer to port to search for unit
- * @fcp_lun: FCP LUN to search for
- *
- * Returns: pointer to zfcp_unit or NULL
- */
-struct zfcp_unit *zfcp_get_unit_by_lun(struct zfcp_port *port,
-				       fcp_lun_t fcp_lun)
+static void __exit zfcp_module_exit(void)
 {
-	struct zfcp_unit *unit;
-
-	list_for_each_entry(unit, &port->unit_list_head, list)
-		if ((unit->fcp_lun == fcp_lun) &&
-		    !(atomic_read(&unit->status) & ZFCP_STATUS_COMMON_REMOVE))
-		    return unit;
-	return NULL;
+	ccw_driver_unregister(&zfcp_ccw_driver);
+	fc_release_transport(zfcp_scsi_transport_template);
+	kmem_cache_destroy(zfcp_fc_req_cache);
+	kmem_cache_destroy(zfcp_fsf_qtcb_cache);
 }
+
+module_exit(zfcp_module_exit);
 
 /**
  * zfcp_get_port_by_wwpn - find port in port list of adapter by wwpn
@@ -251,149 +187,65 @@ struct zfcp_unit *zfcp_get_unit_by_lun(struct zfcp_port *port,
  * Returns: pointer to zfcp_port or NULL
  */
 struct zfcp_port *zfcp_get_port_by_wwpn(struct zfcp_adapter *adapter,
-					wwn_t wwpn)
+					u64 wwpn)
 {
+	unsigned long flags;
 	struct zfcp_port *port;
 
-	list_for_each_entry(port, &adapter->port_list_head, list)
-		if ((port->wwpn == wwpn) && !(atomic_read(&port->status) &
-		      (ZFCP_STATUS_PORT_NO_WWPN | ZFCP_STATUS_COMMON_REMOVE)))
+	read_lock_irqsave(&adapter->port_list_lock, flags);
+	list_for_each_entry(port, &adapter->port_list, list)
+		if (port->wwpn == wwpn) {
+			if (!get_device(&port->dev))
+				port = NULL;
+			read_unlock_irqrestore(&adapter->port_list_lock, flags);
 			return port;
+		}
+	read_unlock_irqrestore(&adapter->port_list_lock, flags);
 	return NULL;
-}
-
-static void zfcp_sysfs_unit_release(struct device *dev)
-{
-	kfree(container_of(dev, struct zfcp_unit, sysfs_device));
-}
-
-/**
- * zfcp_unit_enqueue - enqueue unit to unit list of a port.
- * @port: pointer to port where unit is added
- * @fcp_lun: FCP LUN of unit to be enqueued
- * Returns: pointer to enqueued unit on success, ERR_PTR on error
- * Locks: config_sema must be held to serialize changes to the unit list
- *
- * Sets up some unit internal structures and creates sysfs entry.
- */
-struct zfcp_unit *zfcp_unit_enqueue(struct zfcp_port *port, fcp_lun_t fcp_lun)
-{
-	struct zfcp_unit *unit;
-
-	unit = kzalloc(sizeof(struct zfcp_unit), GFP_KERNEL);
-	if (!unit)
-		return ERR_PTR(-ENOMEM);
-
-	atomic_set(&unit->refcount, 0);
-	init_waitqueue_head(&unit->remove_wq);
-
-	unit->port = port;
-	unit->fcp_lun = fcp_lun;
-
-	snprintf(unit->sysfs_device.bus_id, BUS_ID_SIZE, "0x%016llx", fcp_lun);
-	unit->sysfs_device.parent = &port->sysfs_device;
-	unit->sysfs_device.release = zfcp_sysfs_unit_release;
-	dev_set_drvdata(&unit->sysfs_device, unit);
-
-	/* mark unit unusable as long as sysfs registration is not complete */
-	atomic_set_mask(ZFCP_STATUS_COMMON_REMOVE, &unit->status);
-
-	spin_lock_init(&unit->latencies.lock);
-	unit->latencies.write.channel.min = 0xFFFFFFFF;
-	unit->latencies.write.fabric.min = 0xFFFFFFFF;
-	unit->latencies.read.channel.min = 0xFFFFFFFF;
-	unit->latencies.read.fabric.min = 0xFFFFFFFF;
-	unit->latencies.cmd.channel.min = 0xFFFFFFFF;
-	unit->latencies.cmd.fabric.min = 0xFFFFFFFF;
-
-	read_lock_irq(&zfcp_data.config_lock);
-	if (zfcp_get_unit_by_lun(port, fcp_lun)) {
-		read_unlock_irq(&zfcp_data.config_lock);
-		goto err_out_free;
-	}
-	read_unlock_irq(&zfcp_data.config_lock);
-
-	if (device_register(&unit->sysfs_device))
-		goto err_out_free;
-
-	if (sysfs_create_group(&unit->sysfs_device.kobj,
-			       &zfcp_sysfs_unit_attrs)) {
-		device_unregister(&unit->sysfs_device);
-		return ERR_PTR(-EIO);
-	}
-
-	zfcp_unit_get(unit);
-	unit->scsi_lun = scsilun_to_int((struct scsi_lun *)&unit->fcp_lun);
-
-	write_lock_irq(&zfcp_data.config_lock);
-	list_add_tail(&unit->list, &port->unit_list_head);
-	atomic_clear_mask(ZFCP_STATUS_COMMON_REMOVE, &unit->status);
-	atomic_set_mask(ZFCP_STATUS_COMMON_RUNNING, &unit->status);
-
-	write_unlock_irq(&zfcp_data.config_lock);
-
-	port->units++;
-	zfcp_port_get(port);
-
-	return unit;
-
-err_out_free:
-	kfree(unit);
-	return ERR_PTR(-EINVAL);
-}
-
-/**
- * zfcp_unit_dequeue - dequeue unit
- * @unit: pointer to zfcp_unit
- *
- * waits until all work is done on unit and removes it then from the unit->list
- * of the associated port.
- */
-void zfcp_unit_dequeue(struct zfcp_unit *unit)
-{
-	zfcp_unit_wait(unit);
-	write_lock_irq(&zfcp_data.config_lock);
-	list_del(&unit->list);
-	write_unlock_irq(&zfcp_data.config_lock);
-	unit->port->units--;
-	zfcp_port_put(unit->port);
-	sysfs_remove_group(&unit->sysfs_device.kobj, &zfcp_sysfs_unit_attrs);
-	device_unregister(&unit->sysfs_device);
 }
 
 static int zfcp_allocate_low_mem_buffers(struct zfcp_adapter *adapter)
 {
-	/* must only be called with zfcp_data.config_sema taken */
-	adapter->pool.fsf_req_erp =
-		mempool_create_slab_pool(1, zfcp_data.fsf_req_qtcb_cache);
-	if (!adapter->pool.fsf_req_erp)
+	adapter->pool.erp_req =
+		mempool_create_kmalloc_pool(1, sizeof(struct zfcp_fsf_req));
+	if (!adapter->pool.erp_req)
 		return -ENOMEM;
 
-	adapter->pool.fsf_req_scsi =
-		mempool_create_slab_pool(1, zfcp_data.fsf_req_qtcb_cache);
-	if (!adapter->pool.fsf_req_scsi)
+	adapter->pool.gid_pn_req =
+		mempool_create_kmalloc_pool(1, sizeof(struct zfcp_fsf_req));
+	if (!adapter->pool.gid_pn_req)
 		return -ENOMEM;
 
-	adapter->pool.fsf_req_abort =
-		mempool_create_slab_pool(1, zfcp_data.fsf_req_qtcb_cache);
-	if (!adapter->pool.fsf_req_abort)
+	adapter->pool.scsi_req =
+		mempool_create_kmalloc_pool(1, sizeof(struct zfcp_fsf_req));
+	if (!adapter->pool.scsi_req)
 		return -ENOMEM;
 
-	adapter->pool.fsf_req_status_read =
+	adapter->pool.scsi_abort =
+		mempool_create_kmalloc_pool(1, sizeof(struct zfcp_fsf_req));
+	if (!adapter->pool.scsi_abort)
+		return -ENOMEM;
+
+	adapter->pool.status_read_req =
 		mempool_create_kmalloc_pool(FSF_STATUS_READS_RECOM,
 					    sizeof(struct zfcp_fsf_req));
-	if (!adapter->pool.fsf_req_status_read)
+	if (!adapter->pool.status_read_req)
 		return -ENOMEM;
 
-	adapter->pool.data_status_read =
-		mempool_create_slab_pool(FSF_STATUS_READS_RECOM,
-					 zfcp_data.sr_buffer_cache);
-	if (!adapter->pool.data_status_read)
+	adapter->pool.qtcb_pool =
+		mempool_create_slab_pool(4, zfcp_fsf_qtcb_cache);
+	if (!adapter->pool.qtcb_pool)
 		return -ENOMEM;
 
-	adapter->pool.data_gid_pn =
-		mempool_create_slab_pool(1, zfcp_data.gid_pn_cache);
-	if (!adapter->pool.data_gid_pn)
+	BUILD_BUG_ON(sizeof(struct fsf_status_read_buffer) > PAGE_SIZE);
+	adapter->pool.sr_data =
+		mempool_create_page_pool(FSF_STATUS_READS_RECOM, 0);
+	if (!adapter->pool.sr_data)
+		return -ENOMEM;
+
+	adapter->pool.gid_pn =
+		mempool_create_slab_pool(1, zfcp_fc_req_cache);
+	if (!adapter->pool.gid_pn)
 		return -ENOMEM;
 
 	return 0;
@@ -401,46 +253,36 @@ static int zfcp_allocate_low_mem_buffers(struct zfcp_adapter *adapter)
 
 static void zfcp_free_low_mem_buffers(struct zfcp_adapter *adapter)
 {
-	/* zfcp_data.config_sema must be held */
-	if (adapter->pool.fsf_req_erp)
-		mempool_destroy(adapter->pool.fsf_req_erp);
-	if (adapter->pool.fsf_req_scsi)
-		mempool_destroy(adapter->pool.fsf_req_scsi);
-	if (adapter->pool.fsf_req_abort)
-		mempool_destroy(adapter->pool.fsf_req_abort);
-	if (adapter->pool.fsf_req_status_read)
-		mempool_destroy(adapter->pool.fsf_req_status_read);
-	if (adapter->pool.data_status_read)
-		mempool_destroy(adapter->pool.data_status_read);
-	if (adapter->pool.data_gid_pn)
-		mempool_destroy(adapter->pool.data_gid_pn);
-}
-
-static void zfcp_dummy_release(struct device *dev)
-{
-	return;
+	mempool_destroy(adapter->pool.erp_req);
+	mempool_destroy(adapter->pool.scsi_req);
+	mempool_destroy(adapter->pool.scsi_abort);
+	mempool_destroy(adapter->pool.qtcb_pool);
+	mempool_destroy(adapter->pool.status_read_req);
+	mempool_destroy(adapter->pool.sr_data);
+	mempool_destroy(adapter->pool.gid_pn);
 }
 
 /**
  * zfcp_status_read_refill - refill the long running status_read_requests
  * @adapter: ptr to struct zfcp_adapter for which the buffers should be refilled
  *
- * Returns: 0 on success, 1 otherwise
- *
- * if there are 16 or more status_read requests missing an adapter_reopen
- * is triggered
+ * Return:
+ * * 0 on success meaning at least one status read is pending
+ * * 1 if posting failed and not a single status read buffer is pending,
+ *     also triggers adapter reopen recovery
  */
 int zfcp_status_read_refill(struct zfcp_adapter *adapter)
 {
-	while (atomic_read(&adapter->stat_miss) > 0)
-		if (zfcp_fsf_status_read(adapter)) {
-			if (atomic_read(&adapter->stat_miss) >= 16) {
-				zfcp_erp_adapter_reopen(adapter, 0, 103, NULL);
+	while (atomic_add_unless(&adapter->stat_miss, -1, 0))
+		if (zfcp_fsf_status_read(adapter->qdio)) {
+			atomic_inc(&adapter->stat_miss); /* undo add -1 */
+			if (atomic_read(&adapter->stat_miss) >=
+			    adapter->stat_read_buf_num) {
+				zfcp_erp_adapter_reopen(adapter, 0, "axsref1");
 				return 1;
 			}
 			break;
-		} else
-			atomic_dec(&adapter->stat_miss);
+		}
 	return 0;
 }
 
@@ -450,174 +292,185 @@ static void _zfcp_status_read_scheduler(struct work_struct *work)
 					     stat_work));
 }
 
-static int zfcp_nameserver_enqueue(struct zfcp_adapter *adapter)
+static void zfcp_print_sl(struct seq_file *m, struct service_level *sl)
 {
-	struct zfcp_port *port;
+	struct zfcp_adapter *adapter =
+		container_of(sl, struct zfcp_adapter, service_level);
 
-	port = zfcp_port_enqueue(adapter, 0, ZFCP_STATUS_PORT_WKA,
-				 ZFCP_DID_DIRECTORY_SERVICE);
-	if (IS_ERR(port))
-		return PTR_ERR(port);
-	zfcp_port_put(port);
+	seq_printf(m, "zfcp: %s microcode level %x\n",
+		   dev_name(&adapter->ccw_device->dev),
+		   adapter->fsf_lic_version);
+}
 
-	return 0;
+static int zfcp_setup_adapter_work_queue(struct zfcp_adapter *adapter)
+{
+	char name[TASK_COMM_LEN];
+
+	snprintf(name, sizeof(name), "zfcp_q_%s",
+		 dev_name(&adapter->ccw_device->dev));
+	adapter->work_queue = alloc_ordered_workqueue(name, WQ_MEM_RECLAIM);
+
+	if (adapter->work_queue)
+		return 0;
+	return -ENOMEM;
+}
+
+static void zfcp_destroy_adapter_work_queue(struct zfcp_adapter *adapter)
+{
+	if (adapter->work_queue)
+		destroy_workqueue(adapter->work_queue);
+	adapter->work_queue = NULL;
+
 }
 
 /**
  * zfcp_adapter_enqueue - enqueue a new adapter to the list
  * @ccw_device: pointer to the struct cc_device
  *
- * Returns:	0             if a new adapter was successfully enqueued
- *		-ENOMEM       if alloc failed
+ * Returns:	struct zfcp_adapter*
  * Enqueues an adapter at the end of the adapter list in the driver data.
  * All adapter internal structures are set up.
  * Proc-fs entries are also created.
- * locks:	config_sema must be held to serialise changes to the adapter list
  */
-int zfcp_adapter_enqueue(struct ccw_device *ccw_device)
+struct zfcp_adapter *zfcp_adapter_enqueue(struct ccw_device *ccw_device)
 {
 	struct zfcp_adapter *adapter;
 
-	/*
-	 * Note: It is safe to release the list_lock, as any list changes
-	 * are protected by the config_sema, which must be held to get here
-	 */
+	if (!get_device(&ccw_device->dev))
+		return ERR_PTR(-ENODEV);
 
 	adapter = kzalloc(sizeof(struct zfcp_adapter), GFP_KERNEL);
-	if (!adapter)
-		return -ENOMEM;
+	if (!adapter) {
+		put_device(&ccw_device->dev);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	kref_init(&adapter->ref);
 
 	ccw_device->handler = NULL;
 	adapter->ccw_device = ccw_device;
-	atomic_set(&adapter->refcount, 0);
 
-	if (zfcp_qdio_allocate(adapter))
-		goto qdio_allocate_failed;
+	INIT_WORK(&adapter->stat_work, _zfcp_status_read_scheduler);
+	INIT_DELAYED_WORK(&adapter->scan_work, zfcp_fc_scan_ports);
+	INIT_WORK(&adapter->ns_up_work, zfcp_fc_sym_name_update);
+
+	adapter->next_port_scan = jiffies;
+
+	adapter->erp_action.adapter = adapter;
+
+	if (zfcp_diag_adapter_setup(adapter))
+		goto failed;
+
+	if (zfcp_qdio_setup(adapter))
+		goto failed;
 
 	if (zfcp_allocate_low_mem_buffers(adapter))
-		goto failed_low_mem_buffers;
+		goto failed;
 
-	if (zfcp_reqlist_alloc(adapter))
-		goto failed_low_mem_buffers;
+	adapter->req_list = zfcp_reqlist_alloc();
+	if (!adapter->req_list)
+		goto failed;
 
-	if (zfcp_adapter_debug_register(adapter))
-		goto debug_register_failed;
+	if (zfcp_dbf_adapter_register(adapter))
+		goto failed;
 
-	init_waitqueue_head(&adapter->remove_wq);
-	init_waitqueue_head(&adapter->erp_thread_wqh);
+	if (zfcp_setup_adapter_work_queue(adapter))
+		goto failed;
+
+	if (zfcp_fc_gs_setup(adapter))
+		goto failed;
+
+	rwlock_init(&adapter->port_list_lock);
+	INIT_LIST_HEAD(&adapter->port_list);
+
+	INIT_LIST_HEAD(&adapter->events.list);
+	INIT_WORK(&adapter->events.work, zfcp_fc_post_event);
+	spin_lock_init(&adapter->events.list_lock);
+
+	init_waitqueue_head(&adapter->erp_ready_wq);
 	init_waitqueue_head(&adapter->erp_done_wqh);
 
-	INIT_LIST_HEAD(&adapter->port_list_head);
-	INIT_LIST_HEAD(&adapter->port_remove_lh);
 	INIT_LIST_HEAD(&adapter->erp_ready_head);
 	INIT_LIST_HEAD(&adapter->erp_running_head);
-
-	spin_lock_init(&adapter->req_list_lock);
-
-	spin_lock_init(&adapter->hba_dbf_lock);
-	spin_lock_init(&adapter->san_dbf_lock);
-	spin_lock_init(&adapter->scsi_dbf_lock);
-	spin_lock_init(&adapter->rec_dbf_lock);
-	spin_lock_init(&adapter->req_q.lock);
 
 	rwlock_init(&adapter->erp_lock);
 	rwlock_init(&adapter->abort_lock);
 
-	sema_init(&adapter->erp_ready_sem, 0);
+	if (zfcp_erp_thread_setup(adapter))
+		goto failed;
 
-	INIT_WORK(&adapter->stat_work, _zfcp_status_read_scheduler);
-	INIT_WORK(&adapter->scan_work, _zfcp_scan_ports_later);
-
-	/* mark adapter unusable as long as sysfs registration is not complete */
-	atomic_set_mask(ZFCP_STATUS_COMMON_REMOVE, &adapter->status);
+	adapter->service_level.seq_print = zfcp_print_sl;
 
 	dev_set_drvdata(&ccw_device->dev, adapter);
 
 	if (sysfs_create_group(&ccw_device->dev.kobj,
 			       &zfcp_sysfs_adapter_attrs))
-		goto sysfs_failed;
+		goto failed;
 
-	adapter->generic_services.parent = &adapter->ccw_device->dev;
-	adapter->generic_services.release = zfcp_dummy_release;
-	snprintf(adapter->generic_services.bus_id, BUS_ID_SIZE,
-		 "generic_services");
+	if (zfcp_diag_sysfs_setup(adapter))
+		goto failed;
 
-	if (device_register(&adapter->generic_services))
-		goto generic_services_failed;
+	/* report size limit per scatter-gather segment */
+	adapter->ccw_device->dev.dma_parms = &adapter->dma_parms;
 
-	write_lock_irq(&zfcp_data.config_lock);
-	atomic_clear_mask(ZFCP_STATUS_COMMON_REMOVE, &adapter->status);
-	list_add_tail(&adapter->list, &zfcp_data.adapter_list_head);
-	write_unlock_irq(&zfcp_data.config_lock);
+	adapter->stat_read_buf_num = FSF_STATUS_READS_RECOM;
 
-	zfcp_data.adapters++;
+	return adapter;
 
-	zfcp_nameserver_enqueue(adapter);
+failed:
+	zfcp_adapter_unregister(adapter);
+	return ERR_PTR(-ENOMEM);
+}
 
-	return 0;
+void zfcp_adapter_unregister(struct zfcp_adapter *adapter)
+{
+	struct ccw_device *cdev = adapter->ccw_device;
 
-generic_services_failed:
-	sysfs_remove_group(&ccw_device->dev.kobj,
-			   &zfcp_sysfs_adapter_attrs);
-sysfs_failed:
-	zfcp_adapter_debug_unregister(adapter);
-debug_register_failed:
-	dev_set_drvdata(&ccw_device->dev, NULL);
-	kfree(adapter->req_list);
-failed_low_mem_buffers:
-	zfcp_free_low_mem_buffers(adapter);
-qdio_allocate_failed:
-	zfcp_qdio_free(adapter);
-	kfree(adapter);
-	return -ENOMEM;
+	cancel_delayed_work_sync(&adapter->scan_work);
+	cancel_work_sync(&adapter->stat_work);
+	cancel_work_sync(&adapter->ns_up_work);
+	zfcp_destroy_adapter_work_queue(adapter);
+
+	zfcp_fc_wka_ports_force_offline(adapter->gs);
+	zfcp_scsi_adapter_unregister(adapter);
+	zfcp_diag_sysfs_destroy(adapter);
+	sysfs_remove_group(&cdev->dev.kobj, &zfcp_sysfs_adapter_attrs);
+
+	zfcp_erp_thread_kill(adapter);
+	zfcp_dbf_adapter_unregister(adapter);
+	zfcp_qdio_destroy(adapter->qdio);
+
+	zfcp_ccw_adapter_put(adapter); /* final put to release */
 }
 
 /**
- * zfcp_adapter_dequeue - remove the adapter from the resource list
- * @adapter: pointer to struct zfcp_adapter which should be removed
+ * zfcp_adapter_release - remove the adapter from the resource list
+ * @ref: pointer to struct kref
  * locks:	adapter list write lock is assumed to be held by caller
  */
-void zfcp_adapter_dequeue(struct zfcp_adapter *adapter)
+void zfcp_adapter_release(struct kref *ref)
 {
-	int retval = 0;
-	unsigned long flags;
+	struct zfcp_adapter *adapter = container_of(ref, struct zfcp_adapter,
+						    ref);
+	struct ccw_device *cdev = adapter->ccw_device;
 
-	cancel_work_sync(&adapter->scan_work);
-	cancel_work_sync(&adapter->stat_work);
-	zfcp_adapter_scsi_unregister(adapter);
-	device_unregister(&adapter->generic_services);
-	sysfs_remove_group(&adapter->ccw_device->dev.kobj,
-			   &zfcp_sysfs_adapter_attrs);
 	dev_set_drvdata(&adapter->ccw_device->dev, NULL);
-	/* sanity check: no pending FSF requests */
-	spin_lock_irqsave(&adapter->req_list_lock, flags);
-	retval = zfcp_reqlist_isempty(adapter);
-	spin_unlock_irqrestore(&adapter->req_list_lock, flags);
-	if (!retval)
-		return;
-
-	zfcp_adapter_debug_unregister(adapter);
-
-	/* remove specified adapter data structure from list */
-	write_lock_irq(&zfcp_data.config_lock);
-	list_del(&adapter->list);
-	write_unlock_irq(&zfcp_data.config_lock);
-
-	/* decrease number of adapters in list */
-	zfcp_data.adapters--;
-
-	zfcp_qdio_free(adapter);
-
+	zfcp_fc_gs_destroy(adapter);
 	zfcp_free_low_mem_buffers(adapter);
+	zfcp_diag_adapter_free(adapter);
 	kfree(adapter->req_list);
 	kfree(adapter->fc_stats);
 	kfree(adapter->stats_reset_data);
 	kfree(adapter);
+	put_device(&cdev->dev);
 }
 
-static void zfcp_sysfs_port_release(struct device *dev)
+static void zfcp_port_release(struct device *dev)
 {
-	kfree(container_of(dev, struct zfcp_port, sysfs_device));
+	struct zfcp_port *port = container_of(dev, struct zfcp_port, dev);
+
+	zfcp_ccw_adapter_put(port->adapter);
+	kfree(port);
 }
 
 /**
@@ -627,175 +480,69 @@ static void zfcp_sysfs_port_release(struct device *dev)
  * @status: initial status for the port
  * @d_id: destination id of the remote port to be enqueued
  * Returns: pointer to enqueued port on success, ERR_PTR on error
- * Locks: config_sema must be held to serialize changes to the port list
  *
  * All port internal structures are set up and the sysfs entry is generated.
  * d_id is used to enqueue ports with a well known address like the Directory
  * Service for nameserver lookup.
  */
-struct zfcp_port *zfcp_port_enqueue(struct zfcp_adapter *adapter, wwn_t wwpn,
+struct zfcp_port *zfcp_port_enqueue(struct zfcp_adapter *adapter, u64 wwpn,
 				     u32 status, u32 d_id)
 {
 	struct zfcp_port *port;
-	int retval;
-	char *bus_id;
+	int retval = -ENOMEM;
+
+	kref_get(&adapter->ref);
+
+	port = zfcp_get_port_by_wwpn(adapter, wwpn);
+	if (port) {
+		put_device(&port->dev);
+		retval = -EEXIST;
+		goto err_out;
+	}
 
 	port = kzalloc(sizeof(struct zfcp_port), GFP_KERNEL);
 	if (!port)
-		return ERR_PTR(-ENOMEM);
+		goto err_out;
 
-	init_waitqueue_head(&port->remove_wq);
+	rwlock_init(&port->unit_list_lock);
+	INIT_LIST_HEAD(&port->unit_list);
+	atomic_set(&port->units, 0);
 
-	INIT_LIST_HEAD(&port->unit_list_head);
-	INIT_LIST_HEAD(&port->unit_remove_lh);
+	INIT_WORK(&port->gid_pn_work, zfcp_fc_port_did_lookup);
+	INIT_WORK(&port->test_link_work, zfcp_fc_link_test_work);
+	INIT_WORK(&port->rport_work, zfcp_scsi_rport_work);
 
 	port->adapter = adapter;
 	port->d_id = d_id;
 	port->wwpn = wwpn;
+	port->rport_task = RPORT_NONE;
+	port->dev.parent = &adapter->ccw_device->dev;
+	port->dev.groups = zfcp_port_attr_groups;
+	port->dev.release = zfcp_port_release;
 
-	/* mark port unusable as long as sysfs registration is not complete */
-	atomic_set_mask(status | ZFCP_STATUS_COMMON_REMOVE, &port->status);
-	atomic_set(&port->refcount, 0);
+	port->erp_action.adapter = adapter;
+	port->erp_action.port = port;
 
-	if (status & ZFCP_STATUS_PORT_WKA) {
-		switch (d_id) {
-		case ZFCP_DID_DIRECTORY_SERVICE:
-			bus_id = "directory";
-			break;
-		case ZFCP_DID_MANAGEMENT_SERVICE:
-			bus_id = "management";
-			break;
-		case ZFCP_DID_KEY_DISTRIBUTION_SERVICE:
-			bus_id = "key_distribution";
-			break;
-		case ZFCP_DID_ALIAS_SERVICE:
-			bus_id = "alias";
-			break;
-		case ZFCP_DID_TIME_SERVICE:
-			bus_id = "time";
-			break;
-		default:
-			kfree(port);
-			return ERR_PTR(-EINVAL);
-		}
-		snprintf(port->sysfs_device.bus_id, BUS_ID_SIZE, "%s", bus_id);
-		port->sysfs_device.parent = &adapter->generic_services;
-	} else {
-		snprintf(port->sysfs_device.bus_id,
-			 BUS_ID_SIZE, "0x%016llx", wwpn);
-		port->sysfs_device.parent = &adapter->ccw_device->dev;
+	if (dev_set_name(&port->dev, "0x%016llx", (unsigned long long)wwpn)) {
+		kfree(port);
+		goto err_out;
 	}
+	retval = -EINVAL;
 
-	port->sysfs_device.release = zfcp_sysfs_port_release;
-	dev_set_drvdata(&port->sysfs_device, port);
-
-	read_lock_irq(&zfcp_data.config_lock);
-	if (!(status & ZFCP_STATUS_PORT_NO_WWPN))
-		if (zfcp_get_port_by_wwpn(adapter, wwpn)) {
-			read_unlock_irq(&zfcp_data.config_lock);
-			goto err_out_free;
-		}
-	read_unlock_irq(&zfcp_data.config_lock);
-
-	if (device_register(&port->sysfs_device))
-		goto err_out_free;
-
-	if (status & ZFCP_STATUS_PORT_WKA)
-		retval = sysfs_create_group(&port->sysfs_device.kobj,
-					    &zfcp_sysfs_ns_port_attrs);
-	else
-		retval = sysfs_create_group(&port->sysfs_device.kobj,
-					    &zfcp_sysfs_port_attrs);
-
-	if (retval) {
-		device_unregister(&port->sysfs_device);
+	if (device_register(&port->dev)) {
+		put_device(&port->dev);
 		goto err_out;
 	}
 
-	zfcp_port_get(port);
+	write_lock_irq(&adapter->port_list_lock);
+	list_add_tail(&port->list, &adapter->port_list);
+	write_unlock_irq(&adapter->port_list_lock);
 
-	write_lock_irq(&zfcp_data.config_lock);
-	list_add_tail(&port->list, &adapter->port_list_head);
-	atomic_clear_mask(ZFCP_STATUS_COMMON_REMOVE, &port->status);
-	atomic_set_mask(ZFCP_STATUS_COMMON_RUNNING, &port->status);
-	if (d_id == ZFCP_DID_DIRECTORY_SERVICE)
-		if (!adapter->nameserver_port)
-			adapter->nameserver_port = port;
-	adapter->ports++;
+	atomic_or(status | ZFCP_STATUS_COMMON_RUNNING, &port->status);
 
-	write_unlock_irq(&zfcp_data.config_lock);
-
-	zfcp_adapter_get(adapter);
 	return port;
 
-err_out_free:
-	kfree(port);
 err_out:
-	return ERR_PTR(-EINVAL);
-}
-
-/**
- * zfcp_port_dequeue - dequeues a port from the port list of the adapter
- * @port: pointer to struct zfcp_port which should be removed
- */
-void zfcp_port_dequeue(struct zfcp_port *port)
-{
-	zfcp_port_wait(port);
-	write_lock_irq(&zfcp_data.config_lock);
-	list_del(&port->list);
-	port->adapter->ports--;
-	write_unlock_irq(&zfcp_data.config_lock);
-	if (port->rport)
-		fc_remote_port_delete(port->rport);
-	port->rport = NULL;
-	zfcp_adapter_put(port->adapter);
-	if (atomic_read(&port->status) & ZFCP_STATUS_PORT_WKA)
-		sysfs_remove_group(&port->sysfs_device.kobj,
-				   &zfcp_sysfs_ns_port_attrs);
-	else
-		sysfs_remove_group(&port->sysfs_device.kobj,
-				   &zfcp_sysfs_port_attrs);
-	device_unregister(&port->sysfs_device);
-}
-
-/**
- * zfcp_sg_free_table - free memory used by scatterlists
- * @sg: pointer to scatterlist
- * @count: number of scatterlist which are to be free'ed
- * the scatterlist are expected to reference pages always
- */
-void zfcp_sg_free_table(struct scatterlist *sg, int count)
-{
-	int i;
-
-	for (i = 0; i < count; i++, sg++)
-		if (sg)
-			free_page((unsigned long) sg_virt(sg));
-		else
-			break;
-}
-
-/**
- * zfcp_sg_setup_table - init scatterlist and allocate, assign buffers
- * @sg: pointer to struct scatterlist
- * @count: number of scatterlists which should be assigned with buffers
- * of size page
- *
- * Returns: 0 on success, -ENOMEM otherwise
- */
-int zfcp_sg_setup_table(struct scatterlist *sg, int count)
-{
-	void *addr;
-	int i;
-
-	sg_init_table(sg, count);
-	for (i = 0; i < count; i++, sg++) {
-		addr = (void *) get_zeroed_page(GFP_KERNEL);
-		if (!addr) {
-			zfcp_sg_free_table(sg, i);
-			return -ENOMEM;
-		}
-		sg_set_buf(sg, addr, PAGE_SIZE);
-	}
-	return 0;
+	zfcp_ccw_adapter_put(adapter);
+	return ERR_PTR(retval);
 }

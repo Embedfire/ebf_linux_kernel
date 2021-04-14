@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* -*- linux-c -*-
  *
  *	$Id: sysrq.h,v 1.3 1997/07/17 11:54:33 mj Exp $
@@ -14,8 +15,8 @@
 #ifndef _LINUX_SYSRQ_H
 #define _LINUX_SYSRQ_H
 
-struct pt_regs;
-struct tty_struct;
+#include <linux/errno.h>
+#include <linux/types.h>
 
 /* Possible values of bitmask for enabling sysrq functions */
 /* 0x0001 is reserved for enable everything */
@@ -29,48 +30,53 @@ struct tty_struct;
 #define SYSRQ_ENABLE_RTNICE	0x0100
 
 struct sysrq_key_op {
-	void (*handler)(int, struct tty_struct *);
-	char *help_msg;
-	char *action_msg;
-	int enable_mask;
+	void (* const handler)(int);
+	const char * const help_msg;
+	const char * const action_msg;
+	const int enable_mask;
 };
 
 #ifdef CONFIG_MAGIC_SYSRQ
-
-extern int sysrq_on(void);
-
-/*
- * Do not use this one directly:
- */
-extern int __sysrq_enabled;
 
 /* Generic SysRq interface -- you may call it from any device driver, supplying
  * ASCII code of the key, pointer to registers and kbd/tty structs (if they
  * are available -- else NULL's).
  */
 
-void handle_sysrq(int key, struct tty_struct *tty);
-void __handle_sysrq(int key, struct tty_struct *tty, int check_mask);
-int register_sysrq_key(int key, struct sysrq_key_op *op);
-int unregister_sysrq_key(int key, struct sysrq_key_op *op);
-struct sysrq_key_op *__sysrq_get_key_op(int key);
+void handle_sysrq(int key);
+void __handle_sysrq(int key, bool check_mask);
+int register_sysrq_key(int key, const struct sysrq_key_op *op);
+int unregister_sysrq_key(int key, const struct sysrq_key_op *op);
+extern const struct sysrq_key_op *__sysrq_reboot_op;
+
+int sysrq_toggle_support(int enable_mask);
+int sysrq_mask(void);
 
 #else
 
-static inline int sysrq_on(void)
-{
-	return 0;
-}
-static inline int __reterr(void)
-{
-	return -EINVAL;
-}
-static inline void handle_sysrq(int key, struct tty_struct *tty)
+static inline void handle_sysrq(int key)
 {
 }
 
-#define register_sysrq_key(ig,nore) __reterr()
-#define unregister_sysrq_key(ig,nore) __reterr()
+static inline void __handle_sysrq(int key, bool check_mask)
+{
+}
+
+static inline int register_sysrq_key(int key, const struct sysrq_key_op *op)
+{
+	return -EINVAL;
+}
+
+static inline int unregister_sysrq_key(int key, const struct sysrq_key_op *op)
+{
+	return -EINVAL;
+}
+
+static inline int sysrq_mask(void)
+{
+	/* Magic SysRq disabled mask */
+	return 0;
+}
 
 #endif
 

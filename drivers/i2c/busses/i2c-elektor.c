@@ -1,35 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* ------------------------------------------------------------------------- */
 /* i2c-elektor.c i2c-hw access for PCF8584 style isa bus adaptes             */
 /* ------------------------------------------------------------------------- */
 /*   Copyright (C) 1995-97 Simon G. Vogl
                    1998-99 Hans Berglund
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.		     */
+ */
 /* ------------------------------------------------------------------------- */
 
 /* With some changes from Kyösti Mälkki <kmalkki@cc.hut.fi> and even
    Frodo Looijaard <frodol@dds.nl> */
 
-/* Partialy rewriten by Oleg I. Vdovikin for mmapped support of
+/* Partially rewriten by Oleg I. Vdovikin for mmapped support of
    for Alpha Processor Inc. UP-2000(+) boards */
 
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/module.h>
 #include <linux/delay.h>
-#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
@@ -38,8 +26,8 @@
 #include <linux/isa.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-pcf.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
 #include <asm/irq.h>
 
 #include "../algos/i2c-algo-pcf.h"
@@ -104,7 +92,8 @@ static int pcf_isa_getclock(void *data)
 	return (clock);
 }
 
-static void pcf_isa_waitforpin(void) {
+static void pcf_isa_waitforpin(void *data)
+{
 	DEFINE_WAIT(wait);
 	int timeout = 2;
 	unsigned long flags;
@@ -201,12 +190,11 @@ static struct i2c_algo_pcf_data pcf_isa_data = {
 static struct i2c_adapter pcf_isa_ops = {
 	.owner		= THIS_MODULE,
 	.class		= I2C_CLASS_HWMON | I2C_CLASS_SPD,
-	.id		= I2C_HW_P_ELEK,
 	.algo_data	= &pcf_isa_data,
 	.name		= "i2c-elektor",
 };
 
-static int __devinit elektor_match(struct device *dev, unsigned int id)
+static int elektor_match(struct device *dev, unsigned int id)
 {
 #ifdef __alpha__
 	/* check to see we have memory mapped PCF8584 connected to the
@@ -265,7 +253,7 @@ static int __devinit elektor_match(struct device *dev, unsigned int id)
 	return 1;
 }
 
-static int __devinit elektor_probe(struct device *dev, unsigned int id)
+static int elektor_probe(struct device *dev, unsigned int id)
 {
 	init_waitqueue_head(&pcf_wait);
 	if (pcf_isa_init())
@@ -294,7 +282,7 @@ static int __devinit elektor_probe(struct device *dev, unsigned int id)
 	return -ENODEV;
 }
 
-static int __devexit elektor_remove(struct device *dev, unsigned int id)
+static int elektor_remove(struct device *dev, unsigned int id)
 {
 	i2c_del_adapter(&pcf_isa_ops);
 
@@ -317,32 +305,20 @@ static int __devexit elektor_remove(struct device *dev, unsigned int id)
 static struct isa_driver i2c_elektor_driver = {
 	.match		= elektor_match,
 	.probe		= elektor_probe,
-	.remove		= __devexit_p(elektor_remove),
+	.remove		= elektor_remove,
 	.driver = {
 		.owner	= THIS_MODULE,
 		.name	= "i2c-elektor",
 	},
 };
 
-static int __init i2c_pcfisa_init(void)
-{
-	return isa_register_driver(&i2c_elektor_driver, 1);
-}
-
-static void __exit i2c_pcfisa_exit(void)
-{
-	isa_unregister_driver(&i2c_elektor_driver);
-}
-
 MODULE_AUTHOR("Hans Berglund <hb@spacetec.no>");
 MODULE_DESCRIPTION("I2C-Bus adapter routines for PCF8584 ISA bus adapter");
 MODULE_LICENSE("GPL");
 
-module_param(base, int, 0);
-module_param(irq, int, 0);
+module_param_hw(base, int, ioport_or_iomem, 0);
+module_param_hw(irq, int, irq, 0);
 module_param(clock, int, 0);
 module_param(own, int, 0);
-module_param(mmapped, int, 0);
-
-module_init(i2c_pcfisa_init);
-module_exit(i2c_pcfisa_exit);
+module_param_hw(mmapped, int, other, 0);
+module_isa_driver(i2c_elektor_driver, 1);

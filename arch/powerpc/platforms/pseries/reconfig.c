@@ -1,111 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * pSeries_reconfig.c - support for dynamic reconfiguration (including PCI
  * Hotplug and Dynamic Logical Partitioning on RPA platforms).
  *
  * Copyright (C) 2005 Nathan Lynch
  * Copyright (C) 2005 IBM Corporation
- *
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License version
- *	2 as published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
-#include <linux/kref.h>
 #include <linux/notifier.h>
 #include <linux/proc_fs.h>
+#include <linux/slab.h>
+#include <linux/of.h>
 
 #include <asm/prom.h>
 #include <asm/machdep.h>
-#include <asm/uaccess.h>
-#include <asm/pSeries_reconfig.h>
+#include <linux/uaccess.h>
+#include <asm/mmu.h>
 
-
-
-/*
- * Routines for "runtime" addition and removal of device tree nodes.
- */
-#ifdef CONFIG_PROC_DEVICETREE
-/*
- * Add a node to /proc/device-tree.
- */
-static void add_node_proc_entries(struct device_node *np)
-{
-	struct proc_dir_entry *ent;
-
-	ent = proc_mkdir(strrchr(np->full_name, '/') + 1, np->parent->pde);
-	if (ent)
-		proc_device_tree_add_node(np, ent);
-}
-
-static void remove_node_proc_entries(struct device_node *np)
-{
-	struct property *pp = np->properties;
-	struct device_node *parent = np->parent;
-
-	while (pp) {
-		remove_proc_entry(pp->name, np->pde);
-		pp = pp->next;
-	}
-	if (np->pde)
-		remove_proc_entry(np->pde->name, parent->pde);
-}
-#else /* !CONFIG_PROC_DEVICETREE */
-static void add_node_proc_entries(struct device_node *np)
-{
-	return;
-}
-
-static void remove_node_proc_entries(struct device_node *np)
-{
-	return;
-}
-#endif /* CONFIG_PROC_DEVICETREE */
-
-/**
- *	derive_parent - basically like dirname(1)
- *	@path:  the full_name of a node to be added to the tree
- *
- *	Returns the node which should be the parent of the node
- *	described by path.  E.g., for path = "/foo/bar", returns
- *	the node with full_name = "/foo".
- */
-static struct device_node *derive_parent(const char *path)
-{
-	struct device_node *parent = NULL;
-	char *parent_path = "/";
-	size_t parent_path_len = strrchr(path, '/') - path + 1;
-
-	/* reject if path is "/" */
-	if (!strcmp(path, "/"))
-		return ERR_PTR(-EINVAL);
-
-	if (strrchr(path, '/') != path) {
-		parent_path = kmalloc(parent_path_len, GFP_KERNEL);
-		if (!parent_path)
-			return ERR_PTR(-ENOMEM);
-		strlcpy(parent_path, path, parent_path_len);
-	}
-	parent = of_find_node_by_path(parent_path);
-	if (!parent)
-		return ERR_PTR(-EINVAL);
-	if (strcmp(parent_path, "/"))
-		kfree(parent_path);
-	return parent;
-}
-
-static BLOCKING_NOTIFIER_HEAD(pSeries_reconfig_chain);
-
-int pSeries_reconfig_notifier_register(struct notifier_block *nb)
-{
-	return blocking_notifier_chain_register(&pSeries_reconfig_chain, nb);
-}
-
-void pSeries_reconfig_notifier_unregister(struct notifier_block *nb)
-{
-	blocking_notifier_chain_unregister(&pSeries_reconfig_chain, nb);
-}
+#include "of_helpers.h"
 
 static int pSeries_reconfig_add_node(const char *path, struct property *proplist)
 {
@@ -116,33 +29,25 @@ static int pSeries_reconfig_add_node(const char *path, struct property *proplist
 	if (!np)
 		goto out_err;
 
-	np->full_name = kmalloc(strlen(path) + 1, GFP_KERNEL);
+	np->full_name = kstrdup(kbasename(path), GFP_KERNEL);
 	if (!np->full_name)
 		goto out_err;
 
-	strcpy(np->full_name, path);
-
 	np->properties = proplist;
 	of_node_set_flag(np, OF_DYNAMIC);
-	kref_init(&np->kref);
+	of_node_init(np);
 
-	np->parent = derive_parent(path);
+	np->parent = pseries_of_derive_parent(path);
 	if (IS_ERR(np->parent)) {
 		err = PTR_ERR(np->parent);
 		goto out_err;
 	}
 
-	err = blocking_notifier_call_chain(&pSeries_reconfig_chain,
-				  PSERIES_RECONFIG_ADD, np);
-	if (err == NOTIFY_BAD) {
+	err = of_attach_node(np);
+	if (err) {
 		printk(KERN_ERR "Failed to add device node %s\n", path);
-		err = -ENOMEM; /* For now, safe to assume kmalloc failure */
 		goto out_err;
 	}
-
-	of_attach_node(np);
-
-	add_node_proc_entries(np);
 
 	of_node_put(np->parent);
 
@@ -171,19 +76,13 @@ static int pSeries_reconfig_remove_node(struct device_node *np)
 		return -EBUSY;
 	}
 
-	remove_node_proc_entries(np);
-
-	blocking_notifier_call_chain(&pSeries_reconfig_chain,
-			    PSERIES_RECONFIG_REMOVE, np);
 	of_detach_node(np);
-
 	of_node_put(parent);
-	of_node_put(np); /* Must decrement the refcount */
 	return 0;
 }
 
 /*
- * /proc/ppc64/ofdt - yucky binary interface for adding and removing
+ * /proc/powerpc/ofdt - yucky binary interface for adding and removing
  * OF device nodes.  Should be deprecated as soon as we get an
  * in-kernel wrapper for the RTAS ibm,configure-connector call.
  */
@@ -274,12 +173,11 @@ static struct property *new_property(const char *name, const int length,
 	if (!new)
 		return NULL;
 
-	if (!(new->name = kmalloc(strlen(name) + 1, GFP_KERNEL)))
+	if (!(new->name = kstrdup(name, GFP_KERNEL)))
 		goto cleanup;
 	if (!(new->value = kmalloc(length + 1, GFP_KERNEL)))
 		goto cleanup;
 
-	strcpy(new->name, name);
 	memcpy(new->value, value, length);
 	*(((char *)new->value) + length) = 0;
 	new->length = length;
@@ -391,7 +289,7 @@ static int do_add_property(char *buf, size_t bufsize)
 	if (!prop)
 		return -ENOMEM;
 
-	prom_add_property(np, prop);
+	of_add_property(np, prop);
 
 	return 0;
 }
@@ -400,7 +298,6 @@ static int do_remove_property(char *buf, size_t bufsize)
 {
 	struct device_node *np;
 	char *tmp;
-	struct property *prop;
 	buf = parse_node(buf, bufsize, &np);
 
 	if (!np)
@@ -413,9 +310,7 @@ static int do_remove_property(char *buf, size_t bufsize)
 	if (strlen(buf) == 0)
 		return -EINVAL;
 
-	prop = of_find_property(np, buf, NULL);
-
-	return prom_remove_property(np, prop);
+	return of_remove_property(np, of_find_property(np, buf, NULL));
 }
 
 static int do_update_property(char *buf, size_t bufsize)
@@ -423,8 +318,8 @@ static int do_update_property(char *buf, size_t bufsize)
 	struct device_node *np;
 	unsigned char *value;
 	char *name, *end, *next_prop;
-	int rc, length;
-	struct property *newprop, *oldprop;
+	int length;
+	struct property *newprop;
 	buf = parse_node(buf, bufsize, &np);
 	end = buf + bufsize;
 
@@ -435,42 +330,17 @@ static int do_update_property(char *buf, size_t bufsize)
 	if (!next_prop)
 		return -EINVAL;
 
+	if (!strlen(name))
+		return -ENODEV;
+
 	newprop = new_property(name, length, value, NULL);
 	if (!newprop)
 		return -ENOMEM;
 
-	oldprop = of_find_property(np, name,NULL);
-	if (!oldprop)
-		return -ENODEV;
+	if (!strcmp(name, "slb-size") || !strcmp(name, "ibm,slb-size"))
+		slb_set_size(*(int *)value);
 
-	rc = prom_update_property(np, newprop, oldprop);
-	if (rc)
-		return rc;
-
-	/* For memory under the ibm,dynamic-reconfiguration-memory node
-	 * of the device tree, adding and removing memory is just an update
-	 * to the ibm,dynamic-memory property instead of adding/removing a
-	 * memory node in the device tree.  For these cases we still need to
-	 * involve the notifier chain.
-	 */
-	if (!strcmp(name, "ibm,dynamic-memory")) {
-		int action;
-
-		next_prop = parse_next_property(next_prop, end, &name,
-						&length, &value);
-		if (!next_prop)
-			return -EINVAL;
-
-		if (!strcmp(name, "add"))
-			action = PSERIES_DRCONF_MEM_ADD;
-		else
-			action = PSERIES_DRCONF_MEM_REMOVE;
-
-		blocking_notifier_call_chain(&pSeries_reconfig_chain,
-					     action, value);
-	}
-
-	return 0;
+	return of_update_property(np, newprop);
 }
 
 /**
@@ -488,20 +358,13 @@ static int do_update_property(char *buf, size_t bufsize)
 static ssize_t ofdt_write(struct file *file, const char __user *buf, size_t count,
 			  loff_t *off)
 {
-	int rv = 0;
+	int rv;
 	char *kbuf;
 	char *tmp;
 
-	if (!(kbuf = kmalloc(count + 1, GFP_KERNEL))) {
-		rv = -ENOMEM;
-		goto out;
-	}
-	if (copy_from_user(kbuf, buf, count)) {
-		rv = -EFAULT;
-		goto out;
-	}
-
-	kbuf[count] = '\0';
+	kbuf = memdup_user_nul(buf, count);
+	if (IS_ERR(kbuf))
+		return PTR_ERR(kbuf);
 
 	tmp = strchr(kbuf, ' ');
 	if (!tmp) {
@@ -528,22 +391,20 @@ out:
 	return rv ? rv : count;
 }
 
-static const struct file_operations ofdt_fops = {
-	.write = ofdt_write
+static const struct proc_ops ofdt_proc_ops = {
+	.proc_write	= ofdt_write,
+	.proc_lseek	= noop_llseek,
 };
 
-/* create /proc/ppc64/ofdt write-only by root */
+/* create /proc/powerpc/ofdt write-only by root */
 static int proc_ppc64_create_ofdt(void)
 {
 	struct proc_dir_entry *ent;
 
-	if (!machine_is(pseries))
-		return 0;
-
-	ent = proc_create("ppc64/ofdt", S_IWUSR, NULL, &ofdt_fops);
+	ent = proc_create("powerpc/ofdt", 0200, NULL, &ofdt_proc_ops);
 	if (ent)
-		ent->size = 0;
+		proc_set_size(ent, 0);
 
 	return 0;
 }
-__initcall(proc_ppc64_create_ofdt);
+machine_device_initcall(pseries, proc_ppc64_create_ofdt);

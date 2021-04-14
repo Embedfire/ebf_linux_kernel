@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-pxa/zylonite_pxa320.c
  *
@@ -7,19 +8,15 @@
  * Copyright (C) 2007 Marvell Internation Ltd.
  * 2007-08-21: eric miao <eric.miao@marvell.com>
  *             initial version
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/gpio.h>
 
-#include <mach/gpio.h>
-#include <mach/mfp-pxa320.h>
-#include <mach/zylonite.h>
+#include "pxa320.h"
+#include "zylonite.h"
 
 #include "generic.h"
 
@@ -68,6 +65,13 @@ static mfp_cfg_t mfp_cfg[] __initdata = {
 	GPIO38_AC97_SYNC,
 	GPIO39_AC97_BITCLK,
 	GPIO40_AC97_nACRESET,
+	GPIO36_GPIO,	/* SDATA_IN_1 but unused - configure to GPIO */
+
+	/* SSP3 */
+	GPIO89_SSP3_SCLK,
+	GPIO90_SSP3_FRM,
+	GPIO91_SSP3_TXD,
+	GPIO92_SSP3_RXD,
 
 	/* WM9713 IRQ */
 	GPIO15_GPIO,
@@ -117,6 +121,10 @@ static mfp_cfg_t mfp_cfg[] __initdata = {
 	GPIO28_MMC2_CLK,
 	GPIO29_MMC2_CMD,
 
+	/* USB Host */
+	GPIO2_2_USBH_PEN,
+	GPIO3_2_USBH_PWR,
+
 	/* Debug LEDs */
 	GPIO1_2_GPIO | MFP_LPM_DRIVE_HIGH,
 	GPIO4_2_GPIO | MFP_LPM_DRIVE_HIGH,
@@ -165,10 +173,12 @@ static void __init zylonite_detect_lcd_panel(void)
 	for (i = 0; i < NUM_LCD_DETECT_PINS; i++) {
 		id = id << 1;
 		gpio = mfp_to_gpio(lcd_detect_pins[i]);
+		gpio_request(gpio, "LCD_ID_PINS");
 		gpio_direction_input(gpio);
 
 		if (gpio_get_value(gpio))
 			id = id | 0x1;
+		gpio_free(gpio);
 	}
 
 	/* lcd id, flush out bit 1 */
@@ -195,10 +205,6 @@ void __init zylonite_pxa320_init(void)
 		gpio_eth_irq	= mfp_to_gpio(MFP_PIN_GPIO9);
 		gpio_debug_led1	= mfp_to_gpio(MFP_PIN_GPIO1_2);
 		gpio_debug_led2	= mfp_to_gpio(MFP_PIN_GPIO4_2);
-
-		/* MMC card detect & write protect for controller 0 */
-		zylonite_mmc_slot[0].gpio_cd  = mfp_to_gpio(MFP_PIN_GPIO1);
-		zylonite_mmc_slot[0].gpio_wp  = mfp_to_gpio(MFP_PIN_GPIO5);
 
 		/* WM9713 IRQ */
 		wm9713_irq = mfp_to_gpio(MFP_PIN_GPIO15);

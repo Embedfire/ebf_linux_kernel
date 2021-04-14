@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/include/linux/sunrpc/svcauth.h
  *
@@ -9,19 +10,48 @@
 #ifndef _LINUX_SUNRPC_SVCAUTH_H_
 #define _LINUX_SUNRPC_SVCAUTH_H_
 
-#ifdef __KERNEL__
-
 #include <linux/string.h>
 #include <linux/sunrpc/msg_prot.h>
 #include <linux/sunrpc/cache.h>
+#include <linux/sunrpc/gss_api.h>
 #include <linux/hash.h>
+#include <linux/stringhash.h>
+#include <linux/cred.h>
 
-#define SVC_CRED_NGROUPS	32
 struct svc_cred {
-	uid_t			cr_uid;
-	gid_t			cr_gid;
+	kuid_t			cr_uid;
+	kgid_t			cr_gid;
 	struct group_info	*cr_group_info;
+	u32			cr_flavor; /* pseudoflavor */
+	/* name of form servicetype/hostname@REALM, passed down by
+	 * gss-proxy: */
+	char			*cr_raw_principal;
+	/* name of form servicetype@hostname, passed down by
+	 * rpc.svcgssd, or computed from the above: */
+	char			*cr_principal;
+	char			*cr_targ_princ;
+	struct gss_api_mech	*cr_gss_mech;
 };
+
+static inline void init_svc_cred(struct svc_cred *cred)
+{
+	cred->cr_group_info = NULL;
+	cred->cr_raw_principal = NULL;
+	cred->cr_principal = NULL;
+	cred->cr_targ_princ = NULL;
+	cred->cr_gss_mech = NULL;
+}
+
+static inline void free_svc_cred(struct svc_cred *cred)
+{
+	if (cred->cr_group_info)
+		put_group_info(cred->cr_group_info);
+	kfree(cred->cr_raw_principal);
+	kfree(cred->cr_principal);
+	kfree(cred->cr_targ_princ);
+	gss_mech_put(cred->cr_gss_mech);
+	init_svc_cred(cred);
+}
 
 struct svc_rqst;		/* forward decl */
 struct in6_addr;
@@ -50,6 +80,7 @@ struct auth_domain {
 	struct hlist_node	hash;
 	char			*name;
 	struct auth_ops		*flavour;
+	struct rcu_head		rcu_head;
 };
 
 /*
@@ -108,10 +139,15 @@ struct auth_ops {
 #define	SVC_NEGATIVE	4
 #define	SVC_OK		5
 #define	SVC_DROP	6
-#define	SVC_DENIED	7
-#define	SVC_PENDING	8
-#define	SVC_COMPLETE	9
+#define	SVC_CLOSE	7	/* Like SVC_DROP, but request is definitely
+				 * lost so if there is a tcp connection, it
+				 * should be closed
+				 */
+#define	SVC_DENIED	8
+#define	SVC_PENDING	9
+#define	SVC_COMPLETE	10
 
+struct svc_xprt;
 
 extern int	svc_authenticate(struct svc_rqst *rqstp, __be32 *authp);
 extern int	svc_authorise(struct svc_rqst *rqstp);
@@ -121,52 +157,30 @@ extern void	svc_auth_unregister(rpc_authflavor_t flavor);
 
 extern struct auth_domain *unix_domain_find(char *name);
 extern void auth_domain_put(struct auth_domain *item);
-extern int auth_unix_add_addr(struct in6_addr *addr, struct auth_domain *dom);
+extern int auth_unix_add_addr(struct net *net, struct in6_addr *addr, struct auth_domain *dom);
 extern struct auth_domain *auth_domain_lookup(char *name, struct auth_domain *new);
 extern struct auth_domain *auth_domain_find(char *name);
-extern struct auth_domain *auth_unix_lookup(struct in6_addr *addr);
+extern struct auth_domain *auth_unix_lookup(struct net *net, struct in6_addr *addr);
 extern int auth_unix_forget_old(struct auth_domain *dom);
-extern void svcauth_unix_purge(void);
-extern void svcauth_unix_info_release(void *);
+extern void svcauth_unix_purge(struct net *net);
+extern void svcauth_unix_info_release(struct svc_xprt *xpt);
 extern int svcauth_unix_set_client(struct svc_rqst *rqstp);
 
-static inline unsigned long hash_str(char *name, int bits)
+extern int unix_gid_cache_create(struct net *net);
+extern void unix_gid_cache_destroy(struct net *net);
+
+/*
+ * The <stringhash.h> functions are good enough that we don't need to
+ * use hash_32() on them; just extracting the high bits is enough.
+ */
+static inline unsigned long hash_str(char const *name, int bits)
 {
-	unsigned long hash = 0;
-	unsigned long l = 0;
-	int len = 0;
-	unsigned char c;
-	do {
-		if (unlikely(!(c = *name++))) {
-			c = (char)len; len = -1;
-		}
-		l = (l << 8) | c;
-		len++;
-		if ((len & (BITS_PER_LONG/8-1))==0)
-			hash = hash_long(hash^l, BITS_PER_LONG);
-	} while (len);
-	return hash >> (BITS_PER_LONG - bits);
+	return hashlen_hash(hashlen_string(NULL, name)) >> (32 - bits);
 }
 
-static inline unsigned long hash_mem(char *buf, int length, int bits)
+static inline unsigned long hash_mem(char const *buf, int length, int bits)
 {
-	unsigned long hash = 0;
-	unsigned long l = 0;
-	int len = 0;
-	unsigned char c;
-	do {
-		if (len == length) {
-			c = (char)len; len = -1;
-		} else
-			c = *buf++;
-		l = (l << 8) | c;
-		len++;
-		if ((len & (BITS_PER_LONG/8-1))==0)
-			hash = hash_long(hash^l, BITS_PER_LONG);
-	} while (len);
-	return hash >> (BITS_PER_LONG - bits);
+	return full_name_hash(NULL, buf, length) >> (32 - bits);
 }
-
-#endif /* __KERNEL__ */
 
 #endif /* _LINUX_SUNRPC_SVCAUTH_H_ */

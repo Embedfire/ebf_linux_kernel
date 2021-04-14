@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* linux/drivers/mfd/sm501.c
  *
  * Copyright (C) 2006 Simtec Electronics
  *	Ben Dooks <ben@simtec.co.uk>
  *	Vincent Sanders <vince@simtec.co.uk>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * SM501 MFD driver
 */
@@ -19,13 +16,16 @@
 #include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/pci.h>
-#include <linux/i2c-gpio.h>
+#include <linux/platform_data/i2c-gpio.h>
+#include <linux/gpio/driver.h>
+#include <linux/gpio/machine.h>
+#include <linux/slab.h>
 
 #include <linux/sm501.h>
 #include <linux/sm501-regs.h>
 #include <linux/serial_8250.h>
 
-#include <asm/io.h>
+#include <linux/io.h>
 
 struct sm501_device {
 	struct list_head		list;
@@ -41,6 +41,7 @@ struct sm501_gpio_chip {
 	struct gpio_chip	gpio;
 	struct sm501_gpio	*ourgpio;	/* to get back to parent. */
 	void __iomem		*regbase;
+	void __iomem		*control;	/* address of control reg. */
 };
 
 struct sm501_gpio {
@@ -131,10 +132,10 @@ static unsigned long decode_div(unsigned long pll2, unsigned long val,
 
 static void sm501_dump_clk(struct sm501_devdata *sm)
 {
-	unsigned long misct = readl(sm->regs + SM501_MISC_TIMING);
-	unsigned long pm0 = readl(sm->regs + SM501_POWER_MODE_0_CLOCK);
-	unsigned long pm1 = readl(sm->regs + SM501_POWER_MODE_1_CLOCK);
-	unsigned long pmc = readl(sm->regs + SM501_POWER_MODE_CONTROL);
+	unsigned long misct = smc501_readl(sm->regs + SM501_MISC_TIMING);
+	unsigned long pm0 = smc501_readl(sm->regs + SM501_POWER_MODE_0_CLOCK);
+	unsigned long pm1 = smc501_readl(sm->regs + SM501_POWER_MODE_1_CLOCK);
+	unsigned long pmc = smc501_readl(sm->regs + SM501_POWER_MODE_CONTROL);
 	unsigned long sdclk0, sdclk1;
 	unsigned long pll2 = 0;
 
@@ -191,29 +192,29 @@ static void sm501_dump_regs(struct sm501_devdata *sm)
 	void __iomem *regs = sm->regs;
 
 	dev_info(sm->dev, "System Control   %08x\n",
-			readl(regs + SM501_SYSTEM_CONTROL));
+			smc501_readl(regs + SM501_SYSTEM_CONTROL));
 	dev_info(sm->dev, "Misc Control     %08x\n",
-			readl(regs + SM501_MISC_CONTROL));
+			smc501_readl(regs + SM501_MISC_CONTROL));
 	dev_info(sm->dev, "GPIO Control Low %08x\n",
-			readl(regs + SM501_GPIO31_0_CONTROL));
+			smc501_readl(regs + SM501_GPIO31_0_CONTROL));
 	dev_info(sm->dev, "GPIO Control Hi  %08x\n",
-			readl(regs + SM501_GPIO63_32_CONTROL));
+			smc501_readl(regs + SM501_GPIO63_32_CONTROL));
 	dev_info(sm->dev, "DRAM Control     %08x\n",
-			readl(regs + SM501_DRAM_CONTROL));
+			smc501_readl(regs + SM501_DRAM_CONTROL));
 	dev_info(sm->dev, "Arbitration Ctrl %08x\n",
-			readl(regs + SM501_ARBTRTN_CONTROL));
+			smc501_readl(regs + SM501_ARBTRTN_CONTROL));
 	dev_info(sm->dev, "Misc Timing      %08x\n",
-			readl(regs + SM501_MISC_TIMING));
+			smc501_readl(regs + SM501_MISC_TIMING));
 }
 
 static void sm501_dump_gate(struct sm501_devdata *sm)
 {
 	dev_info(sm->dev, "CurrentGate      %08x\n",
-			readl(sm->regs + SM501_CURRENT_GATE));
+			smc501_readl(sm->regs + SM501_CURRENT_GATE));
 	dev_info(sm->dev, "CurrentClock     %08x\n",
-			readl(sm->regs + SM501_CURRENT_CLOCK));
+			smc501_readl(sm->regs + SM501_CURRENT_CLOCK));
 	dev_info(sm->dev, "PowerModeControl %08x\n",
-			readl(sm->regs + SM501_POWER_MODE_CONTROL));
+			smc501_readl(sm->regs + SM501_POWER_MODE_CONTROL));
 }
 
 #else
@@ -229,7 +230,7 @@ static inline void sm501_dump_clk(struct sm501_devdata *sm) { }
 
 static void sm501_sync_regs(struct sm501_devdata *sm)
 {
-	readl(sm->regs);
+	smc501_readl(sm->regs);
 }
 
 static inline void sm501_mdelay(struct sm501_devdata *sm, unsigned int delay)
@@ -259,11 +260,11 @@ int sm501_misc_control(struct device *dev,
 
 	spin_lock_irqsave(&sm->reg_lock, save);
 
-	misc = readl(sm->regs + SM501_MISC_CONTROL);
+	misc = smc501_readl(sm->regs + SM501_MISC_CONTROL);
 	to = (misc & ~clear) | set;
 
 	if (to != misc) {
-		writel(to, sm->regs + SM501_MISC_CONTROL);
+		smc501_writel(to, sm->regs + SM501_MISC_CONTROL);
 		sm501_sync_regs(sm);
 
 		dev_dbg(sm->dev, "MISC_CONTROL %08lx\n", misc);
@@ -292,11 +293,11 @@ unsigned long sm501_modify_reg(struct device *dev,
 
 	spin_lock_irqsave(&sm->reg_lock, save);
 
-	data = readl(sm->regs + reg);
+	data = smc501_readl(sm->regs + reg);
 	data |= set;
 	data &= ~clear;
 
-	writel(data, sm->regs + reg);
+	smc501_writel(data, sm->regs + reg);
 	sm501_sync_regs(sm);
 
 	spin_unlock_irqrestore(&sm->reg_lock, save);
@@ -320,9 +321,9 @@ int sm501_unit_power(struct device *dev, unsigned int unit, unsigned int to)
 
 	mutex_lock(&sm->clock_lock);
 
-	mode = readl(sm->regs + SM501_POWER_MODE_CONTROL);
-	gate = readl(sm->regs + SM501_CURRENT_GATE);
-	clock = readl(sm->regs + SM501_CURRENT_CLOCK);
+	mode = smc501_readl(sm->regs + SM501_POWER_MODE_CONTROL);
+	gate = smc501_readl(sm->regs + SM501_CURRENT_GATE);
+	clock = smc501_readl(sm->regs + SM501_CURRENT_CLOCK);
 
 	mode &= 3;		/* get current power mode */
 
@@ -354,22 +355,23 @@ int sm501_unit_power(struct device *dev, unsigned int unit, unsigned int to)
 
 	switch (mode) {
 	case 1:
-		writel(gate, sm->regs + SM501_POWER_MODE_0_GATE);
-		writel(clock, sm->regs + SM501_POWER_MODE_0_CLOCK);
+		smc501_writel(gate, sm->regs + SM501_POWER_MODE_0_GATE);
+		smc501_writel(clock, sm->regs + SM501_POWER_MODE_0_CLOCK);
 		mode = 0;
 		break;
 	case 2:
 	case 0:
-		writel(gate, sm->regs + SM501_POWER_MODE_1_GATE);
-		writel(clock, sm->regs + SM501_POWER_MODE_1_CLOCK);
+		smc501_writel(gate, sm->regs + SM501_POWER_MODE_1_GATE);
+		smc501_writel(clock, sm->regs + SM501_POWER_MODE_1_CLOCK);
 		mode = 1;
 		break;
 
 	default:
-		return -1;
+		gate = -1;
+		goto already;
 	}
 
-	writel(mode, sm->regs + SM501_POWER_MODE_CONTROL);
+	smc501_writel(mode, sm->regs + SM501_POWER_MODE_CONTROL);
 	sm501_sync_regs(sm);
 
 	dev_dbg(sm->dev, "gate %08lx, clock %08lx, mode %08lx\n",
@@ -383,14 +385,6 @@ int sm501_unit_power(struct device *dev, unsigned int unit, unsigned int to)
 }
 
 EXPORT_SYMBOL_GPL(sm501_unit_power);
-
-
-/* Perform a rounded division. */
-static long sm501fb_round_div(long num, long denom)
-{
-        /* n / d + 1 / 2 = (2n + d) / 2d */
-        return (2 * num + denom) / (2 * denom);
-}
 
 /* clock value structure. */
 struct sm501_clock {
@@ -425,7 +419,7 @@ static int sm501_calc_clock(unsigned long freq,
 		/* try all 8 shift values.*/
 		for (shift = 0; shift < 8; shift++) {
 			/* Calculate difference to requested clock */
-			diff = sm501fb_round_div(mclk, divider << shift) - freq;
+			diff = DIV_ROUND_CLOSEST(mclk, divider << shift) - freq;
 			if (diff < 0)
 				diff = -diff;
 
@@ -516,12 +510,12 @@ unsigned long sm501_set_clock(struct device *dev,
 			      unsigned long req_freq)
 {
 	struct sm501_devdata *sm = dev_get_drvdata(dev);
-	unsigned long mode = readl(sm->regs + SM501_POWER_MODE_CONTROL);
-	unsigned long gate = readl(sm->regs + SM501_CURRENT_GATE);
-	unsigned long clock = readl(sm->regs + SM501_CURRENT_CLOCK);
-	unsigned char reg;
+	unsigned long mode = smc501_readl(sm->regs + SM501_POWER_MODE_CONTROL);
+	unsigned long gate = smc501_readl(sm->regs + SM501_CURRENT_GATE);
+	unsigned long clock = smc501_readl(sm->regs + SM501_CURRENT_CLOCK);
 	unsigned int pll_reg = 0;
-	unsigned long sm501_freq; /* the actual frequency acheived */
+	unsigned long sm501_freq; /* the actual frequency achieved */
+	u64 reg;
 
 	struct sm501_clock to;
 
@@ -531,7 +525,7 @@ unsigned long sm501_set_clock(struct device *dev,
 
 	switch (clksrc) {
 	case SM501_CLOCK_P2XCLK:
-		/* This clock is divided in half so to achive the
+		/* This clock is divided in half so to achieve the
 		 * requested frequency the value must be multiplied by
 		 * 2. This clock also has an additional pre divisor */
 
@@ -560,7 +554,7 @@ unsigned long sm501_set_clock(struct device *dev,
 		break;
 
 	case SM501_CLOCK_V2XCLK:
-		/* This clock is divided in half so to achive the
+		/* This clock is divided in half so to achieve the
 		 * requested frequency the value must be multiplied by 2. */
 
 		sm501_freq = (sm501_select_clock(2 * req_freq, &to, 3) / 2);
@@ -589,9 +583,9 @@ unsigned long sm501_set_clock(struct device *dev,
 
 	mutex_lock(&sm->clock_lock);
 
-	mode = readl(sm->regs + SM501_POWER_MODE_CONTROL);
-	gate = readl(sm->regs + SM501_CURRENT_GATE);
-	clock = readl(sm->regs + SM501_CURRENT_CLOCK);
+	mode = smc501_readl(sm->regs + SM501_POWER_MODE_CONTROL);
+	gate = smc501_readl(sm->regs + SM501_CURRENT_GATE);
+	clock = smc501_readl(sm->regs + SM501_CURRENT_CLOCK);
 
 	clock = clock & ~(0xFF << clksrc);
 	clock |= reg<<clksrc;
@@ -600,14 +594,14 @@ unsigned long sm501_set_clock(struct device *dev,
 
 	switch (mode) {
 	case 1:
-		writel(gate, sm->regs + SM501_POWER_MODE_0_GATE);
-		writel(clock, sm->regs + SM501_POWER_MODE_0_CLOCK);
+		smc501_writel(gate, sm->regs + SM501_POWER_MODE_0_GATE);
+		smc501_writel(clock, sm->regs + SM501_POWER_MODE_0_CLOCK);
 		mode = 0;
 		break;
 	case 2:
 	case 0:
-		writel(gate, sm->regs + SM501_POWER_MODE_1_GATE);
-		writel(clock, sm->regs + SM501_POWER_MODE_1_CLOCK);
+		smc501_writel(gate, sm->regs + SM501_POWER_MODE_1_GATE);
+		smc501_writel(clock, sm->regs + SM501_POWER_MODE_1_CLOCK);
 		mode = 1;
 		break;
 
@@ -616,15 +610,16 @@ unsigned long sm501_set_clock(struct device *dev,
 		return -1;
 	}
 
-	writel(mode, sm->regs + SM501_POWER_MODE_CONTROL);
+	smc501_writel(mode, sm->regs + SM501_POWER_MODE_CONTROL);
 
 	if (pll_reg)
-		writel(pll_reg, sm->regs + SM501_PROGRAMMABLE_PLL_CONTROL);
+		smc501_writel(pll_reg,
+				sm->regs + SM501_PROGRAMMABLE_PLL_CONTROL);
 
 	sm501_sync_regs(sm);
 
-	dev_info(sm->dev, "gate %08lx, clock %08lx, mode %08lx\n",
-		 gate, clock, mode);
+	dev_dbg(sm->dev, "gate %08lx, clock %08lx, mode %08lx\n",
+		gate, clock, mode);
 
 	sm501_mdelay(sm, 16);
 	mutex_unlock(&sm->clock_lock);
@@ -646,7 +641,7 @@ unsigned long sm501_find_clock(struct device *dev,
 			       unsigned long req_freq)
 {
 	struct sm501_devdata *sm = dev_get_drvdata(dev);
-	unsigned long sm501_freq; /* the frequency achiveable by the 501 */
+	unsigned long sm501_freq; /* the frequency achieveable by the 501 */
 	struct sm501_clock to;
 
 	switch (clksrc) {
@@ -718,6 +713,7 @@ sm501_create_subdev(struct sm501_devdata *sm, char *name,
 	smdev->pdev.name = name;
 	smdev->pdev.id = sm->pdev_id;
 	smdev->pdev.dev.parent = sm->dev;
+	smdev->pdev.dev.coherent_dma_mask = 0xffffffff;
 
 	if (res_count) {
 		smdev->pdev.resource = (struct resource *)(smdev+1);
@@ -742,11 +738,8 @@ static int sm501_register_device(struct sm501_devdata *sm,
 	int ret;
 
 	for (ptr = 0; ptr < pdev->num_resources; ptr++) {
-		printk("%s[%d] flags %08lx: %08llx..%08llx\n",
-		       pdev->name, ptr,
-		       pdev->resource[ptr].flags,
-		       (unsigned long long)pdev->resource[ptr].start,
-		       (unsigned long long)pdev->resource[ptr].end);
+		printk(KERN_DEBUG "%s[%d] %pR\n",
+		       pdev->name, ptr, &pdev->resource[ptr]);
 	}
 
 	ret = platform_device_register(pdev);
@@ -847,7 +840,7 @@ static int sm501_register_uart(struct sm501_devdata *sm, int devices)
 	if (!pdev)
 		return -ENOMEM;
 
-	uart_data = pdev->dev.platform_data;
+	uart_data = dev_get_platdata(&pdev->dev);
 
 	if (devices & SM501_USE_UART0) {
 		sm501_setup_uart_data(sm, uart_data++, 0x30000);
@@ -886,11 +879,6 @@ static int sm501_register_display(struct sm501_devdata *sm,
 
 #ifdef CONFIG_MFD_SM501_GPIO
 
-static inline struct sm501_gpio_chip *to_sm501_gpio(struct gpio_chip *gc)
-{
-	return container_of(gc, struct sm501_gpio_chip, gpio);
-}
-
 static inline struct sm501_devdata *sm501_gpio_to_dev(struct sm501_gpio *gpio)
 {
 	return container_of(gpio, struct sm501_devdata, gpio);
@@ -899,19 +887,38 @@ static inline struct sm501_devdata *sm501_gpio_to_dev(struct sm501_gpio *gpio)
 static int sm501_gpio_get(struct gpio_chip *chip, unsigned offset)
 
 {
-	struct sm501_gpio_chip *smgpio = to_sm501_gpio(chip);
+	struct sm501_gpio_chip *smgpio = gpiochip_get_data(chip);
 	unsigned long result;
 
-	result = readl(smgpio->regbase + SM501_GPIO_DATA_LOW);
+	result = smc501_readl(smgpio->regbase + SM501_GPIO_DATA_LOW);
 	result >>= offset;
 
 	return result & 1UL;
 }
 
+static void sm501_gpio_ensure_gpio(struct sm501_gpio_chip *smchip,
+				   unsigned long bit)
+{
+	unsigned long ctrl;
+
+	/* check and modify if this pin is not set as gpio. */
+
+	if (smc501_readl(smchip->control) & bit) {
+		dev_info(sm501_gpio_to_dev(smchip->ourgpio)->dev,
+			 "changing mode of gpio, bit %08lx\n", bit);
+
+		ctrl = smc501_readl(smchip->control);
+		ctrl &= ~bit;
+		smc501_writel(ctrl, smchip->control);
+
+		sm501_sync_regs(sm501_gpio_to_dev(smchip->ourgpio));
+	}
+}
+
 static void sm501_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 
 {
-	struct sm501_gpio_chip *smchip = to_sm501_gpio(chip);
+	struct sm501_gpio_chip *smchip = gpiochip_get_data(chip);
 	struct sm501_gpio *smgpio = smchip->ourgpio;
 	unsigned long bit = 1 << offset;
 	void __iomem *regs = smchip->regbase;
@@ -923,33 +930,37 @@ static void sm501_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 
 	spin_lock_irqsave(&smgpio->lock, save);
 
-	val = readl(regs + SM501_GPIO_DATA_LOW) & ~bit;
+	val = smc501_readl(regs + SM501_GPIO_DATA_LOW) & ~bit;
 	if (value)
 		val |= bit;
-	writel(val, regs);
+	smc501_writel(val, regs);
 
 	sm501_sync_regs(sm501_gpio_to_dev(smgpio));
+	sm501_gpio_ensure_gpio(smchip, bit);
+
 	spin_unlock_irqrestore(&smgpio->lock, save);
 }
 
 static int sm501_gpio_input(struct gpio_chip *chip, unsigned offset)
 {
-	struct sm501_gpio_chip *smchip = to_sm501_gpio(chip);
+	struct sm501_gpio_chip *smchip = gpiochip_get_data(chip);
 	struct sm501_gpio *smgpio = smchip->ourgpio;
 	void __iomem *regs = smchip->regbase;
 	unsigned long bit = 1 << offset;
 	unsigned long save;
 	unsigned long ddr;
 
-	dev_info(sm501_gpio_to_dev(smgpio)->dev, "%s(%p,%d)\n",
-		 __func__, chip, offset);
+	dev_dbg(sm501_gpio_to_dev(smgpio)->dev, "%s(%p,%d)\n",
+		__func__, chip, offset);
 
 	spin_lock_irqsave(&smgpio->lock, save);
 
-	ddr = readl(regs + SM501_GPIO_DDR_LOW);
-	writel(ddr & ~bit, regs + SM501_GPIO_DDR_LOW);
+	ddr = smc501_readl(regs + SM501_GPIO_DDR_LOW);
+	smc501_writel(ddr & ~bit, regs + SM501_GPIO_DDR_LOW);
 
 	sm501_sync_regs(sm501_gpio_to_dev(smgpio));
+	sm501_gpio_ensure_gpio(smchip, bit);
+
 	spin_unlock_irqrestore(&smgpio->lock, save);
 
 	return 0;
@@ -958,7 +969,7 @@ static int sm501_gpio_input(struct gpio_chip *chip, unsigned offset)
 static int sm501_gpio_output(struct gpio_chip *chip,
 			     unsigned offset, int value)
 {
-	struct sm501_gpio_chip *smchip = to_sm501_gpio(chip);
+	struct sm501_gpio_chip *smchip = gpiochip_get_data(chip);
 	struct sm501_gpio *smgpio = smchip->ourgpio;
 	unsigned long bit = 1 << offset;
 	void __iomem *regs = smchip->regbase;
@@ -971,18 +982,18 @@ static int sm501_gpio_output(struct gpio_chip *chip,
 
 	spin_lock_irqsave(&smgpio->lock, save);
 
-	val = readl(regs + SM501_GPIO_DATA_LOW);
+	val = smc501_readl(regs + SM501_GPIO_DATA_LOW);
 	if (value)
 		val |= bit;
 	else
 		val &= ~bit;
-	writel(val, regs);
+	smc501_writel(val, regs);
 
-	ddr = readl(regs + SM501_GPIO_DDR_LOW);
-	writel(ddr | bit, regs + SM501_GPIO_DDR_LOW);
+	ddr = smc501_readl(regs + SM501_GPIO_DDR_LOW);
+	smc501_writel(ddr | bit, regs + SM501_GPIO_DDR_LOW);
 
 	sm501_sync_regs(sm501_gpio_to_dev(smgpio));
-	writel(val, regs + SM501_GPIO_DATA_LOW);
+	smc501_writel(val, regs + SM501_GPIO_DATA_LOW);
 
 	sm501_sync_regs(sm501_gpio_to_dev(smgpio));
 	spin_unlock_irqrestore(&smgpio->lock, save);
@@ -990,7 +1001,7 @@ static int sm501_gpio_output(struct gpio_chip *chip,
 	return 0;
 }
 
-static struct gpio_chip gpio_chip_template = {
+static const struct gpio_chip gpio_chip_template = {
 	.ngpio			= 32,
 	.direction_input	= sm501_gpio_input,
 	.direction_output	= sm501_gpio_output,
@@ -998,7 +1009,7 @@ static struct gpio_chip gpio_chip_template = {
 	.get			= sm501_gpio_get,
 };
 
-static int __devinit sm501_gpio_register_chip(struct sm501_devdata *sm,
+static int sm501_gpio_register_chip(struct sm501_devdata *sm,
 					      struct sm501_gpio *gpio,
 					      struct sm501_gpio_chip *chip)
 {
@@ -1012,16 +1023,18 @@ static int __devinit sm501_gpio_register_chip(struct sm501_devdata *sm,
 		if (base > 0)
 			base += 32;
 		chip->regbase = gpio->regs + SM501_GPIO_DATA_HIGH;
+		chip->control = sm->regs + SM501_GPIO63_32_CONTROL;
 		gchip->label  = "SM501-HIGH";
 	} else {
 		chip->regbase = gpio->regs + SM501_GPIO_DATA_LOW;
+		chip->control = sm->regs + SM501_GPIO31_0_CONTROL;
 		gchip->label  = "SM501-LOW";
 	}
 
 	gchip->base   = base;
 	chip->ourgpio = gpio;
 
-	return gpiochip_add(gchip);
+	return gpiochip_add_data(gchip, chip);
 }
 
 static int sm501_register_gpio(struct sm501_devdata *sm)
@@ -1029,7 +1042,6 @@ static int sm501_register_gpio(struct sm501_devdata *sm)
 	struct sm501_gpio *gpio = &sm->gpio;
 	resource_size_t iobase = sm->io_res->start + SM501_GPIO;
 	int ret;
-	int tmp;
 
 	dev_dbg(sm->dev, "registering gpio block %08llx\n",
 		(unsigned long long)iobase);
@@ -1037,13 +1049,13 @@ static int sm501_register_gpio(struct sm501_devdata *sm)
 	spin_lock_init(&gpio->lock);
 
 	gpio->regs_res = request_mem_region(iobase, 0x20, "sm501-gpio");
-	if (gpio->regs_res == NULL) {
+	if (!gpio->regs_res) {
 		dev_err(sm->dev, "gpio: failed to request region\n");
 		return -ENXIO;
 	}
 
 	gpio->regs = ioremap(iobase, 0x20);
-	if (gpio->regs == NULL) {
+	if (!gpio->regs) {
 		dev_err(sm->dev, "gpio: failed to remap registers\n");
 		ret = -ENXIO;
 		goto err_claimed;
@@ -1068,18 +1080,13 @@ static int sm501_register_gpio(struct sm501_devdata *sm)
 	return 0;
 
  err_low_chip:
-	tmp = gpiochip_remove(&gpio->low.gpio);
-	if (tmp) {
-		dev_err(sm->dev, "cannot remove low chip, cannot tidy up\n");
-		return ret;
-	}
+	gpiochip_remove(&gpio->low.gpio);
 
  err_mapped:
 	iounmap(gpio->regs);
 
  err_claimed:
-	release_resource(gpio->regs_res);
-	kfree(gpio->regs_res);
+	release_mem_region(iobase, 0x20);
 
 	return ret;
 }
@@ -1087,30 +1094,16 @@ static int sm501_register_gpio(struct sm501_devdata *sm)
 static void sm501_gpio_remove(struct sm501_devdata *sm)
 {
 	struct sm501_gpio *gpio = &sm->gpio;
-	int ret;
+	resource_size_t iobase = sm->io_res->start + SM501_GPIO;
 
 	if (!sm->gpio.registered)
 		return;
 
-	ret = gpiochip_remove(&gpio->low.gpio);
-	if (ret)
-		dev_err(sm->dev, "cannot remove low chip, cannot tidy up\n");
-
-	ret = gpiochip_remove(&gpio->high.gpio);
-	if (ret)
-		dev_err(sm->dev, "cannot remove high chip, cannot tidy up\n");
+	gpiochip_remove(&gpio->low.gpio);
+	gpiochip_remove(&gpio->high.gpio);
 
 	iounmap(gpio->regs);
-	release_resource(gpio->regs_res);
-	kfree(gpio->regs_res);
-}
-
-static inline int sm501_gpio_pin2nr(struct sm501_devdata *sm, unsigned int pin)
-{
-	struct sm501_gpio *gpio = &sm->gpio;
-	int base = (pin < 32) ? gpio->low.gpio.base : gpio->high.gpio.base;
-
-	return (pin % 32) + base;
+	release_mem_region(iobase, 0x20);
 }
 
 static inline int sm501_gpio_isregistered(struct sm501_devdata *sm)
@@ -1127,11 +1120,6 @@ static inline void sm501_gpio_remove(struct sm501_devdata *sm)
 {
 }
 
-static inline int sm501_gpio_pin2nr(struct sm501_devdata *sm, unsigned int pin)
-{
-	return -1;
-}
-
 static inline int sm501_gpio_isregistered(struct sm501_devdata *sm)
 {
 	return 0;
@@ -1143,20 +1131,31 @@ static int sm501_register_gpio_i2c_instance(struct sm501_devdata *sm,
 {
 	struct i2c_gpio_platform_data *icd;
 	struct platform_device *pdev;
+	struct gpiod_lookup_table *lookup;
 
 	pdev = sm501_create_subdev(sm, "i2c-gpio", 0,
 				   sizeof(struct i2c_gpio_platform_data));
 	if (!pdev)
 		return -ENOMEM;
 
-	icd = pdev->dev.platform_data;
+	/* Create a gpiod lookup using gpiochip-local offsets */
+	lookup = devm_kzalloc(&pdev->dev, struct_size(lookup, table, 3),
+			      GFP_KERNEL);
+	if (!lookup)
+		return -ENOMEM;
 
-	/* We keep the pin_sda and pin_scl fields relative in case the
-	 * same platform data is passed to >1 SM501.
-	 */
+	lookup->dev_id = "i2c-gpio";
+	lookup->table[0] = (struct gpiod_lookup)
+		GPIO_LOOKUP_IDX(iic->pin_sda < 32 ? "SM501-LOW" : "SM501-HIGH",
+				iic->pin_sda % 32, NULL, 0,
+				GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN);
+	lookup->table[1] = (struct gpiod_lookup)
+		GPIO_LOOKUP_IDX(iic->pin_scl < 32 ? "SM501-LOW" : "SM501-HIGH",
+				iic->pin_scl % 32, NULL, 1,
+				GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN);
+	gpiod_add_lookup_table(lookup);
 
-	icd->sda_pin = sm501_gpio_pin2nr(sm, iic->pin_sda);
-	icd->scl_pin = sm501_gpio_pin2nr(sm, iic->pin_scl);
+	icd = dev_get_platdata(&pdev->dev);
 	icd->timeout = iic->timeout;
 	icd->udelay = iic->udelay;
 
@@ -1168,9 +1167,9 @@ static int sm501_register_gpio_i2c_instance(struct sm501_devdata *sm,
 
 	pdev->id = iic->bus_num;
 
-	dev_info(sm->dev, "registering i2c-%d: sda=%d (%d), scl=%d (%d)\n",
+	dev_info(sm->dev, "registering i2c-%d: sda=%d, scl=%d\n",
 		 iic->bus_num,
-		 icd->sda_pin, iic->pin_sda, icd->scl_pin, iic->pin_scl);
+		 iic->pin_sda, iic->pin_scl);
 
 	return sm501_register_device(sm, pdev);
 }
@@ -1206,7 +1205,7 @@ static ssize_t sm501_dbg_regs(struct device *dev,
 
 	for (reg = 0x00; reg < 0x70; reg += 4) {
 		ret = sprintf(ptr, "%08x = %08x\n",
-			      reg, readl(sm->regs + reg));
+			      reg, smc501_readl(sm->regs + reg));
 		ptr += ret;
 	}
 
@@ -1214,7 +1213,7 @@ static ssize_t sm501_dbg_regs(struct device *dev,
 }
 
 
-static DEVICE_ATTR(dbg_regs, 0666, sm501_dbg_regs, NULL);
+static DEVICE_ATTR(dbg_regs, 0444, sm501_dbg_regs, NULL);
 
 /* sm501_init_reg
  *
@@ -1230,10 +1229,10 @@ static inline void sm501_init_reg(struct sm501_devdata *sm,
 {
 	unsigned long tmp;
 
-	tmp = readl(sm->regs + reg);
+	tmp = smc501_readl(sm->regs + reg);
 	tmp &= ~r->mask;
 	tmp |= r->set;
-	writel(tmp, sm->regs + reg);
+	smc501_writel(tmp, sm->regs + reg);
 }
 
 /* sm501_init_regs
@@ -1274,7 +1273,7 @@ static void sm501_init_regs(struct sm501_devdata *sm,
 
 static int sm501_check_clocks(struct sm501_devdata *sm)
 {
-	unsigned long pwrmode = readl(sm->regs + SM501_CURRENT_CLOCK);
+	unsigned long pwrmode = smc501_readl(sm->regs + SM501_CURRENT_CLOCK);
 	unsigned long msrc = (pwrmode & SM501_POWERMODE_M_SRC);
 	unsigned long m1src = (pwrmode & SM501_POWERMODE_M1_SRC);
 
@@ -1309,7 +1308,7 @@ static int sm501_init_dev(struct sm501_devdata *sm)
 
 	INIT_LIST_HEAD(&sm->devices);
 
-	devid = readl(sm->regs + SM501_DEVICEID);
+	devid = smc501_readl(sm->regs + SM501_DEVICEID);
 
 	if ((devid & SM501_DEVICEID_IDMASK) != SM501_DEVICEID_SM501) {
 		dev_err(sm->dev, "incorrect device id %08lx\n", devid);
@@ -1317,9 +1316,9 @@ static int sm501_init_dev(struct sm501_devdata *sm)
 	}
 
 	/* disable irqs */
-	writel(0, sm->regs + SM501_IRQ_MASK);
+	smc501_writel(0, sm->regs + SM501_IRQ_MASK);
 
-	dramctrl = readl(sm->regs + SM501_DRAM_CONTROL);
+	dramctrl = smc501_readl(sm->regs + SM501_DRAM_CONTROL);
 	mem_avail = sm501_mem_local[(dramctrl >> 13) & 0x7];
 
 	dev_info(sm->dev, "SM501 At %p: Version %08lx, %ld Mb, IRQ %d\n",
@@ -1351,7 +1350,7 @@ static int sm501_init_dev(struct sm501_devdata *sm)
 			sm501_register_gpio(sm);
 	}
 
-	if (pdata->gpio_i2c != NULL && pdata->gpio_i2c_nr > 0) {
+	if (pdata && pdata->gpio_i2c && pdata->gpio_i2c_nr > 0) {
 		if (!sm501_gpio_isregistered(sm))
 			dev_err(sm->dev, "no gpio available for i2c gpio.\n");
 		else
@@ -1374,63 +1373,62 @@ static int sm501_init_dev(struct sm501_devdata *sm)
 static int sm501_plat_probe(struct platform_device *dev)
 {
 	struct sm501_devdata *sm;
-	int err;
+	int ret;
 
-	sm = kzalloc(sizeof(struct sm501_devdata), GFP_KERNEL);
-	if (sm == NULL) {
-		dev_err(&dev->dev, "no memory for device data\n");
-		err = -ENOMEM;
+	sm = kzalloc(sizeof(*sm), GFP_KERNEL);
+	if (!sm) {
+		ret = -ENOMEM;
 		goto err1;
 	}
 
 	sm->dev = &dev->dev;
 	sm->pdev_id = dev->id;
-	sm->irq = platform_get_irq(dev, 0);
+	sm->platdata = dev_get_platdata(&dev->dev);
+
+	ret = platform_get_irq(dev, 0);
+	if (ret < 0)
+		goto err_res;
+	sm->irq = ret;
+
 	sm->io_res = platform_get_resource(dev, IORESOURCE_MEM, 1);
 	sm->mem_res = platform_get_resource(dev, IORESOURCE_MEM, 0);
-	sm->platdata = dev->dev.platform_data;
-
-	if (sm->irq < 0) {
-		dev_err(&dev->dev, "failed to get irq resource\n");
-		err = sm->irq;
-		goto err_res;
-	}
-
-	if (sm->io_res == NULL || sm->mem_res == NULL) {
+	if (!sm->io_res || !sm->mem_res) {
 		dev_err(&dev->dev, "failed to get IO resource\n");
-		err = -ENOENT;
+		ret = -ENOENT;
 		goto err_res;
 	}
 
 	sm->regs_claim = request_mem_region(sm->io_res->start,
 					    0x100, "sm501");
-
-	if (sm->regs_claim == NULL) {
+	if (!sm->regs_claim) {
 		dev_err(&dev->dev, "cannot claim registers\n");
-		err= -EBUSY;
+		ret = -EBUSY;
 		goto err_res;
 	}
 
 	platform_set_drvdata(dev, sm);
 
-	sm->regs = ioremap(sm->io_res->start,
-			   (sm->io_res->end - sm->io_res->start) - 1);
-
-	if (sm->regs == NULL) {
+	sm->regs = ioremap(sm->io_res->start, resource_size(sm->io_res));
+	if (!sm->regs) {
 		dev_err(&dev->dev, "cannot remap registers\n");
-		err = -EIO;
+		ret = -EIO;
 		goto err_claim;
 	}
 
-	return sm501_init_dev(sm);
+	ret = sm501_init_dev(sm);
+	if (ret)
+		goto err_unmap;
 
+	return 0;
+
+ err_unmap:
+	iounmap(sm->regs);
  err_claim:
-	release_resource(sm->regs_claim);
-	kfree(sm->regs_claim);
+	release_mem_region(sm->io_res->start, 0x100);
  err_res:
 	kfree(sm);
  err1:
-	return err;
+	return ret;
 
 }
 
@@ -1442,7 +1440,7 @@ static void sm501_set_power(struct sm501_devdata *sm, int on)
 {
 	struct sm501_platdata *pd = sm->platdata;
 
-	if (pd == NULL)
+	if (!pd)
 		return;
 
 	if (pd->get_power) {
@@ -1465,7 +1463,7 @@ static int sm501_plat_suspend(struct platform_device *pdev, pm_message_t state)
 	struct sm501_devdata *sm = platform_get_drvdata(pdev);
 
 	sm->in_suspend = 1;
-	sm->pm_misc = readl(sm->regs + SM501_MISC_CONTROL);
+	sm->pm_misc = smc501_readl(sm->regs + SM501_MISC_CONTROL);
 
 	sm501_dump_regs(sm);
 
@@ -1489,9 +1487,9 @@ static int sm501_plat_resume(struct platform_device *pdev)
 
 	/* check to see if we are in the same state as when suspended */
 
-	if (readl(sm->regs + SM501_MISC_CONTROL) != sm->pm_misc) {
+	if (smc501_readl(sm->regs + SM501_MISC_CONTROL) != sm->pm_misc) {
 		dev_info(sm->dev, "SM501_MISC_CONTROL changed over sleep\n");
-		writel(sm->pm_misc, sm->regs + SM501_MISC_CONTROL);
+		smc501_writel(sm->pm_misc, sm->regs + SM501_MISC_CONTROL);
 
 		/* our suspend causes the controller state to change,
 		 * either by something attempting setup, power loss,
@@ -1561,14 +1559,13 @@ static struct sm501_platdata sm501_pci_platdata = {
 };
 
 static int sm501_pci_probe(struct pci_dev *dev,
-			   const struct pci_device_id *id)
+				     const struct pci_device_id *id)
 {
 	struct sm501_devdata *sm;
 	int err;
 
-	sm = kzalloc(sizeof(struct sm501_devdata), GFP_KERNEL);
-	if (sm == NULL) {
-		dev_err(&dev->dev, "no memory for device data\n");
+	sm = kzalloc(sizeof(*sm), GFP_KERNEL);
+	if (!sm) {
 		err = -ENOMEM;
 		goto err1;
 	}
@@ -1619,16 +1616,14 @@ static int sm501_pci_probe(struct pci_dev *dev,
 
 	sm->regs_claim = request_mem_region(sm->io_res->start,
 					    0x100, "sm501");
-	if (sm->regs_claim == NULL) {
+	if (!sm->regs_claim) {
 		dev_err(&dev->dev, "cannot claim registers\n");
 		err= -EBUSY;
 		goto err3;
 	}
 
-	sm->regs = ioremap(pci_resource_start(dev, 1),
-			   pci_resource_len(dev, 1));
-
-	if (sm->regs == NULL) {
+	sm->regs = pci_ioremap_bar(dev, 1);
+	if (!sm->regs) {
 		dev_err(&dev->dev, "cannot remap registers\n");
 		err = -EIO;
 		goto err4;
@@ -1638,12 +1633,10 @@ static int sm501_pci_probe(struct pci_dev *dev,
 	return 0;
 
  err4:
-	release_resource(sm->regs_claim);
-	kfree(sm->regs_claim);
+	release_mem_region(sm->io_res->start, 0x100);
  err3:
 	pci_disable_device(dev);
  err2:
-	pci_set_drvdata(dev, NULL);
 	kfree(sm);
  err1:
 	return err;
@@ -1675,10 +1668,8 @@ static void sm501_pci_remove(struct pci_dev *dev)
 	sm501_dev_remove(sm);
 	iounmap(sm->regs);
 
-	release_resource(sm->regs_claim);
-	kfree(sm->regs_claim);
+	release_mem_region(sm->io_res->start, 0x100);
 
-	pci_set_drvdata(dev, NULL);
 	pci_disable_device(dev);
 }
 
@@ -1689,20 +1680,19 @@ static int sm501_plat_remove(struct platform_device *dev)
 	sm501_dev_remove(sm);
 	iounmap(sm->regs);
 
-	release_resource(sm->regs_claim);
-	kfree(sm->regs_claim);
+	release_mem_region(sm->io_res->start, 0x100);
 
 	return 0;
 }
 
-static struct pci_device_id sm501_pci_tbl[] = {
+static const struct pci_device_id sm501_pci_tbl[] = {
 	{ 0x126f, 0x0501, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ 0, },
 };
 
 MODULE_DEVICE_TABLE(pci, sm501_pci_tbl);
 
-static struct pci_driver sm501_pci_drv = {
+static struct pci_driver sm501_pci_driver = {
 	.name		= "sm501",
 	.id_table	= sm501_pci_tbl,
 	.probe		= sm501_pci_probe,
@@ -1711,10 +1701,16 @@ static struct pci_driver sm501_pci_drv = {
 
 MODULE_ALIAS("platform:sm501");
 
-static struct platform_driver sm501_plat_drv = {
+static const struct of_device_id of_sm501_match_tbl[] = {
+	{ .compatible = "smi,sm501", },
+	{ /* end */ }
+};
+MODULE_DEVICE_TABLE(of, of_sm501_match_tbl);
+
+static struct platform_driver sm501_plat_driver = {
 	.driver		= {
 		.name	= "sm501",
-		.owner	= THIS_MODULE,
+		.of_match_table = of_sm501_match_tbl,
 	},
 	.probe		= sm501_plat_probe,
 	.remove		= sm501_plat_remove,
@@ -1724,14 +1720,14 @@ static struct platform_driver sm501_plat_drv = {
 
 static int __init sm501_base_init(void)
 {
-	platform_driver_register(&sm501_plat_drv);
-	return pci_register_driver(&sm501_pci_drv);
+	platform_driver_register(&sm501_plat_driver);
+	return pci_register_driver(&sm501_pci_driver);
 }
 
 static void __exit sm501_base_exit(void)
 {
-	platform_driver_unregister(&sm501_plat_drv);
-	pci_unregister_driver(&sm501_pci_drv);
+	platform_driver_unregister(&sm501_plat_driver);
+	pci_unregister_driver(&sm501_pci_driver);
 }
 
 module_init(sm501_base_init);

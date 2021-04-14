@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/drivers/rtc/rtc-pl030.c
  *
  *  Copyright (C) 2000-2001 Deep Blue Solutions Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/module.h>
 #include <linux/rtc.h>
@@ -13,6 +10,7 @@
 #include <linux/interrupt.h>
 #include <linux/amba/bus.h>
 #include <linux/io.h>
+#include <linux/slab.h>
 
 #define RTC_DR		(0)
 #define RTC_MR		(4)
@@ -34,50 +32,28 @@ static irqreturn_t pl030_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int pl030_open(struct device *dev)
-{
-	return 0;
-}
-
-static void pl030_release(struct device *dev)
-{
-}
-
-static int pl030_ioctl(struct device *dev, unsigned int cmd, unsigned long arg)
-{
-	return -ENOIOCTLCMD;
-}
-
 static int pl030_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 {
 	struct pl030_rtc *rtc = dev_get_drvdata(dev);
 
-	rtc_time_to_tm(readl(rtc->base + RTC_MR), &alrm->time);
+	rtc_time64_to_tm(readl(rtc->base + RTC_MR), &alrm->time);
 	return 0;
 }
 
 static int pl030_set_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 {
 	struct pl030_rtc *rtc = dev_get_drvdata(dev);
-	unsigned long time;
-	int ret;
 
-	/*
-	 * At the moment, we can only deal with non-wildcarded alarm times.
-	 */
-	ret = rtc_valid_tm(&alrm->time);
-	if (ret == 0)
-		ret = rtc_tm_to_time(&alrm->time, &time);
-	if (ret == 0)
-		writel(time, rtc->base + RTC_MR);
-	return ret;
+	writel(rtc_tm_to_time64(&alrm->time), rtc->base + RTC_MR);
+
+	return 0;
 }
 
 static int pl030_read_time(struct device *dev, struct rtc_time *tm)
 {
 	struct pl030_rtc *rtc = dev_get_drvdata(dev);
 
-	rtc_time_to_tm(readl(rtc->base + RTC_DR), tm);
+	rtc_time64_to_tm(readl(rtc->base + RTC_DR), tm);
 
 	return 0;
 }
@@ -93,27 +69,20 @@ static int pl030_read_time(struct device *dev, struct rtc_time *tm)
 static int pl030_set_time(struct device *dev, struct rtc_time *tm)
 {
 	struct pl030_rtc *rtc = dev_get_drvdata(dev);
-	unsigned long time;
-	int ret;
 
-	ret = rtc_tm_to_time(tm, &time);
-	if (ret == 0)
-		writel(time + 1, rtc->base + RTC_LR);
+	writel(rtc_tm_to_time64(tm) + 1, rtc->base + RTC_LR);
 
-	return ret;
+	return 0;
 }
 
 static const struct rtc_class_ops pl030_ops = {
-	.open		= pl030_open,
-	.release	= pl030_release,
-	.ioctl		= pl030_ioctl,
 	.read_time	= pl030_read_time,
 	.set_time	= pl030_set_time,
 	.read_alarm	= pl030_read_alarm,
 	.set_alarm	= pl030_set_alarm,
 };
 
-static int pl030_probe(struct amba_device *dev, void *id)
+static int pl030_probe(struct amba_device *dev, const struct amba_id *id)
 {
 	struct pl030_rtc *rtc;
 	int ret;
@@ -122,16 +91,24 @@ static int pl030_probe(struct amba_device *dev, void *id)
 	if (ret)
 		goto err_req;
 
-	rtc = kmalloc(sizeof(*rtc), GFP_KERNEL);
+	rtc = devm_kzalloc(&dev->dev, sizeof(*rtc), GFP_KERNEL);
 	if (!rtc) {
 		ret = -ENOMEM;
 		goto err_rtc;
 	}
 
-	rtc->base = ioremap(dev->res.start, SZ_4K);
+	rtc->rtc = devm_rtc_allocate_device(&dev->dev);
+	if (IS_ERR(rtc->rtc)) {
+		ret = PTR_ERR(rtc->rtc);
+		goto err_rtc;
+	}
+
+	rtc->rtc->ops = &pl030_ops;
+	rtc->rtc->range_max = U32_MAX;
+	rtc->base = ioremap(dev->res.start, resource_size(&dev->res));
 	if (!rtc->base) {
 		ret = -ENOMEM;
-		goto err_map;
+		goto err_rtc;
 	}
 
 	__raw_writel(0, rtc->base + RTC_CR);
@@ -139,17 +116,14 @@ static int pl030_probe(struct amba_device *dev, void *id)
 
 	amba_set_drvdata(dev, rtc);
 
-	ret = request_irq(dev->irq[0], pl030_interrupt, IRQF_DISABLED,
+	ret = request_irq(dev->irq[0], pl030_interrupt, 0,
 			  "rtc-pl030", rtc);
 	if (ret)
 		goto err_irq;
 
-	rtc->rtc = rtc_device_register("pl030", &dev->dev, &pl030_ops,
-				       THIS_MODULE);
-	if (IS_ERR(rtc->rtc)) {
-		ret = PTR_ERR(rtc->rtc);
+	ret = rtc_register_device(rtc->rtc);
+	if (ret)
 		goto err_reg;
-	}
 
 	return 0;
 
@@ -157,8 +131,6 @@ static int pl030_probe(struct amba_device *dev, void *id)
 	free_irq(dev->irq[0], rtc);
  err_irq:
 	iounmap(rtc->base);
- err_map:
-	kfree(rtc);
  err_rtc:
 	amba_release_regions(dev);
  err_req:
@@ -169,14 +141,10 @@ static int pl030_remove(struct amba_device *dev)
 {
 	struct pl030_rtc *rtc = amba_get_drvdata(dev);
 
-	amba_set_drvdata(dev, NULL);
-
 	writel(0, rtc->base + RTC_CR);
 
 	free_irq(dev->irq[0], rtc);
-	rtc_device_unregister(rtc->rtc);
 	iounmap(rtc->base);
-	kfree(rtc);
 	amba_release_regions(dev);
 
 	return 0;
@@ -190,6 +158,8 @@ static struct amba_id pl030_ids[] = {
 	{ 0, 0 },
 };
 
+MODULE_DEVICE_TABLE(amba, pl030_ids);
+
 static struct amba_driver pl030_driver = {
 	.drv		= {
 		.name	= "rtc-pl030",
@@ -199,18 +169,7 @@ static struct amba_driver pl030_driver = {
 	.id_table	= pl030_ids,
 };
 
-static int __init pl030_init(void)
-{
-	return amba_driver_register(&pl030_driver);
-}
-
-static void __exit pl030_exit(void)
-{
-	amba_driver_unregister(&pl030_driver);
-}
-
-module_init(pl030_init);
-module_exit(pl030_exit);
+module_amba_driver(pl030_driver);
 
 MODULE_AUTHOR("Russell King <rmk@arm.linux.org.uk>");
 MODULE_DESCRIPTION("ARM AMBA PL030 RTC Driver");

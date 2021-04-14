@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  arch/arm/include/asm/hardware/iomd.h
  *
  *  Copyright (C) 1999 Russell King
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  This file contains information out the IOMD ASIC used in the
  *  Acorn RiscPC and subsequently integrated into the CLPS7500 chips.
@@ -32,18 +29,10 @@
 #define IOMD_KARTRX	(0x004)
 #define IOMD_KCTRL	(0x008)
 
-#ifdef CONFIG_ARCH_CLPS7500
-#define IOMD_IOLINES	(0x00C)
-#endif
-
 #define IOMD_IRQSTATA	(0x010)
 #define IOMD_IRQREQA	(0x014)
 #define IOMD_IRQCLRA	(0x014)
 #define IOMD_IRQMASKA	(0x018)
-
-#ifdef CONFIG_ARCH_CLPS7500
-#define IOMD_SUSMODE	(0x01C)
-#endif
 
 #define IOMD_IRQSTATB	(0x020)
 #define IOMD_IRQREQB	(0x024)
@@ -52,10 +41,6 @@
 #define IOMD_FIQSTAT	(0x030)
 #define IOMD_FIQREQ	(0x034)
 #define IOMD_FIQMASK	(0x038)
-
-#ifdef CONFIG_ARCH_CLPS7500
-#define IOMD_CLKCTL	(0x03C)
-#endif
 
 #define IOMD_T0CNTL	(0x040)
 #define IOMD_T0LTCHL	(0x040)
@@ -70,18 +55,6 @@
 #define IOMD_T1LTCHH	(0x054)
 #define IOMD_T1GO	(0x058)
 #define IOMD_T1LATCH	(0x05c)
-
-#ifdef CONFIG_ARCH_CLPS7500
-#define IOMD_IRQSTATC	(0x060)
-#define IOMD_IRQREQC	(0x064)
-#define IOMD_IRQMASKC	(0x068)
-
-#define IOMD_VIDMUX	(0x06c)
-
-#define IOMD_IRQSTATD	(0x070)
-#define IOMD_IRQREQD	(0x074)
-#define IOMD_IRQMASKD	(0x078)
-#endif
 
 #define IOMD_ROMCR0	(0x080)
 #define IOMD_ROMCR1	(0x084)
@@ -100,11 +73,6 @@
 #define IOMD_MOUSEY	(0x0A4)
 #endif
 
-#ifdef CONFIG_ARCH_CLPS7500
-#define IOMD_MSEDAT	(0x0A8)
-#define IOMD_MSECTL	(0x0Ac)
-#endif
-
 #ifdef CONFIG_ARCH_RPC
 #define IOMD_DMATCR	(0x0C0)
 #endif
@@ -112,18 +80,6 @@
 #define IOMD_ECTCR	(0x0C8)
 #ifdef CONFIG_ARCH_RPC
 #define IOMD_DMAEXT	(0x0CC)
-#endif
-#ifdef CONFIG_ARCH_CLPS7500
-#define IOMD_ASTCR	(0x0CC)
-#define IOMD_DRAMCR	(0x0D0)
-#define IOMD_SELFREF	(0x0D4)
-#define IOMD_ATODICR	(0x0E0)
-#define IOMD_ATODSR	(0x0E4)
-#define IOMD_ATODCC	(0x0E8)
-#define IOMD_ATODCNT1	(0x0EC)
-#define IOMD_ATODCNT2	(0x0F0)
-#define IOMD_ATODCNT3	(0x0F4)
-#define IOMD_ATODCNT4	(0x0F8)
 #endif
 
 #ifdef CONFIG_ARCH_RPC

@@ -1,27 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for PowerMac AWACS
  * Copyright (c) 2001 by Takashi Iwai <tiwai@suse.de>
  *   based on dmasound.c.
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/init.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include "pmac.h"
@@ -36,7 +23,7 @@ MODULE_LICENSE("GPL");
 
 static int index = SNDRV_DEFAULT_IDX1;		/* Index 0-MAX */
 static char *id = SNDRV_DEFAULT_STR1;		/* ID for this card */
-static int enable_beep = 1;
+static bool enable_beep = 1;
 
 module_param(index, int, 0444);
 MODULE_PARM_DESC(index, "Index value for " CHIP_NAME " soundchip.");
@@ -51,16 +38,16 @@ static struct platform_device *device;
 /*
  */
 
-static int __init snd_pmac_probe(struct platform_device *devptr)
+static int snd_pmac_probe(struct platform_device *devptr)
 {
 	struct snd_card *card;
 	struct snd_pmac *chip;
 	char *name_ext;
 	int err;
 
-	card = snd_card_new(index, id, THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_new(&devptr->dev, index, id, THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	if ((err = snd_pmac_new(card, &chip)) < 0)
 		goto __error;
@@ -110,7 +97,7 @@ static int __init snd_pmac_probe(struct platform_device *devptr)
 			goto __error;
 		break;
 	default:
-		snd_printk("unsupported hardware %d\n", chip->model);
+		snd_printk(KERN_ERR "unsupported hardware %d\n", chip->model);
 		err = -EINVAL;
 		goto __error;
 	}
@@ -121,8 +108,6 @@ static int __init snd_pmac_probe(struct platform_device *devptr)
 	chip->initialized = 1;
 	if (enable_beep)
 		snd_pmac_attach_beep(chip);
-
-	snd_card_set_dev(card, &devptr->dev);
 
 	if ((err = snd_card_register(card)) < 0)
 		goto __error;
@@ -136,40 +121,41 @@ __error:
 }
 
 
-static int __devexit snd_pmac_remove(struct platform_device *devptr)
+static int snd_pmac_remove(struct platform_device *devptr)
 {
 	snd_card_free(platform_get_drvdata(devptr));
-	platform_set_drvdata(devptr, NULL);
 	return 0;
 }
 
-#ifdef CONFIG_PM
-static int snd_pmac_driver_suspend(struct platform_device *devptr, pm_message_t state)
+#ifdef CONFIG_PM_SLEEP
+static int snd_pmac_driver_suspend(struct device *dev)
 {
-	struct snd_card *card = platform_get_drvdata(devptr);
+	struct snd_card *card = dev_get_drvdata(dev);
 	snd_pmac_suspend(card->private_data);
 	return 0;
 }
 
-static int snd_pmac_driver_resume(struct platform_device *devptr)
+static int snd_pmac_driver_resume(struct device *dev)
 {
-	struct snd_card *card = platform_get_drvdata(devptr);
+	struct snd_card *card = dev_get_drvdata(dev);
 	snd_pmac_resume(card->private_data);
 	return 0;
 }
+
+static SIMPLE_DEV_PM_OPS(snd_pmac_pm, snd_pmac_driver_suspend, snd_pmac_driver_resume);
+#define SND_PMAC_PM_OPS	&snd_pmac_pm
+#else
+#define SND_PMAC_PM_OPS	NULL
 #endif
 
 #define SND_PMAC_DRIVER		"snd_powermac"
 
 static struct platform_driver snd_pmac_driver = {
 	.probe		= snd_pmac_probe,
-	.remove		= __devexit_p(snd_pmac_remove),
-#ifdef CONFIG_PM
-	.suspend	= snd_pmac_driver_suspend,
-	.resume		= snd_pmac_driver_resume,
-#endif
+	.remove		= snd_pmac_remove,
 	.driver		= {
-		.name	= SND_PMAC_DRIVER
+		.name	= SND_PMAC_DRIVER,
+		.pm	= SND_PMAC_PM_OPS,
 	},
 };
 

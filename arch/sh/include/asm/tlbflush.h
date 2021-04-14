@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_SH_TLBFLUSH_H
 #define __ASM_SH_TLBFLUSH_H
 
@@ -20,6 +21,8 @@ extern void local_flush_tlb_page(struct vm_area_struct *vma,
 extern void local_flush_tlb_kernel_range(unsigned long start,
 					 unsigned long end);
 extern void local_flush_tlb_one(unsigned long asid, unsigned long page);
+
+extern void __flush_tlb_global(void);
 
 #ifdef CONFIG_SMP
 

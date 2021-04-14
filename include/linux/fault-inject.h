@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_FAULT_INJECT_H
 #define _LINUX_FAULT_INJECT_H
 
@@ -5,11 +6,12 @@
 
 #include <linux/types.h>
 #include <linux/debugfs.h>
-#include <asm/atomic.h>
+#include <linux/ratelimit.h>
+#include <linux/atomic.h>
 
 /*
  * For explanation of the elements of this struct, see
- * Documentation/fault-injection/fault-injection.txt
+ * Documentation/fault-injection/fault-injection.rst
  */
 struct fault_attr {
 	unsigned long probability;
@@ -17,7 +19,7 @@ struct fault_attr {
 	atomic_t times;
 	atomic_t space;
 	unsigned long verbose;
-	u32 task_filter;
+	bool task_filter;
 	unsigned long stacktrace_depth;
 	unsigned long require_start;
 	unsigned long require_end;
@@ -25,60 +27,51 @@ struct fault_attr {
 	unsigned long reject_end;
 
 	unsigned long count;
-
-#ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
-
-	struct {
-		struct dentry *dir;
-
-		struct dentry *probability_file;
-		struct dentry *interval_file;
-		struct dentry *times_file;
-		struct dentry *space_file;
-		struct dentry *verbose_file;
-		struct dentry *task_filter_file;
-		struct dentry *stacktrace_depth_file;
-		struct dentry *require_start_file;
-		struct dentry *require_end_file;
-		struct dentry *reject_start_file;
-		struct dentry *reject_end_file;
-	} dentries;
-
-#endif
+	struct ratelimit_state ratelimit_state;
+	struct dentry *dname;
 };
 
-#define FAULT_ATTR_INITIALIZER {				\
-		.interval = 1,					\
-		.times = ATOMIC_INIT(1),			\
-		.require_end = ULONG_MAX,			\
-		.stacktrace_depth = 32,				\
-		.verbose = 2,					\
+#define FAULT_ATTR_INITIALIZER {					\
+		.interval = 1,						\
+		.times = ATOMIC_INIT(1),				\
+		.require_end = ULONG_MAX,				\
+		.stacktrace_depth = 32,					\
+		.ratelimit_state = RATELIMIT_STATE_INIT_DISABLED,	\
+		.verbose = 2,						\
+		.dname = NULL,						\
 	}
 
 #define DECLARE_FAULT_ATTR(name) struct fault_attr name = FAULT_ATTR_INITIALIZER
 int setup_fault_attr(struct fault_attr *attr, char *str);
-void should_fail_srandom(unsigned long entropy);
 bool should_fail(struct fault_attr *attr, ssize_t size);
 
 #ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
 
-int init_fault_attr_dentries(struct fault_attr *attr, const char *name);
-void cleanup_fault_attr_dentries(struct fault_attr *attr);
+struct dentry *fault_create_debugfs_attr(const char *name,
+			struct dentry *parent, struct fault_attr *attr);
 
 #else /* CONFIG_FAULT_INJECTION_DEBUG_FS */
 
-static inline int init_fault_attr_dentries(struct fault_attr *attr,
-					  const char *name)
+static inline struct dentry *fault_create_debugfs_attr(const char *name,
+			struct dentry *parent, struct fault_attr *attr)
 {
-	return -ENODEV;
-}
-
-static inline void cleanup_fault_attr_dentries(struct fault_attr *attr)
-{
+	return ERR_PTR(-ENODEV);
 }
 
 #endif /* CONFIG_FAULT_INJECTION_DEBUG_FS */
 
 #endif /* CONFIG_FAULT_INJECTION */
+
+struct kmem_cache;
+
+int should_failslab(struct kmem_cache *s, gfp_t gfpflags);
+#ifdef CONFIG_FAILSLAB
+extern bool __should_failslab(struct kmem_cache *s, gfp_t gfpflags);
+#else
+static inline bool __should_failslab(struct kmem_cache *s, gfp_t gfpflags)
+{
+	return false;
+}
+#endif /* CONFIG_FAILSLAB */
 
 #endif /* _LINUX_FAULT_INJECT_H */

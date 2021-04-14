@@ -1,6 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * (C) 2001, 2001 Red Hat, Inc.
- * GPL'd
+ * Copyright © 2001      Red Hat UK Limited
+ * Copyright © 2001-2010 David Woodhouse <dwmw2@infradead.org>
  */
 
 #ifndef __LINUX_MTD_GEN_PROBE_H__

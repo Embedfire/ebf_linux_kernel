@@ -1,7 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _SPARC64_TTABLE_H
 #define _SPARC64_TTABLE_H
 
 #include <asm/utrap.h>
+#include <asm/pil.h>
 
 #ifdef __ASSEMBLY__
 #include <asm/thread_info.h>
@@ -123,7 +125,7 @@
 
 #define TRAP_IRQ(routine, level)			\
 	rdpr	%pil, %g2;				\
-	wrpr	%g0, 15, %pil;				\
+	wrpr	%g0, PIL_NORMAL_MAX, %pil;		\
 	sethi	%hi(1f-4), %g7;				\
 	ba,pt	%xcc, etrap_irq;			\
 	 or	%g7, %lo(1f-4), %g7;			\
@@ -143,7 +145,7 @@
 
 #define TRAP_IRQ(routine, level)			\
 	rdpr	%pil, %g2;				\
-	wrpr	%g0, 15, %pil;				\
+	wrpr	%g0, PIL_NORMAL_MAX, %pil;		\
 	ba,pt	%xcc, etrap_irq;			\
 	 rd	%pc, %g7;				\
 	mov	level, %o0;				\
@@ -152,6 +154,16 @@
 	ba,a,pt	%xcc, rtrap_irq;
 
 #endif
+
+#define TRAP_NMI_IRQ(routine, level)			\
+	rdpr	%pil, %g2;				\
+	wrpr	%g0, PIL_NMI, %pil;			\
+	ba,pt	%xcc, etrap_irq;			\
+	 rd	%pc, %g7;				\
+	mov	level, %o0;				\
+	call	routine;				\
+	 add	%sp, PTREGS_OFF, %o1;			\
+	ba,a,pt	%xcc, rtrap_nmi;
 
 #define TRAP_IVEC TRAP_NOSAVE(do_ivec)
 
@@ -173,6 +185,12 @@
 #define KPROBES_TRAP(lvl) TRAP_IRQ(kprobe_trap, lvl)
 #else
 #define KPROBES_TRAP(lvl) TRAP_ARG(bad_trap, lvl)
+#endif
+
+#ifdef CONFIG_UPROBES
+#define UPROBES_TRAP(lvl) TRAP_ARG(uprobe_trap, lvl)
+#else
+#define UPROBES_TRAP(lvl) TRAP_ARG(bad_trap, lvl)
 #endif
 
 #ifdef CONFIG_KGDB
@@ -199,6 +217,16 @@
 	ba,pt	%xcc, sun4v_dtsb_miss;			\
 	 nop;						\
 	nop;						\
+	nop;
+
+#define SUN4V_MCD_PRECISE				\
+	ldxa	[%g0] ASI_SCRATCHPAD, %g2;		\
+	ldx	[%g2 + HV_FAULT_D_ADDR_OFFSET], %g4;	\
+	ldx	[%g2 + HV_FAULT_D_CTX_OFFSET], %g5;	\
+	ba,pt	%xcc, etrap;				\
+	 rd	%pc, %g7;				\
+	ba,pt	%xcc, sun4v_mcd_detect_precise;		\
+	 nop;						\
 	nop;
 
 /* Before touching these macros, you owe it to yourself to go and
@@ -361,7 +389,9 @@ etrap_spill_fixup_64bit:				\
 
 /* Normal 32bit spill */
 #define SPILL_2_GENERIC(ASI)				\
-	srl	%sp, 0, %sp;				\
+	and	%sp, 1, %g3;				\
+	brnz,pn	%g3, (. - (128 + 4));			\
+	 srl	%sp, 0, %sp;				\
 	stwa	%l0, [%sp + %g0] ASI;			\
 	mov	0x04, %g3;				\
 	stwa	%l1, [%sp + %g3] ASI;			\
@@ -387,14 +417,16 @@ etrap_spill_fixup_64bit:				\
 	stwa	%i6, [%g1 + %g0] ASI;			\
 	stwa	%i7, [%g1 + %g3] ASI;			\
 	saved;						\
-        retry; nop; nop;				\
+        retry;						\
 	b,a,pt	%xcc, spill_fixup_dax;			\
 	b,a,pt	%xcc, spill_fixup_mna;			\
 	b,a,pt	%xcc, spill_fixup;
 
 #define SPILL_2_GENERIC_ETRAP		\
 etrap_user_spill_32bit:			\
-	srl	%sp, 0, %sp;		\
+	and	%sp, 1, %g3;		\
+	brnz,pn	%g3, etrap_user_spill_64bit;	\
+	 srl	%sp, 0, %sp;		\
 	stwa	%l0, [%sp + 0x00] %asi;	\
 	stwa	%l1, [%sp + 0x04] %asi;	\
 	stwa	%l2, [%sp + 0x08] %asi;	\
@@ -416,7 +448,7 @@ etrap_user_spill_32bit:			\
 	ba,pt	%xcc, etrap_save;	\
 	 wrpr	%g1, %cwp;		\
 	nop; nop; nop; nop;		\
-	nop; nop; nop; nop;		\
+	nop; nop;			\
 	ba,a,pt	%xcc, etrap_spill_fixup_32bit; \
 	ba,a,pt	%xcc, etrap_spill_fixup_32bit; \
 	ba,a,pt	%xcc, etrap_spill_fixup_32bit;
@@ -574,14 +606,16 @@ user_rtt_fill_64bit:					\
 	 restored;					\
 	nop; nop; nop; nop; nop; nop;			\
 	nop; nop; nop; nop; nop;			\
-	ba,a,pt	%xcc, user_rtt_fill_fixup;		\
-	ba,a,pt	%xcc, user_rtt_fill_fixup;		\
+	ba,a,pt	%xcc, user_rtt_fill_fixup_dax;		\
+	ba,a,pt	%xcc, user_rtt_fill_fixup_mna;		\
 	ba,a,pt	%xcc, user_rtt_fill_fixup;
 
 
 /* Normal 32bit fill */
 #define FILL_2_GENERIC(ASI)				\
-	srl	%sp, 0, %sp;				\
+	and	%sp, 1, %g3;				\
+	brnz,pn	%g3, (. - (128 + 4));			\
+	 srl	%sp, 0, %sp;				\
 	lduwa	[%sp + %g0] ASI, %l0;			\
 	mov	0x04, %g2;				\
 	mov	0x08, %g3;				\
@@ -605,14 +639,16 @@ user_rtt_fill_64bit:					\
 	lduwa	[%g1 + %g3] ASI, %i6;			\
 	lduwa	[%g1 + %g5] ASI, %i7;			\
 	restored;					\
-	retry; nop; nop; nop; nop;			\
+	retry; nop; nop;				\
 	b,a,pt	%xcc, fill_fixup_dax;			\
 	b,a,pt	%xcc, fill_fixup_mna;			\
 	b,a,pt	%xcc, fill_fixup;
 
 #define FILL_2_GENERIC_RTRAP				\
 user_rtt_fill_32bit:					\
-	srl	%sp, 0, %sp;				\
+	and	%sp, 1, %g3;				\
+	brnz,pn	%g3, user_rtt_fill_64bit;		\
+	 srl	%sp, 0, %sp;				\
 	lduwa	[%sp + 0x00] %asi, %l0;			\
 	lduwa	[%sp + 0x04] %asi, %l1;			\
 	lduwa	[%sp + 0x08] %asi, %l2;			\
@@ -632,9 +668,9 @@ user_rtt_fill_32bit:					\
 	ba,pt	%xcc, user_rtt_pre_restore;		\
 	 restored;					\
 	nop; nop; nop; nop; nop;			\
-	nop; nop; nop; nop; nop;			\
-	ba,a,pt	%xcc, user_rtt_fill_fixup;		\
-	ba,a,pt	%xcc, user_rtt_fill_fixup;		\
+	nop; nop; nop;					\
+	ba,a,pt	%xcc, user_rtt_fill_fixup_dax;		\
+	ba,a,pt	%xcc, user_rtt_fill_fixup_mna;		\
 	ba,a,pt	%xcc, user_rtt_fill_fixup;
 
 

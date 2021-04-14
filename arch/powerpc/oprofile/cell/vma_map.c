@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Cell Broadband Engine OProfile Support
  *
  * (C) Copyright IBM Corporation 2006
  *
  * Author: Maynard Johnson <maynardj@us.ibm.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 /* The code in this source file is responsible for generating
@@ -20,6 +16,7 @@
 #include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/elf.h>
+#include <linux/slab.h>
 #include "pr_util.h"
 
 
@@ -68,8 +65,8 @@ vma_map_add(struct vma_to_fileoffset_map *map, unsigned int vma,
 	    unsigned int size, unsigned int offset, unsigned int guard_ptr,
 	    unsigned int guard_val)
 {
-	struct vma_to_fileoffset_map *new =
-		kzalloc(sizeof(struct vma_to_fileoffset_map), GFP_KERNEL);
+	struct vma_to_fileoffset_map *new = kzalloc(sizeof(*new), GFP_KERNEL);
+
 	if (!new) {
 		printk(KERN_ERR "SPU_PROF: %s, line %d: malloc failed\n",
 		       __func__, __LINE__);
@@ -185,7 +182,7 @@ struct vma_to_fileoffset_map *create_vma_map(const struct spu *aSpu,
 			goto fail;
 
 		if (shdr_str.sh_type != SHT_STRTAB)
-			goto fail;;
+			goto fail;
 
 		for (j = 0; j < shdr.sh_size / sizeof (sym); j++) {
 			if (copy_from_user(&sym, spu_elf_start +
@@ -229,7 +226,7 @@ struct vma_to_fileoffset_map *create_vma_map(const struct spu *aSpu,
 	 */
 	overlay_tbl_offset = vma_map_lookup(map, ovly_table_sym,
 					    aSpu, &grd_val);
-	if (overlay_tbl_offset < 0) {
+	if (overlay_tbl_offset > 0x10000000) {
 		printk(KERN_ERR "SPU_PROF: "
 		       "%s, line %d: Error finding SPU overlay table\n",
 		       __func__, __LINE__);

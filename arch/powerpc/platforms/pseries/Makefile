@@ -1,27 +1,32 @@
-ifeq ($(CONFIG_PPC64),y)
-EXTRA_CFLAGS		+= -mno-minimal-toc
-endif
-
-ifeq ($(CONFIG_PPC_PSERIES_DEBUG),y)
-EXTRA_CFLAGS		+= -DDEBUG
-endif
+# SPDX-License-Identifier: GPL-2.0
+ccflags-$(CONFIG_PPC64)			:= $(NO_MINIMAL_TOC)
+ccflags-$(CONFIG_PPC_PSERIES_DEBUG)	+= -DDEBUG
 
 obj-y			:= lpar.o hvCall.o nvram.o reconfig.o \
-			   setup.o iommu.o ras.o rtasd.o \
-			   firmware.o power.o
+			   of_helpers.o \
+			   setup.o iommu.o event_sources.o ras.o \
+			   firmware.o power.o dlpar.o mobility.o rng.o \
+			   pci.o pci_dlpar.o eeh_pseries.o msi.o
 obj-$(CONFIG_SMP)	+= smp.o
-obj-$(CONFIG_XICS)	+= xics.o
 obj-$(CONFIG_SCANLOG)	+= scanlog.o
-obj-$(CONFIG_EEH)	+= eeh.o eeh_cache.o eeh_driver.o eeh_event.o eeh_sysfs.o
-obj-$(CONFIG_KEXEC)	+= kexec.o
-obj-$(CONFIG_PCI)	+= pci.o pci_dlpar.o
-obj-$(CONFIG_PCI_MSI)	+= msi.o
+obj-$(CONFIG_KEXEC_CORE)	+= kexec.o
+obj-$(CONFIG_PSERIES_ENERGY)	+= pseries_energy.o
 
 obj-$(CONFIG_HOTPLUG_CPU)	+= hotplug-cpu.o
-obj-$(CONFIG_MEMORY_HOTPLUG)	+= hotplug-memory.o
+obj-$(CONFIG_MEMORY_HOTPLUG)	+= hotplug-memory.o pmem.o
 
 obj-$(CONFIG_HVC_CONSOLE)	+= hvconsole.o
 obj-$(CONFIG_HVCS)		+= hvcserver.o
 obj-$(CONFIG_HCALL_STATS)	+= hvCall_inst.o
-obj-$(CONFIG_PHYP_DUMP)	+= phyp_dump.o
 obj-$(CONFIG_CMM)		+= cmm.o
+obj-$(CONFIG_DTL)		+= dtl.o
+obj-$(CONFIG_IO_EVENT_IRQ)	+= io_event_irq.o
+obj-$(CONFIG_LPARCFG)		+= lparcfg.o
+obj-$(CONFIG_IBMVIO)		+= vio.o
+obj-$(CONFIG_IBMEBUS)		+= ibmebus.o
+obj-$(CONFIG_PAPR_SCM)		+= papr_scm.o
+obj-$(CONFIG_PPC_SPLPAR)	+= vphn.o
+obj-$(CONFIG_PPC_SVM)		+= svm.o
+obj-$(CONFIG_FA_DUMP)		+= rtas-fadump.o
+
+obj-$(CONFIG_SUSPEND)		+= suspend.o

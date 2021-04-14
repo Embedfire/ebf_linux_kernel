@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	Copyright (c) 2001 Maciej W. Rozycki
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  */
 
 #include <linux/init.h>
@@ -59,12 +55,8 @@ static int ms02nv_read(struct mtd_info *mtd, loff_t from,
 {
 	struct ms02nv_private *mp = mtd->priv;
 
-	if (from + len > mtd->size)
-		return -EINVAL;
-
 	memcpy(buf, mp->uaddr + from, len);
 	*retlen = len;
-
 	return 0;
 }
 
@@ -73,12 +65,8 @@ static int ms02nv_write(struct mtd_info *mtd, loff_t to,
 {
 	struct ms02nv_private *mp = mtd->priv;
 
-	if (to + len > mtd->size)
-		return -EINVAL;
-
 	memcpy(mp->uaddr + to, buf, len);
 	*retlen = len;
-
 	return 0;
 }
 
@@ -213,14 +201,14 @@ static int __init ms02nv_init_one(ulong addr)
 	mtd->type = MTD_RAM;
 	mtd->flags = MTD_CAP_RAM;
 	mtd->size = fixsize;
-	mtd->name = (char *)ms02nv_name;
+	mtd->name = ms02nv_name;
 	mtd->owner = THIS_MODULE;
-	mtd->read = ms02nv_read;
-	mtd->write = ms02nv_write;
+	mtd->_read = ms02nv_read;
+	mtd->_write = ms02nv_write;
 	mtd->writesize = 1;
 
 	ret = -EIO;
-	if (add_mtd_device(mtd)) {
+	if (mtd_device_register(mtd, NULL, 0)) {
 		printk(KERN_ERR
 			"ms02-nv: Unable to register MTD device, aborting!\n");
 		goto err_out_csr_res;
@@ -262,7 +250,7 @@ static void __exit ms02nv_remove_one(void)
 
 	root_ms02nv_mtd = mp->next;
 
-	del_mtd_device(mtd);
+	mtd_device_unregister(mtd);
 
 	release_resource(mp->resource.csr);
 	kfree(mp->resource.csr);

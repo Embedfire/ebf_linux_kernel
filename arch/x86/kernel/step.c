@@ -1,21 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * x86 single-step support code, common to 32-bit and 64-bit.
  */
 #include <linux/sched.h>
+#include <linux/sched/task_stack.h>
 #include <linux/mm.h>
 #include <linux/ptrace.h>
+#include <asm/desc.h>
+#include <asm/mmu_context.h>
 
 unsigned long convert_ip_to_linear(struct task_struct *child, struct pt_regs *regs)
 {
 	unsigned long addr, seg;
 
 	addr = regs->ip;
-	seg = regs->cs & 0xffff;
+	seg = regs->cs;
 	if (v8086_mode(regs)) {
 		addr = (addr & 0xffff) + (seg << 4);
 		return addr;
 	}
 
+#ifdef CONFIG_MODIFY_LDT_SYSCALL
 	/*
 	 * We'll assume that the code segments in the GDT
 	 * are all zero-based. That is largely true: the
@@ -23,27 +28,27 @@ unsigned long convert_ip_to_linear(struct task_struct *child, struct pt_regs *re
 	 * and APM bios ones we just ignore here.
 	 */
 	if ((seg & SEGMENT_TI_MASK) == SEGMENT_LDT) {
-		u32 *desc;
+		struct desc_struct *desc;
 		unsigned long base;
 
-		seg &= ~7UL;
+		seg >>= 3;
 
 		mutex_lock(&child->mm->context.lock);
-		if (unlikely((seg >> 3) >= child->mm->context.size))
+		if (unlikely(!child->mm->context.ldt ||
+			     seg >= child->mm->context.ldt->nr_entries))
 			addr = -1L; /* bogus selector, access would fault */
 		else {
-			desc = child->mm->context.ldt + seg;
-			base = ((desc[0] >> 16) |
-				((desc[1] & 0xff) << 16) |
-				(desc[1] & 0xff000000));
+			desc = &child->mm->context.ldt->entries[seg];
+			base = get_desc_base(desc);
 
 			/* 16-bit code segment? */
-			if (!((desc[1] >> 22) & 1))
+			if (!desc->d)
 				addr &= 0xffff;
 			addr += base;
 		}
 		mutex_unlock(&child->mm->context.lock);
 	}
+#endif
 
 	return addr;
 }
@@ -54,7 +59,8 @@ static int is_setting_trap_flag(struct task_struct *child, struct pt_regs *regs)
 	unsigned char opcode[15];
 	unsigned long addr = convert_ip_to_linear(child, regs);
 
-	copied = access_process_vm(child, addr, opcode, sizeof(opcode), 0);
+	copied = access_process_vm(child, addr, opcode, sizeof(opcode),
+			FOLL_FORCE);
 	for (i = 0; i < copied; i++) {
 		switch (opcode[i]) {
 		/* popf and iret */
@@ -75,7 +81,7 @@ static int is_setting_trap_flag(struct task_struct *child, struct pt_regs *regs)
 
 #ifdef CONFIG_X86_64
 		case 0x40 ... 0x4f:
-			if (regs->cs != __USER_CS)
+			if (!user_64bit_mode(regs))
 				/* 32-bit mode: register increment */
 				return 0;
 			/* 64-bit mode: REX prefix */
@@ -158,20 +164,32 @@ static int enable_single_step(struct task_struct *child)
 	return 1;
 }
 
-/*
- * Install this value in MSR_IA32_DEBUGCTLMSR whenever child is running.
- */
-static void write_debugctlmsr(struct task_struct *child, unsigned long val)
+void set_task_blockstep(struct task_struct *task, bool on)
 {
-	if (child->thread.debugctlmsr == val)
-		return;
+	unsigned long debugctl;
 
-	child->thread.debugctlmsr = val;
-
-	if (child != current)
-		return;
-
-	update_debugctlmsr(val);
+	/*
+	 * Ensure irq/preemption can't change debugctl in between.
+	 * Note also that both TIF_BLOCKSTEP and debugctl should
+	 * be changed atomically wrt preemption.
+	 *
+	 * NOTE: this means that set/clear TIF_BLOCKSTEP is only safe if
+	 * task is current or it can't be running, otherwise we can race
+	 * with __switch_to_xtra(). We rely on ptrace_freeze_traced() but
+	 * PTRACE_KILL is not safe.
+	 */
+	local_irq_disable();
+	debugctl = get_debugctlmsr();
+	if (on) {
+		debugctl |= DEBUGCTLMSR_BTF;
+		set_tsk_thread_flag(task, TIF_BLOCKSTEP);
+	} else {
+		debugctl &= ~DEBUGCTLMSR_BTF;
+		clear_tsk_thread_flag(task, TIF_BLOCKSTEP);
+	}
+	if (task == current)
+		update_debugctlmsr(debugctl);
+	local_irq_enable();
 }
 
 /*
@@ -183,20 +201,13 @@ static void enable_step(struct task_struct *child, bool block)
 	 * Make sure block stepping (BTF) is not enabled unless it should be.
 	 * Note that we don't try to worry about any is_setting_trap_flag()
 	 * instructions after the first when using block stepping.
-	 * So noone should try to use debugger block stepping in a program
+	 * So no one should try to use debugger block stepping in a program
 	 * that uses user-mode single stepping itself.
 	 */
-	if (enable_single_step(child) && block) {
-		set_tsk_thread_flag(child, TIF_DEBUGCTLMSR);
-		write_debugctlmsr(child,
-				  child->thread.debugctlmsr | DEBUGCTLMSR_BTF);
-	} else {
-		write_debugctlmsr(child,
-				  child->thread.debugctlmsr & ~DEBUGCTLMSR_BTF);
-
-		if (!child->thread.debugctlmsr)
-			clear_tsk_thread_flag(child, TIF_DEBUGCTLMSR);
-	}
+	if (enable_single_step(child) && block)
+		set_task_blockstep(child, true);
+	else if (test_tsk_thread_flag(child, TIF_BLOCKSTEP))
+		set_task_blockstep(child, false);
 }
 
 void user_enable_single_step(struct task_struct *child)
@@ -214,11 +225,8 @@ void user_disable_single_step(struct task_struct *child)
 	/*
 	 * Make sure block stepping (BTF) is disabled.
 	 */
-	write_debugctlmsr(child,
-			  child->thread.debugctlmsr & ~DEBUGCTLMSR_BTF);
-
-	if (!child->thread.debugctlmsr)
-		clear_tsk_thread_flag(child, TIF_DEBUGCTLMSR);
+	if (test_tsk_thread_flag(child, TIF_BLOCKSTEP))
+		set_task_blockstep(child, false);
 
 	/* Always clear TIF_SINGLESTEP... */
 	clear_tsk_thread_flag(child, TIF_SINGLESTEP);

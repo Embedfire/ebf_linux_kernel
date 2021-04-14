@@ -1,32 +1,42 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2001 Lennert Buytenhek (buytenh@gnu.org)
  * Copyright (C) 2001 - 2008 Jeff Dike (jdike@{addtoit,linux.intel}.com)
- * Licensed under the GPL
  */
 
 #include <linux/console.h>
 #include <linux/ctype.h>
+#include <linux/string.h>
 #include <linux/interrupt.h>
 #include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/notifier.h>
 #include <linux/reboot.h>
+#include <linux/sched/debug.h>
 #include <linux/proc_fs.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/utsname.h>
+#include <linux/socket.h>
+#include <linux/un.h>
 #include <linux/workqueue.h>
 #include <linux/mutex.h>
-#include <asm/uaccess.h>
+#include <linux/fs.h>
+#include <linux/mount.h>
+#include <linux/file.h>
+#include <linux/uaccess.h>
+#include <asm/switch_to.h>
 
-#include "init.h"
-#include "irq_kern.h"
-#include "irq_user.h"
-#include "kern_util.h"
+#include <init.h>
+#include <irq_kern.h>
+#include <irq_user.h>
+#include <kern_util.h>
 #include "mconsole.h"
 #include "mconsole_kern.h"
-#include "os.h"
+#include <os.h>
+
+static struct vfsmount *proc_mnt = NULL;
 
 static int do_unlink_socket(struct notifier_block *notifier,
 			    unsigned long what, void *data)
@@ -88,7 +98,6 @@ static irqreturn_t mconsole_interrupt(int irq, void *dev_id)
 	}
 	if (!list_empty(&mc_requests))
 		schedule_work(&mconsole_work);
-	reactivate_fd(fd, MCONSOLE_IRQ);
 	return IRQ_HANDLED;
 }
 
@@ -114,57 +123,29 @@ void mconsole_log(struct mc_request *req)
 	mconsole_reply(req, "", 0, 0);
 }
 
-/* This is a more convoluted version of mconsole_proc, which has some stability
- * problems; however, we need it fixed, because it is expected that UML users
- * mount HPPFS instead of procfs on /proc. And we want mconsole_proc to still
- * show the real procfs content, not the ones from hppfs.*/
-#if 0
 void mconsole_proc(struct mc_request *req)
 {
-	struct nameidata nd;
-	struct file_system_type *proc;
-	struct super_block *super;
+	struct vfsmount *mnt = proc_mnt;
+	char *buf;
+	int len;
 	struct file *file;
-	int n, err;
-	char *ptr = req->request.data, *buf;
+	int first_chunk = 1;
+	char *ptr = req->request.data;
+	loff_t pos = 0;
 
 	ptr += strlen("proc");
-	while (isspace(*ptr)) ptr++;
+	ptr = skip_spaces(ptr);
 
-	proc = get_fs_type("proc");
-	if (proc == NULL) {
-		mconsole_reply(req, "procfs not registered", 1, 0);
+	if (!mnt) {
+		mconsole_reply(req, "Proc not available", 1, 0);
 		goto out;
 	}
-
-	super = (*proc->get_sb)(proc, 0, NULL, NULL);
-	put_filesystem(proc);
-	if (super == NULL) {
-		mconsole_reply(req, "Failed to get procfs superblock", 1, 0);
-		goto out;
-	}
-	up_write(&super->s_umount);
-
-	nd.path.dentry = super->s_root;
-	nd.path.mnt = NULL;
-	nd.flags = O_RDONLY + 1;
-	nd.last_type = LAST_ROOT;
-
-	/* START: it was experienced that the stability problems are closed
-	 * if commenting out these two calls + the below read cycle. To
-	 * make UML crash again, it was enough to readd either one.*/
-	err = link_path_walk(ptr, &nd);
-	if (err) {
-		mconsole_reply(req, "Failed to look up file", 1, 0);
-		goto out_kill;
-	}
-
-	file = dentry_open(nd.path.dentry, nd.path.mnt, O_RDONLY);
+	file = file_open_root(mnt->mnt_root, mnt, ptr, O_RDONLY, 0);
 	if (IS_ERR(file)) {
 		mconsole_reply(req, "Failed to open file", 1, 0);
-		goto out_kill;
+		printk(KERN_ERR "open /proc/%s: %ld\n", ptr, PTR_ERR(file));
+		goto out;
 	}
-	/*END*/
 
 	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (buf == NULL) {
@@ -172,62 +153,8 @@ void mconsole_proc(struct mc_request *req)
 		goto out_fput;
 	}
 
-	if ((file->f_op != NULL) && (file->f_op->read != NULL)) {
-		do {
-			n = (*file->f_op->read)(file, buf, PAGE_SIZE - 1,
-						&file->f_pos);
-			if (n >= 0) {
-				buf[n] = '\0';
-				mconsole_reply(req, buf, 0, (n > 0));
-			}
-			else {
-				mconsole_reply(req, "Read of file failed",
-					       1, 0);
-				goto out_free;
-			}
-		} while (n > 0);
-	}
-	else mconsole_reply(req, "", 0, 0);
-
- out_free:
-	kfree(buf);
- out_fput:
-	fput(file);
- out_kill:
-	deactivate_super(super);
- out: ;
-}
-#endif
-
-void mconsole_proc(struct mc_request *req)
-{
-	char path[64];
-	char *buf;
-	int len;
-	int fd;
-	int first_chunk = 1;
-	char *ptr = req->request.data;
-
-	ptr += strlen("proc");
-	while (isspace(*ptr))
-		ptr++;
-	snprintf(path, sizeof(path), "/proc/%s", ptr);
-
-	fd = sys_open(path, 0, 0);
-	if (fd < 0) {
-		mconsole_reply(req, "Failed to open file", 1, 0);
-		printk(KERN_ERR "open %s: %d\n",path,fd);
-		goto out;
-	}
-
-	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
-	if (buf == NULL) {
-		mconsole_reply(req, "Failed to allocate buffer", 1, 0);
-		goto out_close;
-	}
-
-	for (;;) {
-		len = sys_read(fd, buf, PAGE_SIZE-1);
+	do {
+		len = kernel_read(file, buf, PAGE_SIZE - 1, &pos);
 		if (len < 0) {
 			mconsole_reply(req, "Read of file failed", 1, 0);
 			goto out_free;
@@ -237,22 +164,14 @@ void mconsole_proc(struct mc_request *req)
 			mconsole_reply(req, "\n", 0, 1);
 			first_chunk = 0;
 		}
-		if (len == PAGE_SIZE-1) {
-			buf[len] = '\0';
-			mconsole_reply(req, buf, 0, 1);
-		} else {
-			buf[len] = '\0';
-			mconsole_reply(req, buf, 0, 0);
-			break;
-		}
-	}
-
+		buf[len] = '\0';
+		mconsole_reply(req, buf, 0, (len > 0));
+	} while (len > 0);
  out_free:
 	kfree(buf);
- out_close:
-	sys_close(fd);
- out:
-	/* nothing */;
+ out_fput:
+	fput(file);
+ out: ;
 }
 
 #define UML_MCONSOLE_HELPTEXT \
@@ -326,7 +245,6 @@ void mconsole_stop(struct mc_request *req)
 		(*req->cmd->handler)(req);
 	}
 	os_set_fd_block(req->originating_fd, 0);
-	reactivate_fd(req->originating_fd, MCONSOLE_IRQ);
 	mconsole_reply(req, "", 0, 0);
 }
 
@@ -557,8 +475,7 @@ void mconsole_config(struct mc_request *req)
 	int err;
 
 	ptr += strlen("config");
-	while (isspace(*ptr))
-		ptr++;
+	ptr = skip_spaces(ptr);
 	dev = mconsole_find_dev(ptr);
 	if (dev == NULL) {
 		mconsole_reply(req, "Bad configuration option", 1, 0);
@@ -585,7 +502,7 @@ void mconsole_remove(struct mc_request *req)
 	int err, start, end, n;
 
 	ptr += strlen("remove");
-	while (isspace(*ptr)) ptr++;
+	ptr = skip_spaces(ptr);
 	dev = mconsole_find_dev(ptr);
 	if (dev == NULL) {
 		mconsole_reply(req, "Bad remove option", 1, 0);
@@ -701,7 +618,7 @@ static void with_console(struct mc_request *req, void (*proc)(void *),
 static void sysrq_proc(void *arg)
 {
 	char *op = arg;
-	handle_sysrq(*op, NULL);
+	handle_sysrq(*op);
 }
 
 void mconsole_sysrq(struct mc_request *req)
@@ -709,7 +626,7 @@ void mconsole_sysrq(struct mc_request *req)
 	char *ptr = req->request.data;
 
 	ptr += strlen("sysrq");
-	while (isspace(*ptr)) ptr++;
+	ptr = skip_spaces(ptr);
 
 	/*
 	 * With 'b', the system will shut down without a chance to reply,
@@ -729,10 +646,9 @@ void mconsole_sysrq(struct mc_request *req)
 
 static void stack_proc(void *arg)
 {
-	struct task_struct *from = current, *to = arg;
+	struct task_struct *task = arg;
 
-	to->thread.saved_task = from;
-	switch_to(from, to, from);
+	show_stack(task, NULL, KERN_INFO);
 }
 
 /*
@@ -754,8 +670,7 @@ void mconsole_stack(struct mc_request *req)
 	 */
 
 	ptr += strlen("stack");
-	while (isspace(*ptr))
-		ptr++;
+	ptr = skip_spaces(ptr);
 
 	/*
 	 * Should really check for multiple pids or reject bad args here
@@ -774,6 +689,24 @@ void mconsole_stack(struct mc_request *req)
 	with_console(req, stack_proc, to);
 }
 
+static int __init mount_proc(void)
+{
+	struct file_system_type *proc_fs_type;
+	struct vfsmount *mnt;
+
+	proc_fs_type = get_fs_type("proc");
+	if (!proc_fs_type)
+		return -ENODEV;
+
+	mnt = kern_mount(proc_fs_type);
+	put_filesystem(proc_fs_type);
+	if (IS_ERR(mnt))
+		return PTR_ERR(mnt);
+
+	proc_mnt = mnt;
+	return 0;
+}
+
 /*
  * Changed by mconsole_setup, which is __setup, and called before SMP is
  * active.
@@ -785,7 +718,9 @@ static int __init mconsole_init(void)
 	/* long to avoid size mismatch warnings from gcc */
 	long sock;
 	int err;
-	char file[256];
+	char file[UNIX_PATH_MAX];
+
+	mount_proc();
 
 	if (umid_file_name("mconsole", file, sizeof(file)))
 		return -1;
@@ -802,8 +737,7 @@ static int __init mconsole_init(void)
 	register_reboot_notifier(&reboot_notifier);
 
 	err = um_request_irq(MCONSOLE_IRQ, sock, IRQ_READ, mconsole_interrupt,
-			     IRQF_DISABLED | IRQF_SHARED | IRQF_SAMPLE_RANDOM,
-			     "mconsole", (void *)sock);
+			     IRQF_SHARED, "mconsole", (void *)sock);
 	if (err) {
 		printk(KERN_ERR "Failed to get IRQ for management console\n");
 		goto out;
@@ -830,27 +764,24 @@ static int __init mconsole_init(void)
 
 __initcall(mconsole_init);
 
-static int write_proc_mconsole(struct file *file, const char __user *buffer,
-			       unsigned long count, void *data)
+static ssize_t mconsole_proc_write(struct file *file,
+		const char __user *buffer, size_t count, loff_t *pos)
 {
 	char *buf;
 
-	buf = kmalloc(count + 1, GFP_KERNEL);
-	if (buf == NULL)
-		return -ENOMEM;
-
-	if (copy_from_user(buf, buffer, count)) {
-		count = -EFAULT;
-		goto out;
-	}
-
-	buf[count] = '\0';
+	buf = memdup_user_nul(buffer, count);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
 
 	mconsole_notify(notify_socket, MCONSOLE_USER_NOTIFY, buf, count);
- out:
 	kfree(buf);
 	return count;
 }
+
+static const struct proc_ops mconsole_proc_ops = {
+	.proc_write	= mconsole_proc_write,
+	.proc_lseek	= noop_llseek,
+};
 
 static int create_proc_mconsole(void)
 {
@@ -859,15 +790,11 @@ static int create_proc_mconsole(void)
 	if (notify_socket == NULL)
 		return 0;
 
-	ent = create_proc_entry("mconsole", S_IFREG | 0200, NULL);
+	ent = proc_create("mconsole", 0200, NULL, &mconsole_proc_ops);
 	if (ent == NULL) {
-		printk(KERN_INFO "create_proc_mconsole : create_proc_entry "
-		       "failed\n");
+		printk(KERN_INFO "create_proc_mconsole : proc_create failed\n");
 		return 0;
 	}
-
-	ent->read_proc = NULL;
-	ent->write_proc = write_proc_mconsole;
 	return 0;
 }
 

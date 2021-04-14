@@ -1,10 +1,7 @@
-
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * struct flchip definition
- *
- * Contains information about the location and state of a given flash device
- *
- * (C) 2000 Red Hat. GPLd.
+ * Copyright © 2000      Red Hat UK Limited
+ * Copyright © 2000-2010 David Woodhouse <dwmw2@infradead.org>
  */
 
 #ifndef __MTD_FLASHCHIP_H__
@@ -15,6 +12,7 @@
  * has asm/spinlock.h, or 2.4, which has linux/spinlock.h
  */
 #include <linux/sched.h>
+#include <linux/mutex.h>
 
 typedef enum {
 	FL_READY,
@@ -38,6 +36,15 @@ typedef enum {
 	FL_XIP_WHILE_ERASING,
 	FL_XIP_WHILE_WRITING,
 	FL_SHUTDOWN,
+	/* These 2 come from nand_state_t, which has been unified here */
+	FL_READING,
+	FL_CACHEDPRG,
+	/* These 4 come from onenand_state_t, which has been unified here */
+	FL_RESETTING,
+	FL_OTPING,
+	FL_PREPARING_ERASE,
+	FL_VERIFYING_ERASE,
+
 	FL_UNKNOWN
 } flstate_t;
 
@@ -64,14 +71,18 @@ struct flchip {
 	unsigned int write_suspended:1;
 	unsigned int erase_suspended:1;
 	unsigned long in_progress_block_addr;
+	unsigned long in_progress_block_mask;
 
-	spinlock_t *mutex;
-	spinlock_t _spinlock; /* We do it like this because sometimes they'll be shared. */
+	struct mutex mutex;
 	wait_queue_head_t wq; /* Wait on here when we're waiting for the chip
 			     to be ready */
 	int word_write_time;
 	int buffer_write_time;
 	int erase_time;
+
+	int word_write_time_max;
+	int buffer_write_time_max;
+	int erase_time_max;
 
 	void *priv;
 };
@@ -79,7 +90,7 @@ struct flchip {
 /* This is used to handle contention on write/erase operations
    between partitions of the same physical chip. */
 struct flchip_shared {
-	spinlock_t lock;
+	struct mutex lock;
 	struct flchip *writing;
 	struct flchip *erasing;
 };

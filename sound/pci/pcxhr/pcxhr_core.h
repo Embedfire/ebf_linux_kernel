@@ -1,23 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Driver for Digigram pcxhr compatible soundcards
  *
- * low level interface with interrupt ans message handling
+ * low level interface with interrupt and message handling
  *
  * Copyright (c) 2004 by Digigram <alsa@digigram.com>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef __SOUND_PCXHR_CORE_H
@@ -65,7 +52,7 @@ enum {
 	CMD_RESYNC_AUDIO_INPUTS,	/* cmd_len = 1	stat_len = 0 */
 	CMD_GET_DSP_RESOURCES,		/* cmd_len = 1	stat_len = 4 */
 	CMD_SET_TIMER_INTERRUPT,	/* cmd_len = 1	stat_len = 0 */
-	CMD_RES_PIPE,			/* cmd_len = 2	stat_len = 0 */
+	CMD_RES_PIPE,			/* cmd_len >=2	stat_len = 0 */
 	CMD_FREE_PIPE,			/* cmd_len = 1	stat_len = 0 */
 	CMD_CONF_PIPE,			/* cmd_len = 2	stat_len = 0 */
 	CMD_STOP_PIPE,			/* cmd_len = 1	stat_len = 0 */
@@ -79,6 +66,8 @@ enum {
 	CMD_FORMAT_STREAM_IN,		/* cmd_len >= 4	stat_len = 0 */
 	CMD_STREAM_SAMPLE_COUNT,	/* cmd_len = 2	stat_len = (2 * nb_stream) */
 	CMD_AUDIO_LEVEL_ADJUST,		/* cmd_len = 3	stat_len = 0 */
+	CMD_GET_TIME_CODE,		/* cmd_len = 1  stat_len = 5 */
+	CMD_MANAGE_SIGNAL,		/* cmd_len = 1  stat_len = 0 */
 	CMD_LAST_INDEX
 };
 
@@ -96,6 +85,8 @@ void pcxhr_init_rmh(struct pcxhr_rmh *rmh, int cmd);
 void pcxhr_set_pipe_cmd_params(struct pcxhr_rmh* rmh, int capture, unsigned int param1,
 			       unsigned int param2, unsigned int param3);
 
+#define DSP_EXT_CMD_SET(x) (x->dsp_version > 0x012800)
+
 /*
  send the rmh
  */
@@ -110,10 +101,11 @@ int pcxhr_send_msg(struct pcxhr_mgr *mgr, struct pcxhr_rmh *rmh);
 #define IO_NUM_REG_STATUS		5
 #define IO_NUM_REG_CUER			10
 #define IO_NUM_UER_CHIP_REG		11
+#define IO_NUM_REG_CONFIG_SRC		12
 #define IO_NUM_REG_OUT_ANA_LEVEL	20
 #define IO_NUM_REG_IN_ANA_LEVEL		21
 
-
+#define REG_CONT_VALSMPTE		0x000800
 #define REG_CONT_UNMUTE_INPUTS		0x020000
 
 /* parameters used with register IO_NUM_REG_STATUS */
@@ -195,6 +187,6 @@ int pcxhr_write_io_num_reg_cont(struct pcxhr_mgr *mgr, unsigned int mask,
 
 /* interrupt handling */
 irqreturn_t pcxhr_interrupt(int irq, void *dev_id);
-void pcxhr_msg_tasklet(unsigned long arg);
+irqreturn_t pcxhr_threaded_irq(int irq, void *dev_id);
 
 #endif /* __SOUND_PCXHR_CORE_H */

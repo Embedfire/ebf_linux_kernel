@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	X.25 Packet Layer release 002
  *
@@ -7,18 +8,13 @@
  *
  *	This code REQUIRES 2.1.15 or higher
  *
- *	This module:
- *		This module is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
- *
  *	History
  *	X.25 001	Jonathan Naylor	Started coding.
  */
 
 #include <linux/if_arp.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <net/x25.h>
 
 LIST_HEAD(x25_route_list);
@@ -54,7 +50,7 @@ static int x25_add_route(struct x25_address *address, unsigned int sigdigits,
 
 	rt->sigdigits = sigdigits;
 	rt->dev       = dev;
-	atomic_set(&rt->refcnt, 1);
+	refcount_set(&rt->refcnt, 1);
 
 	list_add(&rt->node, &x25_route_list);
 	rc = 0;
@@ -65,7 +61,7 @@ out:
 
 /**
  * __x25_remove_route - remove route from x25_route_list
- * @rt - route to remove
+ * @rt: route to remove
  *
  * Remove route from x25_route_list. If it was there.
  * Caller must hold x25_route_list_lock.
@@ -133,18 +129,20 @@ struct net_device *x25_dev_get(char *devname)
 
 	if (dev &&
 	    (!(dev->flags & IFF_UP) || (dev->type != ARPHRD_X25
-#if defined(CONFIG_LLC) || defined(CONFIG_LLC_MODULE)
+#if IS_ENABLED(CONFIG_LLC)
 					&& dev->type != ARPHRD_ETHER
 #endif
-					)))
+					))){
 		dev_put(dev);
+		dev = NULL;
+	}
 
 	return dev;
 }
 
 /**
  * 	x25_get_route -	Find a route given an X.25 address.
- * 	@addr - address to find a route for
+ *	@addr: - address to find a route for
  *
  * 	Find a route given an X.25 address.
  */
@@ -190,7 +188,7 @@ int x25_route_ioctl(unsigned int cmd, void __user *arg)
 		goto out;
 
 	rc = -EINVAL;
-	if (rt.sigdigits < 0 || rt.sigdigits > 15)
+	if (rt.sigdigits > 15)
 		goto out;
 
 	dev = x25_dev_get(rt.device);

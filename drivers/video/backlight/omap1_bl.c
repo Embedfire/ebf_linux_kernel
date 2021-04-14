@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Backlight driver for OMAP based boards.
  *
  * Copyright (c) 2006 Andrzej Zaborowski  <balrog@zabor.org>
- *
- * This package is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This package is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this package; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include <linux/module.h>
@@ -24,9 +11,10 @@
 #include <linux/platform_device.h>
 #include <linux/fb.h>
 #include <linux/backlight.h>
+#include <linux/slab.h>
+#include <linux/platform_data/omap1_bl.h>
 
 #include <mach/hardware.h>
-#include <mach/board.h>
 #include <mach/mux.h>
 
 #define OMAPBL_MAX_INTENSITY		0xff
@@ -39,12 +27,12 @@ struct omap_backlight {
 	struct omap_backlight_config *pdata;
 };
 
-static void inline omapbl_send_intensity(int intensity)
+static inline void omapbl_send_intensity(int intensity)
 {
 	omap_writeb(intensity, OMAP_PWL_ENABLE);
 }
 
-static void inline omapbl_send_enable(int enable)
+static inline void omapbl_send_enable(int enable)
 {
 	omap_writeb(enable, OMAP_PWL_CLK_ENABLE);
 }
@@ -70,32 +58,29 @@ static void omapbl_blank(struct omap_backlight *bl, int mode)
 	}
 }
 
-#ifdef CONFIG_PM
-static int omapbl_suspend(struct platform_device *pdev, pm_message_t state)
+#ifdef CONFIG_PM_SLEEP
+static int omapbl_suspend(struct device *dev)
 {
-	struct backlight_device *dev = platform_get_drvdata(pdev);
-	struct omap_backlight *bl = dev_get_drvdata(&dev->dev);
+	struct backlight_device *bl_dev = dev_get_drvdata(dev);
+	struct omap_backlight *bl = bl_get_data(bl_dev);
 
 	omapbl_blank(bl, FB_BLANK_POWERDOWN);
 	return 0;
 }
 
-static int omapbl_resume(struct platform_device *pdev)
+static int omapbl_resume(struct device *dev)
 {
-	struct backlight_device *dev = platform_get_drvdata(pdev);
-	struct omap_backlight *bl = dev_get_drvdata(&dev->dev);
+	struct backlight_device *bl_dev = dev_get_drvdata(dev);
+	struct omap_backlight *bl = bl_get_data(bl_dev);
 
 	omapbl_blank(bl, bl->powermode);
 	return 0;
 }
-#else
-#define omapbl_suspend	NULL
-#define omapbl_resume	NULL
 #endif
 
 static int omapbl_set_power(struct backlight_device *dev, int state)
 {
-	struct omap_backlight *bl = dev_get_drvdata(&dev->dev);
+	struct omap_backlight *bl = bl_get_data(dev);
 
 	omapbl_blank(bl, state);
 	bl->powermode = state;
@@ -105,7 +90,7 @@ static int omapbl_set_power(struct backlight_device *dev, int state)
 
 static int omapbl_update_status(struct backlight_device *dev)
 {
-	struct omap_backlight *bl = dev_get_drvdata(&dev->dev);
+	struct omap_backlight *bl = bl_get_data(dev);
 
 	if (bl->current_intensity != dev->props.brightness) {
 		if (bl->powermode == FB_BLANK_UNBLANK)
@@ -121,35 +106,38 @@ static int omapbl_update_status(struct backlight_device *dev)
 
 static int omapbl_get_intensity(struct backlight_device *dev)
 {
-	struct omap_backlight *bl = dev_get_drvdata(&dev->dev);
+	struct omap_backlight *bl = bl_get_data(dev);
+
 	return bl->current_intensity;
 }
 
-static struct backlight_ops omapbl_ops = {
+static const struct backlight_ops omapbl_ops = {
 	.get_brightness = omapbl_get_intensity,
 	.update_status  = omapbl_update_status,
 };
 
 static int omapbl_probe(struct platform_device *pdev)
 {
+	struct backlight_properties props;
 	struct backlight_device *dev;
 	struct omap_backlight *bl;
-	struct omap_backlight_config *pdata = pdev->dev.platform_data;
+	struct omap_backlight_config *pdata = dev_get_platdata(&pdev->dev);
 
 	if (!pdata)
 		return -ENXIO;
 
-	omapbl_ops.check_fb = pdata->check_fb;
-
-	bl = kzalloc(sizeof(struct omap_backlight), GFP_KERNEL);
+	bl = devm_kzalloc(&pdev->dev, sizeof(struct omap_backlight),
+			  GFP_KERNEL);
 	if (unlikely(!bl))
 		return -ENOMEM;
 
-	dev = backlight_device_register("omap-bl", &pdev->dev, bl, &omapbl_ops);
-	if (IS_ERR(dev)) {
-		kfree(bl);
+	memset(&props, 0, sizeof(struct backlight_properties));
+	props.type = BACKLIGHT_RAW;
+	props.max_brightness = OMAPBL_MAX_INTENSITY;
+	dev = devm_backlight_device_register(&pdev->dev, "omap-bl", &pdev->dev,
+					bl, &omapbl_ops, &props);
+	if (IS_ERR(dev))
 		return PTR_ERR(dev);
-	}
 
 	bl->powermode = FB_BLANK_POWERDOWN;
 	bl->current_intensity = 0;
@@ -162,48 +150,25 @@ static int omapbl_probe(struct platform_device *pdev)
 	omap_cfg_reg(PWL);	/* Conflicts with UART3 */
 
 	dev->props.fb_blank = FB_BLANK_UNBLANK;
-	dev->props.max_brightness = OMAPBL_MAX_INTENSITY;
 	dev->props.brightness = pdata->default_intensity;
 	omapbl_update_status(dev);
 
-	printk(KERN_INFO "OMAP LCD backlight initialised\n");
+	dev_info(&pdev->dev, "OMAP LCD backlight initialised\n");
 
 	return 0;
 }
 
-static int omapbl_remove(struct platform_device *pdev)
-{
-	struct backlight_device *dev = platform_get_drvdata(pdev);
-	struct omap_backlight *bl = dev_get_drvdata(&dev->dev);
-
-	backlight_device_unregister(dev);
-	kfree(bl);
-
-	return 0;
-}
+static SIMPLE_DEV_PM_OPS(omapbl_pm_ops, omapbl_suspend, omapbl_resume);
 
 static struct platform_driver omapbl_driver = {
 	.probe		= omapbl_probe,
-	.remove		= omapbl_remove,
-	.suspend	= omapbl_suspend,
-	.resume		= omapbl_resume,
 	.driver		= {
 		.name	= "omap-bl",
+		.pm	= &omapbl_pm_ops,
 	},
 };
 
-static int __init omapbl_init(void)
-{
-	return platform_driver_register(&omapbl_driver);
-}
-
-static void __exit omapbl_exit(void)
-{
-	platform_driver_unregister(&omapbl_driver);
-}
-
-module_init(omapbl_init);
-module_exit(omapbl_exit);
+module_platform_driver(omapbl_driver);
 
 MODULE_AUTHOR("Andrzej Zaborowski <balrog@zabor.org>");
 MODULE_DESCRIPTION("OMAP LCD Backlight driver");

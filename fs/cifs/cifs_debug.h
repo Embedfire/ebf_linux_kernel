@@ -1,76 +1,160 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *
  *   Copyright (c) International Business Machines  Corp., 2000,2002
  *   Modified by Steve French (sfrench@us.ibm.com)
- *
- *   This program is free software;  you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY;  without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
- *   the GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program;  if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
 */
-#define CIFS_DEBUG		/* BB temporary */
 
 #ifndef _H_CIFS_DEBUG
 #define _H_CIFS_DEBUG
 
-void cifs_dump_mem(char *label, void *data, int length);
-#ifdef CONFIG_CIFS_DEBUG2
-#define DBG2 2
-void cifs_dump_detail(struct smb_hdr *);
-void cifs_dump_mids(struct TCP_Server_Info *);
-#else
-#define DBG2 0
+#ifdef pr_fmt
+#undef pr_fmt
 #endif
-extern int traceSMB;		/* flag which enables the function below */
-void dump_smb(struct smb_hdr *, int);
+
+#define pr_fmt(fmt) "CIFS: " fmt
+
+void cifs_dump_mem(char *label, void *data, int length);
+void cifs_dump_detail(void *buf, struct TCP_Server_Info *ptcp_info);
+void cifs_dump_mids(struct TCP_Server_Info *);
+extern bool traceSMB;		/* flag which enables the function below */
+void dump_smb(void *, int);
 #define CIFS_INFO	0x01
-#define CIFS_RC  	0x02
+#define CIFS_RC		0x02
 #define CIFS_TIMER	0x04
+
+#define VFS 1
+#define FYI 2
+extern int cifsFYI;
+#ifdef CONFIG_CIFS_DEBUG2
+#define NOISY 4
+#else
+#define NOISY 0
+#endif
+#define ONCE 8
 
 /*
  *	debug ON
  *	--------
  */
-#ifdef CIFS_DEBUG
+#ifdef CONFIG_CIFS_DEBUG
 
+
+/*
+ * When adding tracepoints and debug messages we have various choices.
+ * Some considerations:
+ *
+ * Use cifs_dbg(VFS, ...) for things we always want logged, and the user to see
+ *     cifs_info(...) slightly less important, admin can filter via loglevel > 6
+ *     cifs_dbg(FYI, ...) minor debugging messages, off by default
+ *     trace_smb3_*  ftrace functions are preferred for complex debug messages
+ *                 intended for developers or experienced admins, off by default
+ */
+
+/* Information level messages, minor events */
+#define cifs_info_func(ratefunc, fmt, ...)				\
+	pr_info_ ## ratefunc(fmt, ##__VA_ARGS__)
+
+#define cifs_info(fmt, ...)						\
+	cifs_info_func(ratelimited, fmt, ##__VA_ARGS__)
 
 /* information message: e.g., configuration, major event */
-extern int cifsFYI;
-#define cifsfyi(format,arg...) if (cifsFYI & CIFS_INFO) printk(KERN_DEBUG " " __FILE__ ": " format "\n" "" , ## arg)
+#define cifs_dbg_func(ratefunc, type, fmt, ...)				\
+do {									\
+	if ((type) & FYI && cifsFYI & CIFS_INFO) {			\
+		pr_debug_ ## ratefunc("%s: " fmt,			\
+				      __FILE__, ##__VA_ARGS__);		\
+	} else if ((type) & VFS) {					\
+		pr_err_ ## ratefunc("VFS: " fmt, ##__VA_ARGS__);	\
+	} else if ((type) & NOISY && (NOISY != 0)) {			\
+		pr_debug_ ## ratefunc(fmt, ##__VA_ARGS__);		\
+	}								\
+} while (0)
 
-#define cFYI(button,prspec) if (button) cifsfyi prspec
+#define cifs_dbg(type, fmt, ...)					\
+do {									\
+	if ((type) & ONCE)						\
+		cifs_dbg_func(once, type, fmt, ##__VA_ARGS__);		\
+	else								\
+		cifs_dbg_func(ratelimited, type, fmt, ##__VA_ARGS__);	\
+} while (0)
 
-#define cifswarn(format, arg...) printk(KERN_WARNING ": " format "\n" , ## arg)
+#define cifs_server_dbg_func(ratefunc, type, fmt, ...)			\
+do {									\
+	const char *sn = "";						\
+	if (server && server->hostname)					\
+		sn = server->hostname;					\
+	if ((type) & FYI && cifsFYI & CIFS_INFO) {			\
+		pr_debug_ ## ratefunc("%s: \\\\%s " fmt,		\
+				      __FILE__, sn, ##__VA_ARGS__);	\
+	} else if ((type) & VFS) {					\
+		pr_err_ ## ratefunc("VFS: \\\\%s " fmt,			\
+				    sn, ##__VA_ARGS__);			\
+	} else if ((type) & NOISY && (NOISY != 0)) {			\
+		pr_debug_ ## ratefunc("\\\\%s " fmt,			\
+				      sn, ##__VA_ARGS__);		\
+	}								\
+} while (0)
 
-/* debug event message: */
-extern int cifsERROR;
+#define cifs_server_dbg(type, fmt, ...)					\
+do {									\
+	if ((type) & ONCE)						\
+		cifs_server_dbg_func(once, type, fmt, ##__VA_ARGS__);	\
+	else								\
+		cifs_server_dbg_func(ratelimited, type, fmt,		\
+				     ##__VA_ARGS__);			\
+} while (0)
 
-#define cEVENT(format,arg...) if (cifsERROR) printk(KERN_EVENT __FILE__ ": " format "\n" , ## arg)
+#define cifs_tcon_dbg_func(ratefunc, type, fmt, ...)			\
+do {									\
+	const char *tn = "";						\
+	if (tcon && tcon->treeName)					\
+		tn = tcon->treeName;					\
+	if ((type) & FYI && cifsFYI & CIFS_INFO) {			\
+		pr_debug_ ## ratefunc("%s: %s "	fmt,			\
+				      __FILE__, tn, ##__VA_ARGS__);	\
+	} else if ((type) & VFS) {					\
+		pr_err_ ## ratefunc("VFS: %s " fmt, tn, ##__VA_ARGS__);	\
+	} else if ((type) & NOISY && (NOISY != 0)) {			\
+		pr_debug_ ## ratefunc("%s " fmt, tn, ##__VA_ARGS__);	\
+	}								\
+} while (0)
 
-/* error event message: e.g., i/o error */
-#define cifserror(format,arg...) if (cifsERROR) printk(KERN_ERR " CIFS VFS: " format "\n" "" , ## arg)
-
-#define cERROR(button, prspec) if (button) cifserror prspec
+#define cifs_tcon_dbg(type, fmt, ...)					\
+do {									\
+	if ((type) & ONCE)						\
+		cifs_tcon_dbg_func(once, type, fmt, ##__VA_ARGS__);	\
+	else								\
+		cifs_tcon_dbg_func(ratelimited, type, fmt,		\
+				   ##__VA_ARGS__);			\
+} while (0)
 
 /*
  *	debug OFF
  *	---------
  */
 #else		/* _CIFS_DEBUG */
-#define cERROR(button, prspec)
-#define cEVENT(format, arg...)
-#define cFYI(button, prspec)
-#define cifserror(format, arg...)
-#endif		/* _CIFS_DEBUG */
+#define cifs_dbg(type, fmt, ...)					\
+do {									\
+	if (0)								\
+		pr_debug(fmt, ##__VA_ARGS__);				\
+} while (0)
+
+#define cifs_server_dbg(type, fmt, ...)					\
+do {									\
+	if (0)								\
+		pr_debug("\\\\%s " fmt,					\
+			 server->hostname, ##__VA_ARGS__);		\
+} while (0)
+
+#define cifs_tcon_dbg(type, fmt, ...)					\
+do {									\
+	if (0)								\
+		pr_debug("%s " fmt, tcon->treeName, ##__VA_ARGS__);	\
+} while (0)
+
+#define cifs_info(fmt, ...)						\
+	pr_info(fmt, ##__VA_ARGS__)
+#endif
 
 #endif				/* _H_CIFS_DEBUG */

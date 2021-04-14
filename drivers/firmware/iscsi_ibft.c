@@ -1,5 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- *  Copyright 2007 Red Hat, Inc.
+ *  Copyright 2007-2010 Red Hat, Inc.
  *  by Peter Jones <pjones@redhat.com>
  *  Copyright 2008 IBM, Inc.
  *  by Konrad Rzeszutek <konradr@linux.vnet.ibm.com>
@@ -8,16 +9,10 @@
  *
  * This code exposes the iSCSI Boot Format Table to userland via sysfs.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License v2.0 as published by
- * the Free Software Foundation
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  * Changelog:
+ *
+ *  06 Jan 2010 - Peter Jones <pjones@redhat.com>
+ *    New changelog entries are in the git log from now on.  Not here.
  *
  *  14 Mar 2008 - Konrad Rzeszutek <ketuzsezr@darnok.org>
  *    Updated comments and copyrights. (v0.4.9)
@@ -60,7 +55,6 @@
  *
  *  27 Aug 2007 - Konrad Rzeszutek <konradr@linux.vnet.ibm.com>
  *   First version exposing iBFT data via a binary /sysfs. (v0.1)
- *
  */
 
 
@@ -78,15 +72,21 @@
 #include <linux/stat.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/acpi.h>
+#include <linux/iscsi_boot_sysfs.h>
 
-#define IBFT_ISCSI_VERSION "0.4.9"
-#define IBFT_ISCSI_DATE "2008-Mar-14"
+#define IBFT_ISCSI_VERSION "0.5.0"
+#define IBFT_ISCSI_DATE "2010-Feb-25"
 
-MODULE_AUTHOR("Peter Jones <pjones@redhat.com> and \
-Konrad Rzeszutek <ketuzsezr@darnok.org>");
+MODULE_AUTHOR("Peter Jones <pjones@redhat.com> and "
+	      "Konrad Rzeszutek <ketuzsezr@darnok.org>");
 MODULE_DESCRIPTION("sysfs interface to BIOS iBFT information");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(IBFT_ISCSI_VERSION);
+
+#ifndef CONFIG_ISCSI_IBFT_FIND
+struct acpi_table_ibft *ibft_addr;
+#endif
 
 struct ibft_hdr {
 	u8 id;
@@ -104,6 +104,7 @@ struct ibft_control {
 	u16 tgt0_off;
 	u16 nic1_off;
 	u16 tgt1_off;
+	u16 expansion[];
 } __attribute__((__packed__));
 
 struct ibft_initiator {
@@ -166,110 +167,34 @@ enum ibft_id {
 };
 
 /*
- * We do not support the other types, hence the usage of NULL.
- * This maps to the enum ibft_id.
- */
-static const char *ibft_id_names[] =
-	{NULL, NULL, "initiator", "ethernet%d", "target%d", NULL, NULL};
-
-/*
- * The text attributes names for each of the kobjects.
-*/
-enum ibft_eth_properties_enum {
-	ibft_eth_index,
-	ibft_eth_flags,
-	ibft_eth_ip_addr,
-	ibft_eth_subnet_mask,
-	ibft_eth_origin,
-	ibft_eth_gateway,
-	ibft_eth_primary_dns,
-	ibft_eth_secondary_dns,
-	ibft_eth_dhcp,
-	ibft_eth_vlan,
-	ibft_eth_mac,
-	/* ibft_eth_pci_bdf - this is replaced by link to the device itself. */
-	ibft_eth_hostname,
-	ibft_eth_end_marker,
-};
-
-static const char *ibft_eth_properties[] =
-	{"index", "flags", "ip-addr", "subnet-mask", "origin", "gateway",
-	"primary-dns", "secondary-dns", "dhcp", "vlan", "mac", "hostname",
-	NULL};
-
-enum ibft_tgt_properties_enum {
-	ibft_tgt_index,
-	ibft_tgt_flags,
-	ibft_tgt_ip_addr,
-	ibft_tgt_port,
-	ibft_tgt_lun,
-	ibft_tgt_chap_type,
-	ibft_tgt_nic_assoc,
-	ibft_tgt_name,
-	ibft_tgt_chap_name,
-	ibft_tgt_chap_secret,
-	ibft_tgt_rev_chap_name,
-	ibft_tgt_rev_chap_secret,
-	ibft_tgt_end_marker,
-};
-
-static const char *ibft_tgt_properties[] =
-	{"index", "flags", "ip-addr", "port", "lun", "chap-type", "nic-assoc",
-	"target-name", "chap-name", "chap-secret", "rev-chap-name",
-	"rev-chap-name-secret", NULL};
-
-enum ibft_initiator_properties_enum {
-	ibft_init_index,
-	ibft_init_flags,
-	ibft_init_isns_server,
-	ibft_init_slp_server,
-	ibft_init_pri_radius_server,
-	ibft_init_sec_radius_server,
-	ibft_init_initiator_name,
-	ibft_init_end_marker,
-};
-
-static const char *ibft_initiator_properties[] =
-	{"index", "flags", "isns-server", "slp-server", "pri-radius-server",
-	"sec-radius-server", "initiator-name", NULL};
-
-/*
  * The kobject and attribute structures.
  */
 
 struct ibft_kobject {
-	struct ibft_table_header *header;
+	struct acpi_table_ibft *header;
 	union {
 		struct ibft_initiator *initiator;
 		struct ibft_nic *nic;
 		struct ibft_tgt *tgt;
 		struct ibft_hdr *hdr;
 	};
-	struct kobject kobj;
-	struct list_head node;
 };
 
-struct ibft_attribute {
-	struct attribute attr;
-	ssize_t (*show) (struct  ibft_kobject *entry,
-			 struct ibft_attribute *attr, char *buf);
-	union {
-		struct ibft_initiator *initiator;
-		struct ibft_nic *nic;
-		struct ibft_tgt *tgt;
-		struct ibft_hdr *hdr;
-	};
-	struct kobject *kobj;
-	int type; /* The enum of the type. This can be any value of:
-		ibft_eth_properties_enum, ibft_tgt_properties_enum,
-		or ibft_initiator_properties_enum. */
-	struct list_head node;
-};
+static struct iscsi_boot_kset *boot_kset;
 
-static LIST_HEAD(ibft_attr_list);
-static LIST_HEAD(ibft_kobject_list);
-
+/* fully null address */
 static const char nulls[16];
+
+/* IPv4-mapped IPv6 ::ffff:0.0.0.0 */
+static const char mapped_nulls[16] = { 0x00, 0x00, 0x00, 0x00,
+                                       0x00, 0x00, 0x00, 0x00,
+                                       0x00, 0x00, 0xff, 0xff,
+                                       0x00, 0x00, 0x00, 0x00 };
+
+static int address_not_null(u8 *ip)
+{
+	return (memcmp(ip, nulls, 16) && memcmp(ip, mapped_nulls, 16));
+}
 
 /*
  * Helper functions to parse data properly.
@@ -284,15 +209,12 @@ static ssize_t sprintf_ipaddr(char *buf, u8 *ip)
 		/*
 		 * IPV4
 		 */
-		str += sprintf(buf, NIPQUAD_FMT, ip[12],
-			       ip[13], ip[14], ip[15]);
+		str += sprintf(buf, "%pI4", ip + 12);
 	} else {
 		/*
 		 * IPv6
 		 */
-		str += sprintf(str, NIP6_FMT, ntohs(ip[0]), ntohs(ip[1]),
-			       ntohs(ip[2]), ntohs(ip[3]), ntohs(ip[4]),
-			       ntohs(ip[5]), ntohs(ip[6]), ntohs(ip[7]));
+		str += sprintf(str, "%pI6", ip);
 	}
 	str += sprintf(str, "\n");
 	return str - buf;
@@ -309,35 +231,27 @@ static ssize_t sprintf_string(char *str, int len, char *buf)
 static int ibft_verify_hdr(char *t, struct ibft_hdr *hdr, int id, int length)
 {
 	if (hdr->id != id) {
-		printk(KERN_ERR "iBFT error: We expected the " \
+		printk(KERN_ERR "iBFT error: We expected the %s " \
 				"field header.id to have %d but " \
-				"found %d instead!\n", id, hdr->id);
+				"found %d instead!\n", t, id, hdr->id);
 		return -ENODEV;
 	}
-	if (hdr->length != length) {
-		printk(KERN_ERR "iBFT error: We expected the " \
+	if (length && hdr->length != length) {
+		printk(KERN_ERR "iBFT error: We expected the %s " \
 				"field header.length to have %d but " \
-				"found %d instead!\n", length, hdr->length);
+				"found %d instead!\n", t, length, hdr->length);
 		return -ENODEV;
 	}
 
 	return 0;
 }
 
-static void ibft_release(struct kobject *kobj)
-{
-	struct ibft_kobject *ibft =
-		container_of(kobj, struct ibft_kobject, kobj);
-	kfree(ibft);
-}
-
 /*
  *  Routines for parsing the iBFT data to be human readable.
  */
-ssize_t ibft_attr_show_initiator(struct ibft_kobject *entry,
-				  struct ibft_attribute *attr,
-				  char *buf)
+static ssize_t ibft_attr_show_initiator(void *data, int type, char *buf)
 {
+	struct ibft_kobject *entry = data;
 	struct ibft_initiator *initiator = entry->initiator;
 	void *ibft_loc = entry->header;
 	char *str = buf;
@@ -345,26 +259,26 @@ ssize_t ibft_attr_show_initiator(struct ibft_kobject *entry,
 	if (!initiator)
 		return 0;
 
-	switch (attr->type) {
-	case ibft_init_index:
+	switch (type) {
+	case ISCSI_BOOT_INI_INDEX:
 		str += sprintf(str, "%d\n", initiator->hdr.index);
 		break;
-	case ibft_init_flags:
+	case ISCSI_BOOT_INI_FLAGS:
 		str += sprintf(str, "%d\n", initiator->hdr.flags);
 		break;
-	case ibft_init_isns_server:
+	case ISCSI_BOOT_INI_ISNS_SERVER:
 		str += sprintf_ipaddr(str, initiator->isns_server);
 		break;
-	case ibft_init_slp_server:
+	case ISCSI_BOOT_INI_SLP_SERVER:
 		str += sprintf_ipaddr(str, initiator->slp_server);
 		break;
-	case ibft_init_pri_radius_server:
+	case ISCSI_BOOT_INI_PRI_RADIUS_SERVER:
 		str += sprintf_ipaddr(str, initiator->pri_radius_server);
 		break;
-	case ibft_init_sec_radius_server:
+	case ISCSI_BOOT_INI_SEC_RADIUS_SERVER:
 		str += sprintf_ipaddr(str, initiator->sec_radius_server);
 		break;
-	case ibft_init_initiator_name:
+	case ISCSI_BOOT_INI_INITIATOR_NAME:
 		str += sprintf_string(str, initiator->initiator_name_len,
 				      (char *)ibft_loc +
 				      initiator->initiator_name_off);
@@ -376,60 +290,56 @@ ssize_t ibft_attr_show_initiator(struct ibft_kobject *entry,
 	return str - buf;
 }
 
-ssize_t ibft_attr_show_nic(struct ibft_kobject *entry,
-			    struct ibft_attribute *attr,
-			    char *buf)
+static ssize_t ibft_attr_show_nic(void *data, int type, char *buf)
 {
+	struct ibft_kobject *entry = data;
 	struct ibft_nic *nic = entry->nic;
 	void *ibft_loc = entry->header;
 	char *str = buf;
-	char *mac;
-	int val;
+	__be32 val;
 
 	if (!nic)
 		return 0;
 
-	switch (attr->type) {
-	case ibft_eth_index:
+	switch (type) {
+	case ISCSI_BOOT_ETH_INDEX:
 		str += sprintf(str, "%d\n", nic->hdr.index);
 		break;
-	case ibft_eth_flags:
+	case ISCSI_BOOT_ETH_FLAGS:
 		str += sprintf(str, "%d\n", nic->hdr.flags);
 		break;
-	case ibft_eth_ip_addr:
+	case ISCSI_BOOT_ETH_IP_ADDR:
 		str += sprintf_ipaddr(str, nic->ip_addr);
 		break;
-	case ibft_eth_subnet_mask:
-		val = ~((1 << (32-nic->subnet_mask_prefix))-1);
-		str += sprintf(str, NIPQUAD_FMT,
-			       (u8)(val >> 24), (u8)(val >> 16),
-			       (u8)(val >> 8), (u8)(val));
+	case ISCSI_BOOT_ETH_SUBNET_MASK:
+		val = cpu_to_be32(~((1 << (32-nic->subnet_mask_prefix))-1));
+		str += sprintf(str, "%pI4", &val);
 		break;
-	case ibft_eth_origin:
+	case ISCSI_BOOT_ETH_PREFIX_LEN:
+		str += sprintf(str, "%d\n", nic->subnet_mask_prefix);
+		break;
+	case ISCSI_BOOT_ETH_ORIGIN:
 		str += sprintf(str, "%d\n", nic->origin);
 		break;
-	case ibft_eth_gateway:
+	case ISCSI_BOOT_ETH_GATEWAY:
 		str += sprintf_ipaddr(str, nic->gateway);
 		break;
-	case ibft_eth_primary_dns:
+	case ISCSI_BOOT_ETH_PRIMARY_DNS:
 		str += sprintf_ipaddr(str, nic->primary_dns);
 		break;
-	case ibft_eth_secondary_dns:
+	case ISCSI_BOOT_ETH_SECONDARY_DNS:
 		str += sprintf_ipaddr(str, nic->secondary_dns);
 		break;
-	case ibft_eth_dhcp:
+	case ISCSI_BOOT_ETH_DHCP:
 		str += sprintf_ipaddr(str, nic->dhcp);
 		break;
-	case ibft_eth_vlan:
+	case ISCSI_BOOT_ETH_VLAN:
 		str += sprintf(str, "%d\n", nic->vlan);
 		break;
-	case ibft_eth_mac:
-		mac = nic->mac;
-		str += sprintf(str, "%02x:%02x:%02x:%02x:%02x:%02x\n",
-			       (u8)mac[0], (u8)mac[1], (u8)mac[2],
-			       (u8)mac[3], (u8)mac[4], (u8)mac[5]);
+	case ISCSI_BOOT_ETH_MAC:
+		str += sprintf(str, "%pM\n", nic->mac);
 		break;
-	case ibft_eth_hostname:
+	case ISCSI_BOOT_ETH_HOSTNAME:
 		str += sprintf_string(str, nic->hostname_len,
 				      (char *)ibft_loc + nic->hostname_off);
 		break;
@@ -440,10 +350,9 @@ ssize_t ibft_attr_show_nic(struct ibft_kobject *entry,
 	return str - buf;
 };
 
-ssize_t ibft_attr_show_target(struct ibft_kobject *entry,
-			       struct ibft_attribute *attr,
-			       char *buf)
+static ssize_t ibft_attr_show_target(void *data, int type, char *buf)
 {
+	struct ibft_kobject *entry = data;
 	struct ibft_tgt *tgt = entry->tgt;
 	void *ibft_loc = entry->header;
 	char *str = buf;
@@ -452,48 +361,48 @@ ssize_t ibft_attr_show_target(struct ibft_kobject *entry,
 	if (!tgt)
 		return 0;
 
-	switch (attr->type) {
-	case ibft_tgt_index:
+	switch (type) {
+	case ISCSI_BOOT_TGT_INDEX:
 		str += sprintf(str, "%d\n", tgt->hdr.index);
 		break;
-	case ibft_tgt_flags:
+	case ISCSI_BOOT_TGT_FLAGS:
 		str += sprintf(str, "%d\n", tgt->hdr.flags);
 		break;
-	case ibft_tgt_ip_addr:
+	case ISCSI_BOOT_TGT_IP_ADDR:
 		str += sprintf_ipaddr(str, tgt->ip_addr);
 		break;
-	case ibft_tgt_port:
+	case ISCSI_BOOT_TGT_PORT:
 		str += sprintf(str, "%d\n", tgt->port);
 		break;
-	case ibft_tgt_lun:
+	case ISCSI_BOOT_TGT_LUN:
 		for (i = 0; i < 8; i++)
 			str += sprintf(str, "%x", (u8)tgt->lun[i]);
 		str += sprintf(str, "\n");
 		break;
-	case ibft_tgt_nic_assoc:
+	case ISCSI_BOOT_TGT_NIC_ASSOC:
 		str += sprintf(str, "%d\n", tgt->nic_assoc);
 		break;
-	case ibft_tgt_chap_type:
+	case ISCSI_BOOT_TGT_CHAP_TYPE:
 		str += sprintf(str, "%d\n", tgt->chap_type);
 		break;
-	case ibft_tgt_name:
+	case ISCSI_BOOT_TGT_NAME:
 		str += sprintf_string(str, tgt->tgt_name_len,
 				      (char *)ibft_loc + tgt->tgt_name_off);
 		break;
-	case ibft_tgt_chap_name:
+	case ISCSI_BOOT_TGT_CHAP_NAME:
 		str += sprintf_string(str, tgt->chap_name_len,
 				      (char *)ibft_loc + tgt->chap_name_off);
 		break;
-	case ibft_tgt_chap_secret:
+	case ISCSI_BOOT_TGT_CHAP_SECRET:
 		str += sprintf_string(str, tgt->chap_secret_len,
 				      (char *)ibft_loc + tgt->chap_secret_off);
 		break;
-	case ibft_tgt_rev_chap_name:
+	case ISCSI_BOOT_TGT_REV_CHAP_NAME:
 		str += sprintf_string(str, tgt->rev_chap_name_len,
 				      (char *)ibft_loc +
 				      tgt->rev_chap_name_off);
 		break;
-	case ibft_tgt_rev_chap_secret:
+	case ISCSI_BOOT_TGT_REV_CHAP_SECRET:
 		str += sprintf_string(str, tgt->rev_chap_secret_len,
 				      (char *)ibft_loc +
 				      tgt->rev_chap_secret_off);
@@ -505,39 +414,30 @@ ssize_t ibft_attr_show_target(struct ibft_kobject *entry,
 	return str - buf;
 }
 
-/*
- * The routine called for all sysfs attributes.
- */
-static ssize_t ibft_show_attribute(struct kobject *kobj,
-				    struct attribute *attr,
-				    char *buf)
+static ssize_t ibft_attr_show_acpitbl(void *data, int type, char *buf)
 {
-	struct ibft_kobject *dev =
-		container_of(kobj, struct ibft_kobject, kobj);
-	struct ibft_attribute *ibft_attr =
-		container_of(attr, struct ibft_attribute, attr);
-	ssize_t ret = -EIO;
+	struct ibft_kobject *entry = data;
 	char *str = buf;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EACCES;
+	switch (type) {
+	case ISCSI_BOOT_ACPITBL_SIGNATURE:
+		str += sprintf_string(str, ACPI_NAMESEG_SIZE,
+				      entry->header->header.signature);
+		break;
+	case ISCSI_BOOT_ACPITBL_OEM_ID:
+		str += sprintf_string(str, ACPI_OEM_ID_SIZE,
+				      entry->header->header.oem_id);
+		break;
+	case ISCSI_BOOT_ACPITBL_OEM_TABLE_ID:
+		str += sprintf_string(str, ACPI_OEM_TABLE_ID_SIZE,
+				      entry->header->header.oem_table_id);
+		break;
+	default:
+		break;
+	}
 
-	if (ibft_attr->show)
-		ret = ibft_attr->show(dev, ibft_attr, str);
-
-	return ret;
+	return str - buf;
 }
-
-static struct sysfs_ops ibft_attr_ops = {
-	.show = ibft_show_attribute,
-};
-
-static struct kobj_type ibft_ktype = {
-	.release = ibft_release,
-	.sysfs_ops = &ibft_attr_ops,
-};
-
-static struct kset *ibft_kset;
 
 static int __init ibft_check_device(void)
 {
@@ -545,12 +445,13 @@ static int __init ibft_check_device(void)
 	u8 *pos;
 	u8 csum = 0;
 
-	len = ibft_addr->length;
+	len = ibft_addr->header.length;
 
 	/* Sanity checking of iBFT. */
-	if (ibft_addr->revision != 1) {
+	if (ibft_addr->header.revision != 1) {
 		printk(KERN_ERR "iBFT module supports only revision 1, " \
-				"while this is %d.\n", ibft_addr->revision);
+				"while this is %d.\n",
+				ibft_addr->header.revision);
 		return -ENOENT;
 	}
 	for (pos = (u8 *)ibft_addr; pos < (u8 *)ibft_addr + len; pos++)
@@ -565,12 +466,168 @@ static int __init ibft_check_device(void)
 }
 
 /*
+ * Helper routiners to check to determine if the entry is valid
+ * in the proper iBFT structure.
+ */
+static umode_t ibft_check_nic_for(void *data, int type)
+{
+	struct ibft_kobject *entry = data;
+	struct ibft_nic *nic = entry->nic;
+	umode_t rc = 0;
+
+	switch (type) {
+	case ISCSI_BOOT_ETH_INDEX:
+	case ISCSI_BOOT_ETH_FLAGS:
+		rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_ETH_IP_ADDR:
+		if (address_not_null(nic->ip_addr))
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_ETH_PREFIX_LEN:
+	case ISCSI_BOOT_ETH_SUBNET_MASK:
+		if (nic->subnet_mask_prefix)
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_ETH_ORIGIN:
+		rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_ETH_GATEWAY:
+		if (address_not_null(nic->gateway))
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_ETH_PRIMARY_DNS:
+		if (address_not_null(nic->primary_dns))
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_ETH_SECONDARY_DNS:
+		if (address_not_null(nic->secondary_dns))
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_ETH_DHCP:
+		if (address_not_null(nic->dhcp))
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_ETH_VLAN:
+	case ISCSI_BOOT_ETH_MAC:
+		rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_ETH_HOSTNAME:
+		if (nic->hostname_off)
+			rc = S_IRUGO;
+		break;
+	default:
+		break;
+	}
+
+	return rc;
+}
+
+static umode_t __init ibft_check_tgt_for(void *data, int type)
+{
+	struct ibft_kobject *entry = data;
+	struct ibft_tgt *tgt = entry->tgt;
+	umode_t rc = 0;
+
+	switch (type) {
+	case ISCSI_BOOT_TGT_INDEX:
+	case ISCSI_BOOT_TGT_FLAGS:
+	case ISCSI_BOOT_TGT_IP_ADDR:
+	case ISCSI_BOOT_TGT_PORT:
+	case ISCSI_BOOT_TGT_LUN:
+	case ISCSI_BOOT_TGT_NIC_ASSOC:
+	case ISCSI_BOOT_TGT_CHAP_TYPE:
+		rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_TGT_NAME:
+		if (tgt->tgt_name_len)
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_TGT_CHAP_NAME:
+	case ISCSI_BOOT_TGT_CHAP_SECRET:
+		if (tgt->chap_name_len)
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_TGT_REV_CHAP_NAME:
+	case ISCSI_BOOT_TGT_REV_CHAP_SECRET:
+		if (tgt->rev_chap_name_len)
+			rc = S_IRUGO;
+		break;
+	default:
+		break;
+	}
+
+	return rc;
+}
+
+static umode_t __init ibft_check_initiator_for(void *data, int type)
+{
+	struct ibft_kobject *entry = data;
+	struct ibft_initiator *init = entry->initiator;
+	umode_t rc = 0;
+
+	switch (type) {
+	case ISCSI_BOOT_INI_INDEX:
+	case ISCSI_BOOT_INI_FLAGS:
+		rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_INI_ISNS_SERVER:
+		if (address_not_null(init->isns_server))
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_INI_SLP_SERVER:
+		if (address_not_null(init->slp_server))
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_INI_PRI_RADIUS_SERVER:
+		if (address_not_null(init->pri_radius_server))
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_INI_SEC_RADIUS_SERVER:
+		if (address_not_null(init->sec_radius_server))
+			rc = S_IRUGO;
+		break;
+	case ISCSI_BOOT_INI_INITIATOR_NAME:
+		if (init->initiator_name_len)
+			rc = S_IRUGO;
+		break;
+	default:
+		break;
+	}
+
+	return rc;
+}
+
+static umode_t __init ibft_check_acpitbl_for(void *data, int type)
+{
+
+	umode_t rc = 0;
+
+	switch (type) {
+	case ISCSI_BOOT_ACPITBL_SIGNATURE:
+	case ISCSI_BOOT_ACPITBL_OEM_ID:
+	case ISCSI_BOOT_ACPITBL_OEM_TABLE_ID:
+		rc = S_IRUGO;
+		break;
+	default:
+		break;
+	}
+
+	return rc;
+}
+
+static void ibft_kobj_release(void *data)
+{
+	kfree(data);
+}
+
+/*
  * Helper function for ibft_register_kobjects.
  */
-static int __init ibft_create_kobject(struct ibft_table_header *header,
-				       struct ibft_hdr *hdr,
-				       struct list_head *list)
+static int __init ibft_create_kobject(struct acpi_table_ibft *header,
+				      struct ibft_hdr *hdr)
 {
+	struct iscsi_boot_kobj *boot_kobj = NULL;
 	struct ibft_kobject *ibft_kobj = NULL;
 	struct ibft_nic *nic = (struct ibft_nic *)hdr;
 	struct pci_dev *pci_dev;
@@ -587,14 +644,50 @@ static int __init ibft_create_kobject(struct ibft_table_header *header,
 	case id_initiator:
 		rc = ibft_verify_hdr("initiator", hdr, id_initiator,
 				     sizeof(*ibft_kobj->initiator));
+		if (rc)
+			break;
+
+		boot_kobj = iscsi_boot_create_initiator(boot_kset, hdr->index,
+						ibft_kobj,
+						ibft_attr_show_initiator,
+						ibft_check_initiator_for,
+						ibft_kobj_release);
+		if (!boot_kobj) {
+			rc = -ENOMEM;
+			goto free_ibft_obj;
+		}
 		break;
 	case id_nic:
 		rc = ibft_verify_hdr("ethernet", hdr, id_nic,
 				     sizeof(*ibft_kobj->nic));
+		if (rc)
+			break;
+
+		boot_kobj = iscsi_boot_create_ethernet(boot_kset, hdr->index,
+						       ibft_kobj,
+						       ibft_attr_show_nic,
+						       ibft_check_nic_for,
+						       ibft_kobj_release);
+		if (!boot_kobj) {
+			rc = -ENOMEM;
+			goto free_ibft_obj;
+		}
 		break;
 	case id_target:
 		rc = ibft_verify_hdr("target", hdr, id_target,
 				     sizeof(*ibft_kobj->tgt));
+		if (rc)
+			break;
+
+		boot_kobj = iscsi_boot_create_target(boot_kset, hdr->index,
+						     ibft_kobj,
+						     ibft_attr_show_target,
+						     ibft_check_tgt_for,
+						     ibft_kobj_release);
+		if (!boot_kobj) {
+			rc = -ENOMEM;
+			goto free_ibft_obj;
+		}
 		break;
 	case id_reserved:
 	case id_control:
@@ -605,28 +698,16 @@ static int __init ibft_create_kobject(struct ibft_table_header *header,
 	default:
 		printk(KERN_ERR "iBFT has unknown structure type (%d). " \
 				"Report this bug to %.6s!\n", hdr->id,
-				header->oem_id);
+				header->header.oem_id);
 		rc = 1;
 		break;
 	}
 
 	if (rc) {
 		/* Skip adding this kobject, but exit with non-fatal error. */
-		kfree(ibft_kobj);
-		goto out_invalid_struct;
+		rc = 0;
+		goto free_ibft_obj;
 	}
-
-	ibft_kobj->kobj.kset = ibft_kset;
-
-	rc = kobject_init_and_add(&ibft_kobj->kobj, &ibft_ktype,
-				  NULL, ibft_id_names[hdr->id], hdr->index);
-
-	if (rc) {
-		kfree(ibft_kobj);
-		goto out;
-	}
-
-	kobject_uevent(&ibft_kobj->kobj, KOBJ_ADD);
 
 	if (hdr->id == id_nic) {
 		/*
@@ -635,22 +716,20 @@ static int __init ibft_create_kobject(struct ibft_table_header *header,
 		* executes only devices which are in domain 0. Furthermore, the
 		* iBFT spec doesn't have a domain id field :-(
 		*/
-		pci_dev = pci_get_bus_and_slot((nic->pci_bdf & 0xff00) >> 8,
-					       (nic->pci_bdf & 0xff));
+		pci_dev = pci_get_domain_bus_and_slot(0,
+						(nic->pci_bdf & 0xff00) >> 8,
+						(nic->pci_bdf & 0xff));
 		if (pci_dev) {
-			rc = sysfs_create_link(&ibft_kobj->kobj,
+			rc = sysfs_create_link(&boot_kobj->kobj,
 					       &pci_dev->dev.kobj, "device");
 			pci_dev_put(pci_dev);
 		}
 	}
-
-	/* Nothing broke so lets add it to the list. */
-	list_add_tail(&ibft_kobj->node, list);
-out:
-	return rc;
-out_invalid_struct:
-	/* Unsupported structs are skipped. */
 	return 0;
+
+free_ibft_obj:
+	kfree(ibft_kobj);
+	return rc;
 }
 
 /*
@@ -658,10 +737,11 @@ out_invalid_struct:
  * found add them on the passed-in list. We do not support the other
  * fields at this point, so they are skipped.
  */
-static int __init ibft_register_kobjects(struct ibft_table_header *header,
-					  struct list_head *list)
+static int __init ibft_register_kobjects(struct acpi_table_ibft *header)
 {
 	struct ibft_control *control = NULL;
+	struct iscsi_boot_kobj *boot_kobj;
+	struct ibft_kobject *ibft_kobj;
 	void *ptr, *end;
 	int rc = 0;
 	u16 offset;
@@ -669,266 +749,106 @@ static int __init ibft_register_kobjects(struct ibft_table_header *header,
 
 	control = (void *)header + sizeof(*header);
 	end = (void *)control + control->hdr.length;
-	eot_offset = (void *)header + header->length - (void *)control;
-	rc = ibft_verify_hdr("control", (struct ibft_hdr *)control, id_control,
-			     sizeof(*control));
+	eot_offset = (void *)header + header->header.length - (void *)control;
+	rc = ibft_verify_hdr("control", (struct ibft_hdr *)control, id_control, 0);
 
 	/* iBFT table safety checking */
 	rc |= ((control->hdr.index) ? -ENODEV : 0);
+	rc |= ((control->hdr.length < sizeof(*control)) ? -ENODEV : 0);
 	if (rc) {
 		printk(KERN_ERR "iBFT error: Control header is invalid!\n");
 		return rc;
 	}
-	for (ptr = &control->initiator_off; ptr < end; ptr += sizeof(u16)) {
+	for (ptr = &control->initiator_off; ptr + sizeof(u16) <= end; ptr += sizeof(u16)) {
 		offset = *(u16 *)ptr;
-		if (offset && offset < header->length && offset < eot_offset) {
+		if (offset && offset < header->header.length &&
+						offset < eot_offset) {
 			rc = ibft_create_kobject(header,
-						 (void *)header + offset,
-						 list);
+						 (void *)header + offset);
 			if (rc)
 				break;
 		}
 	}
+	if (rc)
+		return rc;
 
-	return rc;
-}
-
-static void ibft_unregister(struct list_head *attr_list,
-			     struct list_head *kobj_list)
-{
-	struct ibft_kobject *data = NULL, *n;
-	struct ibft_attribute *attr = NULL, *m;
-
-	list_for_each_entry_safe(attr, m, attr_list, node) {
-		sysfs_remove_file(attr->kobj, &attr->attr);
-		list_del(&attr->node);
-		kfree(attr);
-	};
-	list_del_init(attr_list);
-
-	list_for_each_entry_safe(data, n, kobj_list, node) {
-		list_del(&data->node);
-		if (data->hdr->id == id_nic)
-			sysfs_remove_link(&data->kobj, "device");
-		kobject_put(&data->kobj);
-	};
-	list_del_init(kobj_list);
-}
-
-static int __init ibft_create_attribute(struct ibft_kobject *kobj_data,
-					 int type,
-					 const char *name,
-					 ssize_t (*show)(struct ibft_kobject *,
-							 struct ibft_attribute*,
-							 char *buf),
-					 struct list_head *list)
-{
-	struct ibft_attribute *attr = NULL;
-	struct ibft_hdr *hdr = kobj_data->hdr;
-
-	attr = kmalloc(sizeof(*attr), GFP_KERNEL);
-	if (!attr)
+	ibft_kobj = kzalloc(sizeof(*ibft_kobj), GFP_KERNEL);
+	if (!ibft_kobj)
 		return -ENOMEM;
 
-	attr->attr.name = name;
-	attr->attr.mode = S_IRUSR;
-	attr->attr.owner = THIS_MODULE;
+	ibft_kobj->header = header;
+	ibft_kobj->hdr = NULL; /*for ibft_unregister*/
 
-	attr->hdr = hdr;
-	attr->show = show;
-	attr->kobj = &kobj_data->kobj;
-	attr->type = type;
-
-	list_add_tail(&attr->node, list);
-
-	return 0;
-}
-
-/*
- * Helper routiners to check to determine if the entry is valid
- * in the proper iBFT structure.
- */
-static int __init ibft_check_nic_for(struct ibft_nic *nic, int entry)
-{
-	int rc = 0;
-
-	switch (entry) {
-	case ibft_eth_index:
-	case ibft_eth_flags:
-		rc = 1;
-		break;
-	case ibft_eth_ip_addr:
-		if (!memcmp(nic->dhcp, nulls, sizeof(nic->dhcp)))
-			rc = 1;
-		break;
-	case ibft_eth_subnet_mask:
-		if (!memcmp(nic->dhcp, nulls, sizeof(nic->dhcp)))
-			rc = 1;
-		break;
-	case ibft_eth_origin:
-		rc = 1;
-		break;
-	case ibft_eth_gateway:
-		if (memcmp(nic->gateway, nulls, sizeof(nic->gateway)))
-			rc = 1;
-		break;
-	case ibft_eth_primary_dns:
-		if (memcmp(nic->primary_dns, nulls,
-			   sizeof(nic->primary_dns)))
-			rc = 1;
-		break;
-	case ibft_eth_secondary_dns:
-		if (memcmp(nic->secondary_dns, nulls,
-			   sizeof(nic->secondary_dns)))
-			rc = 1;
-		break;
-	case ibft_eth_dhcp:
-		if (memcmp(nic->dhcp, nulls, sizeof(nic->dhcp)))
-			rc = 1;
-		break;
-	case ibft_eth_vlan:
-	case ibft_eth_mac:
-		rc = 1;
-		break;
-	case ibft_eth_hostname:
-		if (nic->hostname_off)
-			rc = 1;
-		break;
-	default:
-		break;
+	boot_kobj = iscsi_boot_create_acpitbl(boot_kset, 0,
+					ibft_kobj,
+					ibft_attr_show_acpitbl,
+					ibft_check_acpitbl_for,
+					ibft_kobj_release);
+	if (!boot_kobj)  {
+		kfree(ibft_kobj);
+		rc = -ENOMEM;
 	}
 
 	return rc;
 }
 
-static int __init ibft_check_tgt_for(struct ibft_tgt *tgt, int entry)
+static void ibft_unregister(void)
 {
-	int rc = 0;
+	struct iscsi_boot_kobj *boot_kobj, *tmp_kobj;
+	struct ibft_kobject *ibft_kobj;
 
-	switch (entry) {
-	case ibft_tgt_index:
-	case ibft_tgt_flags:
-	case ibft_tgt_ip_addr:
-	case ibft_tgt_port:
-	case ibft_tgt_lun:
-	case ibft_tgt_nic_assoc:
-	case ibft_tgt_chap_type:
-		rc = 1;
-	case ibft_tgt_name:
-		if (tgt->tgt_name_len)
-			rc = 1;
-		break;
-	case ibft_tgt_chap_name:
-	case ibft_tgt_chap_secret:
-		if (tgt->chap_name_len)
-			rc = 1;
-		break;
-	case ibft_tgt_rev_chap_name:
-	case ibft_tgt_rev_chap_secret:
-		if (tgt->rev_chap_name_len)
-			rc = 1;
-		break;
-	default:
-		break;
-	}
-
-	return rc;
+	list_for_each_entry_safe(boot_kobj, tmp_kobj,
+				 &boot_kset->kobj_list, list) {
+		ibft_kobj = boot_kobj->data;
+		if (ibft_kobj->hdr && ibft_kobj->hdr->id == id_nic)
+			sysfs_remove_link(&boot_kobj->kobj, "device");
+	};
 }
 
-static int __init ibft_check_initiator_for(struct ibft_initiator *init,
-					    int entry)
+static void ibft_cleanup(void)
 {
-	int rc = 0;
-
-	switch (entry) {
-	case ibft_init_index:
-	case ibft_init_flags:
-		rc = 1;
-		break;
-	case ibft_init_isns_server:
-		if (memcmp(init->isns_server, nulls,
-			   sizeof(init->isns_server)))
-			rc = 1;
-		break;
-	case ibft_init_slp_server:
-		if (memcmp(init->slp_server, nulls,
-			   sizeof(init->slp_server)))
-			rc = 1;
-		break;
-	case ibft_init_pri_radius_server:
-		if (memcmp(init->pri_radius_server, nulls,
-			   sizeof(init->pri_radius_server)))
-			rc = 1;
-		break;
-	case ibft_init_sec_radius_server:
-		if (memcmp(init->sec_radius_server, nulls,
-			   sizeof(init->sec_radius_server)))
-			rc = 1;
-		break;
-	case ibft_init_initiator_name:
-		if (init->initiator_name_len)
-			rc = 1;
-		break;
-	default:
-		break;
+	if (boot_kset) {
+		ibft_unregister();
+		iscsi_boot_destroy_kset(boot_kset);
 	}
-
-	return rc;
 }
 
-/*
- *  Register the attributes for all of the kobjects.
- */
-static int __init ibft_register_attributes(struct list_head *kobject_list,
-					    struct list_head *attr_list)
+static void __exit ibft_exit(void)
 {
-	int rc = 0, i = 0;
-	struct ibft_kobject *data = NULL;
-	struct ibft_attribute *attr = NULL, *m;
-
-	list_for_each_entry(data, kobject_list, node) {
-		switch (data->hdr->id) {
-		case id_nic:
-			for (i = 0; i < ibft_eth_end_marker && !rc; i++)
-				if (ibft_check_nic_for(data->nic, i))
-					rc = ibft_create_attribute(data, i,
-						ibft_eth_properties[i],
-						ibft_attr_show_nic, attr_list);
-			break;
-		case id_target:
-			for (i = 0; i < ibft_tgt_end_marker && !rc; i++)
-				if (ibft_check_tgt_for(data->tgt, i))
-					rc = ibft_create_attribute(data, i,
-						ibft_tgt_properties[i],
-						ibft_attr_show_target,
-						attr_list);
-			break;
-		case id_initiator:
-			for (i = 0; i < ibft_init_end_marker && !rc; i++)
-				if (ibft_check_initiator_for(
-					data->initiator, i))
-					rc = ibft_create_attribute(data, i,
-						ibft_initiator_properties[i],
-						ibft_attr_show_initiator,
-						attr_list);
-			break;
-		default:
-			break;
-		}
-		if (rc)
-			break;
-	}
-	list_for_each_entry_safe(attr, m, attr_list, node) {
-		rc = sysfs_create_file(attr->kobj, &attr->attr);
-		if (rc) {
-			list_del(&attr->node);
-			kfree(attr);
-			break;
-		}
-	}
-
-	return rc;
+	ibft_cleanup();
 }
+
+#ifdef CONFIG_ACPI
+static const struct {
+	char *sign;
+} ibft_signs[] = {
+	/*
+	 * One spec says "IBFT", the other says "iBFT". We have to check
+	 * for both.
+	 */
+	{ ACPI_SIG_IBFT },
+	{ "iBFT" },
+	{ "BIFT" },	/* Broadcom iSCSI Offload */
+};
+
+static void __init acpi_find_ibft_region(void)
+{
+	int i;
+	struct acpi_table_header *table = NULL;
+
+	if (acpi_disabled)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(ibft_signs) && !ibft_addr; i++) {
+		acpi_get_table(ibft_signs[i].sign, 0, &table);
+		ibft_addr = (struct acpi_table_ibft *)table;
+	}
+}
+#else
+static void __init acpi_find_ibft_region(void)
+{
+}
+#endif
 
 /*
  * ibft_init() - creates sysfs tree entries for the iBFT data.
@@ -937,26 +857,27 @@ static int __init ibft_init(void)
 {
 	int rc = 0;
 
-	ibft_kset = kset_create_and_add("ibft", NULL, firmware_kobj);
-	if (!ibft_kset)
-		return -ENOMEM;
+	/*
+	   As on UEFI systems the setup_arch()/find_ibft_region()
+	   is called before ACPI tables are parsed and it only does
+	   legacy finding.
+	*/
+	if (!ibft_addr)
+		acpi_find_ibft_region();
 
 	if (ibft_addr) {
-		printk(KERN_INFO "iBFT detected at 0x%lx.\n",
-		       virt_to_phys((void *)ibft_addr));
+		pr_info("iBFT detected.\n");
 
 		rc = ibft_check_device();
 		if (rc)
-			goto out_firmware_unregister;
+			return rc;
+
+		boot_kset = iscsi_boot_create_kset("ibft");
+		if (!boot_kset)
+			return -ENOMEM;
 
 		/* Scan the IBFT for data and register the kobjects. */
-		rc = ibft_register_kobjects(ibft_addr, &ibft_kobject_list);
-		if (rc)
-			goto out_free;
-
-		/* Register the attributes */
-		rc = ibft_register_attributes(&ibft_kobject_list,
-					      &ibft_attr_list);
+		rc = ibft_register_kobjects(ibft_addr);
 		if (rc)
 			goto out_free;
 	} else
@@ -965,16 +886,8 @@ static int __init ibft_init(void)
 	return 0;
 
 out_free:
-	ibft_unregister(&ibft_attr_list, &ibft_kobject_list);
-out_firmware_unregister:
-	kset_unregister(ibft_kset);
+	ibft_cleanup();
 	return rc;
-}
-
-static void __exit ibft_exit(void)
-{
-	ibft_unregister(&ibft_attr_list, &ibft_kobject_list);
-	kset_unregister(ibft_kset);
 }
 
 module_init(ibft_init);

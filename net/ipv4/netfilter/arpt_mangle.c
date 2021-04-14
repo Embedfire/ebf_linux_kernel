@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* module that allows mangling of the arp payload */
 #include <linux/module.h>
 #include <linux/netfilter.h>
@@ -9,17 +10,14 @@ MODULE_AUTHOR("Bart De Schuymer <bdschuym@pandora.be>");
 MODULE_DESCRIPTION("arptables arp payload mangle target");
 
 static unsigned int
-target(struct sk_buff *skb,
-       const struct net_device *in, const struct net_device *out,
-       unsigned int hooknum, const struct xt_target *target,
-       const void *targinfo)
+target(struct sk_buff *skb, const struct xt_action_param *par)
 {
-	const struct arpt_mangle *mangle = targinfo;
+	const struct arpt_mangle *mangle = par->targinfo;
 	const struct arphdr *arp;
 	unsigned char *arpptr;
 	int pln, hln;
 
-	if (!skb_make_writable(skb, skb->len))
+	if (skb_ensure_writable(skb, skb->len))
 		return NF_DROP;
 
 	arp = arp_hdr(skb);
@@ -57,25 +55,23 @@ target(struct sk_buff *skb,
 	return mangle->target;
 }
 
-static bool
-checkentry(const char *tablename, const void *e, const struct xt_target *target,
-	   void *targinfo, unsigned int hook_mask)
+static int checkentry(const struct xt_tgchk_param *par)
 {
-	const struct arpt_mangle *mangle = targinfo;
+	const struct arpt_mangle *mangle = par->targinfo;
 
 	if (mangle->flags & ~ARPT_MANGLE_MASK ||
 	    !(mangle->flags & ARPT_MANGLE_MASK))
-		return false;
+		return -EINVAL;
 
 	if (mangle->target != NF_DROP && mangle->target != NF_ACCEPT &&
-	   mangle->target != ARPT_CONTINUE)
-		return false;
-	return true;
+	   mangle->target != XT_CONTINUE)
+		return -EINVAL;
+	return 0;
 }
 
 static struct xt_target arpt_mangle_reg __read_mostly = {
 	.name		= "mangle",
-	.family		= NF_ARP,
+	.family		= NFPROTO_ARP,
 	.target		= target,
 	.targetsize	= sizeof(struct arpt_mangle),
 	.checkentry	= checkentry,

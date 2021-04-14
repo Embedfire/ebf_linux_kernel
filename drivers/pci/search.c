@@ -1,65 +1,129 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- * 	PCI searching functions.
+ * PCI searching functions
  *
- *	Copyright (C) 1993 -- 1997 Drew Eckhardt, Frederic Potter,
+ * Copyright (C) 1993 -- 1997 Drew Eckhardt, Frederic Potter,
  *					David Mosberger-Tang
- *	Copyright (C) 1997 -- 2000 Martin Mares <mj@ucw.cz>
- *	Copyright (C) 2003 -- 2004 Greg Kroah-Hartman <greg@kroah.com>
+ * Copyright (C) 1997 -- 2000 Martin Mares <mj@ucw.cz>
+ * Copyright (C) 2003 -- 2004 Greg Kroah-Hartman <greg@kroah.com>
  */
 
-#include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include "pci.h"
 
 DECLARE_RWSEM(pci_bus_sem);
-/*
- * find the upstream PCIE-to-PCI bridge of a PCI device
- * if the device is PCIE, return NULL
- * if the device isn't connected to a PCIE bridge (that is its parent is a
- * legacy PCI bridge and the bridge is directly connected to bus 0), return its
- * parent
- */
-struct pci_dev *
-pci_find_upstream_pcie_bridge(struct pci_dev *pdev)
-{
-	struct pci_dev *tmp = NULL;
 
-	if (pdev->is_pcie)
-		return NULL;
-	while (1) {
-		if (!pdev->bus->self)
-			break;
-		pdev = pdev->bus->self;
-		/* a p2p bridge */
-		if (!pdev->is_pcie) {
-			tmp = pdev;
-			continue;
+/*
+ * pci_for_each_dma_alias - Iterate over DMA aliases for a device
+ * @pdev: starting downstream device
+ * @fn: function to call for each alias
+ * @data: opaque data to pass to @fn
+ *
+ * Starting @pdev, walk up the bus calling @fn for each possible alias
+ * of @pdev at the root bus.
+ */
+int pci_for_each_dma_alias(struct pci_dev *pdev,
+			   int (*fn)(struct pci_dev *pdev,
+				     u16 alias, void *data), void *data)
+{
+	struct pci_bus *bus;
+	int ret;
+
+	/*
+	 * The device may have an explicit alias requester ID for DMA where the
+	 * requester is on another PCI bus.
+	 */
+	pdev = pci_real_dma_dev(pdev);
+
+	ret = fn(pdev, pci_dev_id(pdev), data);
+	if (ret)
+		return ret;
+
+	/*
+	 * If the device is broken and uses an alias requester ID for
+	 * DMA, iterate over that too.
+	 */
+	if (unlikely(pdev->dma_alias_mask)) {
+		unsigned int devfn;
+
+		for_each_set_bit(devfn, pdev->dma_alias_mask, MAX_NR_DEVFNS) {
+			ret = fn(pdev, PCI_DEVID(pdev->bus->number, devfn),
+				 data);
+			if (ret)
+				return ret;
 		}
-		/* PCI device should connect to a PCIE bridge */
-		if (pdev->pcie_type != PCI_EXP_TYPE_PCI_BRIDGE) {
-			/* Busted hardware? */
-			WARN_ON_ONCE(1);
-			return NULL;
-		}
-		return pdev;
 	}
 
-	return tmp;
+	for (bus = pdev->bus; !pci_is_root_bus(bus); bus = bus->parent) {
+		struct pci_dev *tmp;
+
+		/* Skip virtual buses */
+		if (!bus->self)
+			continue;
+
+		tmp = bus->self;
+
+		/* stop at bridge where translation unit is associated */
+		if (tmp->dev_flags & PCI_DEV_FLAGS_BRIDGE_XLATE_ROOT)
+			return ret;
+
+		/*
+		 * PCIe-to-PCI/X bridges alias transactions from downstream
+		 * devices using the subordinate bus number (PCI Express to
+		 * PCI/PCI-X Bridge Spec, rev 1.0, sec 2.3).  For all cases
+		 * where the upstream bus is PCI/X we alias to the bridge
+		 * (there are various conditions in the previous reference
+		 * where the bridge may take ownership of transactions, even
+		 * when the secondary interface is PCI-X).
+		 */
+		if (pci_is_pcie(tmp)) {
+			switch (pci_pcie_type(tmp)) {
+			case PCI_EXP_TYPE_ROOT_PORT:
+			case PCI_EXP_TYPE_UPSTREAM:
+			case PCI_EXP_TYPE_DOWNSTREAM:
+				continue;
+			case PCI_EXP_TYPE_PCI_BRIDGE:
+				ret = fn(tmp,
+					 PCI_DEVID(tmp->subordinate->number,
+						   PCI_DEVFN(0, 0)), data);
+				if (ret)
+					return ret;
+				continue;
+			case PCI_EXP_TYPE_PCIE_BRIDGE:
+				ret = fn(tmp, pci_dev_id(tmp), data);
+				if (ret)
+					return ret;
+				continue;
+			}
+		} else {
+			if (tmp->dev_flags & PCI_DEV_FLAG_PCIE_BRIDGE_ALIAS)
+				ret = fn(tmp,
+					 PCI_DEVID(tmp->subordinate->number,
+						   PCI_DEVFN(0, 0)), data);
+			else
+				ret = fn(tmp, pci_dev_id(tmp), data);
+			if (ret)
+				return ret;
+		}
+	}
+
+	return ret;
 }
 
 static struct pci_bus *pci_do_find_bus(struct pci_bus *bus, unsigned char busnr)
 {
-	struct pci_bus* child;
-	struct list_head *tmp;
+	struct pci_bus *child;
+	struct pci_bus *tmp;
 
-	if(bus->number == busnr)
+	if (bus->number == busnr)
 		return bus;
 
-	list_for_each(tmp, &bus->children) {
-		child = pci_do_find_bus(pci_bus_b(tmp), busnr);
-		if(child)
+	list_for_each_entry(tmp, &bus->children, node) {
+		child = pci_do_find_bus(tmp, busnr);
+		if (child)
 			return child;
 	}
 	return NULL;
@@ -74,7 +138,7 @@ static struct pci_bus *pci_do_find_bus(struct pci_bus *bus, unsigned char busnr)
  * in the global list of PCI buses.  If the bus is found, a pointer to its
  * data structure is returned.  If no bus is found, %NULL is returned.
  */
-struct pci_bus * pci_find_bus(int domain, int busnr)
+struct pci_bus *pci_find_bus(int domain, int busnr)
 {
 	struct pci_bus *bus = NULL;
 	struct pci_bus *tmp_bus;
@@ -88,18 +152,18 @@ struct pci_bus * pci_find_bus(int domain, int busnr)
 	}
 	return NULL;
 }
+EXPORT_SYMBOL(pci_find_bus);
 
 /**
  * pci_find_next_bus - begin or continue searching for a PCI bus
  * @from: Previous PCI bus found, or %NULL for new search.
  *
- * Iterates through the list of known PCI busses.  A new search is
+ * Iterates through the list of known PCI buses.  A new search is
  * initiated by passing %NULL as the @from argument.  Otherwise if
  * @from is not %NULL, searches continue from next device on the
  * global list.
  */
-struct pci_bus * 
-pci_find_next_bus(const struct pci_bus *from)
+struct pci_bus *pci_find_next_bus(const struct pci_bus *from)
 {
 	struct list_head *n;
 	struct pci_bus *b = NULL;
@@ -108,95 +172,34 @@ pci_find_next_bus(const struct pci_bus *from)
 	down_read(&pci_bus_sem);
 	n = from ? from->node.next : pci_root_buses.next;
 	if (n != &pci_root_buses)
-		b = pci_bus_b(n);
+		b = list_entry(n, struct pci_bus, node);
 	up_read(&pci_bus_sem);
 	return b;
 }
+EXPORT_SYMBOL(pci_find_next_bus);
 
-#ifdef CONFIG_PCI_LEGACY
 /**
- * pci_find_slot - locate PCI device from a given PCI slot
- * @bus: number of PCI bus on which desired PCI device resides
+ * pci_get_slot - locate PCI device for a given PCI slot
+ * @bus: PCI bus on which desired PCI device resides
  * @devfn: encodes number of PCI slot in which the desired PCI
  * device resides and the logical device number within that slot
  * in case of multi-function devices.
  *
  * Given a PCI bus and slot/function number, the desired PCI device
- * is located in system global list of PCI devices.  If the device
- * is found, a pointer to its data structure is returned.  If no
- * device is found, %NULL is returned.
- *
- * NOTE: Do not use this function any more; use pci_get_slot() instead, as
- * the PCI device returned by this function can disappear at any moment in
- * time.
- */
-struct pci_dev *pci_find_slot(unsigned int bus, unsigned int devfn)
-{
-	struct pci_dev *dev = NULL;
-
-	while ((dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
-		if (dev->bus->number == bus && dev->devfn == devfn) {
-			pci_dev_put(dev);
-			return dev;
-		}
-	}
-	return NULL;
-}
-EXPORT_SYMBOL(pci_find_slot);
-
-/**
- * pci_find_device - begin or continue searching for a PCI device by vendor/device id
- * @vendor: PCI vendor id to match, or %PCI_ANY_ID to match all vendor ids
- * @device: PCI device id to match, or %PCI_ANY_ID to match all device ids
- * @from: Previous PCI device found in search, or %NULL for new search.
- *
- * Iterates through the list of known PCI devices.  If a PCI device is found
- * with a matching @vendor and @device, a pointer to its device structure is
- * returned.  Otherwise, %NULL is returned.
- * A new search is initiated by passing %NULL as the @from argument.
- * Otherwise if @from is not %NULL, searches continue from next device
- * on the global list.
- *
- * NOTE: Do not use this function any more; use pci_get_device() instead, as
- * the PCI device returned by this function can disappear at any moment in
- * time.
- */
-struct pci_dev *pci_find_device(unsigned int vendor, unsigned int device,
-				const struct pci_dev *from)
-{
-	struct pci_dev *pdev;
-
-	pdev = pci_get_subsys(vendor, device, PCI_ANY_ID, PCI_ANY_ID, from);
-	pci_dev_put(pdev);
-	return pdev;
-}
-EXPORT_SYMBOL(pci_find_device);
-#endif /* CONFIG_PCI_LEGACY */
-
-/**
- * pci_get_slot - locate PCI device for a given PCI slot
- * @bus: PCI bus on which desired PCI device resides
- * @devfn: encodes number of PCI slot in which the desired PCI 
- * device resides and the logical device number within that slot 
- * in case of multi-function devices.
- *
- * Given a PCI bus and slot/function number, the desired PCI device 
  * is located in the list of PCI devices.
  * If the device is found, its reference count is increased and this
  * function returns a pointer to its data structure.  The caller must
  * decrement the reference count by calling pci_dev_put().
  * If no device is found, %NULL is returned.
  */
-struct pci_dev * pci_get_slot(struct pci_bus *bus, unsigned int devfn)
+struct pci_dev *pci_get_slot(struct pci_bus *bus, unsigned int devfn)
 {
-	struct list_head *tmp;
 	struct pci_dev *dev;
 
 	WARN_ON(in_interrupt());
 	down_read(&pci_bus_sem);
 
-	list_for_each(tmp, &bus->devices) {
-		dev = pci_dev_b(tmp);
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		if (dev->devfn == devfn)
 			goto out;
 	}
@@ -207,39 +210,41 @@ struct pci_dev * pci_get_slot(struct pci_bus *bus, unsigned int devfn)
 	up_read(&pci_bus_sem);
 	return dev;
 }
+EXPORT_SYMBOL(pci_get_slot);
 
 /**
- * pci_get_bus_and_slot - locate PCI device from a given PCI bus & slot
- * @bus: number of PCI bus on which desired PCI device resides
- * @devfn: encodes number of PCI slot in which the desired PCI
- * device resides and the logical device number within that slot
- * in case of multi-function devices.
+ * pci_get_domain_bus_and_slot - locate PCI device for a given PCI domain (segment), bus, and slot
+ * @domain: PCI domain/segment on which the PCI device resides.
+ * @bus: PCI bus on which desired PCI device resides
+ * @devfn: encodes number of PCI slot in which the desired PCI device
+ * resides and the logical device number within that slot in case of
+ * multi-function devices.
  *
- * Note: the bus/slot search is limited to PCI domain (segment) 0.
- *
- * Given a PCI bus and slot/function number, the desired PCI device
- * is located in system global list of PCI devices.  If the device
- * is found, a pointer to its data structure is returned.  If no
- * device is found, %NULL is returned. The returned device has its
- * reference count bumped by one.
+ * Given a PCI domain, bus, and slot/function number, the desired PCI
+ * device is located in the list of PCI devices. If the device is
+ * found, its reference count is increased and this function returns a
+ * pointer to its data structure.  The caller must decrement the
+ * reference count by calling pci_dev_put().  If no device is found,
+ * %NULL is returned.
  */
-
-struct pci_dev * pci_get_bus_and_slot(unsigned int bus, unsigned int devfn)
+struct pci_dev *pci_get_domain_bus_and_slot(int domain, unsigned int bus,
+					    unsigned int devfn)
 {
 	struct pci_dev *dev = NULL;
 
-	while ((dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
-		if (pci_domain_nr(dev->bus) == 0 &&
-		   (dev->bus->number == bus && dev->devfn == devfn))
+	for_each_pci_dev(dev) {
+		if (pci_domain_nr(dev->bus) == domain &&
+		    (dev->bus->number == bus && dev->devfn == devfn))
 			return dev;
 	}
 	return NULL;
 }
+EXPORT_SYMBOL(pci_get_domain_bus_and_slot);
 
-static int match_pci_dev_by_id(struct device *dev, void *data)
+static int match_pci_dev_by_id(struct device *dev, const void *data)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
-	struct pci_device_id *id = data;
+	const struct pci_device_id *id = data;
 
 	if (pci_match_one_device(id, pdev))
 		return 1;
@@ -263,25 +268,20 @@ static int match_pci_dev_by_id(struct device *dev, void *data)
  * this file.
  */
 static struct pci_dev *pci_get_dev_by_id(const struct pci_device_id *id,
-					 const struct pci_dev *from)
+					 struct pci_dev *from)
 {
 	struct device *dev;
 	struct device *dev_start = NULL;
 	struct pci_dev *pdev = NULL;
 
 	WARN_ON(in_interrupt());
-	if (from) {
-		/* FIXME
-		 * take the cast off, when bus_find_device is made const.
-		 */
-		dev_start = (struct device *)&from->dev;
-	}
+	if (from)
+		dev_start = &from->dev;
 	dev = bus_find_device(&pci_bus_type, dev_start, (void *)id,
 			      match_pci_dev_by_id);
 	if (dev)
 		pdev = to_pci_dev(dev);
-	if (from)
-		pci_dev_put(from);
+	pci_dev_put(from);
 	return pdev;
 }
 
@@ -303,33 +303,18 @@ static struct pci_dev *pci_get_dev_by_id(const struct pci_device_id *id,
  */
 struct pci_dev *pci_get_subsys(unsigned int vendor, unsigned int device,
 			       unsigned int ss_vendor, unsigned int ss_device,
-			       const struct pci_dev *from)
+			       struct pci_dev *from)
 {
-	struct pci_dev *pdev;
-	struct pci_device_id *id;
+	struct pci_device_id id = {
+		.vendor = vendor,
+		.device = device,
+		.subvendor = ss_vendor,
+		.subdevice = ss_device,
+	};
 
-	/*
-	 * pci_find_subsys() can be called on the ide_setup() path,
-	 * super-early in boot.  But the down_read() will enable local
-	 * interrupts, which can cause some machines to crash.  So here we
-	 * detect and flag that situation and bail out early.
-	 */
-	if (unlikely(no_pci_devices()))
-		return NULL;
-
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
-	if (!id)
-		return NULL;
-	id->vendor = vendor;
-	id->device = device;
-	id->subvendor = ss_vendor;
-	id->subdevice = ss_device;
-
-	pdev = pci_get_dev_by_id(id, from);
-	kfree(id);
-
-	return pdev;
+	return pci_get_dev_by_id(&id, from);
 }
+EXPORT_SYMBOL(pci_get_subsys);
 
 /**
  * pci_get_device - begin or continue searching for a PCI device by vendor/device id
@@ -345,11 +330,12 @@ struct pci_dev *pci_get_subsys(unsigned int vendor, unsigned int device,
  * from next device on the global list.  The reference count for @from is
  * always decremented if it is not %NULL.
  */
-struct pci_dev *
-pci_get_device(unsigned int vendor, unsigned int device, struct pci_dev *from)
+struct pci_dev *pci_get_device(unsigned int vendor, unsigned int device,
+			       struct pci_dev *from)
 {
 	return pci_get_subsys(vendor, device, PCI_ANY_ID, PCI_ANY_ID, from);
 }
+EXPORT_SYMBOL(pci_get_device);
 
 /**
  * pci_get_class - begin or continue searching for a PCI device by class
@@ -367,20 +353,18 @@ pci_get_device(unsigned int vendor, unsigned int device, struct pci_dev *from)
  */
 struct pci_dev *pci_get_class(unsigned int class, struct pci_dev *from)
 {
-	struct pci_dev *dev;
-	struct pci_device_id *id;
+	struct pci_device_id id = {
+		.vendor = PCI_ANY_ID,
+		.device = PCI_ANY_ID,
+		.subvendor = PCI_ANY_ID,
+		.subdevice = PCI_ANY_ID,
+		.class_mask = PCI_ANY_ID,
+		.class = class,
+	};
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
-	if (!id)
-		return NULL;
-	id->vendor = id->device = id->subvendor = id->subdevice = PCI_ANY_ID;
-	id->class_mask = PCI_ANY_ID;
-	id->class = class;
-
-	dev = pci_get_dev_by_id(id, from);
-	kfree(id);
-	return dev;
+	return pci_get_dev_by_id(&id, from);
 }
+EXPORT_SYMBOL(pci_get_class);
 
 /**
  * pci_dev_present - Returns 1 if device matching the device list is present, 0 if not.
@@ -400,23 +384,13 @@ int pci_dev_present(const struct pci_device_id *ids)
 	WARN_ON(in_interrupt());
 	while (ids->vendor || ids->subvendor || ids->class_mask) {
 		found = pci_get_dev_by_id(ids, NULL);
-		if (found)
-			goto exit;
+		if (found) {
+			pci_dev_put(found);
+			return 1;
+		}
 		ids++;
 	}
-exit:
-	if (found)
-		return 1;
+
 	return 0;
 }
 EXPORT_SYMBOL(pci_dev_present);
-
-/* For boot time work */
-EXPORT_SYMBOL(pci_find_bus);
-EXPORT_SYMBOL(pci_find_next_bus);
-/* For everyone */
-EXPORT_SYMBOL(pci_get_device);
-EXPORT_SYMBOL(pci_get_subsys);
-EXPORT_SYMBOL(pci_get_slot);
-EXPORT_SYMBOL(pci_get_bus_and_slot);
-EXPORT_SYMBOL(pci_get_class);

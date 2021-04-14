@@ -1,16 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2007 Luca Bigliardi (shammash@artha.org).
- * Licensed under the GPL.
  *
  * Transport usage:
  *  ethN=vde,<vde_switch>,<mac addr>,<port>,<group>,<mode>,<description>
  *
  */
 
-#include "linux/init.h"
+#include <linux/init.h>
 #include <linux/netdevice.h>
-#include "net_kern.h"
-#include "net_user.h"
+#include <net_kern.h>
+#include <net_user.h>
 #include "vde.h"
 
 static void vde_init(struct net_device *dev, void *data)
@@ -19,7 +19,7 @@ static void vde_init(struct net_device *dev, void *data)
 	struct uml_net_private *pri;
 	struct vde_data *vpri;
 
-	pri = dev->priv;
+	pri = netdev_priv(dev);
 	vpri = (struct vde_data *) pri->user;
 
 	vpri->vde_switch = init->vde_switch;

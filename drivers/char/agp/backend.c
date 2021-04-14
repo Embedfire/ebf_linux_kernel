@@ -30,6 +30,7 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/miscdevice.h>
 #include <linux/pm.h>
@@ -114,9 +115,9 @@ static int agp_find_max(void)
 	long memory, index, result;
 
 #if PAGE_SHIFT < 20
-	memory = num_physpages >> (20 - PAGE_SHIFT);
+	memory = totalram_pages() >> (20 - PAGE_SHIFT);
 #else
-	memory = num_physpages << (PAGE_SHIFT - 20);
+	memory = totalram_pages() << (PAGE_SHIFT - 20);
 #endif
 	index = 1;
 
@@ -141,17 +142,19 @@ static int agp_backend_initialize(struct agp_bridge_data *bridge)
 	bridge->version = &agp_current_version;
 
 	if (bridge->driver->needs_scratch_page) {
-		void *addr = bridge->driver->agp_alloc_page(bridge);
+		struct page *page = bridge->driver->agp_alloc_page(bridge);
 
-		if (!addr) {
+		if (!page) {
 			dev_err(&bridge->dev->dev,
 				"can't get memory for scratch page\n");
 			return -ENOMEM;
 		}
 
-		bridge->scratch_page_real = virt_to_gart(addr);
-		bridge->scratch_page =
-		    bridge->driver->mask_memory(bridge, bridge->scratch_page_real, 0);
+		bridge->scratch_page_page = page;
+		bridge->scratch_page_dma = page_to_phys(page);
+
+		bridge->scratch_page = bridge->driver->mask_memory(bridge,
+						   bridge->scratch_page_dma, 0);
 	}
 
 	size_value = bridge->driver->fetch_size();
@@ -168,7 +171,7 @@ static int agp_backend_initialize(struct agp_bridge_data *bridge)
 	}
 	got_gatt = 1;
 
-	bridge->key_list = vmalloc(PAGE_SIZE * 4);
+	bridge->key_list = vzalloc(PAGE_SIZE * 4);
 	if (bridge->key_list == NULL) {
 		dev_err(&bridge->dev->dev,
 			"can't allocate memory for key lists\n");
@@ -178,7 +181,6 @@ static int agp_backend_initialize(struct agp_bridge_data *bridge)
 	got_keylist = 1;
 
 	/* FIXME vmalloc'd memory not guaranteed contiguous */
-	memset(bridge->key_list, 0, PAGE_SIZE * 4);
 
 	if (bridge->driver->configure()) {
 		dev_err(&bridge->dev->dev, "error configuring host chipset\n");
@@ -192,10 +194,10 @@ static int agp_backend_initialize(struct agp_bridge_data *bridge)
 
 err_out:
 	if (bridge->driver->needs_scratch_page) {
-		void *va = gart_to_virt(bridge->scratch_page_real);
+		struct page *page = bridge->scratch_page_page;
 
-		bridge->driver->agp_destroy_page(va, AGP_PAGE_DESTROY_UNMAP);
-		bridge->driver->agp_destroy_page(va, AGP_PAGE_DESTROY_FREE);
+		bridge->driver->agp_destroy_page(page, AGP_PAGE_DESTROY_UNMAP);
+		bridge->driver->agp_destroy_page(page, AGP_PAGE_DESTROY_FREE);
 	}
 	if (got_gatt)
 		bridge->driver->free_gatt_table(bridge);
@@ -219,10 +221,10 @@ static void agp_backend_cleanup(struct agp_bridge_data *bridge)
 
 	if (bridge->driver->agp_destroy_page &&
 	    bridge->driver->needs_scratch_page) {
-		void *va = gart_to_virt(bridge->scratch_page_real);
+		struct page *page = bridge->scratch_page_page;
 
-		bridge->driver->agp_destroy_page(va, AGP_PAGE_DESTROY_UNMAP);
-		bridge->driver->agp_destroy_page(va, AGP_PAGE_DESTROY_FREE);
+		bridge->driver->agp_destroy_page(page, AGP_PAGE_DESTROY_UNMAP);
+		bridge->driver->agp_destroy_page(page, AGP_PAGE_DESTROY_FREE);
 	}
 }
 
@@ -263,18 +265,22 @@ int agp_add_bridge(struct agp_bridge_data *bridge)
 {
 	int error;
 
-	if (agp_off)
-		return -ENODEV;
+	if (agp_off) {
+		error = -ENODEV;
+		goto err_put_bridge;
+	}
 
 	if (!bridge->dev) {
 		printk (KERN_DEBUG PFX "Erk, registering with no pci_dev!\n");
-		return -EINVAL;
+		error = -EINVAL;
+		goto err_put_bridge;
 	}
 
 	/* Grab reference on the chipset driver. */
 	if (!try_module_get(bridge->driver->owner)) {
 		dev_info(&bridge->dev->dev, "can't lock chipset driver\n");
-		return -EINVAL;
+		error = -EINVAL;
+		goto err_put_bridge;
 	}
 
 	error = agp_backend_initialize(bridge);
@@ -304,6 +310,7 @@ frontend_err:
 	agp_backend_cleanup(bridge);
 err_out:
 	module_put(bridge->driver->owner);
+err_put_bridge:
 	agp_put_bridge(bridge);
 	return error;
 }
@@ -349,7 +356,7 @@ static __init int agp_setup(char *s)
 __setup("agp=", agp_setup);
 #endif
 
-MODULE_AUTHOR("Dave Jones <davej@codemonkey.org.uk>");
+MODULE_AUTHOR("Dave Jones, Jeff Hartmann");
 MODULE_DESCRIPTION("AGP GART driver");
 MODULE_LICENSE("GPL and additional rights");
 MODULE_ALIAS_MISCDEV(AGPGART_MINOR);

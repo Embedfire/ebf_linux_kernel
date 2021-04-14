@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * PQ2/mpc8260 board-specific stuff
  *
@@ -11,11 +12,6 @@
  *
  * Copyright (c) 2001 Dan Malek <dan@embeddedalley.com>
  * Copyright (c) 2006 MontaVista Software, Inc.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #ifdef __KERNEL__
@@ -23,10 +19,6 @@
 #define __MACH_ADS8260_DEFS
 
 #include <linux/seq_file.h>
-
-/* Backword-compatibility stuff for the drivers */
-#define CPM_MAP_ADDR		((uint)0xf0000000)
-#define CPM_IRQ_OFFSET 0
 
 /* The ADS8260 has 16, 32-bit wide control/status registers, accessed
  * only on word boundaries.
@@ -43,15 +35,6 @@
 #define BCSR1_RS232_EN2		((uint)0x01000000)      /* 0 ==enable */
 #define BCSR3_FETHIEN2		((uint)0x10000000)      /* 0 == enable*/
 #define BCSR3_FETH2_RST		((uint)0x80000000)      /* 0 == reset */
-
-/* cpm serial driver works with constants below */
-
-#define SIU_INT_SMC1		((uint)0x04+CPM_IRQ_OFFSET)
-#define SIU_INT_SMC2		((uint)0x05+CPM_IRQ_OFFSET)
-#define SIU_INT_SCC1		((uint)0x28+CPM_IRQ_OFFSET)
-#define SIU_INT_SCC2		((uint)0x29+CPM_IRQ_OFFSET)
-#define SIU_INT_SCC3		((uint)0x2a+CPM_IRQ_OFFSET)
-#define SIU_INT_SCC4		((uint)0x2b+CPM_IRQ_OFFSET)
 
 #endif /* __MACH_ADS8260_DEFS */
 #endif /* __KERNEL__ */

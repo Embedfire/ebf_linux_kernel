@@ -1,23 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
   Madge Ambassador ATM Adapter driver.
   Copyright (C) 1995-1999  Madge Networks Ltd.
 
-  This program is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 2 of the License, or
-  (at your option) any later version.
-
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-
-  The GNU GPL is contained in /usr/doc/copyright/GPL on a Debian
-  system and in the file COPYING in the Linux kernel source.
 */
 
 /* * dedicated to the memory of Graham Gordon 1971-1998 * */
@@ -36,8 +21,9 @@
 #include <linux/mutex.h>
 #include <linux/firmware.h>
 #include <linux/ihex.h>
+#include <linux/slab.h>
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/io.h>
 #include <asm/byteorder.h>
 
@@ -292,7 +278,7 @@ static inline void __init show_version (void) {
   
 */
 
-static void do_housekeeping (unsigned long arg);
+static void do_housekeeping (struct timer_list *t);
 /********** globals **********/
 
 static unsigned short debug = 0;
@@ -496,7 +482,7 @@ static void rx_complete (amb_dev * dev, rx_out * rx) {
 	  // VC layer stats
 	  atomic_inc(&atm_vcc->stats->rx);
 	  __net_timestamp(skb);
-	  // end of our responsability
+	  // end of our responsibility
 	  atm_vcc->push (atm_vcc, skb);
 	  return;
 	  
@@ -801,7 +787,7 @@ static void fill_rx_pool (amb_dev * dev, unsigned char pool,
     }
     // cast needed as there is no %? for pointer differences
     PRINTD (DBG_SKB, "allocated skb at %p, head %p, area %li",
-	    skb, skb->head, (long) (skb_end_pointer(skb) - skb->head));
+	    skb, skb->head, (long) skb_end_offset(skb));
     rx.handle = virt_to_bus (skb);
     rx.host_address = cpu_to_be32 (virt_to_bus (skb->data));
     if (rx_give (dev, &rx, pool))
@@ -812,7 +798,7 @@ static void fill_rx_pool (amb_dev * dev, unsigned char pool,
   return;
 }
 
-// top up all RX pools (can also be called as a bottom half)
+// top up all RX pools
 static void fill_rx_pools (amb_dev * dev) {
   unsigned char pool;
   
@@ -871,11 +857,7 @@ static irqreturn_t interrupt_handler(int irq, void *dev_id) {
       ++irq_work;
   
     if (irq_work) {
-#ifdef FILL_RX_POOLS_IN_BH
-      schedule_work (&dev->bh);
-#else
       fill_rx_pools (dev);
-#endif
 
       PRINTD (DBG_IRQ, "work done: %u", irq_work);
     } else {
@@ -1306,14 +1288,6 @@ static void amb_close (struct atm_vcc * atm_vcc) {
   return;
 }
 
-/********** Set socket options for a VC **********/
-
-// int amb_getsockopt (struct atm_vcc * atm_vcc, int level, int optname, void * optval, int optlen);
-
-/********** Set socket options for a VC **********/
-
-// int amb_setsockopt (struct atm_vcc * atm_vcc, int level, int optname, void * optval, int optlen);
-
 /********** Send **********/
 
 static int amb_send (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
@@ -1414,7 +1388,7 @@ static void amb_free_rx_skb (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
   rx.host_address = cpu_to_be32 (virt_to_bus (skb->data));
   
   skb->data = skb->head;
-  skb->tail = skb->head;
+  skb_reset_tail_pointer(skb);
   skb->len = 0;
   
   if (!rx_give (dev, &rx, pool)) {
@@ -1504,8 +1478,8 @@ static const struct atmdev_ops amb_ops = {
 };
 
 /********** housekeeping **********/
-static void do_housekeeping (unsigned long arg) {
-  amb_dev * dev = (amb_dev *) arg;
+static void do_housekeeping (struct timer_list *t) {
+  amb_dev * dev = from_timer(dev, t, housekeeping);
   
   // could collect device-specific (not driver/atm-linux) stats here
       
@@ -1518,9 +1492,9 @@ static void do_housekeeping (unsigned long arg) {
 
 /********** creation of communication queues **********/
 
-static int __devinit create_queues (amb_dev * dev, unsigned int cmds,
-				 unsigned int txs, unsigned int * rxs,
-				 unsigned int * rx_buffer_sizes) {
+static int create_queues(amb_dev *dev, unsigned int cmds, unsigned int txs,
+			 unsigned int *rxs, unsigned int *rx_buffer_sizes)
+{
   unsigned char pool;
   size_t total = 0;
   void * memory;
@@ -1748,8 +1722,9 @@ static  int decode_loader_result (loader_command cmd, u32 result)
 	return res;
 }
 
-static int __devinit do_loader_command (volatile loader_block * lb,
-				     const amb_dev * dev, loader_command cmd) {
+static int do_loader_command(volatile loader_block *lb, const amb_dev *dev,
+			     loader_command cmd)
+{
   
   unsigned long timeout;
   
@@ -1804,8 +1779,9 @@ static int __devinit do_loader_command (volatile loader_block * lb,
 
 /* loader: determine loader version */
 
-static int __devinit get_loader_version (loader_block * lb,
-				      const amb_dev * dev, u32 * version) {
+static int get_loader_version(loader_block *lb, const amb_dev *dev,
+			      u32 *version)
+{
   int res;
   
   PRINTD (DBG_FLOW|DBG_LOAD, "get_loader_version");
@@ -1820,9 +1796,9 @@ static int __devinit get_loader_version (loader_block * lb,
 
 /* loader: write memory data blocks */
 
-static int __devinit loader_write (loader_block* lb,
-				   const amb_dev *dev,
-				   const struct ihex_binrec *rec) {
+static int loader_write(loader_block *lb, const amb_dev *dev,
+			const struct ihex_binrec *rec)
+{
   transfer_block * tb = &lb->payload.transfer;
   
   PRINTD (DBG_FLOW|DBG_LOAD, "loader_write");
@@ -1835,9 +1811,9 @@ static int __devinit loader_write (loader_block* lb,
 
 /* loader: verify memory data blocks */
 
-static int __devinit loader_verify (loader_block * lb,
-				    const amb_dev *dev,
-				    const struct ihex_binrec *rec) {
+static int loader_verify(loader_block *lb, const amb_dev *dev,
+			 const struct ihex_binrec *rec)
+{
   transfer_block * tb = &lb->payload.transfer;
   int res;
   
@@ -1853,8 +1829,8 @@ static int __devinit loader_verify (loader_block * lb,
 
 /* loader: start microcode */
 
-static int __devinit loader_start (loader_block * lb,
-				const amb_dev * dev, u32 address) {
+static int loader_start(loader_block *lb, const amb_dev *dev, u32 address)
+{
   PRINTD (DBG_FLOW|DBG_LOAD, "loader_start");
   
   lb->payload.start = cpu_to_be32 (address);
@@ -1929,12 +1905,14 @@ static int amb_reset (amb_dev * dev, int diags) {
 
 /********** transfer and start the microcode **********/
 
-static int __devinit ucode_init (loader_block * lb, amb_dev * dev) {
+static int ucode_init(loader_block *lb, amb_dev *dev)
+{
   const struct firmware *fw;
   unsigned long start_address;
   const struct ihex_binrec *rec;
+  const char *errmsg = NULL;
   int res;
-  
+
   res = request_ihex_firmware(&fw, "atmsar11.fw", &dev->pci_dev->dev);
   if (res) {
     PRINTK (KERN_ERR, "Cannot load microcode data");
@@ -1944,8 +1922,8 @@ static int __devinit ucode_init (loader_block * lb, amb_dev * dev) {
   /* First record contains just the start address */
   rec = (const struct ihex_binrec *)fw->data;
   if (be16_to_cpu(rec->len) != sizeof(__be32) || be32_to_cpu(rec->addr)) {
-    PRINTK (KERN_ERR, "Bad microcode data (no start record)");
-    return -EINVAL;
+    errmsg = "no start record";
+    goto fail;
   }
   start_address = be32_to_cpup((__be32 *)rec->data);
 
@@ -1957,12 +1935,12 @@ static int __devinit ucode_init (loader_block * lb, amb_dev * dev) {
     PRINTD (DBG_LOAD, "starting region (%x, %u)", be32_to_cpu(rec->addr),
 	    be16_to_cpu(rec->len));
     if (be16_to_cpu(rec->len) > 4 * MAX_TRANSFER_DATA) {
-	    PRINTK (KERN_ERR, "Bad microcode data (record too long)");
-	    return -EINVAL;
+	    errmsg = "record too long";
+	    goto fail;
     }
     if (be16_to_cpu(rec->len) & 3) {
-	    PRINTK (KERN_ERR, "Bad microcode data (odd number of bytes)");
-	    return -EINVAL;
+	    errmsg = "odd number of bytes";
+	    goto fail;
     }
     res = loader_write(lb, dev, rec);
     if (res)
@@ -1971,12 +1949,17 @@ static int __devinit ucode_init (loader_block * lb, amb_dev * dev) {
     res = loader_verify(lb, dev, rec);
     if (res)
       break;
+    rec = ihex_next_binrec(rec);
   }
   release_firmware(fw);
   if (!res)
     res = loader_start(lb, dev, start_address);
 
   return res;
+fail:
+  release_firmware(fw);
+  PRINTK(KERN_ERR, "Bad microcode data (%s)", errmsg);
+  return -EINVAL;
 }
 
 /********** give adapter parameters **********/
@@ -1985,7 +1968,8 @@ static inline __be32 bus_addr(void * addr) {
     return cpu_to_be32 (virt_to_bus (addr));
 }
 
-static int __devinit amb_talk (amb_dev * dev) {
+static int amb_talk(amb_dev *dev)
+{
   adap_talk_block a;
   unsigned char pool;
   unsigned long timeout;
@@ -2032,7 +2016,8 @@ static int __devinit amb_talk (amb_dev * dev) {
 }
 
 // get microcode version
-static void __devinit amb_ucode_version (amb_dev * dev) {
+static void amb_ucode_version(amb_dev *dev)
+{
   u32 major;
   u32 minor;
   command cmd;
@@ -2047,7 +2032,8 @@ static void __devinit amb_ucode_version (amb_dev * dev) {
 }
   
 // get end station address
-static void __devinit amb_esi (amb_dev * dev, u8 * esi) {
+static void amb_esi(amb_dev *dev, u8 *esi)
+{
   u32 lower4;
   u16 upper2;
   command cmd;
@@ -2093,7 +2079,7 @@ static void fixup_plx_window (amb_dev *dev, loader_block *lb)
 	return;
 }
 
-static int __devinit amb_init (amb_dev * dev)
+static int amb_init(amb_dev *dev)
 {
   loader_block lb;
   
@@ -2156,11 +2142,6 @@ static void setup_dev(amb_dev *dev, struct pci_dev *pci_dev)
       dev->tx_avail = ATM_OC3_PCR;
       dev->rx_avail = ATM_OC3_PCR;
       
-#ifdef FILL_RX_POOLS_IN_BH
-      // initialise bottom half
-      INIT_WORK(&dev->bh, (void (*)(void *)) fill_rx_pools, dev);
-#endif
-      
       // semaphore for txer/rxer modifications - we cannot use a
       // spinlock as the critical region needs to switch processes
       mutex_init(&dev->vcc_sf);
@@ -2194,7 +2175,8 @@ static void setup_pci_dev(struct pci_dev *pci_dev)
 	}
 }
 
-static int __devinit amb_probe(struct pci_dev *pci_dev, const struct pci_device_id *pci_ent)
+static int amb_probe(struct pci_dev *pci_dev,
+		     const struct pci_device_id *pci_ent)
 {
 	amb_dev * dev;
 	int err;
@@ -2251,7 +2233,8 @@ static int __devinit amb_probe(struct pci_dev *pci_dev, const struct pci_device_
 		goto out_reset;
 	}
 
-	dev->atm_dev = atm_dev_register (DEV_LABEL, &amb_ops, -1, NULL);
+	dev->atm_dev = atm_dev_register (DEV_LABEL, &pci_dev->dev, &amb_ops, -1,
+					 NULL);
 	if (!dev->atm_dev) {
 		PRINTD (DBG_ERR, "failed to register Madge ATM adapter");
 		err = -EINVAL;
@@ -2260,7 +2243,7 @@ static int __devinit amb_probe(struct pci_dev *pci_dev, const struct pci_device_
 
 	PRINTD (DBG_INFO, "registered Madge ATM adapter (no. %d) (%p) at %p",
 		dev->atm_dev->number, dev, dev->atm_dev);
-		dev->atm_dev->dev_data = (void *) dev;
+	dev->atm_dev->dev_data = (void *) dev;
 
 	// register our address
 	amb_esi (dev, dev->atm_dev->esi);
@@ -2269,9 +2252,7 @@ static int __devinit amb_probe(struct pci_dev *pci_dev, const struct pci_device_
 	dev->atm_dev->ci_range.vpi_bits = NUM_VPI_BITS;
 	dev->atm_dev->ci_range.vci_bits = NUM_VCI_BITS;
 
-	init_timer(&dev->housekeeping);
-	dev->housekeeping.function = do_housekeeping;
-	dev->housekeeping.data = (unsigned long) dev;
+	timer_setup(&dev->housekeeping, do_housekeeping, 0);
 	mod_timer(&dev->housekeeping, jiffies);
 
 	// enable host interrupts
@@ -2294,7 +2275,7 @@ out_disable:
 }
 
 
-static void __devexit amb_remove_one(struct pci_dev *pci_dev)
+static void amb_remove_one(struct pci_dev *pci_dev)
 {
 	struct amb_dev *dev;
 
@@ -2359,6 +2340,7 @@ static void __init amb_check_args (void) {
 MODULE_AUTHOR(maintainer_string);
 MODULE_DESCRIPTION(description_string);
 MODULE_LICENSE("GPL");
+MODULE_FIRMWARE("atmsar11.fw");
 module_param(debug,   ushort, 0644);
 module_param(cmds,    uint, 0);
 module_param(txs,     uint, 0);
@@ -2376,11 +2358,9 @@ MODULE_PARM_DESC(pci_lat, "PCI latency in bus cycles");
 
 /********** module entry **********/
 
-static struct pci_device_id amb_pci_tbl[] = {
-	{ PCI_VENDOR_ID_MADGE, PCI_DEVICE_ID_MADGE_AMBASSADOR, PCI_ANY_ID, PCI_ANY_ID,
-	  0, 0, 0 },
-	{ PCI_VENDOR_ID_MADGE, PCI_DEVICE_ID_MADGE_AMBASSADOR_BAD, PCI_ANY_ID, PCI_ANY_ID,
-	  0, 0, 0 },
+static const struct pci_device_id amb_pci_tbl[] = {
+	{ PCI_VDEVICE(MADGE, PCI_DEVICE_ID_MADGE_AMBASSADOR), 0 },
+	{ PCI_VDEVICE(MADGE, PCI_DEVICE_ID_MADGE_AMBASSADOR_BAD), 0 },
 	{ 0, }
 };
 
@@ -2389,7 +2369,7 @@ MODULE_DEVICE_TABLE(pci, amb_pci_tbl);
 static struct pci_driver amb_driver = {
 	.name =		"amb",
 	.probe =	amb_probe,
-	.remove =	__devexit_p(amb_remove_one),
+	.remove =	amb_remove_one,
 	.id_table =	amb_pci_tbl,
 };
 
@@ -2397,12 +2377,7 @@ static int __init amb_module_init (void)
 {
   PRINTD (DBG_FLOW|DBG_INIT, "init_module");
   
-  // sanity check - cast needed as printk does not support %Zu
-  if (sizeof(amb_mem) != 4*16 + 4*12) {
-    PRINTK (KERN_ERR, "Fix amb_mem (is %lu words).",
-	    (unsigned long) sizeof(amb_mem));
-    return -ENOMEM;
-  }
+  BUILD_BUG_ON(sizeof(amb_mem) != 4*16 + 4*12);
   
   show_version();
   

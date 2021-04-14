@@ -1,9 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * raid_class.h - a generic raid visualisation class
  *
  * Copyright (c) 2005 - James Bottomley <James.Bottomley@steeleye.com>
- *
- * This file is licensed under GPLv2
  */
 #include <linux/transport_class.h>
 
@@ -32,11 +31,13 @@ enum raid_level {
 	RAID_LEVEL_0,
 	RAID_LEVEL_1,
 	RAID_LEVEL_10,
+	RAID_LEVEL_1E,
 	RAID_LEVEL_3,
 	RAID_LEVEL_4,
 	RAID_LEVEL_5,
 	RAID_LEVEL_50,
 	RAID_LEVEL_6,
+	RAID_LEVEL_JBOD,
 };
 
 struct raid_data {

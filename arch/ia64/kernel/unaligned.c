@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Architecture-specific unaligned trap handling.
  *
@@ -15,13 +16,16 @@
  */
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/tty.h>
+#include <linux/extable.h>
+#include <linux/ratelimit.h>
+#include <linux/uaccess.h>
 
 #include <asm/intrinsics.h>
 #include <asm/processor.h>
 #include <asm/rse.h>
-#include <asm/uaccess.h>
+#include <asm/exception.h>
 #include <asm/unaligned.h>
 
 extern int die_if_kernel(char *str, struct pt_regs *regs, long err);
@@ -59,7 +63,7 @@ dump (const char *str, void *vp, size_t len)
  *  (i.e. don't allow attacker to fill up logs with unaligned accesses).
  */
 int no_unaligned_warning;
-static int noprint_warning;
+int unaligned_dump_stack;
 
 /*
  * For M-unit:
@@ -1283,24 +1287,9 @@ emulate_store_float (unsigned long ifa, load_store_t ld, struct pt_regs *regs)
 /*
  * Make sure we log the unaligned access, so that user/sysadmin can notice it and
  * eventually fix the program.  However, we don't want to do that for every access so we
- * pace it with jiffies.  This isn't really MP-safe, but it doesn't really have to be
- * either...
+ * pace it with jiffies.
  */
-static int
-within_logging_rate_limit (void)
-{
-	static unsigned long count, last_time;
-
-	if (time_after(jiffies, last_time + 5 * HZ))
-		count = 0;
-	if (count < 5) {
-		last_time = jiffies;
-		count++;
-		return 1;
-	}
-	return 0;
-
-}
+static DEFINE_RATELIMIT_STATE(logging_rate_limit, 5 * HZ, 5);
 
 void
 ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
@@ -1309,7 +1298,6 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	mm_segment_t old_fs = get_fs();
 	unsigned long bundle[2];
 	unsigned long opcode;
-	struct siginfo si;
 	const struct exception_table_entry *eh = NULL;
 	union {
 		unsigned long l;
@@ -1337,7 +1325,7 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 
 		if (!no_unaligned_warning &&
 		    !(current->thread.flags & IA64_THREAD_UAC_NOPRINT) &&
-		    within_logging_rate_limit())
+		    __ratelimit(&logging_rate_limit))
 		{
 			char buf[200];	/* comm[] is at most 16 bytes... */
 			size_t len;
@@ -1350,15 +1338,17 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 			 * Don't call tty_write_message() if we're in the kernel; we might
 			 * be holding locks...
 			 */
-			if (user_mode(regs))
-				tty_write_message(current->signal->tty, buf);
+			if (user_mode(regs)) {
+				struct tty_struct *tty = get_current_tty();
+				tty_write_message(tty, buf);
+				tty_kref_put(tty);
+			}
 			buf[len-1] = '\0';	/* drop '\r' */
 			/* watch for command names containing %s */
 			printk(KERN_WARNING "%s", buf);
 		} else {
-			if (no_unaligned_warning && !noprint_warning) {
-				noprint_warning = 1;
-				printk(KERN_WARNING "%s(%d) encountered an "
+			if (no_unaligned_warning) {
+				printk_once(KERN_WARNING "%s(%d) encountered an "
 				       "unaligned exception which required\n"
 				       "kernel assistance, which degrades "
 				       "the performance of the application.\n"
@@ -1371,9 +1361,12 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 			}
 		}
 	} else {
-		if (within_logging_rate_limit())
+		if (__ratelimit(&logging_rate_limit)) {
 			printk(KERN_WARNING "kernel unaligned access to 0x%016lx, ip=0x%016lx\n",
 			       ifa, regs->cr_iip + ipsr->ri);
+			if (unaligned_dump_stack)
+				dump_stack();
+		}
 		set_fs(KERNEL_DS);
 	}
 
@@ -1387,6 +1380,7 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	 * extract the instruction from the bundle given the slot number
 	 */
 	switch (ipsr->ri) {
+	      default:
 	      case 0: u.l = (bundle[0] >>  5); break;
 	      case 1: u.l = (bundle[0] >> 46) | (bundle[1] << 18); break;
 	      case 2: u.l = (bundle[1] >> 23); break;
@@ -1437,7 +1431,7 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 		if (u.insn.x)
 			/* oops, really a semaphore op (cmpxchg, etc) */
 			goto failure;
-		/* no break */
+		fallthrough;
 	      case LDS_IMM_OP:
 	      case LDSA_IMM_OP:
 	      case LDFS_OP:
@@ -1465,7 +1459,7 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 		if (u.insn.x)
 			/* oops, really a semaphore op (cmpxchg, etc) */
 			goto failure;
-		/* no break */
+		fallthrough;
 	      case LD_IMM_OP:
 	      case LDA_IMM_OP:
 	      case LDBIAS_IMM_OP:
@@ -1481,7 +1475,7 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 		if (u.insn.x)
 			/* oops, really a semaphore op (cmpxchg, etc) */
 			goto failure;
-		/* no break */
+		fallthrough;
 	      case ST_IMM_OP:
 	      case STREL_IMM_OP:
 		ret = emulate_store_int(ifa, u.insn, regs);
@@ -1542,13 +1536,7 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 		/* NOT_REACHED */
 	}
   force_sigbus:
-	si.si_signo = SIGBUS;
-	si.si_errno = 0;
-	si.si_code = BUS_ADRALN;
-	si.si_addr = (void __user *) ifa;
-	si.si_flags = 0;
-	si.si_isr = 0;
-	si.si_imm = 0;
-	force_sig_info(SIGBUS, &si, current);
+	force_sig_fault(SIGBUS, BUS_ADRALN, (void __user *) ifa,
+			0, 0, 0);
 	goto done;
 }

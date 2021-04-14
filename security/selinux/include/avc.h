@@ -1,7 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Access vector cache interface for object managers.
  *
- * Author : Stephen Smalley, <sds@epoch.ncsc.mil>
+ * Author : Stephen Smalley, <sds@tycho.nsa.gov>
  */
 #ifndef _SELINUX_AVC_H_
 #define _SELINUX_AVC_H_
@@ -12,18 +13,12 @@
 #include <linux/kdev_t.h>
 #include <linux/spinlock.h>
 #include <linux/init.h>
+#include <linux/audit.h>
+#include <linux/lsm_audit.h>
 #include <linux/in6.h>
-#include <linux/path.h>
-#include <asm/system.h>
 #include "flask.h"
 #include "av_permissions.h"
 #include "security.h"
-
-#ifdef CONFIG_SECURITY_SELINUX_DEVELOP
-extern int selinux_enforcing;
-#else
-#define selinux_enforcing 1
-#endif
 
 /*
  * An entry in the AVC.
@@ -35,58 +30,29 @@ struct inode;
 struct sock;
 struct sk_buff;
 
-/* Auxiliary data to use in generating the audit record. */
-struct avc_audit_data {
-	char    type;
-#define AVC_AUDIT_DATA_FS   1
-#define AVC_AUDIT_DATA_NET  2
-#define AVC_AUDIT_DATA_CAP  3
-#define AVC_AUDIT_DATA_IPC  4
-	struct task_struct *tsk;
-	union 	{
-		struct {
-			struct path path;
-			struct inode *inode;
-		} fs;
-		struct {
-			int netif;
-			struct sock *sk;
-			u16 family;
-			__be16 dport;
-			__be16 sport;
-			union {
-				struct {
-					__be32 daddr;
-					__be32 saddr;
-				} v4;
-				struct {
-					struct in6_addr daddr;
-					struct in6_addr saddr;
-				} v6;
-			} fam;
-		} net;
-		int cap;
-		int ipc_id;
-	} u;
-};
-
-#define v4info fam.v4
-#define v6info fam.v6
-
-/* Initialize an AVC audit data structure. */
-#define AVC_AUDIT_DATA_INIT(_d,_t) \
-	{ memset((_d), 0, sizeof(struct avc_audit_data)); (_d)->type = AVC_AUDIT_DATA_##_t; }
-
 /*
  * AVC statistics
  */
 struct avc_cache_stats {
 	unsigned int lookups;
-	unsigned int hits;
 	unsigned int misses;
 	unsigned int allocations;
 	unsigned int reclaims;
 	unsigned int frees;
+};
+
+/*
+ * We only need this data after we have decided to send an audit message.
+ */
+struct selinux_audit_data {
+	u32 ssid;
+	u32 tsid;
+	u16 tclass;
+	u32 requested;
+	u32 audited;
+	u32 denied;
+	int result;
+	struct selinux_state *state;
 };
 
 /*
@@ -95,21 +61,112 @@ struct avc_cache_stats {
 
 void __init avc_init(void);
 
-void avc_audit(u32 ssid, u32 tsid,
-	       u16 tclass, u32 requested,
-	       struct av_decision *avd, int result, struct avc_audit_data *auditdata);
+static inline u32 avc_audit_required(u32 requested,
+			      struct av_decision *avd,
+			      int result,
+			      u32 auditdeny,
+			      u32 *deniedp)
+{
+	u32 denied, audited;
+	denied = requested & ~avd->allowed;
+	if (unlikely(denied)) {
+		audited = denied & avd->auditdeny;
+		/*
+		 * auditdeny is TRICKY!  Setting a bit in
+		 * this field means that ANY denials should NOT be audited if
+		 * the policy contains an explicit dontaudit rule for that
+		 * permission.  Take notice that this is unrelated to the
+		 * actual permissions that were denied.  As an example lets
+		 * assume:
+		 *
+		 * denied == READ
+		 * avd.auditdeny & ACCESS == 0 (not set means explicit rule)
+		 * auditdeny & ACCESS == 1
+		 *
+		 * We will NOT audit the denial even though the denied
+		 * permission was READ and the auditdeny checks were for
+		 * ACCESS
+		 */
+		if (auditdeny && !(auditdeny & avd->auditdeny))
+			audited = 0;
+	} else if (result)
+		audited = denied = requested;
+	else
+		audited = requested & avd->auditallow;
+	*deniedp = denied;
+	return audited;
+}
+
+int slow_avc_audit(struct selinux_state *state,
+		   u32 ssid, u32 tsid, u16 tclass,
+		   u32 requested, u32 audited, u32 denied, int result,
+		   struct common_audit_data *a);
+
+/**
+ * avc_audit - Audit the granting or denial of permissions.
+ * @ssid: source security identifier
+ * @tsid: target security identifier
+ * @tclass: target security class
+ * @requested: requested permissions
+ * @avd: access vector decisions
+ * @result: result from avc_has_perm_noaudit
+ * @a:  auxiliary audit data
+ * @flags: VFS walk flags
+ *
+ * Audit the granting or denial of permissions in accordance
+ * with the policy.  This function is typically called by
+ * avc_has_perm() after a permission check, but can also be
+ * called directly by callers who use avc_has_perm_noaudit()
+ * in order to separate the permission check from the auditing.
+ * For example, this separation is useful when the permission check must
+ * be performed under a lock, to allow the lock to be released
+ * before calling the auditing code.
+ */
+static inline int avc_audit(struct selinux_state *state,
+			    u32 ssid, u32 tsid,
+			    u16 tclass, u32 requested,
+			    struct av_decision *avd,
+			    int result,
+			    struct common_audit_data *a,
+			    int flags)
+{
+	u32 audited, denied;
+	audited = avc_audit_required(requested, avd, result, 0, &denied);
+	if (likely(!audited))
+		return 0;
+	/* fall back to ref-walk if we have to generate audit */
+	if (flags & MAY_NOT_BLOCK)
+		return -ECHILD;
+	return slow_avc_audit(state, ssid, tsid, tclass,
+			      requested, audited, denied, result,
+			      a);
+}
 
 #define AVC_STRICT 1 /* Ignore permissive mode. */
-int avc_has_perm_noaudit(u32 ssid, u32 tsid,
+#define AVC_EXTENDED_PERMS 2	/* update extended permissions */
+#define AVC_NONBLOCKING    4	/* non blocking */
+int avc_has_perm_noaudit(struct selinux_state *state,
+			 u32 ssid, u32 tsid,
 			 u16 tclass, u32 requested,
 			 unsigned flags,
 			 struct av_decision *avd);
 
-int avc_has_perm(u32 ssid, u32 tsid,
+int avc_has_perm(struct selinux_state *state,
+		 u32 ssid, u32 tsid,
 		 u16 tclass, u32 requested,
-		 struct avc_audit_data *auditdata);
+		 struct common_audit_data *auditdata);
+int avc_has_perm_flags(struct selinux_state *state,
+		       u32 ssid, u32 tsid,
+		       u16 tclass, u32 requested,
+		       struct common_audit_data *auditdata,
+		       int flags);
 
-u32 avc_policy_seqno(void);
+int avc_has_extended_perms(struct selinux_state *state,
+			   u32 ssid, u32 tsid, u16 tclass, u32 requested,
+			   u8 driver, u8 perm, struct common_audit_data *ad);
+
+
+u32 avc_policy_seqno(struct selinux_state *state);
 
 #define AVC_CALLBACK_GRANT		1
 #define AVC_CALLBACK_TRY_REVOKE		2
@@ -119,16 +176,19 @@ u32 avc_policy_seqno(void);
 #define AVC_CALLBACK_AUDITALLOW_DISABLE	32
 #define AVC_CALLBACK_AUDITDENY_ENABLE	64
 #define AVC_CALLBACK_AUDITDENY_DISABLE	128
+#define AVC_CALLBACK_ADD_XPERMS		256
 
-int avc_add_callback(int (*callback)(u32 event, u32 ssid, u32 tsid,
-				     u16 tclass, u32 perms,
-				     u32 *out_retained),
-		     u32 events, u32 ssid, u32 tsid,
-		     u16 tclass, u32 perms);
+int avc_add_callback(int (*callback)(u32 event), u32 events);
 
 /* Exported to selinuxfs */
-int avc_get_hash_stats(char *page);
-extern unsigned int avc_cache_threshold;
+struct selinux_avc;
+int avc_get_hash_stats(struct selinux_avc *avc, char *page);
+unsigned int avc_get_cache_threshold(struct selinux_avc *avc);
+void avc_set_cache_threshold(struct selinux_avc *avc,
+			     unsigned int cache_threshold);
+
+/* Attempt to free avc node cache */
+void avc_disable(void);
 
 #ifdef CONFIG_SECURITY_SELINUX_AVC_STATS
 DECLARE_PER_CPU(struct avc_cache_stats, avc_cache_stats);

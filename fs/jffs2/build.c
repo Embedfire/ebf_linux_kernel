@@ -2,6 +2,7 @@
  * JFFS2 -- Journalling Flash File System, Version 2.
  *
  * Copyright © 2001-2007 Red Hat, Inc.
+ * Copyright © 2004-2010 David Woodhouse <dwmw2@infradead.org>
  *
  * Created by David Woodhouse <dwmw2@infradead.org>
  *
@@ -9,11 +10,14 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/mtd/mtd.h>
+#include <linux/mm.h> /* kvfree() */
 #include "nodelist.h"
 
 static void jffs2_build_remove_unlinked_inode(struct jffs2_sb_info *,
@@ -22,7 +26,7 @@ static void jffs2_build_remove_unlinked_inode(struct jffs2_sb_info *,
 static inline struct jffs2_inode_cache *
 first_inode_chain(int *i, struct jffs2_sb_info *c)
 {
-	for (; *i < INOCACHE_HASHSIZE; (*i)++) {
+	for (; *i < c->inocache_hashsize; (*i)++) {
 		if (c->inocache_list[*i])
 			return c->inocache_list[*i];
 	}
@@ -46,7 +50,8 @@ next_inode(int *i, struct jffs2_inode_cache *ic, struct jffs2_sb_info *c)
 
 
 static void jffs2_build_inode_pass1(struct jffs2_sb_info *c,
-				    struct jffs2_inode_cache *ic)
+				    struct jffs2_inode_cache *ic,
+				    int *dir_hardlinks)
 {
 	struct jffs2_full_dirent *fd;
 
@@ -65,19 +70,21 @@ static void jffs2_build_inode_pass1(struct jffs2_sb_info *c,
 			dbg_fsbuild("child \"%s\" (ino #%u) of dir ino #%u doesn't exist!\n",
 				  fd->name, fd->ino, ic->ino);
 			jffs2_mark_node_obsolete(c, fd->raw);
+			/* Clear the ic/raw union so it doesn't cause problems later. */
+			fd->ic = NULL;
 			continue;
 		}
 
+		/* From this point, fd->raw is no longer used so we can set fd->ic */
+		fd->ic = child_ic;
+		child_ic->pino_nlink++;
+		/* If we appear (at this stage) to have hard-linked directories,
+		 * set a flag to trigger a scan later */
 		if (fd->type == DT_DIR) {
-			if (child_ic->pino_nlink) {
-				JFFS2_ERROR("child dir \"%s\" (ino #%u) of dir ino #%u appears to be a hard link\n",
-					    fd->name, fd->ino, ic->ino);
-				/* TODO: What do we do about it? */
-			} else {
-				child_ic->pino_nlink = ic->ino;
-			}
-		} else
-			child_ic->pino_nlink++;
+			child_ic->flags |= INO_FLAGS_IS_DIR;
+			if (child_ic->pino_nlink > 1)
+				*dir_hardlinks = 1;
+		}
 
 		dbg_fsbuild("increased nlink for child \"%s\" (ino #%u)\n", fd->name, fd->ino);
 		/* Can't free scan_dents so far. We might need them in pass 2 */
@@ -91,8 +98,7 @@ static void jffs2_build_inode_pass1(struct jffs2_sb_info *c,
 */
 static int jffs2_build_filesystem(struct jffs2_sb_info *c)
 {
-	int ret;
-	int i;
+	int ret, i, dir_hardlinks = 0;
 	struct jffs2_inode_cache *ic;
 	struct jffs2_full_dirent *fd;
 	struct jffs2_full_dirent *dead_fds = NULL;
@@ -116,7 +122,7 @@ static int jffs2_build_filesystem(struct jffs2_sb_info *c)
 	/* Now scan the directory tree, increasing nlink according to every dirent found. */
 	for_each_inode(i, c, ic) {
 		if (ic->scan_dents) {
-			jffs2_build_inode_pass1(c, ic);
+			jffs2_build_inode_pass1(c, ic, &dir_hardlinks);
 			cond_resched();
 		}
 	}
@@ -152,6 +158,20 @@ static int jffs2_build_filesystem(struct jffs2_sb_info *c)
 	}
 
 	dbg_fsbuild("pass 2a complete\n");
+
+	if (dir_hardlinks) {
+		/* If we detected directory hardlinks earlier, *hopefully*
+		 * they are gone now because some of the links were from
+		 * dead directories which still had some old dirents lying
+		 * around and not yet garbage-collected, but which have
+		 * been discarded above. So clear the pino_nlink field
+		 * in each directory, so that the final scan below can
+		 * print appropriate warnings. */
+		for_each_inode(i, c, ic) {
+			if (ic->flags & INO_FLAGS_IS_DIR)
+				ic->pino_nlink = 0;
+		}
+	}
 	dbg_fsbuild("freeing temporary data structures\n");
 
 	/* Finally, we can scan again and free the dirent structs */
@@ -159,6 +179,33 @@ static int jffs2_build_filesystem(struct jffs2_sb_info *c)
 		while(ic->scan_dents) {
 			fd = ic->scan_dents;
 			ic->scan_dents = fd->next;
+			/* We do use the pino_nlink field to count nlink of
+			 * directories during fs build, so set it to the
+			 * parent ino# now. Now that there's hopefully only
+			 * one. */
+			if (fd->type == DT_DIR) {
+				if (!fd->ic) {
+					/* We'll have complained about it and marked the coresponding
+					   raw node obsolete already. Just skip it. */
+					continue;
+				}
+
+				/* We *have* to have set this in jffs2_build_inode_pass1() */
+				BUG_ON(!(fd->ic->flags & INO_FLAGS_IS_DIR));
+
+				/* We clear ic->pino_nlink ∀ directories' ic *only* if dir_hardlinks
+				 * is set. Otherwise, we know this should never trigger anyway, so
+				 * we don't do the check. And ic->pino_nlink still contains the nlink
+				 * value (which is 1). */
+				if (dir_hardlinks && fd->ic->pino_nlink) {
+					JFFS2_ERROR("child dir \"%s\" (ino #%u) of dir ino #%u is also hard linked from dir ino #%u\n",
+						    fd->name, fd->ino, ic->ino, fd->ic->pino_nlink);
+					/* Should we unlink it from its previous parent? */
+				}
+
+				/* For directories, ic->pino_nlink holds that parent inode # */
+				fd->ic->pino_nlink = ic->ino;
+			}
 			jffs2_free_full_dirent(fd);
 		}
 		ic->scan_dents = NULL;
@@ -237,11 +284,7 @@ static void jffs2_build_remove_unlinked_inode(struct jffs2_sb_info *c,
 
 			/* Reduce nlink of the child. If it's now zero, stick it on the
 			   dead_fds list to be cleaned up later. Else just free the fd */
-
-			if (fd->type == DT_DIR)
-				child_ic->pino_nlink = 0;
-			else
-				child_ic->pino_nlink--;
+			child_ic->pino_nlink--;
 
 			if (!child_ic->pino_nlink) {
 				dbg_fsbuild("inode #%u (\"%s\") now has no links; adding to dead_fds list.\n",
@@ -306,8 +349,8 @@ static void jffs2_calc_trigger_levels(struct jffs2_sb_info *c)
 	   trying to GC to make more space. It'll be a fruitless task */
 	c->nospc_dirty_size = c->sector_size + (c->flash_size / 100);
 
-	dbg_fsbuild("JFFS2 trigger levels (size %d KiB, block size %d KiB, %d blocks)\n",
-		  c->flash_size / 1024, c->sector_size / 1024, c->nr_blocks);
+	dbg_fsbuild("trigger levels (size %d KiB, block size %d KiB, %d blocks)\n",
+		    c->flash_size / 1024, c->sector_size / 1024, c->nr_blocks);
 	dbg_fsbuild("Blocks required to allow deletion:    %d (%d KiB)\n",
 		  c->resv_blocks_deletion, c->resv_blocks_deletion*c->sector_size/1024);
 	dbg_fsbuild("Blocks required to allow writes:      %d (%d KiB)\n",
@@ -335,14 +378,13 @@ int jffs2_do_mount_fs(struct jffs2_sb_info *c)
 	size = sizeof(struct jffs2_eraseblock) * c->nr_blocks;
 #ifndef __ECOS
 	if (jffs2_blocks_use_vmalloc(c))
-		c->blocks = vmalloc(size);
+		c->blocks = vzalloc(size);
 	else
 #endif
-		c->blocks = kmalloc(size, GFP_KERNEL);
+		c->blocks = kzalloc(size, GFP_KERNEL);
 	if (!c->blocks)
 		return -ENOMEM;
 
-	memset(c->blocks, 0, size);
 	for (i=0; i<c->nr_blocks; i++) {
 		INIT_LIST_HEAD(&c->blocks[i].list);
 		c->blocks[i].offset = i * c->sector_size;
@@ -381,12 +423,7 @@ int jffs2_do_mount_fs(struct jffs2_sb_info *c)
 	return 0;
 
  out_free:
-#ifndef __ECOS
-	if (jffs2_blocks_use_vmalloc(c))
-		vfree(c->blocks);
-	else
-#endif
-		kfree(c->blocks);
+	kvfree(c->blocks);
 
 	return ret;
 }

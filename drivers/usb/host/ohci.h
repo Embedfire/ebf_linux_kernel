@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-1.0+ */
 /*
  * OHCI HCD (Host Controller Driver) for USB.
  *
@@ -47,6 +48,7 @@ struct ed {
 	struct ed		*ed_next;	/* on schedule or rm_list */
 	struct ed		*ed_prev;	/* for non-interrupt EDs */
 	struct list_head	td_list;	/* "shadow list" of our TDs */
+	struct list_head	in_use_list;
 
 	/* create --> IDLE --> OPER --> ... --> IDLE --> destroy
 	 * usually:  OPER --> UNLINK --> (IDLE | OPER) --> ...
@@ -66,6 +68,13 @@ struct ed {
 
 	/* HC may see EDs on rm_list until next frame (frame_no == tick) */
 	u16			tick;
+
+	/* Detect TDs not added to the done queue */
+	unsigned		takeback_wdh_cnt;
+	struct td		*pending_td;
+#define	OKAY_TO_TAKEBACK(ohci, ed)			\
+		((int) (ohci->wdh_cnt - ed->takeback_wdh_cnt) >= 0)
+
 } __attribute__ ((aligned(16)));
 
 #define ED_MASK	((u32)~0x0f)		/* strip hw status in low addr bits */
@@ -153,7 +162,7 @@ struct td {
 
 
 /* map OHCI TD status codes (CC) to errno values */
-static const int cc_to_error [16] = {
+static const int __maybe_unused cc_to_error [16] = {
 	/* No  Error  */               0,
 	/* CRC Error  */               -EILSEQ,
 	/* Bit Stuff  */               -EPROTO,
@@ -328,7 +337,7 @@ typedef struct urb_priv {
 	u16			length;		// # tds in this request
 	u16			td_cnt;		// tds already serviced
 	struct list_head	pending;
-	struct td		*td [0];	// all TDs in this request
+	struct td		*td[];		// all TDs in this request
 
 } urb_priv_t;
 
@@ -343,6 +352,12 @@ typedef struct urb_priv {
  * Note how the "proper" USB information is just
  * a subset of what the full implementation needs. (Linus)
  */
+
+enum ohci_rh_state {
+	OHCI_RH_HALTED,
+	OHCI_RH_SUSPENDED,
+	OHCI_RH_RUNNING
+};
 
 struct ohci_hcd {
 	spinlock_t		lock;
@@ -366,30 +381,32 @@ struct ohci_hcd {
 	struct ed		*ed_controltail;	/* last in ctrl list */
 	struct ed		*periodic [NUM_INTS];	/* shadow int_table */
 
-	/*
-	 * OTG controllers and transceivers need software interaction;
-	 * other external transceivers should be software-transparent
-	 */
-	struct otg_transceiver	*transceiver;
 	void (*start_hnp)(struct ohci_hcd *ohci);
 
 	/*
 	 * memory management for queue data structures
+	 *
+	 * @td_cache and @ed_cache are %NULL if &usb_hcd.localmem_pool is used.
 	 */
 	struct dma_pool		*td_cache;
 	struct dma_pool		*ed_cache;
 	struct td		*td_hash [TD_HASH_SIZE];
+	struct td		*dl_start, *dl_end;	/* the done list */
 	struct list_head	pending;
+	struct list_head	eds_in_use;	/* all EDs with at least 1 TD */
 
 	/*
 	 * driver state
 	 */
+	enum ohci_rh_state	rh_state;
 	int			num_ports;
 	int			load [NUM_INTS];
 	u32			hc_control;	/* copy of hc control reg */
 	unsigned long		next_statechange;	/* suspend/resume */
 	u32			fminterval;		/* saved register */
 	unsigned		autostop:1;	/* rh auto stopping/stopped */
+	unsigned		working:1;
+	unsigned		restart_work:1;
 
 	unsigned long		flags;		/* for HC bugs */
 #define	OHCI_QUIRK_AMD756	0x01			/* erratum #4 */
@@ -401,26 +418,28 @@ struct ohci_hcd {
 #define	OHCI_QUIRK_NEC		0x40			/* lost interrupts */
 #define	OHCI_QUIRK_FRAME_NO	0x80			/* no big endian frame_no shift */
 #define	OHCI_QUIRK_HUB_POWER	0x100			/* distrust firmware power/oc setup */
-#define	OHCI_QUIRK_AMD_ISO	0x200			/* ISO transfers*/
+#define	OHCI_QUIRK_AMD_PLL	0x200			/* AMD PLL quirk*/
+#define	OHCI_QUIRK_AMD_PREFETCH	0x400			/* pre-fetch for ISO transfer */
+#define	OHCI_QUIRK_GLOBAL_SUSPEND	0x800		/* must suspend ports */
+#define	OHCI_QUIRK_QEMU		0x1000			/* relax timing expectations */
+
 	// there are also chip quirks/bugs in init logic
+
+	unsigned		prev_frame_no;
+	unsigned		wdh_cnt, prev_wdh_cnt;
+	u32			prev_donehead;
+	struct timer_list	io_watchdog;
 
 	struct work_struct	nec_work;	/* Worker for NEC quirk */
 
-	/* Needed for ZF Micro quirk */
-	struct timer_list	unlink_watchdog;
-	unsigned		eds_scheduled;
-	struct ed		*ed_to_check;
-	unsigned		zf_delay;
-
-#ifdef DEBUG
 	struct dentry		*debug_dir;
-	struct dentry		*debug_async;
-	struct dentry		*debug_periodic;
-	struct dentry		*debug_registers;
-#endif
+
+	/* platform-specific data -- must come last */
+	unsigned long           priv[] __aligned(sizeof(s64));
+
 };
 
-#ifdef CONFIG_PCI
+#ifdef CONFIG_USB_PCI
 static inline int quirk_nec(struct ohci_hcd *ohci)
 {
 	return ohci->flags & OHCI_QUIRK_NEC;
@@ -431,7 +450,11 @@ static inline int quirk_zfmicro(struct ohci_hcd *ohci)
 }
 static inline int quirk_amdiso(struct ohci_hcd *ohci)
 {
-	return ohci->flags & OHCI_QUIRK_AMD_ISO;
+	return ohci->flags & OHCI_QUIRK_AMD_PLL;
+}
+static inline int quirk_amdprefetch(struct ohci_hcd *ohci)
+{
+	return ohci->flags & OHCI_QUIRK_AMD_PREFETCH;
 }
 #else
 static inline int quirk_nec(struct ohci_hcd *ohci)
@@ -443,6 +466,10 @@ static inline int quirk_zfmicro(struct ohci_hcd *ohci)
 	return 0;
 }
 static inline int quirk_amdiso(struct ohci_hcd *ohci)
+{
+	return 0;
+}
+static inline int quirk_amdprefetch(struct ohci_hcd *ohci)
 {
 	return 0;
 }
@@ -460,10 +487,6 @@ static inline struct usb_hcd *ohci_to_hcd (const struct ohci_hcd *ohci)
 
 /*-------------------------------------------------------------------------*/
 
-#ifndef DEBUG
-#define STUB_DEBUG_FILES
-#endif	/* DEBUG */
-
 #define ohci_dbg(ohci, fmt, args...) \
 	dev_dbg (ohci_to_hcd(ohci)->self.controller , fmt , ## args )
 #define ohci_err(ohci, fmt, args...) \
@@ -472,12 +495,6 @@ static inline struct usb_hcd *ohci_to_hcd (const struct ohci_hcd *ohci)
 	dev_info (ohci_to_hcd(ohci)->self.controller , fmt , ## args )
 #define ohci_warn(ohci, fmt, args...) \
 	dev_warn (ohci_to_hcd(ohci)->self.controller , fmt , ## args )
-
-#ifdef OHCI_VERBOSE_DEBUG
-#	define ohci_vdbg ohci_dbg
-#else
-#	define ohci_vdbg(ohci, fmt, args...) do { } while (0)
-#endif
 
 /*-------------------------------------------------------------------------*/
 
@@ -540,15 +557,7 @@ static inline struct usb_hcd *ohci_to_hcd (const struct ohci_hcd *ohci)
  * Big-endian read/write functions are arch-specific.
  * Other arches can be added if/when they're needed.
  *
- * REVISIT: arch/powerpc now has readl/writel_be, so the
- * definition below can die once the STB04xxx support is
- * finally ported over.
  */
-#if defined(CONFIG_PPC) && !defined(CONFIG_PPC_MERGE)
-#define readl_be(addr)		in_be32((__force unsigned *)addr)
-#define writel_be(val, addr)	out_be32((__force unsigned *)addr, val)
-#endif
-
 static inline unsigned int _ohci_readl (const struct ohci_hcd *ohci,
 					__hc32 __iomem * regs)
 {
@@ -573,18 +582,8 @@ static inline void _ohci_writel (const struct ohci_hcd *ohci,
 #endif
 }
 
-#ifdef CONFIG_ARCH_LH7A404
-/* Marc Singer: at the time this code was written, the LH7A404
- * had a problem reading the USB host registers.  This
- * implementation of the ohci_readl function performs the read
- * twice as a work-around.
- */
-#define ohci_readl(o,r)		(_ohci_readl(o,r),_ohci_readl(o,r))
-#define ohci_writel(o,v,r)	_ohci_writel(o,v,r)
-#else
 #define ohci_readl(o,r)		_ohci_readl(o,r)
 #define ohci_writel(o,v,r)	_ohci_writel(o,v,r)
-#endif
 
 
 /*-------------------------------------------------------------------------*/
@@ -649,23 +648,22 @@ static inline u32 hc32_to_cpup (const struct ohci_hcd *ohci, const __hc32 *x)
 
 /*-------------------------------------------------------------------------*/
 
-/* HCCA frame number is 16 bits, but is accessed as 32 bits since not all
- * hardware handles 16 bit reads.  That creates a different confusion on
- * some big-endian SOC implementations.  Same thing happens with PSW access.
+/*
+ * The HCCA frame number is 16 bits, but is accessed as 32 bits since not all
+ * hardware handles 16 bit reads.  Depending on the SoC implementation, the
+ * frame number can wind up in either bits [31:16] (default) or
+ * [15:0] (OHCI_QUIRK_FRAME_NO) on big endian hosts.
+ *
+ * Somewhat similarly, the 16-bit PSW fields in a transfer descriptor are
+ * reordered on BE.
  */
-
-#ifdef CONFIG_PPC_MPC52xx
-#define big_endian_frame_no_quirk(ohci)	(ohci->flags & OHCI_QUIRK_FRAME_NO)
-#else
-#define big_endian_frame_no_quirk(ohci)	0
-#endif
 
 static inline u16 ohci_frame_no(const struct ohci_hcd *ohci)
 {
 	u32 tmp;
 	if (big_endian_desc(ohci)) {
 		tmp = be32_to_cpup((__force __be32 *)&ohci->hcca->frame_no);
-		if (!big_endian_frame_no_quirk(ohci))
+		if (!(ohci->flags & OHCI_QUIRK_FRAME_NO))
 			tmp >>= 16;
 	} else
 		tmp = le32_to_cpup((__force __le32 *)&ohci->hcca->frame_no);
@@ -687,11 +685,6 @@ static inline u16 ohci_hwPSW(const struct ohci_hcd *ohci,
 }
 
 /*-------------------------------------------------------------------------*/
-
-static inline void disable (struct ohci_hcd *ohci)
-{
-	ohci_to_hcd(ohci)->state = HC_STATE_HALT;
-}
 
 #define	FI			0x2edf		/* 12000 bits per frame (-1) */
 #define	FSMP(fi)		(0x7fff & ((6 * ((fi) - 210)) / 7))
@@ -716,7 +709,7 @@ static inline void periodic_reinit (struct ohci_hcd *ohci)
 #define read_roothub(hc, register, mask) ({ \
 	u32 temp = ohci_readl (hc, &hc->regs->roothub.register); \
 	if (temp == -1) \
-		disable (hc); \
+		hc->rh_state = OHCI_RH_HALTED; \
 	else if (hc->flags & OHCI_QUIRK_AMD756) \
 		while (temp & mask) \
 			temp = ohci_readl (hc, &hc->regs->roothub.register); \
@@ -730,3 +723,21 @@ static inline u32 roothub_status (struct ohci_hcd *hc)
 	{ return ohci_readl (hc, &hc->regs->roothub.status); }
 static inline u32 roothub_portstatus (struct ohci_hcd *hc, int i)
 	{ return read_roothub (hc, portstatus [i], 0xffe0fce0); }
+
+/* Declarations of things exported for use by ohci platform drivers */
+
+struct ohci_driver_overrides {
+	const char	*product_desc;
+	size_t		extra_priv_size;
+	int		(*reset)(struct usb_hcd *hcd);
+};
+
+extern void	ohci_init_driver(struct hc_driver *drv,
+				const struct ohci_driver_overrides *over);
+extern int	ohci_restart(struct ohci_hcd *ohci);
+extern int	ohci_setup(struct usb_hcd *hcd);
+extern int	ohci_suspend(struct usb_hcd *hcd, bool do_wakeup);
+extern int	ohci_resume(struct usb_hcd *hcd, bool hibernated);
+extern int	ohci_hub_control(struct usb_hcd	*hcd, u16 typeReq, u16 wValue,
+				 u16 wIndex, char *buf, u16 wLength);
+extern int	ohci_hub_status_data(struct usb_hcd *hcd, char *buf);

@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/drivers/mmc/host/pxa.c - PXA MMCI driver
  *
  *  Copyright (C) 2003 Russell King, All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  This hardware is really sick:
  *   - No way to clear interrupts.
@@ -22,17 +19,23 @@
 #include <linux/platform_device.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
 #include <linux/clk.h>
 #include <linux/err.h>
 #include <linux/mmc/host.h>
+#include <linux/mmc/slot-gpio.h>
+#include <linux/io.h>
+#include <linux/regulator/consumer.h>
+#include <linux/gpio/consumer.h>
+#include <linux/gfp.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 
-#include <asm/dma.h>
-#include <asm/io.h>
-#include <asm/sizes.h>
+#include <linux/sizes.h>
 
-#include <mach/pxa-regs.h>
-#include <mach/mmc.h>
+#include <mach/hardware.h>
+#include <linux/platform_data/mmc-pxamci.h>
 
 #include "pxamci.h"
 
@@ -41,6 +44,9 @@
 #define NR_SG	1
 #define CLKRT_OFF	(~0)
 
+#define mmc_has_26MHz()		(cpu_is_pxa300() || cpu_is_pxa310() \
+				|| cpu_is_pxa935())
+
 struct pxamci_host {
 	struct mmc_host		*mmc;
 	spinlock_t		lock;
@@ -48,26 +54,65 @@ struct pxamci_host {
 	void __iomem		*base;
 	struct clk		*clk;
 	unsigned long		clkrate;
-	int			irq;
-	int			dma;
 	unsigned int		clkrt;
 	unsigned int		cmdat;
 	unsigned int		imask;
 	unsigned int		power_mode;
+	unsigned long		detect_delay_ms;
+	bool			use_ro_gpio;
+	struct gpio_desc	*power;
 	struct pxamci_platform_data *pdata;
 
 	struct mmc_request	*mrq;
 	struct mmc_command	*cmd;
 	struct mmc_data		*data;
 
-	dma_addr_t		sg_dma;
-	struct pxa_dma_desc	*sg_cpu;
+	struct dma_chan		*dma_chan_rx;
+	struct dma_chan		*dma_chan_tx;
+	dma_cookie_t		dma_cookie;
 	unsigned int		dma_len;
-
 	unsigned int		dma_dir;
-	unsigned int		dma_drcmrrx;
-	unsigned int		dma_drcmrtx;
 };
+
+static int pxamci_init_ocr(struct pxamci_host *host)
+{
+	struct mmc_host *mmc = host->mmc;
+	int ret;
+
+	ret = mmc_regulator_get_supply(mmc);
+	if (ret < 0)
+		return ret;
+
+	if (IS_ERR(mmc->supply.vmmc)) {
+		/* fall-back to platform data */
+		mmc->ocr_avail = host->pdata ?
+			host->pdata->ocr_mask :
+			MMC_VDD_32_33 | MMC_VDD_33_34;
+	}
+
+	return 0;
+}
+
+static inline int pxamci_set_power(struct pxamci_host *host,
+				    unsigned char power_mode,
+				    unsigned int vdd)
+{
+	struct mmc_host *mmc = host->mmc;
+	struct regulator *supply = mmc->supply.vmmc;
+
+	if (!IS_ERR(supply))
+		return mmc_regulator_set_ocr(mmc, supply, vdd);
+
+	if (host->power) {
+		bool on = !!((1 << vdd) & host->pdata->ocr_mask);
+		gpiod_set_value(host->power, on);
+	}
+
+	if (host->pdata && host->pdata->setpower)
+		return host->pdata->setpower(mmc_dev(host->mmc), vdd);
+
+	return 0;
+}
 
 static void pxamci_stop_clock(struct pxamci_host *host)
 {
@@ -109,19 +154,20 @@ static void pxamci_disable_irq(struct pxamci_host *host, unsigned int mask)
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
+static void pxamci_dma_irq(void *param);
+
 static void pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 {
+	struct dma_async_tx_descriptor *tx;
+	enum dma_transfer_direction direction;
+	struct dma_slave_config	config;
+	struct dma_chan *chan;
 	unsigned int nob = data->blocks;
 	unsigned long long clks;
 	unsigned int timeout;
-	bool dalgn = 0;
-	u32 dcmd;
-	int i;
+	int ret;
 
 	host->data = data;
-
-	if (data->flags & MMC_DATA_STREAM)
-		nob = 0xffff;
 
 	writel(nob, host->base + MMC_NOB);
 	writel(data->blksz, host->base + MMC_BLKLEN);
@@ -131,55 +177,57 @@ static void pxamci_setup_data(struct pxamci_host *host, struct mmc_data *data)
 	timeout = (unsigned int)clks + (data->timeout_clks << host->clkrt);
 	writel((timeout + 255) / 256, host->base + MMC_RDTO);
 
+	memset(&config, 0, sizeof(config));
+	config.src_addr_width = DMA_SLAVE_BUSWIDTH_1_BYTE;
+	config.dst_addr_width = DMA_SLAVE_BUSWIDTH_1_BYTE;
+	config.src_addr = host->res->start + MMC_RXFIFO;
+	config.dst_addr = host->res->start + MMC_TXFIFO;
+	config.src_maxburst = 32;
+	config.dst_maxburst = 32;
+
 	if (data->flags & MMC_DATA_READ) {
 		host->dma_dir = DMA_FROM_DEVICE;
-		dcmd = DCMD_INCTRGADDR | DCMD_FLOWTRG;
-		DRCMR(host->dma_drcmrtx) = 0;
-		DRCMR(host->dma_drcmrrx) = host->dma | DRCMR_MAPVLD;
+		direction = DMA_DEV_TO_MEM;
+		chan = host->dma_chan_rx;
 	} else {
 		host->dma_dir = DMA_TO_DEVICE;
-		dcmd = DCMD_INCSRCADDR | DCMD_FLOWSRC;
-		DRCMR(host->dma_drcmrrx) = 0;
-		DRCMR(host->dma_drcmrtx) = host->dma | DRCMR_MAPVLD;
+		direction = DMA_MEM_TO_DEV;
+		chan = host->dma_chan_tx;
 	}
 
-	dcmd |= DCMD_BURST32 | DCMD_WIDTH1;
+	config.direction = direction;
 
-	host->dma_len = dma_map_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
+	ret = dmaengine_slave_config(chan, &config);
+	if (ret < 0) {
+		dev_err(mmc_dev(host->mmc), "dma slave config failed\n");
+		return;
+	}
+
+	host->dma_len = dma_map_sg(chan->device->dev, data->sg, data->sg_len,
 				   host->dma_dir);
 
-	for (i = 0; i < host->dma_len; i++) {
-		unsigned int length = sg_dma_len(&data->sg[i]);
-		host->sg_cpu[i].dcmd = dcmd | length;
-		if (length & 31 && !(data->flags & MMC_DATA_READ))
-			host->sg_cpu[i].dcmd |= DCMD_ENDIRQEN;
-		/* Not aligned to 8-byte boundary? */
-		if (sg_dma_address(&data->sg[i]) & 0x7)
-			dalgn = 1;
-		if (data->flags & MMC_DATA_READ) {
-			host->sg_cpu[i].dsadr = host->res->start + MMC_RXFIFO;
-			host->sg_cpu[i].dtadr = sg_dma_address(&data->sg[i]);
-		} else {
-			host->sg_cpu[i].dsadr = sg_dma_address(&data->sg[i]);
-			host->sg_cpu[i].dtadr = host->res->start + MMC_TXFIFO;
-		}
-		host->sg_cpu[i].ddadr = host->sg_dma + (i + 1) *
-					sizeof(struct pxa_dma_desc);
+	tx = dmaengine_prep_slave_sg(chan, data->sg, host->dma_len, direction,
+				     DMA_PREP_INTERRUPT);
+	if (!tx) {
+		dev_err(mmc_dev(host->mmc), "prep_slave_sg() failed\n");
+		return;
 	}
-	host->sg_cpu[host->dma_len - 1].ddadr = DDADR_STOP;
-	wmb();
+
+	if (!(data->flags & MMC_DATA_READ)) {
+		tx->callback = pxamci_dma_irq;
+		tx->callback_param = host;
+	}
+
+	host->dma_cookie = dmaengine_submit(tx);
 
 	/*
-	 * The PXA27x DMA controller encounters overhead when working with
-	 * unaligned (to 8-byte boundaries) data, so switch on byte alignment
-	 * mode only if we have unaligned data.
+	 * workaround for erratum #91:
+	 * only start DMA now if we are doing a read,
+	 * otherwise we wait until CMD/RESP has finished
+	 * before starting DMA.
 	 */
-	if (dalgn)
-		DALGN |= (1 << host->dma);
-	else
-		DALGN &= ~(1 << host->dma);
-	DDADR(host->dma) = host->sg_dma;
-	DCSR(host->dma) = DCSR_RUN;
+	if (!cpu_is_pxa27x() || data->flags & MMC_DATA_READ)
+		dma_async_issue_pending(chan);
 }
 
 static void pxamci_start_cmd(struct pxamci_host *host, struct mmc_command *cmd, unsigned int cmdat)
@@ -250,23 +298,28 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 	if (stat & STAT_TIME_OUT_RESPONSE) {
 		cmd->error = -ETIMEDOUT;
 	} else if (stat & STAT_RES_CRC_ERR && cmd->flags & MMC_RSP_CRC) {
-#ifdef CONFIG_PXA27x
 		/*
 		 * workaround for erratum #42:
 		 * Intel PXA27x Family Processor Specification Update Rev 001
 		 * A bogus CRC error can appear if the msb of a 136 bit
 		 * response is a one.
 		 */
-		if (cmd->flags & MMC_RSP_136 && cmd->resp[0] & 0x80000000) {
+		if (cpu_is_pxa27x() &&
+		    (cmd->flags & MMC_RSP_136 && cmd->resp[0] & 0x80000000))
 			pr_debug("ignoring CRC from command %d - *risky*\n", cmd->opcode);
-		} else
-#endif
-		cmd->error = -EILSEQ;
+		else
+			cmd->error = -EILSEQ;
 	}
 
 	pxamci_disable_irq(host, END_CMD_RES);
 	if (host->data && !cmd->error) {
 		pxamci_enable_irq(host, DATA_TRAN_DONE);
+		/*
+		 * workaround for erratum #91, if doing write
+		 * enable DMA late
+		 */
+		if (cpu_is_pxa27x() && host->data->flags & MMC_DATA_WRITE)
+			dma_async_issue_pending(host->dma_chan_tx);
 	} else {
 		pxamci_finish_request(host, host->mrq);
 	}
@@ -277,13 +330,17 @@ static int pxamci_cmd_done(struct pxamci_host *host, unsigned int stat)
 static int pxamci_data_done(struct pxamci_host *host, unsigned int stat)
 {
 	struct mmc_data *data = host->data;
+	struct dma_chan *chan;
 
 	if (!data)
 		return 0;
 
-	DCSR(host->dma) = 0;
-	dma_unmap_sg(mmc_dev(host->mmc), data->sg, host->dma_len,
-		     host->dma_dir);
+	if (data->flags & MMC_DATA_READ)
+		chan = host->dma_chan_rx;
+	else
+		chan = host->dma_chan_tx;
+	dma_unmap_sg(chan->device->dev,
+		     data->sg, data->sg_len, host->dma_dir);
 
 	if (stat & STAT_READ_TIME_OUT)
 		data->error = -ETIMEDOUT;
@@ -361,9 +418,6 @@ static void pxamci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 		cmdat |= CMDAT_DATAEN | CMDAT_DMAEN;
 		if (mrq->data->flags & MMC_DATA_WRITE)
 			cmdat |= CMDAT_WRITE;
-
-		if (mrq->data->flags & MMC_DATA_STREAM)
-			cmdat |= CMDAT_STREAM;
 	}
 
 	pxamci_start_cmd(host, mrq->cmd, cmdat);
@@ -373,6 +427,8 @@ static int pxamci_get_ro(struct mmc_host *mmc)
 {
 	struct pxamci_host *host = mmc_priv(mmc);
 
+	if (host->use_ro_gpio)
+		return mmc_gpio_get_ro(mmc);
 	if (host->pdata && host->pdata->get_ro)
 		return !!host->pdata->get_ro(mmc_dev(mmc));
 	/*
@@ -391,10 +447,10 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		unsigned int clk = rate / ios->clock;
 
 		if (host->clkrt == CLKRT_OFF)
-			clk_enable(host->clk);
+			clk_prepare_enable(host->clk);
 
 		if (ios->clock == 26000000) {
-			/* to support 26MHz on pxa300/pxa310 */
+			/* to support 26MHz */
 			host->clkrt = 7;
 		} else {
 			/* to handle (19.5MHz, 26MHz) */
@@ -418,15 +474,26 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		pxamci_stop_clock(host);
 		if (host->clkrt != CLKRT_OFF) {
 			host->clkrt = CLKRT_OFF;
-			clk_disable(host->clk);
+			clk_disable_unprepare(host->clk);
 		}
 	}
 
 	if (host->power_mode != ios->power_mode) {
+		int ret;
+
 		host->power_mode = ios->power_mode;
 
-		if (host->pdata && host->pdata->setpower)
-			host->pdata->setpower(mmc_dev(mmc), ios->vdd);
+		ret = pxamci_set_power(host, ios->power_mode, ios->vdd);
+		if (ret) {
+			dev_err(mmc_dev(mmc), "unable to set power\n");
+			/*
+			 * The .set_ios() function in the mmc_host_ops
+			 * struct return void, and failing to set the
+			 * power should be rare so we print an error and
+			 * return here.
+			 */
+			return;
+		}
 
 		if (ios->power_mode == MMC_POWER_ON)
 			host->cmdat |= CMDAT_INIT;
@@ -437,8 +504,8 @@ static void pxamci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	else
 		host->cmdat &= ~CMDAT_SD_4DAT;
 
-	pr_debug("PXAMCI: clkrt = %x cmdat = %x\n",
-		 host->clkrt, host->cmdat);
+	dev_dbg(mmc_dev(mmc), "PXAMCI: clkrt = %x cmdat = %x\n",
+		host->clkrt, host->cmdat);
 }
 
 static void pxamci_enable_sdio_irq(struct mmc_host *host, int enable)
@@ -453,52 +520,104 @@ static void pxamci_enable_sdio_irq(struct mmc_host *host, int enable)
 
 static const struct mmc_host_ops pxamci_ops = {
 	.request		= pxamci_request,
+	.get_cd			= mmc_gpio_get_cd,
 	.get_ro			= pxamci_get_ro,
 	.set_ios		= pxamci_set_ios,
 	.enable_sdio_irq	= pxamci_enable_sdio_irq,
 };
 
-static void pxamci_dma_irq(int dma, void *devid)
+static void pxamci_dma_irq(void *param)
 {
-	struct pxamci_host *host = devid;
-	int dcsr = DCSR(dma);
-	DCSR(dma) = dcsr & ~DCSR_STOPIRQEN;
+	struct pxamci_host *host = param;
+	struct dma_tx_state state;
+	enum dma_status status;
+	struct dma_chan *chan;
+	unsigned long flags;
 
-	if (dcsr & DCSR_ENDINTR) {
+	spin_lock_irqsave(&host->lock, flags);
+
+	if (!host->data)
+		goto out_unlock;
+
+	if (host->data->flags & MMC_DATA_READ)
+		chan = host->dma_chan_rx;
+	else
+		chan = host->dma_chan_tx;
+
+	status = dmaengine_tx_status(chan, host->dma_cookie, &state);
+
+	if (likely(status == DMA_COMPLETE)) {
 		writel(BUF_PART_FULL, host->base + MMC_PRTBUF);
 	} else {
-		printk(KERN_ERR "%s: DMA error on channel %d (DCSR=%#x)\n",
-		       mmc_hostname(host->mmc), dma, dcsr);
+		pr_err("%s: DMA error on %s channel\n", mmc_hostname(host->mmc),
+			host->data->flags & MMC_DATA_READ ? "rx" : "tx");
 		host->data->error = -EIO;
 		pxamci_data_done(host, 0);
 	}
+
+out_unlock:
+	spin_unlock_irqrestore(&host->lock, flags);
 }
 
 static irqreturn_t pxamci_detect_irq(int irq, void *devid)
 {
 	struct pxamci_host *host = mmc_priv(devid);
 
-	mmc_detect_change(devid, host->pdata->detect_delay);
+	mmc_detect_change(devid, msecs_to_jiffies(host->detect_delay_ms));
 	return IRQ_HANDLED;
 }
+
+#ifdef CONFIG_OF
+static const struct of_device_id pxa_mmc_dt_ids[] = {
+        { .compatible = "marvell,pxa-mmc" },
+        { }
+};
+
+MODULE_DEVICE_TABLE(of, pxa_mmc_dt_ids);
+
+static int pxamci_of_init(struct platform_device *pdev,
+			  struct mmc_host *mmc)
+{
+	struct device_node *np = pdev->dev.of_node;
+	struct pxamci_host *host = mmc_priv(mmc);
+	u32 tmp;
+	int ret;
+
+	if (!np)
+		return 0;
+
+	/* pxa-mmc specific */
+	if (of_property_read_u32(np, "pxa-mmc,detect-delay-ms", &tmp) == 0)
+		host->detect_delay_ms = tmp;
+
+	ret = mmc_of_parse(mmc);
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+#else
+static int pxamci_of_init(struct platform_device *pdev,
+			  struct mmc_host *mmc)
+{
+        return 0;
+}
+#endif
 
 static int pxamci_probe(struct platform_device *pdev)
 {
 	struct mmc_host *mmc;
 	struct pxamci_host *host = NULL;
-	struct resource *r, *dmarx, *dmatx;
+	struct device *dev = &pdev->dev;
+	struct resource *r;
 	int ret, irq;
 
 	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	irq = platform_get_irq(pdev, 0);
-	if (!r || irq < 0)
-		return -ENXIO;
+	if (irq < 0)
+		return irq;
 
-	r = request_mem_region(r->start, SZ_4K, DRIVER_NAME);
-	if (!r)
-		return -EBUSY;
-
-	mmc = mmc_alloc_host(sizeof(struct pxamci_host), &pdev->dev);
+	mmc = mmc_alloc_host(sizeof(struct pxamci_host), dev);
 	if (!mmc) {
 		ret = -ENOMEM;
 		goto out;
@@ -510,7 +629,7 @@ static int pxamci_probe(struct platform_device *pdev)
 	 * We can do SG-DMA, but we don't because we never know how much
 	 * data we successfully wrote to the card.
 	 */
-	mmc->max_phys_segs = NR_SG;
+	mmc->max_segs = NR_SG;
 
 	/*
 	 * Our hardware DMA can handle a maximum of one page per SG entry.
@@ -520,20 +639,23 @@ static int pxamci_probe(struct platform_device *pdev)
 	/*
 	 * Block length register is only 10 bits before PXA27x.
 	 */
-	mmc->max_blk_size = (cpu_is_pxa21x() || cpu_is_pxa25x()) ? 1023 : 2048;
+	mmc->max_blk_size = cpu_is_pxa25x() ? 1023 : 2048;
 
 	/*
 	 * Block count register is 16 bits.
 	 */
 	mmc->max_blk_count = 65535;
 
+	ret = pxamci_of_init(pdev, mmc);
+	if (ret)
+		return ret;
+
 	host = mmc_priv(mmc);
 	host->mmc = mmc;
-	host->dma = -1;
 	host->pdata = pdev->dev.platform_data;
 	host->clkrt = CLKRT_OFF;
 
-	host->clk = clk_get(&pdev->dev, "MMCCLK");
+	host->clk = devm_clk_get(dev, NULL);
 	if (IS_ERR(host->clk)) {
 		ret = PTR_ERR(host->clk);
 		host->clk = NULL;
@@ -546,36 +668,29 @@ static int pxamci_probe(struct platform_device *pdev)
 	 * Calculate minimum clock rate, rounding up.
 	 */
 	mmc->f_min = (host->clkrate + 63) / 64;
-	mmc->f_max = (cpu_is_pxa300() || cpu_is_pxa310()) ? 26000000
-							  : host->clkrate;
+	mmc->f_max = (mmc_has_26MHz()) ? 26000000 : host->clkrate;
 
-	mmc->ocr_avail = host->pdata ?
-			 host->pdata->ocr_mask :
-			 MMC_VDD_32_33|MMC_VDD_33_34;
+	ret = pxamci_init_ocr(host);
+	if (ret < 0)
+		return ret;
+
 	mmc->caps = 0;
 	host->cmdat = 0;
-	if (!cpu_is_pxa21x() && !cpu_is_pxa25x()) {
+	if (!cpu_is_pxa25x()) {
 		mmc->caps |= MMC_CAP_4_BIT_DATA | MMC_CAP_SDIO_IRQ;
 		host->cmdat |= CMDAT_SDIO_INT_EN;
-		if (cpu_is_pxa300() || cpu_is_pxa310())
+		if (mmc_has_26MHz())
 			mmc->caps |= MMC_CAP_MMC_HIGHSPEED |
 				     MMC_CAP_SD_HIGHSPEED;
 	}
 
-	host->sg_cpu = dma_alloc_coherent(&pdev->dev, PAGE_SIZE, &host->sg_dma, GFP_KERNEL);
-	if (!host->sg_cpu) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
 	spin_lock_init(&host->lock);
 	host->res = r;
-	host->irq = irq;
 	host->imask = MMC_I_MASK_ALL;
 
-	host->base = ioremap(r->start, SZ_4K);
-	if (!host->base) {
-		ret = -ENOMEM;
+	host->base = devm_ioremap_resource(dev, r);
+	if (IS_ERR(host->base)) {
+		ret = PTR_ERR(host->base);
 		goto out;
 	}
 
@@ -588,54 +703,79 @@ static int pxamci_probe(struct platform_device *pdev)
 	writel(64, host->base + MMC_RESTO);
 	writel(host->imask, host->base + MMC_I_MASK);
 
-	host->dma = pxa_request_dma(DRIVER_NAME, DMA_PRIO_LOW,
-				    pxamci_dma_irq, host);
-	if (host->dma < 0) {
-		ret = -EBUSY;
-		goto out;
-	}
-
-	ret = request_irq(host->irq, pxamci_irq, 0, DRIVER_NAME, host);
+	ret = devm_request_irq(dev, irq, pxamci_irq, 0,
+			       DRIVER_NAME, host);
 	if (ret)
 		goto out;
 
 	platform_set_drvdata(pdev, mmc);
 
-	dmarx = platform_get_resource(pdev, IORESOURCE_DMA, 0);
-	if (!dmarx) {
-		ret = -ENXIO;
+	host->dma_chan_rx = dma_request_chan(dev, "rx");
+	if (IS_ERR(host->dma_chan_rx)) {
+		dev_err(dev, "unable to request rx dma channel\n");
+		ret = PTR_ERR(host->dma_chan_rx);
+		host->dma_chan_rx = NULL;
 		goto out;
 	}
-	host->dma_drcmrrx = dmarx->start;
 
-	dmatx = platform_get_resource(pdev, IORESOURCE_DMA, 1);
-	if (!dmatx) {
-		ret = -ENXIO;
+	host->dma_chan_tx = dma_request_chan(dev, "tx");
+	if (IS_ERR(host->dma_chan_tx)) {
+		dev_err(dev, "unable to request tx dma channel\n");
+		ret = PTR_ERR(host->dma_chan_tx);
+		host->dma_chan_tx = NULL;
 		goto out;
 	}
-	host->dma_drcmrtx = dmatx->start;
 
-	if (host->pdata && host->pdata->init)
-		host->pdata->init(&pdev->dev, pxamci_detect_irq, mmc);
+	if (host->pdata) {
+		host->detect_delay_ms = host->pdata->detect_delay_ms;
+
+		host->power = devm_gpiod_get_optional(dev, "power", GPIOD_OUT_LOW);
+		if (IS_ERR(host->power)) {
+			ret = PTR_ERR(host->power);
+			dev_err(dev, "Failed requesting gpio_power\n");
+			goto out;
+		}
+
+		/* FIXME: should we pass detection delay to debounce? */
+		ret = mmc_gpiod_request_cd(mmc, "cd", 0, false, 0);
+		if (ret && ret != -ENOENT) {
+			dev_err(dev, "Failed requesting gpio_cd\n");
+			goto out;
+		}
+
+		if (!host->pdata->gpio_card_ro_invert)
+			mmc->caps2 |= MMC_CAP2_RO_ACTIVE_HIGH;
+
+		ret = mmc_gpiod_request_ro(mmc, "wp", 0, 0);
+		if (ret && ret != -ENOENT) {
+			dev_err(dev, "Failed requesting gpio_ro\n");
+			goto out;
+		}
+		if (!ret)
+			host->use_ro_gpio = true;
+
+		if (host->pdata->init)
+			host->pdata->init(dev, pxamci_detect_irq, mmc);
+
+		if (host->power && host->pdata->setpower)
+			dev_warn(dev, "gpio_power and setpower() both defined\n");
+		if (host->use_ro_gpio && host->pdata->get_ro)
+			dev_warn(dev, "gpio_ro and get_ro() both defined\n");
+	}
 
 	mmc_add_host(mmc);
 
 	return 0;
 
- out:
+out:
 	if (host) {
-		if (host->dma >= 0)
-			pxa_free_dma(host->dma);
-		if (host->base)
-			iounmap(host->base);
-		if (host->sg_cpu)
-			dma_free_coherent(&pdev->dev, PAGE_SIZE, host->sg_cpu, host->sg_dma);
-		if (host->clk)
-			clk_put(host->clk);
+		if (host->dma_chan_rx)
+			dma_release_channel(host->dma_chan_rx);
+		if (host->dma_chan_tx)
+			dma_release_channel(host->dma_chan_tx);
 	}
 	if (mmc)
 		mmc_free_host(mmc);
-	release_resource(r);
 	return ret;
 }
 
@@ -643,88 +783,41 @@ static int pxamci_remove(struct platform_device *pdev)
 {
 	struct mmc_host *mmc = platform_get_drvdata(pdev);
 
-	platform_set_drvdata(pdev, NULL);
-
 	if (mmc) {
 		struct pxamci_host *host = mmc_priv(mmc);
 
+		mmc_remove_host(mmc);
+
 		if (host->pdata && host->pdata->exit)
 			host->pdata->exit(&pdev->dev, mmc);
-
-		mmc_remove_host(mmc);
 
 		pxamci_stop_clock(host);
 		writel(TXFIFO_WR_REQ|RXFIFO_RD_REQ|CLK_IS_OFF|STOP_CMD|
 		       END_CMD_RES|PRG_DONE|DATA_TRAN_DONE,
 		       host->base + MMC_I_MASK);
 
-		DRCMR(host->dma_drcmrrx) = 0;
-		DRCMR(host->dma_drcmrtx) = 0;
-
-		free_irq(host->irq, host);
-		pxa_free_dma(host->dma);
-		iounmap(host->base);
-		dma_free_coherent(&pdev->dev, PAGE_SIZE, host->sg_cpu, host->sg_dma);
-
-		clk_put(host->clk);
-
-		release_resource(host->res);
+		dmaengine_terminate_all(host->dma_chan_rx);
+		dmaengine_terminate_all(host->dma_chan_tx);
+		dma_release_channel(host->dma_chan_rx);
+		dma_release_channel(host->dma_chan_tx);
 
 		mmc_free_host(mmc);
 	}
+
 	return 0;
 }
-
-#ifdef CONFIG_PM
-static int pxamci_suspend(struct platform_device *dev, pm_message_t state)
-{
-	struct mmc_host *mmc = platform_get_drvdata(dev);
-	int ret = 0;
-
-	if (mmc)
-		ret = mmc_suspend_host(mmc, state);
-
-	return ret;
-}
-
-static int pxamci_resume(struct platform_device *dev)
-{
-	struct mmc_host *mmc = platform_get_drvdata(dev);
-	int ret = 0;
-
-	if (mmc)
-		ret = mmc_resume_host(mmc);
-
-	return ret;
-}
-#else
-#define pxamci_suspend	NULL
-#define pxamci_resume	NULL
-#endif
 
 static struct platform_driver pxamci_driver = {
 	.probe		= pxamci_probe,
 	.remove		= pxamci_remove,
-	.suspend	= pxamci_suspend,
-	.resume		= pxamci_resume,
 	.driver		= {
 		.name	= DRIVER_NAME,
-		.owner	= THIS_MODULE,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+		.of_match_table = of_match_ptr(pxa_mmc_dt_ids),
 	},
 };
 
-static int __init pxamci_init(void)
-{
-	return platform_driver_register(&pxamci_driver);
-}
-
-static void __exit pxamci_exit(void)
-{
-	platform_driver_unregister(&pxamci_driver);
-}
-
-module_init(pxamci_init);
-module_exit(pxamci_exit);
+module_platform_driver(pxamci_driver);
 
 MODULE_DESCRIPTION("PXA Multimedia Card Interface Driver");
 MODULE_LICENSE("GPL");

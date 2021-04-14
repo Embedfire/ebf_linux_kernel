@@ -1,7 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * poweroff.c - sysrq handler to gracefully power down machine.
- *
- * This file is released under the GPL v2
  */
 
 #include <linux/kernel.h>
@@ -24,20 +23,20 @@ static void do_poweroff(struct work_struct *dummy)
 
 static DECLARE_WORK(poweroff_work, do_poweroff);
 
-static void handle_poweroff(int key, struct tty_struct *tty)
+static void handle_poweroff(int key)
 {
 	/* run sysrq poweroff on boot cpu */
-	schedule_work_on(first_cpu(cpu_online_map), &poweroff_work);
+	schedule_work_on(cpumask_first(cpu_online_mask), &poweroff_work);
 }
 
-static struct sysrq_key_op	sysrq_poweroff_op = {
+static const struct sysrq_key_op	sysrq_poweroff_op = {
 	.handler        = handle_poweroff,
-	.help_msg       = "powerOff",
+	.help_msg       = "poweroff(o)",
 	.action_msg     = "Power Off",
- 	.enable_mask	= SYSRQ_ENABLE_BOOT,
+	.enable_mask	= SYSRQ_ENABLE_BOOT,
 };
 
-static int pm_sysrq_init(void)
+static int __init pm_sysrq_init(void)
 {
 	register_sysrq_key('o', &sysrq_poweroff_op);
 	return 0;

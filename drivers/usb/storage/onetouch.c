@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Support for the Maxtor OneTouch USB hard drive's button
  *
@@ -10,34 +11,26 @@
  * Based on usbmouse.c (Vojtech Pavlik) and xpad.c (Marko Friedemann)
  *
  */
-
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- */
-
 #include <linux/kernel.h>
 #include <linux/input.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/usb/input.h>
 #include "usb.h"
-#include "onetouch.h"
 #include "debug.h"
+#include "scsiglue.h"
 
+#define DRV_NAME "ums-onetouch"
+
+MODULE_DESCRIPTION("Maxtor USB OneTouch hard drive button driver");
+MODULE_AUTHOR("Nick Sillik <n.sillik@temple.edu>");
+MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS(USB_STORAGE);
+
+#define ONETOUCH_PKT_LEN        0x02
+#define ONETOUCH_BUTTON         KEY_PROG1
+
+static int onetouch_connect_input(struct us_data *ss);
 static void onetouch_release_input(void *onetouch_);
 
 struct usb_onetouch {
@@ -51,6 +44,46 @@ struct usb_onetouch {
 	dma_addr_t data_dma;
 	unsigned int is_open:1;
 };
+
+
+/*
+ * The table of devices
+ */
+#define UNUSUAL_DEV(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax, \
+		    vendorName, productName, useProtocol, useTransport, \
+		    initFunction, flags) \
+{ USB_DEVICE_VER(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax), \
+  .driver_info = (flags) }
+
+static struct usb_device_id onetouch_usb_ids[] = {
+#	include "unusual_onetouch.h"
+	{ }		/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(usb, onetouch_usb_ids);
+
+#undef UNUSUAL_DEV
+
+/*
+ * The flags table
+ */
+#define UNUSUAL_DEV(idVendor, idProduct, bcdDeviceMin, bcdDeviceMax, \
+		    vendor_name, product_name, use_protocol, use_transport, \
+		    init_function, Flags) \
+{ \
+	.vendorName = vendor_name,	\
+	.productName = product_name,	\
+	.useProtocol = use_protocol,	\
+	.useTransport = use_transport,	\
+	.initFunction = init_function,	\
+}
+
+static struct us_unusual_dev onetouch_unusual_dev_list[] = {
+#	include "unusual_onetouch.h"
+	{ }		/* Terminating entry */
+};
+
+#undef UNUSUAL_DEV
+
 
 static void usb_onetouch_irq(struct urb *urb)
 {
@@ -78,8 +111,8 @@ static void usb_onetouch_irq(struct urb *urb)
 resubmit:
 	retval = usb_submit_urb (urb, GFP_ATOMIC);
 	if (retval)
-		err ("can't resubmit intr, %s-%s/input0, retval %d",
-			onetouch->udev->bus->bus_name,
+		dev_err(&dev->dev, "can't resubmit intr, %s-%s/input0, "
+			"retval %d\n", onetouch->udev->bus->bus_name,
 			onetouch->udev->devpath, retval);
 }
 
@@ -90,7 +123,7 @@ static int usb_onetouch_open(struct input_dev *dev)
 	onetouch->is_open = 1;
 	onetouch->irq->dev = onetouch->udev;
 	if (usb_submit_urb(onetouch->irq, GFP_KERNEL)) {
-		err("usb_submit_urb failed");
+		dev_err(&dev->dev, "usb_submit_urb failed\n");
 		return -EIO;
 	}
 
@@ -116,8 +149,9 @@ static void usb_onetouch_pm_hook(struct us_data *us, int action)
 			usb_kill_urb(onetouch->irq);
 			break;
 		case US_RESUME:
-			if (usb_submit_urb(onetouch->irq, GFP_KERNEL) != 0)
-				err("usb_submit_urb failed");
+			if (usb_submit_urb(onetouch->irq, GFP_NOIO) != 0)
+				dev_err(&onetouch->irq->dev->dev,
+					"usb_submit_urb failed\n");
 			break;
 		default:
 			break;
@@ -126,7 +160,7 @@ static void usb_onetouch_pm_hook(struct us_data *us, int action)
 }
 #endif /* CONFIG_PM */
 
-int onetouch_connect_input(struct us_data *ss)
+static int onetouch_connect_input(struct us_data *ss)
 {
 	struct usb_device *udev = ss->pusb_dev;
 	struct usb_host_interface *interface;
@@ -147,14 +181,15 @@ int onetouch_connect_input(struct us_data *ss)
 
 	pipe = usb_rcvintpipe(udev, endpoint->bEndpointAddress);
 	maxp = usb_maxpacket(udev, pipe, usb_pipeout(pipe));
+	maxp = min(maxp, ONETOUCH_PKT_LEN);
 
 	onetouch = kzalloc(sizeof(struct usb_onetouch), GFP_KERNEL);
 	input_dev = input_allocate_device();
 	if (!onetouch || !input_dev)
 		goto fail1;
 
-	onetouch->data = usb_buffer_alloc(udev, ONETOUCH_PKT_LEN,
-					  GFP_ATOMIC, &onetouch->data_dma);
+	onetouch->data = usb_alloc_coherent(udev, ONETOUCH_PKT_LEN,
+					    GFP_KERNEL, &onetouch->data_dma);
 	if (!onetouch->data)
 		goto fail1;
 
@@ -197,8 +232,7 @@ int onetouch_connect_input(struct us_data *ss)
 	input_dev->open = usb_onetouch_open;
 	input_dev->close = usb_onetouch_close;
 
-	usb_fill_int_urb(onetouch->irq, udev, pipe, onetouch->data,
-			 (maxp > 8 ? 8 : maxp),
+	usb_fill_int_urb(onetouch->irq, udev, pipe, onetouch->data, maxp,
 			 usb_onetouch_irq, onetouch, endpoint->bInterval);
 	onetouch->irq->transfer_dma = onetouch->data_dma;
 	onetouch->irq->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
@@ -216,8 +250,8 @@ int onetouch_connect_input(struct us_data *ss)
 	return 0;
 
  fail3:	usb_free_urb(onetouch->irq);
- fail2:	usb_buffer_free(udev, ONETOUCH_PKT_LEN,
-			onetouch->data, onetouch->data_dma);
+ fail2:	usb_free_coherent(udev, ONETOUCH_PKT_LEN,
+			  onetouch->data, onetouch->data_dma);
  fail1:	kfree(onetouch);
 	input_free_device(input_dev);
 	return error;
@@ -231,7 +265,43 @@ static void onetouch_release_input(void *onetouch_)
 		usb_kill_urb(onetouch->irq);
 		input_unregister_device(onetouch->dev);
 		usb_free_urb(onetouch->irq);
-		usb_buffer_free(onetouch->udev, ONETOUCH_PKT_LEN,
-				onetouch->data, onetouch->data_dma);
+		usb_free_coherent(onetouch->udev, ONETOUCH_PKT_LEN,
+				  onetouch->data, onetouch->data_dma);
 	}
 }
+
+static struct scsi_host_template onetouch_host_template;
+
+static int onetouch_probe(struct usb_interface *intf,
+			 const struct usb_device_id *id)
+{
+	struct us_data *us;
+	int result;
+
+	result = usb_stor_probe1(&us, intf, id,
+			(id - onetouch_usb_ids) + onetouch_unusual_dev_list,
+			&onetouch_host_template);
+	if (result)
+		return result;
+
+	/* Use default transport and protocol */
+
+	result = usb_stor_probe2(us);
+	return result;
+}
+
+static struct usb_driver onetouch_driver = {
+	.name =		DRV_NAME,
+	.probe =	onetouch_probe,
+	.disconnect =	usb_stor_disconnect,
+	.suspend =	usb_stor_suspend,
+	.resume =	usb_stor_resume,
+	.reset_resume =	usb_stor_reset_resume,
+	.pre_reset =	usb_stor_pre_reset,
+	.post_reset =	usb_stor_post_reset,
+	.id_table =	onetouch_usb_ids,
+	.soft_unbind =	1,
+	.no_dynamic_id = 1,
+};
+
+module_usb_stor_driver(onetouch_driver, onetouch_host_template, DRV_NAME);

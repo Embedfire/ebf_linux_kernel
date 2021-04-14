@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/m68k/mm/kmap.c
  *
@@ -18,19 +19,16 @@
 #include <asm/setup.h>
 #include <asm/segment.h>
 #include <asm/page.h>
-#include <asm/pgalloc.h>
 #include <asm/io.h>
-#include <asm/system.h>
+#include <asm/tlbflush.h>
 
 #undef DEBUG
 
-#define PTRTREESIZE	(256*1024)
-
 /*
  * For 040/060 we can use the virtual memory area like other architectures,
- * but for 020/030 we want to use early termination page descriptor and we
+ * but for 020/030 we want to use early termination page descriptors and we
  * can't mix this with normal page descriptors, so we have to copy that code
- * (mm/vmalloc.c) and return appriorate aligned addresses.
+ * (mm/vmalloc.c) and return appropriately aligned addresses.
  */
 
 #ifdef CPU_M68040_OR_M68060_ONLY
@@ -50,9 +48,63 @@ static inline void free_io_area(void *addr)
 
 #else
 
-#define IO_SIZE		(256*1024)
+#define IO_SIZE		PMD_SIZE
 
 static struct vm_struct *iolist;
+
+/*
+ * __free_io_area unmaps nearly everything, so be careful
+ * Currently it doesn't free pointer/page tables anymore but this
+ * wasn't used anyway and might be added later.
+ */
+static void __free_io_area(void *addr, unsigned long size)
+{
+	unsigned long virtaddr = (unsigned long)addr;
+	pgd_t *pgd_dir;
+	p4d_t *p4d_dir;
+	pud_t *pud_dir;
+	pmd_t *pmd_dir;
+	pte_t *pte_dir;
+
+	while ((long)size > 0) {
+		pgd_dir = pgd_offset_k(virtaddr);
+		p4d_dir = p4d_offset(pgd_dir, virtaddr);
+		pud_dir = pud_offset(p4d_dir, virtaddr);
+		if (pud_bad(*pud_dir)) {
+			printk("iounmap: bad pud(%08lx)\n", pud_val(*pud_dir));
+			pud_clear(pud_dir);
+			return;
+		}
+		pmd_dir = pmd_offset(pud_dir, virtaddr);
+
+#if CONFIG_PGTABLE_LEVELS == 3
+		if (CPU_IS_020_OR_030) {
+			int pmd_type = pmd_val(*pmd_dir) & _DESCTYPE_MASK;
+
+			if (pmd_type == _PAGE_PRESENT) {
+				pmd_clear(pmd_dir);
+				virtaddr += PMD_SIZE;
+				size -= PMD_SIZE;
+
+			} else if (pmd_type == 0)
+				continue;
+		}
+#endif
+
+		if (pmd_bad(*pmd_dir)) {
+			printk("iounmap: bad pmd (%08lx)\n", pmd_val(*pmd_dir));
+			pmd_clear(pmd_dir);
+			return;
+		}
+		pte_dir = pte_offset_kernel(pmd_dir, virtaddr);
+
+		pte_val(*pte_dir) = 0;
+		virtaddr += PAGE_SIZE;
+		size -= PAGE_SIZE;
+	}
+
+	flush_tlb_all();
+}
 
 static struct vm_struct *get_io_area(unsigned long size)
 {
@@ -66,8 +118,10 @@ static struct vm_struct *get_io_area(unsigned long size)
 	for (p = &iolist; (tmp = *p) ; p = &tmp->next) {
 		if (size + addr < (unsigned long)tmp->addr)
 			break;
-		if (addr > KMAP_END-size)
+		if (addr > KMAP_END-size) {
+			kfree(area);
 			return NULL;
+		}
 		addr = tmp->size + (unsigned long)tmp->addr;
 	}
 	area->addr = (void *)addr;
@@ -87,7 +141,8 @@ static inline void free_io_area(void *addr)
 	for (p = &iolist ; (tmp = *p) ; p = &tmp->next) {
 		if (tmp->addr == addr) {
 			*p = tmp->next;
-			__iounmap(tmp->addr, tmp->size);
+			/* remove gap added in get_io_area() */
+			__free_io_area(tmp->addr, tmp->size - IO_SIZE);
 			kfree(tmp);
 			return;
 		}
@@ -97,8 +152,7 @@ static inline void free_io_area(void *addr)
 #endif
 
 /*
- * Map some physical address range into the kernel address space. The
- * code is copied and adapted from map_chunk().
+ * Map some physical address range into the kernel address space.
  */
 /* Rewritten by Andreas Schwab to remove all races. */
 
@@ -108,13 +162,15 @@ void __iomem *__ioremap(unsigned long physaddr, unsigned long size, int cachefla
 	unsigned long virtaddr, retaddr;
 	long offset;
 	pgd_t *pgd_dir;
+	p4d_t *p4d_dir;
+	pud_t *pud_dir;
 	pmd_t *pmd_dir;
 	pte_t *pte_dir;
 
 	/*
 	 * Don't allow mappings that wrap..
 	 */
-	if (!size || size > physaddr + size)
+	if (!size || physaddr > (unsigned long)(-size))
 		return NULL;
 
 #ifdef CONFIG_AMIGA
@@ -123,6 +179,10 @@ void __iomem *__ioremap(unsigned long physaddr, unsigned long size, int cachefla
 		    && (cacheflag == IOMAP_NOCACHE_SER))
 			return (void __iomem *)physaddr;
 	}
+#endif
+#ifdef CONFIG_COLDFIRE
+	if (__cf_internalio(physaddr))
+		return (void __iomem *) physaddr;
 #endif
 
 #ifdef DEBUG
@@ -170,7 +230,8 @@ void __iomem *__ioremap(unsigned long physaddr, unsigned long size, int cachefla
 			break;
 		}
 	} else {
-		physaddr |= (_PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_DIRTY);
+		physaddr |= (_PAGE_PRESENT | _PAGE_ACCESSED |
+			     _PAGE_DIRTY | _PAGE_READWRITE);
 		switch (cacheflag) {
 		case IOMAP_NOCACHE_SER:
 		case IOMAP_NOCACHE_NONSER:
@@ -185,22 +246,27 @@ void __iomem *__ioremap(unsigned long physaddr, unsigned long size, int cachefla
 
 	while ((long)size > 0) {
 #ifdef DEBUG
-		if (!(virtaddr & (PTRTREESIZE-1)))
+		if (!(virtaddr & (PMD_SIZE-1)))
 			printk ("\npa=%#lx va=%#lx ", physaddr, virtaddr);
 #endif
 		pgd_dir = pgd_offset_k(virtaddr);
-		pmd_dir = pmd_alloc(&init_mm, pgd_dir, virtaddr);
+		p4d_dir = p4d_offset(pgd_dir, virtaddr);
+		pud_dir = pud_offset(p4d_dir, virtaddr);
+		pmd_dir = pmd_alloc(&init_mm, pud_dir, virtaddr);
 		if (!pmd_dir) {
 			printk("ioremap: no mem for pmd_dir\n");
 			return NULL;
 		}
 
+#if CONFIG_PGTABLE_LEVELS == 3
 		if (CPU_IS_020_OR_030) {
-			pmd_dir->pmd[(virtaddr/PTRTREESIZE) & 15] = physaddr;
-			physaddr += PTRTREESIZE;
-			virtaddr += PTRTREESIZE;
-			size -= PTRTREESIZE;
-		} else {
+			pmd_val(*pmd_dir) = physaddr;
+			physaddr += PMD_SIZE;
+			virtaddr += PMD_SIZE;
+			size -= PMD_SIZE;
+		} else
+#endif
+		{
 			pte_dir = pte_alloc_kernel(pmd_dir, virtaddr);
 			if (!pte_dir) {
 				printk("ioremap: no mem for pte_dir\n");
@@ -223,7 +289,7 @@ void __iomem *__ioremap(unsigned long physaddr, unsigned long size, int cachefla
 EXPORT_SYMBOL(__ioremap);
 
 /*
- * Unmap a ioremap()ed region again
+ * Unmap an ioremap()ed region again
  */
 void iounmap(void __iomem *addr)
 {
@@ -233,59 +299,14 @@ void iounmap(void __iomem *addr)
 	     ((unsigned long)addr > 0x60000000)))
 			free_io_area((__force void *)addr);
 #else
+#ifdef CONFIG_COLDFIRE
+	if (cf_internalio(addr))
+		return;
+#endif
 	free_io_area((__force void *)addr);
 #endif
 }
 EXPORT_SYMBOL(iounmap);
-
-/*
- * __iounmap unmaps nearly everything, so be careful
- * it doesn't free currently pointer/page tables anymore but it
- * wans't used anyway and might be added later.
- */
-void __iounmap(void *addr, unsigned long size)
-{
-	unsigned long virtaddr = (unsigned long)addr;
-	pgd_t *pgd_dir;
-	pmd_t *pmd_dir;
-	pte_t *pte_dir;
-
-	while ((long)size > 0) {
-		pgd_dir = pgd_offset_k(virtaddr);
-		if (pgd_bad(*pgd_dir)) {
-			printk("iounmap: bad pgd(%08lx)\n", pgd_val(*pgd_dir));
-			pgd_clear(pgd_dir);
-			return;
-		}
-		pmd_dir = pmd_offset(pgd_dir, virtaddr);
-
-		if (CPU_IS_020_OR_030) {
-			int pmd_off = (virtaddr/PTRTREESIZE) & 15;
-			int pmd_type = pmd_dir->pmd[pmd_off] & _DESCTYPE_MASK;
-
-			if (pmd_type == _PAGE_PRESENT) {
-				pmd_dir->pmd[pmd_off] = 0;
-				virtaddr += PTRTREESIZE;
-				size -= PTRTREESIZE;
-				continue;
-			} else if (pmd_type == 0)
-				continue;
-		}
-
-		if (pmd_bad(*pmd_dir)) {
-			printk("iounmap: bad pmd (%08lx)\n", pmd_val(*pmd_dir));
-			pmd_clear(pmd_dir);
-			return;
-		}
-		pte_dir = pte_offset_kernel(pmd_dir, virtaddr);
-
-		pte_val(*pte_dir) = 0;
-		virtaddr += PAGE_SIZE;
-		size -= PAGE_SIZE;
-	}
-
-	flush_tlb_all();
-}
 
 /*
  * Set new cache mode for some kernel address space.
@@ -296,6 +317,8 @@ void kernel_set_cachemode(void *addr, unsigned long size, int cmode)
 {
 	unsigned long virtaddr = (unsigned long)addr;
 	pgd_t *pgd_dir;
+	p4d_t *p4d_dir;
+	pud_t *pud_dir;
 	pmd_t *pmd_dir;
 	pte_t *pte_dir;
 
@@ -330,24 +353,27 @@ void kernel_set_cachemode(void *addr, unsigned long size, int cmode)
 
 	while ((long)size > 0) {
 		pgd_dir = pgd_offset_k(virtaddr);
-		if (pgd_bad(*pgd_dir)) {
-			printk("iocachemode: bad pgd(%08lx)\n", pgd_val(*pgd_dir));
-			pgd_clear(pgd_dir);
+		p4d_dir = p4d_offset(pgd_dir, virtaddr);
+		pud_dir = pud_offset(p4d_dir, virtaddr);
+		if (pud_bad(*pud_dir)) {
+			printk("iocachemode: bad pud(%08lx)\n", pud_val(*pud_dir));
+			pud_clear(pud_dir);
 			return;
 		}
-		pmd_dir = pmd_offset(pgd_dir, virtaddr);
+		pmd_dir = pmd_offset(pud_dir, virtaddr);
 
+#if CONFIG_PGTABLE_LEVELS == 3
 		if (CPU_IS_020_OR_030) {
-			int pmd_off = (virtaddr/PTRTREESIZE) & 15;
+			unsigned long pmd = pmd_val(*pmd_dir);
 
-			if ((pmd_dir->pmd[pmd_off] & _DESCTYPE_MASK) == _PAGE_PRESENT) {
-				pmd_dir->pmd[pmd_off] = (pmd_dir->pmd[pmd_off] &
-							 _CACHEMASK040) | cmode;
-				virtaddr += PTRTREESIZE;
-				size -= PTRTREESIZE;
+			if ((pmd & _DESCTYPE_MASK) == _PAGE_PRESENT) {
+				*pmd_dir = __pmd((pmd & _CACHEMASK040) | cmode);
+				virtaddr += PMD_SIZE;
+				size -= PMD_SIZE;
 				continue;
 			}
 		}
+#endif
 
 		if (pmd_bad(*pmd_dir)) {
 			printk("iocachemode: bad pmd (%08lx)\n", pmd_val(*pmd_dir));

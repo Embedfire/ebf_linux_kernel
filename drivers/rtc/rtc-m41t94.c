@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for ST M41T94 SPI RTC
  *
  * Copyright (C) 2008 Kim B. Heino
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -41,17 +38,17 @@ static int m41t94_set_time(struct device *dev, struct rtc_time *tm)
 		tm->tm_mon, tm->tm_year, tm->tm_wday);
 
 	buf[0] = 0x80 | M41T94_REG_SECONDS; /* write time + date */
-	buf[M41T94_REG_SECONDS] = BIN2BCD(tm->tm_sec);
-	buf[M41T94_REG_MINUTES] = BIN2BCD(tm->tm_min);
-	buf[M41T94_REG_HOURS]   = BIN2BCD(tm->tm_hour);
-	buf[M41T94_REG_WDAY]    = BIN2BCD(tm->tm_wday + 1);
-	buf[M41T94_REG_DAY]     = BIN2BCD(tm->tm_mday);
-	buf[M41T94_REG_MONTH]   = BIN2BCD(tm->tm_mon + 1);
+	buf[M41T94_REG_SECONDS] = bin2bcd(tm->tm_sec);
+	buf[M41T94_REG_MINUTES] = bin2bcd(tm->tm_min);
+	buf[M41T94_REG_HOURS]   = bin2bcd(tm->tm_hour);
+	buf[M41T94_REG_WDAY]    = bin2bcd(tm->tm_wday + 1);
+	buf[M41T94_REG_DAY]     = bin2bcd(tm->tm_mday);
+	buf[M41T94_REG_MONTH]   = bin2bcd(tm->tm_mon + 1);
 
 	buf[M41T94_REG_HOURS] |= M41T94_BIT_CEB;
 	if (tm->tm_year >= 100)
 		buf[M41T94_REG_HOURS] |= M41T94_BIT_CB;
-	buf[M41T94_REG_YEAR] = BIN2BCD(tm->tm_year % 100);
+	buf[M41T94_REG_YEAR] = bin2bcd(tm->tm_year % 100);
 
 	return spi_write(spi, buf, 8);
 }
@@ -82,14 +79,14 @@ static int m41t94_read_time(struct device *dev, struct rtc_time *tm)
 		spi_write(spi, buf, 2);
 	}
 
-	tm->tm_sec  = BCD2BIN(spi_w8r8(spi, M41T94_REG_SECONDS));
-	tm->tm_min  = BCD2BIN(spi_w8r8(spi, M41T94_REG_MINUTES));
+	tm->tm_sec  = bcd2bin(spi_w8r8(spi, M41T94_REG_SECONDS));
+	tm->tm_min  = bcd2bin(spi_w8r8(spi, M41T94_REG_MINUTES));
 	hour = spi_w8r8(spi, M41T94_REG_HOURS);
-	tm->tm_hour = BCD2BIN(hour & 0x3f);
-	tm->tm_wday = BCD2BIN(spi_w8r8(spi, M41T94_REG_WDAY)) - 1;
-	tm->tm_mday = BCD2BIN(spi_w8r8(spi, M41T94_REG_DAY));
-	tm->tm_mon  = BCD2BIN(spi_w8r8(spi, M41T94_REG_MONTH)) - 1;
-	tm->tm_year = BCD2BIN(spi_w8r8(spi, M41T94_REG_YEAR));
+	tm->tm_hour = bcd2bin(hour & 0x3f);
+	tm->tm_wday = bcd2bin(spi_w8r8(spi, M41T94_REG_WDAY)) - 1;
+	tm->tm_mday = bcd2bin(spi_w8r8(spi, M41T94_REG_DAY));
+	tm->tm_mon  = bcd2bin(spi_w8r8(spi, M41T94_REG_MONTH)) - 1;
+	tm->tm_year = bcd2bin(spi_w8r8(spi, M41T94_REG_YEAR));
 	if ((hour & M41T94_BIT_CB) || !(hour & M41T94_BIT_CEB))
 		tm->tm_year += 100;
 
@@ -99,8 +96,7 @@ static int m41t94_read_time(struct device *dev, struct rtc_time *tm)
 		tm->tm_hour, tm->tm_mday,
 		tm->tm_mon, tm->tm_year, tm->tm_wday);
 
-	/* initial clock setting can be undefined */
-	return rtc_valid_tm(tm);
+	return 0;
 }
 
 static const struct rtc_class_ops m41t94_rtc_ops = {
@@ -110,7 +106,7 @@ static const struct rtc_class_ops m41t94_rtc_ops = {
 
 static struct spi_driver m41t94_driver;
 
-static int __devinit m41t94_probe(struct spi_device *spi)
+static int m41t94_probe(struct spi_device *spi)
 {
 	struct rtc_device *rtc;
 	int res;
@@ -124,22 +120,12 @@ static int __devinit m41t94_probe(struct spi_device *spi)
 		return res;
 	}
 
-	rtc = rtc_device_register(m41t94_driver.driver.name,
-		&spi->dev, &m41t94_rtc_ops, THIS_MODULE);
+	rtc = devm_rtc_device_register(&spi->dev, m41t94_driver.driver.name,
+					&m41t94_rtc_ops, THIS_MODULE);
 	if (IS_ERR(rtc))
 		return PTR_ERR(rtc);
 
-	dev_set_drvdata(&spi->dev, rtc);
-
-	return 0;
-}
-
-static int __devexit m41t94_remove(struct spi_device *spi)
-{
-	struct rtc_device *rtc = platform_get_drvdata(spi);
-
-	if (rtc)
-		rtc_device_unregister(rtc);
+	spi_set_drvdata(spi, rtc);
 
 	return 0;
 }
@@ -147,27 +133,13 @@ static int __devexit m41t94_remove(struct spi_device *spi)
 static struct spi_driver m41t94_driver = {
 	.driver = {
 		.name	= "rtc-m41t94",
-		.bus	= &spi_bus_type,
-		.owner	= THIS_MODULE,
 	},
 	.probe	= m41t94_probe,
-	.remove = __devexit_p(m41t94_remove),
 };
 
-static __init int m41t94_init(void)
-{
-	return spi_register_driver(&m41t94_driver);
-}
-
-module_init(m41t94_init);
-
-static __exit void m41t94_exit(void)
-{
-	spi_unregister_driver(&m41t94_driver);
-}
-
-module_exit(m41t94_exit);
+module_spi_driver(m41t94_driver);
 
 MODULE_AUTHOR("Kim B. Heino <Kim.Heino@bluegiga.com>");
 MODULE_DESCRIPTION("Driver for ST M41T94 SPI RTC");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("spi:rtc-m41t94");

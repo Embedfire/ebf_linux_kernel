@@ -1,24 +1,32 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * (c) Copyright 2006, 2007 Hewlett-Packard Development Company, L.P.
  *	Bjorn Helgaas <bjorn.helgaas@hp.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/compiler.h>
 #include <linux/module.h>
 #include <linux/efi.h>
 #include <linux/io.h>
+#include <linux/mm.h>
 #include <linux/vmalloc.h>
 #include <asm/io.h>
 #include <asm/meminit.h>
 
 static inline void __iomem *
-__ioremap (unsigned long phys_addr)
+__ioremap_uc(unsigned long phys_addr)
 {
 	return (void __iomem *) (__IA64_UNCACHED_OFFSET | phys_addr);
+}
+
+void __iomem *
+early_ioremap (unsigned long phys_addr, unsigned long size)
+{
+	u64 attr;
+	attr = kern_mem_attribute(phys_addr, size);
+	if (attr & EFI_MEMORY_WB)
+		return (void __iomem *) phys_to_virt(phys_addr);
+	return __ioremap_uc(phys_addr);
 }
 
 void __iomem *
@@ -35,13 +43,13 @@ ioremap (unsigned long phys_addr, unsigned long size)
 	/*
 	 * For things in kern_memmap, we must use the same attribute
 	 * as the rest of the kernel.  For more details, see
-	 * Documentation/ia64/aliasing.txt.
+	 * Documentation/ia64/aliasing.rst.
 	 */
 	attr = kern_mem_attribute(phys_addr, size);
 	if (attr & EFI_MEMORY_WB)
 		return (void __iomem *) phys_to_virt(phys_addr);
 	else if (attr & EFI_MEMORY_UC)
-		return __ioremap(phys_addr);
+		return __ioremap_uc(phys_addr);
 
 	/*
 	 * Some chipsets don't support UC access to memory.  If
@@ -87,19 +95,24 @@ ioremap (unsigned long phys_addr, unsigned long size)
 		return (void __iomem *) (offset + (char __iomem *)addr);
 	}
 
-	return __ioremap(phys_addr);
+	return __ioremap_uc(phys_addr);
 }
 EXPORT_SYMBOL(ioremap);
 
 void __iomem *
-ioremap_nocache (unsigned long phys_addr, unsigned long size)
+ioremap_uc(unsigned long phys_addr, unsigned long size)
 {
 	if (kern_mem_attribute(phys_addr, size) & EFI_MEMORY_WB)
 		return NULL;
 
-	return __ioremap(phys_addr);
+	return __ioremap_uc(phys_addr);
 }
-EXPORT_SYMBOL(ioremap_nocache);
+EXPORT_SYMBOL(ioremap_uc);
+
+void
+early_iounmap (volatile void __iomem *addr, unsigned long size)
+{
+}
 
 void
 iounmap (volatile void __iomem *addr)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * "security" table for IPv6
  *
@@ -10,13 +11,10 @@
  * Copyright (C) 1999 Paul `Rusty' Russell & Michael J. Neuling
  * Copyright (C) 2000-2004 Netfilter Core Team <coreteam <at> netfilter.org>
  * Copyright (C) 2008 Red Hat, Inc., James Morris <jmorris <at> redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/module.h>
 #include <linux/netfilter_ipv6/ip6_tables.h>
+#include <linux/slab.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("James Morris <jmorris <at> redhat.com>");
@@ -26,120 +24,60 @@ MODULE_DESCRIPTION("ip6tables security table, for MAC rules");
 				(1 << NF_INET_FORWARD) | \
 				(1 << NF_INET_LOCAL_OUT)
 
-static struct
-{
-	struct ip6t_replace repl;
-	struct ip6t_standard entries[3];
-	struct ip6t_error term;
-} initial_table __net_initdata = {
-	.repl = {
-		.name = "security",
-		.valid_hooks = SECURITY_VALID_HOOKS,
-		.num_entries = 4,
-		.size = sizeof(struct ip6t_standard) * 3 + sizeof(struct ip6t_error),
-		.hook_entry = {
-			[NF_INET_LOCAL_IN] 	= 0,
-			[NF_INET_FORWARD] 	= sizeof(struct ip6t_standard),
-			[NF_INET_LOCAL_OUT] 	= sizeof(struct ip6t_standard) * 2,
-		},
-		.underflow = {
-			[NF_INET_LOCAL_IN] 	= 0,
-			[NF_INET_FORWARD] 	= sizeof(struct ip6t_standard),
-			[NF_INET_LOCAL_OUT] 	= sizeof(struct ip6t_standard) * 2,
-		},
-	},
-	.entries = {
-		IP6T_STANDARD_INIT(NF_ACCEPT),	/* LOCAL_IN */
-		IP6T_STANDARD_INIT(NF_ACCEPT),	/* FORWARD */
-		IP6T_STANDARD_INIT(NF_ACCEPT),	/* LOCAL_OUT */
-	},
-	.term = IP6T_ERROR_INIT,		/* ERROR */
-};
+static int __net_init ip6table_security_table_init(struct net *net);
 
-static struct xt_table security_table = {
+static const struct xt_table security_table = {
 	.name		= "security",
 	.valid_hooks	= SECURITY_VALID_HOOKS,
-	.lock		= __RW_LOCK_UNLOCKED(security_table.lock),
 	.me		= THIS_MODULE,
-	.af		= AF_INET6,
+	.af		= NFPROTO_IPV6,
+	.priority	= NF_IP6_PRI_SECURITY,
+	.table_init     = ip6table_security_table_init,
 };
 
 static unsigned int
-ip6t_local_in_hook(unsigned int hook,
-		   struct sk_buff *skb,
-		   const struct net_device *in,
-		   const struct net_device *out,
-		   int (*okfn)(struct sk_buff *))
+ip6table_security_hook(void *priv, struct sk_buff *skb,
+		       const struct nf_hook_state *state)
 {
-	return ip6t_do_table(skb, hook, in, out,
-			     nf_local_in_net(in, out)->ipv6.ip6table_security);
+	return ip6t_do_table(skb, state, state->net->ipv6.ip6table_security);
 }
 
-static unsigned int
-ip6t_forward_hook(unsigned int hook,
-		  struct sk_buff *skb,
-		  const struct net_device *in,
-		  const struct net_device *out,
-		  int (*okfn)(struct sk_buff *))
+static struct nf_hook_ops *sectbl_ops __read_mostly;
+
+static int __net_init ip6table_security_table_init(struct net *net)
 {
-	return ip6t_do_table(skb, hook, in, out,
-			     nf_forward_net(in, out)->ipv6.ip6table_security);
+	struct ip6t_replace *repl;
+	int ret;
+
+	if (net->ipv6.ip6table_security)
+		return 0;
+
+	repl = ip6t_alloc_initial_table(&security_table);
+	if (repl == NULL)
+		return -ENOMEM;
+	ret = ip6t_register_table(net, &security_table, repl, sectbl_ops,
+				  &net->ipv6.ip6table_security);
+	kfree(repl);
+	return ret;
 }
 
-static unsigned int
-ip6t_local_out_hook(unsigned int hook,
-		    struct sk_buff *skb,
-		    const struct net_device *in,
-		    const struct net_device *out,
-		    int (*okfn)(struct sk_buff *))
+static void __net_exit ip6table_security_net_pre_exit(struct net *net)
 {
-	/* TBD: handle short packets via raw socket */
-	return ip6t_do_table(skb, hook, in, out,
-			     nf_local_out_net(in, out)->ipv6.ip6table_security);
-}
-
-static struct nf_hook_ops ip6t_ops[] __read_mostly = {
-	{
-		.hook		= ip6t_local_in_hook,
-		.owner		= THIS_MODULE,
-		.pf		= PF_INET6,
-		.hooknum	= NF_INET_LOCAL_IN,
-		.priority	= NF_IP6_PRI_SECURITY,
-	},
-	{
-		.hook		= ip6t_forward_hook,
-		.owner		= THIS_MODULE,
-		.pf		= PF_INET6,
-		.hooknum	= NF_INET_FORWARD,
-		.priority	= NF_IP6_PRI_SECURITY,
-	},
-	{
-		.hook		= ip6t_local_out_hook,
-		.owner		= THIS_MODULE,
-		.pf		= PF_INET6,
-		.hooknum	= NF_INET_LOCAL_OUT,
-		.priority	= NF_IP6_PRI_SECURITY,
-	},
-};
-
-static int __net_init ip6table_security_net_init(struct net *net)
-{
-	net->ipv6.ip6table_security =
-		ip6t_register_table(net, &security_table, &initial_table.repl);
-
-	if (IS_ERR(net->ipv6.ip6table_security))
-		return PTR_ERR(net->ipv6.ip6table_security);
-
-	return 0;
+	if (net->ipv6.ip6table_security)
+		ip6t_unregister_table_pre_exit(net, net->ipv6.ip6table_security,
+					       sectbl_ops);
 }
 
 static void __net_exit ip6table_security_net_exit(struct net *net)
 {
-	ip6t_unregister_table(net->ipv6.ip6table_security);
+	if (!net->ipv6.ip6table_security)
+		return;
+	ip6t_unregister_table_exit(net, net->ipv6.ip6table_security);
+	net->ipv6.ip6table_security = NULL;
 }
 
 static struct pernet_operations ip6table_security_net_ops = {
-	.init = ip6table_security_net_init,
+	.pre_exit = ip6table_security_net_pre_exit,
 	.exit = ip6table_security_net_exit,
 };
 
@@ -147,25 +85,28 @@ static int __init ip6table_security_init(void)
 {
 	int ret;
 
+	sectbl_ops = xt_hook_ops_alloc(&security_table, ip6table_security_hook);
+	if (IS_ERR(sectbl_ops))
+		return PTR_ERR(sectbl_ops);
+
 	ret = register_pernet_subsys(&ip6table_security_net_ops);
-	if (ret < 0)
+	if (ret < 0) {
+		kfree(sectbl_ops);
 		return ret;
+	}
 
-	ret = nf_register_hooks(ip6t_ops, ARRAY_SIZE(ip6t_ops));
-	if (ret < 0)
-		goto cleanup_table;
-
-	return ret;
-
-cleanup_table:
-	unregister_pernet_subsys(&ip6table_security_net_ops);
+	ret = ip6table_security_table_init(&init_net);
+	if (ret) {
+		unregister_pernet_subsys(&ip6table_security_net_ops);
+		kfree(sectbl_ops);
+	}
 	return ret;
 }
 
 static void __exit ip6table_security_fini(void)
 {
-	nf_unregister_hooks(ip6t_ops, ARRAY_SIZE(ip6t_ops));
 	unregister_pernet_subsys(&ip6table_security_net_ops);
+	kfree(sectbl_ops);
 }
 
 module_init(ip6table_security_init);

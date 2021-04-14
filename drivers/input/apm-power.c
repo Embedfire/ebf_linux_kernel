@@ -1,13 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Input Power Event -> APM Bridge
  *
  *  Copyright (c) 2007 Richard Purdie
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation.
- *
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/input.h>
@@ -23,8 +21,7 @@ static void system_power_event(unsigned int keycode)
 	switch (keycode) {
 	case KEY_SUSPEND:
 		apm_queue_event(APM_USER_SUSPEND);
-
-		printk(KERN_INFO "apm-power: Requesting system suspend...\n");
+		pr_info("Requesting system suspend...\n");
 		break;
 	default:
 		break;
@@ -32,7 +29,7 @@ static void system_power_event(unsigned int keycode)
 }
 
 static void apmpower_event(struct input_handle *handle, unsigned int type,
-		        unsigned int code, int value)
+			   unsigned int code, int value)
 {
 	/* only react on key down events */
 	if (value != 1)
@@ -65,18 +62,15 @@ static int apmpower_connect(struct input_handler *handler,
 
 	error = input_register_handle(handle);
 	if (error) {
-		printk(KERN_ERR
-			"apm-power: Failed to register input power handler, "
-			"error %d\n", error);
+		pr_err("Failed to register input power handler, error %d\n",
+		       error);
 		kfree(handle);
 		return error;
 	}
 
 	error = input_open_device(handle);
 	if (error) {
-		printk(KERN_ERR
-			"apm-power: Failed to open input power device, "
-			"error %d\n", error);
+		pr_err("Failed to open input power device, error %d\n", error);
 		input_unregister_handle(handle);
 		kfree(handle);
 		return error;

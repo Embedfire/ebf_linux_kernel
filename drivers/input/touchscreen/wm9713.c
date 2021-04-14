@@ -1,18 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * wm9713.c  --  Codec touch driver for Wolfson WM9713 AC97 Codec.
  *
  * Copyright 2003, 2004, 2005, 2006, 2007, 2008 Wolfson Microelectronics PLC.
- * Author: Liam Girdwood
- *         liam.girdwood@wolfsonmicro.com or linux@wolfsonmicro.com
+ * Author: Liam Girdwood <lrg@slimlogic.co.uk>
  * Parts Copyright : Ian Molton <spyro@f2s.com>
  *                   Andrew Zabolotny <zap@homelink.ru>
  *                   Russell King <rmk@arm.linux.org.uk>
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
- *
  */
 
 #include <linux/module.h>
@@ -42,7 +36,7 @@
  */
 static int rpu = 8;
 module_param(rpu, int, 0);
-MODULE_PARM_DESC(rpu, "Set internal pull up resitor for pen detect.");
+MODULE_PARM_DESC(rpu, "Set internal pull up resistor for pen detect.");
 
 /*
  * Set current used for pressure measurement.
@@ -262,8 +256,9 @@ static int wm9713_poll_sample(struct wm97xx *wm, int adcsel, int *sample)
 {
 	u16 dig1;
 	int timeout = 5 * delay;
+	bool wants_pen = adcsel & WM97XX_PEN_DOWN;
 
-	if (!wm->pen_probably_down) {
+	if (wants_pen && !wm->pen_probably_down) {
 		u16 data = wm97xx_reg_read(wm, AC97_WM97XX_DIGITISER_RD);
 		if (!(data & WM97XX_PEN_DOWN))
 			return RC_PENUP;
@@ -271,15 +266,14 @@ static int wm9713_poll_sample(struct wm97xx *wm, int adcsel, int *sample)
 	}
 
 	/* set up digitiser */
-	if (adcsel & 0x8000)
-		adcsel = 1 << ((adcsel & 0x7fff) + 3);
-
 	dig1 = wm97xx_reg_read(wm, AC97_WM9713_DIG1);
 	dig1 &= ~WM9713_ADCSEL_MASK;
+	/* WM97XX_ADCSEL_* channels need to be converted to WM9713 format */
+	dig1 |= 1 << ((adcsel & WM97XX_ADCSEL_MASK) >> 12);
 
 	if (wm->mach_ops && wm->mach_ops->pre_sample)
 		wm->mach_ops->pre_sample(adcsel);
-	wm97xx_reg_write(wm, AC97_WM9713_DIG1, dig1 | adcsel | WM9713_POLL);
+	wm97xx_reg_write(wm, AC97_WM9713_DIG1, dig1 | WM9713_POLL);
 
 	/* wait 3 AC97 time slots + delay for conversion */
 	poll_delay(delay);
@@ -305,13 +299,14 @@ static int wm9713_poll_sample(struct wm97xx *wm, int adcsel, int *sample)
 		wm->mach_ops->post_sample(adcsel);
 
 	/* check we have correct sample */
-	if ((*sample & WM97XX_ADCSRC_MASK) != ffs(adcsel >> 1) << 12) {
-		dev_dbg(wm->dev, "adc wrong sample, read %x got %x", adcsel,
-			*sample & WM97XX_ADCSRC_MASK);
+	if ((*sample ^ adcsel) & WM97XX_ADCSEL_MASK) {
+		dev_dbg(wm->dev, "adc wrong sample, wanted %x got %x",
+			adcsel & WM97XX_ADCSEL_MASK,
+			*sample & WM97XX_ADCSEL_MASK);
 		return RC_PENUP;
 	}
 
-	if (!(*sample & WM97XX_PEN_DOWN)) {
+	if (wants_pen && !(*sample & WM97XX_PEN_DOWN)) {
 		wm->pen_probably_down = 0;
 		return RC_PENUP;
 	}
@@ -401,14 +396,14 @@ static int wm9713_poll_touch(struct wm97xx *wm, struct wm97xx_data *data)
 		if (rc != RC_VALID)
 			return rc;
 	} else {
-		rc = wm9713_poll_sample(wm, WM9713_ADCSEL_X, &data->x);
+		rc = wm9713_poll_sample(wm, WM97XX_ADCSEL_X | WM97XX_PEN_DOWN, &data->x);
 		if (rc != RC_VALID)
 			return rc;
-		rc = wm9713_poll_sample(wm, WM9713_ADCSEL_Y, &data->y);
+		rc = wm9713_poll_sample(wm, WM97XX_ADCSEL_Y | WM97XX_PEN_DOWN, &data->y);
 		if (rc != RC_VALID)
 			return rc;
 		if (pil) {
-			rc = wm9713_poll_sample(wm, WM9713_ADCSEL_PRES,
+			rc = wm9713_poll_sample(wm, WM97XX_ADCSEL_PRES | WM97XX_PEN_DOWN,
 						&data->p);
 			if (rc != RC_VALID)
 				return rc;
@@ -432,7 +427,7 @@ static int wm9713_acc_enable(struct wm97xx *wm, int enable)
 	dig3 = wm->dig[2];
 
 	if (enable) {
-		/* continous mode */
+		/* continuous mode */
 		if (wm->mach_ops->acc_startup &&
 			(ret = wm->mach_ops->acc_startup(wm)) < 0)
 			return ret;
@@ -476,6 +471,6 @@ struct wm97xx_codec_drv wm9713_codec = {
 EXPORT_SYMBOL_GPL(wm9713_codec);
 
 /* Module information */
-MODULE_AUTHOR("Liam Girdwood <liam.girdwood@wolfsonmicro.com>");
+MODULE_AUTHOR("Liam Girdwood <lrg@slimlogic.co.uk>");
 MODULE_DESCRIPTION("WM9713 Touch Screen Driver");
 MODULE_LICENSE("GPL");

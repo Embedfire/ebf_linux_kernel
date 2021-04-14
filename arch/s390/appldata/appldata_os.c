@@ -1,13 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- * arch/s390/appldata/appldata_os.c
- *
  * Data gathering module for Linux-VM Monitor Stream, Stage 1.
  * Collects misc. OS related data (CPU utilization, running processes).
  *
- * Copyright (C) 2003,2006 IBM Corporation, IBM Deutschland Entwicklung GmbH.
+ * Copyright IBM Corp. 2003, 2006
  *
  * Author: Gerald Schaefer <gerald.schaefer@de.ibm.com>
  */
+
+#define KMSG_COMPONENT	"appldata"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -16,15 +18,12 @@
 #include <linux/kernel_stat.h>
 #include <linux/netdevice.h>
 #include <linux/sched.h>
+#include <linux/sched/loadavg.h>
+#include <linux/sched/stat.h>
 #include <asm/appldata.h>
 #include <asm/smp.h>
 
 #include "appldata.h"
-
-
-#define MY_PRINT_NAME	"appldata_os"		/* for debug messages, etc. */
-#define LOAD_INT(x) ((x) >> FSHIFT)
-#define LOAD_FRAC(x) LOAD_INT(((x) & (FIXED_1-1)) * 100)
 
 /*
  * OS data
@@ -33,10 +32,6 @@
  * the structure version (product ID, see appldata_base.c) needs to be changed
  * as well and all documentation and z/VM applications using it must be
  * updated.
- *
- * The record layout is documented in the Linux for zSeries Device Drivers
- * book:
- * http://oss.software.ibm.com/developerworks/opensource/linux390/index.shtml
  */
 struct appldata_os_per_cpu {
 	u32 per_cpu_user;	/* timer ticks spent in user mode   */
@@ -76,7 +71,7 @@ struct appldata_os_data {
 				   (waiting for I/O)               */
 
 	/* per cpu data */
-	struct appldata_os_per_cpu os_cpu[0];
+	struct appldata_os_per_cpu os_cpu[];
 } __attribute__((packed));
 
 static struct appldata_os_data *appldata_os_data;
@@ -113,29 +108,28 @@ static void appldata_get_os_data(void *data)
 	j = 0;
 	for_each_online_cpu(i) {
 		os_data->os_cpu[j].per_cpu_user =
-			cputime_to_jiffies(kstat_cpu(i).cpustat.user);
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_USER]);
 		os_data->os_cpu[j].per_cpu_nice =
-			cputime_to_jiffies(kstat_cpu(i).cpustat.nice);
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_NICE]);
 		os_data->os_cpu[j].per_cpu_system =
-			cputime_to_jiffies(kstat_cpu(i).cpustat.system);
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_SYSTEM]);
 		os_data->os_cpu[j].per_cpu_idle =
-			cputime_to_jiffies(kstat_cpu(i).cpustat.idle);
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_IDLE]);
 		os_data->os_cpu[j].per_cpu_irq =
-			cputime_to_jiffies(kstat_cpu(i).cpustat.irq);
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_IRQ]);
 		os_data->os_cpu[j].per_cpu_softirq =
-			cputime_to_jiffies(kstat_cpu(i).cpustat.softirq);
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_SOFTIRQ]);
 		os_data->os_cpu[j].per_cpu_iowait =
-			cputime_to_jiffies(kstat_cpu(i).cpustat.iowait);
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_IOWAIT]);
 		os_data->os_cpu[j].per_cpu_steal =
-			cputime_to_jiffies(kstat_cpu(i).cpustat.steal);
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_STEAL]);
 		os_data->os_cpu[j].cpu_id = i;
 		j++;
 	}
 
 	os_data->nr_cpus = j;
 
-	new_size = sizeof(struct appldata_os_data) +
-		   (os_data->nr_cpus * sizeof(struct appldata_os_per_cpu));
+	new_size = struct_size(os_data, os_cpu, os_data->nr_cpus);
 	if (ops.size != new_size) {
 		if (ops.active) {
 			rc = appldata_diag(APPLDATA_RECORD_OS_ID,
@@ -143,25 +137,20 @@ static void appldata_get_os_data(void *data)
 					   (unsigned long) ops.data, new_size,
 					   ops.mod_lvl);
 			if (rc != 0)
-				P_ERROR("os: START NEW DIAG 0xDC failed, "
-					"return code: %d, new size = %i\n", rc,
-					new_size);
+				pr_err("Starting a new OS data collection "
+				       "failed with rc=%d\n", rc);
 
 			rc = appldata_diag(APPLDATA_RECORD_OS_ID,
 					   APPLDATA_STOP_REC,
 					   (unsigned long) ops.data, ops.size,
 					   ops.mod_lvl);
 			if (rc != 0)
-				P_ERROR("os: STOP OLD DIAG 0xDC failed, "
-					"return code: %d, old size = %i\n", rc,
-					ops.size);
-			else
-				P_INFO("os: old record size = %i stopped\n",
-					ops.size);
+				pr_err("Stopping a faulty OS data "
+				       "collection failed with rc=%d\n", rc);
 		}
 		ops.size = new_size;
 	}
-	os_data->timestamp = get_clock();
+	os_data->timestamp = get_tod_clock();
 	os_data->sync_count_2++;
 }
 
@@ -175,16 +164,15 @@ static int __init appldata_os_init(void)
 {
 	int rc, max_size;
 
-	max_size = sizeof(struct appldata_os_data) +
-		   (NR_CPUS * sizeof(struct appldata_os_per_cpu));
+	max_size = struct_size(appldata_os_data, os_cpu, num_possible_cpus());
 	if (max_size > APPLDATA_MAX_REC_SIZE) {
-		P_ERROR("Max. size of OS record = %i, bigger than maximum "
-			"record size (%i)\n", max_size, APPLDATA_MAX_REC_SIZE);
+		pr_err("Maximum OS record size %i exceeds the maximum "
+		       "record size %i\n", max_size, APPLDATA_MAX_REC_SIZE);
 		rc = -ENOMEM;
 		goto out;
 	}
 
-	appldata_os_data = kzalloc(max_size, GFP_DMA);
+	appldata_os_data = kzalloc(max_size, GFP_KERNEL | GFP_DMA);
 	if (appldata_os_data == NULL) {
 		rc = -ENOMEM;
 		goto out;

@@ -187,7 +187,7 @@
 #define S_IO		BIT(1)    /* Input/Output line from SCSI bus */
 #define S_CD		BIT(2)    /* Command/Data line from SCSI bus */
 #define S_BUSY		BIT(3)    /* Busy line from SCSI bus         */
-#define S_ACK		BIT(4)    /* Acknowlege line from SCSI bus   */
+#define S_ACK		BIT(4)    /* Acknowledge line from SCSI bus  */
 #define S_REQUEST	BIT(5)    /* Request line from SCSI bus      */
 #define S_SELECT	BIT(6)	  /*                                 */
 #define S_ATN		BIT(7)	  /*                                 */
@@ -224,7 +224,6 @@
 typedef struct scsi_info_t {
 	struct pcmcia_device	*p_dev;
 	struct Scsi_Host      *host;
-	dev_node_t             node;
 	int                    stop;
 } scsi_info_t;
 
@@ -293,15 +292,9 @@ static int        nsp_cs_config (struct pcmcia_device *link);
 /* Linux SCSI subsystem specific functions */
 static struct Scsi_Host *nsp_detect     (struct scsi_host_template *sht);
 static const  char      *nsp_info       (struct Scsi_Host *shpnt);
-static        int        nsp_proc_info  (
-	                                 struct Scsi_Host *host,
-					 char   *buffer,
-					 char  **start,
-					 off_t   offset,
-					 int     length,
-					 int     inout);
-static int nsp_queuecommand(struct scsi_cmnd *SCpnt,
-			    void (* done)(struct scsi_cmnd *SCpnt));
+static        int        nsp_show_info  (struct seq_file *m,
+	                                 struct Scsi_Host *host);
+static int nsp_queuecommand(struct Scsi_Host *h, struct scsi_cmnd *SCpnt);
 
 /* Error handler */
 /*static int nsp_eh_abort       (struct scsi_cmnd *SCpnt);*/
@@ -332,10 +325,6 @@ static struct Scsi_Host *nsp_detect(struct scsi_host_template *sht);
 
 /* Interrupt handler */
 //static irqreturn_t nspintr(int irq, void *dev_id);
-
-/* Module entry point*/
-static int  __init nsp_cs_init(void);
-static void __exit nsp_cs_exit(void);
 
 /* Debug */
 #ifdef NSP_DEBUG

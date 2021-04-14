@@ -1,27 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Interrupt handing routines for NEC VR4100 series.
  *
- *  Copyright (C) 2005-2007  Yoichi Yuasa <yoichi_yuasa@tripeaks.co.jp>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *  Copyright (C) 2005-2007  Yoichi Yuasa <yuasa@linux-mips.org>
  */
+#include <linux/export.h>
 #include <linux/interrupt.h>
-#include <linux/module.h>
+#include <linux/irq.h>
 
 #include <asm/irq_cpu.h>
-#include <asm/system.h>
 #include <asm/vr41xx/irq.h>
 
 typedef struct irq_cascade {
@@ -29,12 +16,6 @@ typedef struct irq_cascade {
 } irq_cascade_t;
 
 static irq_cascade_t irq_cascade[NR_IRQS] __cacheline_aligned;
-
-static struct irqaction cascade_irqaction = {
-	.handler	= no_action,
-	.mask		= CPU_MASK_NONE,
-	.name		= "cascade",
-};
 
 int cascade_irq(unsigned int irq, int (*get_irq)(unsigned int))
 {
@@ -49,7 +30,8 @@ int cascade_irq(unsigned int irq, int (*get_irq)(unsigned int))
 	irq_cascade[irq].get_irq = get_irq;
 
 	if (get_irq != NULL) {
-		retval = setup_irq(irq, &cascade_irqaction);
+		retval = request_irq(irq, no_action, IRQF_NO_THREAD,
+				     "cascade", NULL);
 		if (retval < 0)
 			irq_cascade[irq].get_irq = NULL;
 	}
@@ -62,7 +44,6 @@ EXPORT_SYMBOL_GPL(cascade_irq);
 static void irq_dispatch(unsigned int irq)
 {
 	irq_cascade_t *cascade;
-	struct irq_desc *desc;
 
 	if (irq >= NR_IRQS) {
 		atomic_inc(&irq_err_count);
@@ -71,14 +52,16 @@ static void irq_dispatch(unsigned int irq)
 
 	cascade = irq_cascade + irq;
 	if (cascade->get_irq != NULL) {
-		unsigned int source_irq = irq;
+		struct irq_desc *desc = irq_to_desc(irq);
+		struct irq_data *idata = irq_desc_get_irq_data(desc);
+		struct irq_chip *chip = irq_desc_get_chip(desc);
 		int ret;
-		desc = irq_desc + source_irq;
-		if (desc->chip->mask_ack)
-			desc->chip->mask_ack(source_irq);
+
+		if (chip->irq_mask_ack)
+			chip->irq_mask_ack(idata);
 		else {
-			desc->chip->mask(source_irq);
-			desc->chip->ack(source_irq);
+			chip->irq_mask(idata);
+			chip->irq_ack(idata);
 		}
 		ret = cascade->get_irq(irq);
 		irq = ret;
@@ -86,8 +69,8 @@ static void irq_dispatch(unsigned int irq)
 			atomic_inc(&irq_err_count);
 		else
 			irq_dispatch(irq);
-		if (!(desc->status & IRQ_DISABLED) && desc->chip->unmask)
-			desc->chip->unmask(source_irq);
+		if (!irqd_irq_disabled(idata) && chip->irq_unmask)
+			chip->irq_unmask(idata);
 	} else
 		do_IRQ(irq);
 }

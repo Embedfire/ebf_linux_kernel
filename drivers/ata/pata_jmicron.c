@@ -1,16 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *    pata_jmicron.c - JMicron ATA driver for non AHCI mode. This drives the
  *			PATA port of the controller. The SATA ports are
  *			driven by AHCI in the usual configuration although
  *			this driver can handle other setups if we need it.
  *
- *	(c) 2006 Red Hat  <alan@redhat.com>
+ *	(c) 2006 Red Hat
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -136,15 +136,15 @@ static int jmicron_init_one (struct pci_dev *pdev, const struct pci_device_id *i
 	static const struct ata_port_info info = {
 		.flags	= ATA_FLAG_SLAVE_POSS,
 
-		.pio_mask	= 0x1f,
-		.mwdma_mask	= 0x07,
+		.pio_mask	= ATA_PIO4,
+		.mwdma_mask	= ATA_MWDMA2,
 		.udma_mask 	= ATA_UDMA5,
 
 		.port_ops	= &jmicron_ops,
 	};
 	const struct ata_port_info *ppi[] = { &info, NULL };
 
-	return ata_pci_sff_init_one(pdev, ppi, &jmicron_sht, NULL);
+	return ata_pci_bmdma_init_one(pdev, ppi, &jmicron_sht, NULL, 0);
 }
 
 static const struct pci_device_id jmicron_pci_tbl[] = {
@@ -158,24 +158,13 @@ static struct pci_driver jmicron_pci_driver = {
 	.id_table		= jmicron_pci_tbl,
 	.probe			= jmicron_init_one,
 	.remove			= ata_pci_remove_one,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	.suspend		= ata_pci_device_suspend,
 	.resume			= ata_pci_device_resume,
 #endif
 };
 
-static int __init jmicron_init(void)
-{
-	return pci_register_driver(&jmicron_pci_driver);
-}
-
-static void __exit jmicron_exit(void)
-{
-	pci_unregister_driver(&jmicron_pci_driver);
-}
-
-module_init(jmicron_init);
-module_exit(jmicron_exit);
+module_pci_driver(jmicron_pci_driver);
 
 MODULE_AUTHOR("Alan Cox");
 MODULE_DESCRIPTION("SCSI low-level driver for Jmicron PATA ports");

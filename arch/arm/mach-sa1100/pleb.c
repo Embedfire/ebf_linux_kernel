@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/arm/mach-sa1100/pleb.c
  */
@@ -6,20 +7,20 @@
 #include <linux/kernel.h>
 #include <linux/tty.h>
 #include <linux/ioport.h>
+#include <linux/platform_data/sa11x0-serial.h>
 #include <linux/platform_device.h>
 #include <linux/irq.h>
-
+#include <linux/io.h>
 #include <linux/mtd/partitions.h>
+#include <linux/smc91x.h>
 
 #include <mach/hardware.h>
-#include <asm/io.h>
 #include <asm/setup.h>
 #include <asm/mach-types.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 #include <asm/mach/flash.h>
-#include <asm/mach/serial_sa1100.h>
 #include <mach/irqs.h>
 
 #include "generic.h"
@@ -38,26 +39,24 @@
 #define IRQ_GPIO_ETH0_IRQ	IRQ_GPIO21
 
 static struct resource smc91x_resources[] = {
-	[0] = {
-		.start	=  PLEB_ETH0_P,
-		.end	=  PLEB_ETH0_P | 0x03ffffff,
-		.flags	= IORESOURCE_MEM,
-	},
+	[0] = DEFINE_RES_MEM(PLEB_ETH0_P, 0x04000000),
 #if 0 /* Autoprobe instead, to get rising/falling edge characteristic right */
-	[1] = {
-		.start	= IRQ_GPIO_ETH0_IRQ,
-		.end	= IRQ_GPIO_ETH0_IRQ,
-		.flags	= IORESOURCE_IRQ,
-	},
+	[1] = DEFINE_RES_IRQ(IRQ_GPIO_ETH0_IRQ),
 #endif
 };
 
+static struct smc91x_platdata smc91x_platdata = {
+	.flags = SMC91X_USE_16BIT | SMC91X_USE_8BIT | SMC91X_NOWAIT,
+};
 
 static struct platform_device smc91x_device = {
 	.name		= "smc91x",
 	.id		= 0,
 	.num_resources	= ARRAY_SIZE(smc91x_resources),
 	.resource	= smc91x_resources,
+	.dev = {
+		.platform_data  = &smc91x_platdata,
+	},
 };
 
 static struct platform_device *devices[] __initdata = {
@@ -71,31 +70,23 @@ static struct platform_device *devices[] __initdata = {
  * the two SA1100 lowest chip select outputs.
  */
 static struct resource pleb_flash_resources[] = {
-	[0] = {
-		.start = SA1100_CS0_PHYS,
-		.end   = SA1100_CS0_PHYS + SZ_8M - 1,
-		.flags = IORESOURCE_MEM,
-	},
-	[1] = {
-		.start = SA1100_CS1_PHYS,
-		.end   = SA1100_CS1_PHYS + SZ_8M - 1,
-		.flags = IORESOURCE_MEM,
-	}
+	[0] = DEFINE_RES_MEM(SA1100_CS0_PHYS, SZ_8M),
+	[1] = DEFINE_RES_MEM(SA1100_CS1_PHYS, SZ_8M),
 };
 
 
 static struct mtd_partition pleb_partitions[] = {
 	{
 		.name		= "blob",
-		.offset 	= 0,
+		.offset		= 0,
 		.size		= 0x00020000,
 	}, {
 		.name		= "kernel",
-		.offset 	= MTDPART_OFS_APPEND,
+		.offset		= MTDPART_OFS_APPEND,
 		.size		= 0x000e0000,
 	}, {
 		.name		= "rootfs",
-		.offset 	= MTDPART_OFS_APPEND,
+		.offset		= MTDPART_OFS_APPEND,
 		.size		= 0x00300000,
 	}
 };
@@ -110,7 +101,7 @@ static struct flash_platform_data pleb_flash_data = {
 
 static void __init pleb_init(void)
 {
-	sa11x0_set_flash_data(&pleb_flash_data, pleb_flash_resources,
+	sa11x0_register_mtd(&pleb_flash_data, pleb_flash_resources,
 			      ARRAY_SIZE(pleb_flash_resources));
 
 
@@ -123,12 +114,12 @@ static void __init pleb_map_io(void)
 	sa1100_map_io();
 
 	sa1100_register_uart(0, 3);
-        sa1100_register_uart(1, 1);
+	sa1100_register_uart(1, 1);
 
-        GAFR |= (GPIO_UART_TXD | GPIO_UART_RXD);
-        GPDR |= GPIO_UART_TXD;
-        GPDR &= ~GPIO_UART_RXD;
-        PPAR |= PPAR_UPR;
+	GAFR |= (GPIO_UART_TXD | GPIO_UART_RXD);
+	GPDR |= GPIO_UART_TXD;
+	GPDR &= ~GPIO_UART_RXD;
+	PPAR |= PPAR_UPR;
 
 	/*
 	 * Fix expansion memory timing for network card
@@ -143,14 +134,15 @@ static void __init pleb_map_io(void)
 
 	GPDR &= ~GPIO_ETH0_IRQ;
 
-	set_irq_type(GPIO_ETH0_IRQ, IRQ_TYPE_EDGE_FALLING);
+	irq_set_irq_type(GPIO_ETH0_IRQ, IRQ_TYPE_EDGE_FALLING);
 }
 
 MACHINE_START(PLEB, "PLEB")
-	.phys_io	= 0x80000000,
-	.io_pg_offst	= ((0xf8000000) >> 18) & 0xfffc,
 	.map_io		= pleb_map_io,
+	.nr_irqs	= SA1100_NR_IRQS,
 	.init_irq	= sa1100_init_irq,
-	.timer		= &sa1100_timer,
+	.init_time	= sa1100_timer_init,
 	.init_machine   = pleb_init,
+	.init_late	= sa11x0_init_late,
+	.restart	= sa11x0_restart,
 MACHINE_END

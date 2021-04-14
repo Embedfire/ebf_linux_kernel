@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * cistpl.h
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * The initial developer of the original code is David A. Hinds
  * <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
@@ -14,6 +11,8 @@
 
 #ifndef _LINUX_CISTPL_H
 #define _LINUX_CISTPL_H
+
+typedef unsigned char cisdata_t;
 
 #define CISTPL_NULL		0x00
 #define CISTPL_DEVICE		0x01
@@ -162,7 +161,7 @@ typedef struct cistpl_funcid_t {
 
 typedef struct cistpl_funce_t {
     u_char	type;
-    u_char	data[0];
+    u_char	data[];
 } cistpl_funce_t;
 
 /*======================================================================
@@ -256,7 +255,7 @@ typedef struct cistpl_data_serv_t {
     u_char	escape;
     u_char	encrypt;
     u_char	misc_features;
-    u_char	ccitt_code[0];
+    u_char	ccitt_code[];
 } cistpl_data_serv_t;
 
 typedef struct cistpl_fax_serv_t {
@@ -266,7 +265,7 @@ typedef struct cistpl_fax_serv_t {
     u_char	encrypt;
     u_char	features_0;
     u_char	features_1;
-    u_char	ccitt_code[0];
+    u_char	ccitt_code[];
 } cistpl_fax_serv_t;
 
 typedef struct cistpl_voice_serv_t {
@@ -573,44 +572,6 @@ typedef struct tuple_t {
 #define TUPLE_RETURN_LINK	0x01
 #define TUPLE_RETURN_COMMON	0x02
 
-/* For ValidateCIS */
-typedef struct cisinfo_t {
-    u_int	Chains;
-} cisinfo_t;
-
 #define CISTPL_MAX_CIS_SIZE	0x200
-
-/* For ReplaceCIS */
-typedef struct cisdump_t {
-    u_int	Length;
-    cisdata_t	Data[CISTPL_MAX_CIS_SIZE];
-} cisdump_t;
-
-
-int pcmcia_replace_cis(struct pcmcia_socket *s, cisdump_t *cis);
-
-/* don't use outside of PCMCIA core yet */
-int pccard_get_next_tuple(struct pcmcia_socket *s, unsigned int func, tuple_t *tuple);
-int pccard_get_first_tuple(struct pcmcia_socket *s, unsigned int function, tuple_t *tuple);
-int pccard_get_tuple_data(struct pcmcia_socket *s, tuple_t *tuple);
-int pccard_parse_tuple(tuple_t *tuple, cisparse_t *parse);
-
-int pccard_validate_cis(struct pcmcia_socket *s, unsigned int function, unsigned int *count);
-
-/* ... but use these wrappers instead */
-#define pcmcia_get_first_tuple(p_dev, tuple) \
-		pccard_get_first_tuple(p_dev->socket, p_dev->func, tuple)
-
-#define pcmcia_get_next_tuple(p_dev, tuple) \
-		pccard_get_next_tuple(p_dev->socket, p_dev->func, tuple)
-
-#define pcmcia_get_tuple_data(p_dev, tuple) \
-		pccard_get_tuple_data(p_dev->socket, tuple)
-
-#define pcmcia_parse_tuple(p_dev, tuple, parse) \
-		pccard_parse_tuple(tuple, parse)
-
-#define pcmcia_validate_cis(p_dev, info) \
-		pccard_validate_cis(p_dev->socket, p_dev->func, info)
 
 #endif /* LINUX_CISTPL_H */

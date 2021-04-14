@@ -1,14 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Maple (970 eval board) setup code
  *
  *  (c) Copyright 2004 Benjamin Herrenschmidt (benh@kernel.crashing.org),
  *                     IBM Corp. 
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
- *
  */
 
 #undef DEBUG
@@ -17,13 +12,12 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/export.h>
 #include <linux/mm.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
 #include <linux/tty.h>
 #include <linux/string.h>
 #include <linux/delay.h>
@@ -43,15 +37,12 @@
 #include <linux/smp.h>
 #include <linux/bitops.h>
 #include <linux/of_device.h>
-#include <linux/lmb.h>
+#include <linux/memblock.h>
 
 #include <asm/processor.h>
 #include <asm/sections.h>
 #include <asm/prom.h>
-#include <asm/system.h>
-#include <asm/pgtable.h>
 #include <asm/io.h>
-#include <asm/kexec.h>
 #include <asm/pci-bridge.h>
 #include <asm/iommu.h>
 #include <asm/machdep.h>
@@ -97,7 +88,7 @@ static unsigned long maple_find_nvram_base(void)
 	return result;
 }
 
-static void maple_restart(char *cmd)
+static void __noreturn maple_restart(char *cmd)
 {
 	unsigned int maple_nvram_base;
 	const unsigned int *maple_nvram_offset, *maple_nvram_command;
@@ -122,9 +113,10 @@ static void maple_restart(char *cmd)
 	for (;;) ;
  fail:
 	printk(KERN_EMERG "Maple: Manual Restart Required\n");
+	for (;;) ;
 }
 
-static void maple_power_off(void)
+static void __noreturn maple_power_off(void)
 {
 	unsigned int maple_nvram_base;
 	const unsigned int *maple_nvram_offset, *maple_nvram_command;
@@ -149,15 +141,16 @@ static void maple_power_off(void)
 	for (;;) ;
  fail:
 	printk(KERN_EMERG "Maple: Manual Power-Down Required\n");
+	for (;;) ;
 }
 
-static void maple_halt(void)
+static void __noreturn maple_halt(void)
 {
 	maple_power_off();
 }
 
 #ifdef CONFIG_SMP
-struct smp_ops_t maple_smp_ops = {
+static struct smp_ops_t maple_smp_ops = {
 	.probe		= smp_mpic_probe,
 	.message_pass	= smp_mpic_message_pass,
 	.kick_cpu	= smp_generic_kick_cpu,
@@ -172,12 +165,12 @@ static void __init maple_use_rtas_reboot_and_halt_if_present(void)
 	if (rtas_service_present("system-reboot") &&
 	    rtas_service_present("power-off")) {
 		ppc_md.restart = rtas_restart;
-		ppc_md.power_off = rtas_power_off;
+		pm_power_off = rtas_power_off;
 		ppc_md.halt = rtas_halt;
 	}
 }
 
-void __init maple_setup_arch(void)
+static void __init maple_setup_arch(void)
 {
 	/* init to some ~sane value until calibrate_delay() runs */
 	loops_per_jiffy = 50000000;
@@ -189,26 +182,11 @@ void __init maple_setup_arch(void)
 	/* Lookup PCI hosts */
        	maple_pci_init();
 
-#ifdef CONFIG_DUMMY_CONSOLE
-	conswitchp = &dummy_con;
-#endif
 	maple_use_rtas_reboot_and_halt_if_present();
 
 	printk(KERN_DEBUG "Using native/NAP idle loop\n");
 
 	mmio_nvram_init();
-}
-
-/* 
- * Early initialization.
- */
-static void __init maple_init_early(void)
-{
-	DBG(" -> maple_init_early\n");
-
-	iommu_init_early_dart();
-
-	DBG(" <- maple_init_early\n");
 }
 
 /*
@@ -223,7 +201,7 @@ static void __init maple_init_IRQ(void)
 	unsigned long openpic_addr = 0;
 	int naddr, n, i, opplen, has_isus = 0;
 	struct mpic *mpic;
-	unsigned int flags = MPIC_PRIMARY;
+	unsigned int flags = 0;
 
 	/* Locate MPIC in the device-tree. Note that there is a bug
 	 * in Maple device-tree where the type of the controller is
@@ -250,7 +228,7 @@ static void __init maple_init_IRQ(void)
 	root = of_find_node_by_path("/");
 	naddr = of_n_addr_cells(root);
 	opprop = of_get_property(root, "platform-open-pic", &opplen);
-	if (opprop != 0) {
+	if (opprop) {
 		openpic_addr = of_read_number(opprop, naddr);
 		has_isus = (opplen > naddr);
 		printk(KERN_DEBUG "OpenPIC addr: %lx, has ISUs: %d\n",
@@ -264,7 +242,7 @@ static void __init maple_init_IRQ(void)
 		flags |= MPIC_BIG_ENDIAN;
 
 	/* XXX Maple specific bits */
-	flags |= MPIC_U3_HT_IRQS | MPIC_WANTS_RESET;
+	flags |= MPIC_U3_HT_IRQS;
 	/* All U3/U4 are big-endian, older SLOF firmware doesn't encode this */
 	flags |= MPIC_BIG_ENDIAN;
 
@@ -301,44 +279,87 @@ static void __init maple_progress(char *s, unsigned short hex)
  */
 static int __init maple_probe(void)
 {
-	unsigned long root = of_get_flat_dt_root();
-
-	if (!of_flat_dt_is_compatible(root, "Momentum,Maple") &&
-	    !of_flat_dt_is_compatible(root, "Momentum,Apache"))
+	if (!of_machine_is_compatible("Momentum,Maple") &&
+	    !of_machine_is_compatible("Momentum,Apache"))
 		return 0;
-	/*
-	 * On U3, the DART (iommu) must be allocated now since it
-	 * has an impact on htab_initialize (due to the large page it
-	 * occupies having to be broken up so the DART itself is not
-	 * part of the cacheable linar mapping
-	 */
-	alloc_dart_table();
 
-	hpte_init_native();
+	pm_power_off = maple_power_off;
+
+	iommu_init_early_dart(&maple_pci_controller_ops);
 
 	return 1;
 }
+
+#ifdef CONFIG_EDAC
+/*
+ * Register a platform device for CPC925 memory controller on
+ * all boards with U3H (CPC925) bridge.
+ */
+static int __init maple_cpc925_edac_setup(void)
+{
+	struct platform_device *pdev;
+	struct device_node *np = NULL;
+	struct resource r;
+	int ret;
+	volatile void __iomem *mem;
+	u32 rev;
+
+	np = of_find_node_by_type(NULL, "memory-controller");
+	if (!np) {
+		printk(KERN_ERR "%s: Unable to find memory-controller node\n",
+			__func__);
+		return -ENODEV;
+	}
+
+	ret = of_address_to_resource(np, 0, &r);
+	of_node_put(np);
+
+	if (ret < 0) {
+		printk(KERN_ERR "%s: Unable to get memory-controller reg\n",
+			__func__);
+		return -ENODEV;
+	}
+
+	mem = ioremap(r.start, resource_size(&r));
+	if (!mem) {
+		printk(KERN_ERR "%s: Unable to map memory-controller memory\n",
+				__func__);
+		return -ENOMEM;
+	}
+
+	rev = __raw_readl(mem);
+	iounmap(mem);
+
+	if (rev < 0x34 || rev > 0x3f) { /* U3H */
+		printk(KERN_ERR "%s: Non-CPC925(U3H) bridge revision: %02x\n",
+			__func__, rev);
+		return 0;
+	}
+
+	pdev = platform_device_register_simple("cpc925_edac", 0, &r, 1);
+	if (IS_ERR(pdev))
+		return PTR_ERR(pdev);
+
+	printk(KERN_INFO "%s: CPC925 platform device created\n", __func__);
+
+	return 0;
+}
+machine_device_initcall(maple, maple_cpc925_edac_setup);
+#endif
 
 define_machine(maple) {
 	.name			= "Maple",
 	.probe			= maple_probe,
 	.setup_arch		= maple_setup_arch,
-	.init_early		= maple_init_early,
 	.init_IRQ		= maple_init_IRQ,
 	.pci_irq_fixup		= maple_pci_irq_fixup,
 	.pci_get_legacy_ide_irq	= maple_pci_get_legacy_ide_irq,
 	.restart		= maple_restart,
-	.power_off		= maple_power_off,
 	.halt			= maple_halt,
-       	.get_boot_time		= maple_get_boot_time,
-       	.set_rtc_time		= maple_set_rtc_time,
-       	.get_rtc_time		= maple_get_rtc_time,
-      	.calibrate_decr		= generic_calibrate_decr,
+	.get_boot_time		= maple_get_boot_time,
+	.set_rtc_time		= maple_set_rtc_time,
+	.get_rtc_time		= maple_get_rtc_time,
+	.calibrate_decr		= generic_calibrate_decr,
 	.progress		= maple_progress,
 	.power_save		= power4_idle,
-#ifdef CONFIG_KEXEC
-	.machine_kexec		= default_machine_kexec,
-	.machine_kexec_prepare	= default_machine_kexec_prepare,
-	.machine_crash_shutdown	= default_machine_crash_shutdown,
-#endif
 };

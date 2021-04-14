@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/ia64/kernel/crash.c
  *
@@ -11,7 +12,7 @@
 #include <linux/smp.h>
 #include <linux/delay.h>
 #include <linux/crash_dump.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/kexec.h>
 #include <linux/elfcore.h>
 #include <linux/sysctl.h>
@@ -23,30 +24,9 @@
 int kdump_status[NR_CPUS];
 static atomic_t kdump_cpu_frozen;
 atomic_t kdump_in_progress;
+static int kdump_freeze_monarch;
 static int kdump_on_init = 1;
 static int kdump_on_fatal_mca = 1;
-
-static inline Elf64_Word
-*append_elf_note(Elf64_Word *buf, char *name, unsigned type, void *data,
-		size_t data_len)
-{
-	struct elf_note *note = (struct elf_note *)buf;
-	note->n_namesz = strlen(name) + 1;
-	note->n_descsz = data_len;
-	note->n_type   = type;
-	buf += (sizeof(*note) + 3)/4;
-	memcpy(buf, name, note->n_namesz);
-	buf += (note->n_namesz + 3)/4;
-	memcpy(buf, data, data_len);
-	buf += (data_len + 3)/4;
-	return buf;
-}
-
-static void
-final_note(void *buf)
-{
-	memset(buf, 0, sizeof(struct elf_note));
-}
 
 extern void ia64_dump_cpu_regs(void *);
 
@@ -108,10 +88,38 @@ machine_crash_shutdown(struct pt_regs *pt)
 	 */
 	kexec_disable_iosapic();
 #ifdef CONFIG_SMP
+	/*
+	 * If kdump_on_init is set and an INIT is asserted here, kdump will
+	 * be started again via INIT monarch.
+	 */
+	local_irq_disable();
+	ia64_set_psr_mc();	/* mask MCA/INIT */
+	if (atomic_inc_return(&kdump_in_progress) != 1)
+		unw_init_running(kdump_cpu_freeze, NULL);
+
+	/*
+	 * Now this cpu is ready for kdump.
+	 * Stop all others by IPI or INIT.  They could receive INIT from
+	 * outside and might be INIT monarch, but only thing they have to
+	 * do is falling into kdump_cpu_freeze().
+	 *
+	 * If an INIT is asserted here:
+	 * - All receivers might be slaves, since some of cpus could already
+	 *   be frozen and INIT might be masked on monarch.  In this case,
+	 *   all slaves will be frozen soon since kdump_in_progress will let
+	 *   them into DIE_INIT_SLAVE_LEAVE.
+	 * - One might be a monarch, but INIT rendezvous will fail since
+	 *   at least this cpu already have INIT masked so it never join
+	 *   to the rendezvous.  In this case, all slaves and monarch will
+	 *   be frozen soon with no wait since the INIT rendezvous is skipped
+	 *   by kdump_in_progress.
+	 */
 	kdump_smp_send_stop();
 	/* not all cpu response to IPI, send INIT to freeze them */
-	if (kdump_wait_cpu_freeze() && kdump_on_init) 	{
+	if (kdump_wait_cpu_freeze()) {
 		kdump_smp_send_init();
+		/* wait again, don't go ahead if possible */
+		kdump_wait_cpu_freeze();
 	}
 #endif
 }
@@ -129,17 +137,17 @@ void
 kdump_cpu_freeze(struct unw_frame_info *info, void *arg)
 {
 	int cpuid;
+
 	local_irq_disable();
 	cpuid = smp_processor_id();
 	crash_save_this_cpu();
 	current->thread.ksp = (__u64)info->sw - 16;
+
+	ia64_set_psr_mc();	/* mask MCA/INIT and stop reentrance */
+
 	atomic_inc(&kdump_cpu_frozen);
 	kdump_status[cpuid] = 1;
 	mb();
-#ifdef CONFIG_HOTPLUG_CPU
-	if (cpuid != 0)
-		ia64_jump_to_sal(&sal_boot_rendez_state[cpuid]);
-#endif
 	for (;;)
 		cpu_relax();
 }
@@ -149,6 +157,20 @@ kdump_init_notifier(struct notifier_block *self, unsigned long val, void *data)
 {
 	struct ia64_mca_notify_die *nd;
 	struct die_args *args = data;
+
+	if (atomic_read(&kdump_in_progress)) {
+		switch (val) {
+		case DIE_INIT_MONARCH_LEAVE:
+			if (!kdump_freeze_monarch)
+				break;
+			fallthrough;
+		case DIE_INIT_SLAVE_LEAVE:
+		case DIE_INIT_MONARCH_ENTER:
+		case DIE_MCA_RENDZVOUS_LEAVE:
+			unw_init_running(kdump_cpu_freeze, NULL);
+			break;
+		}
+	}
 
 	if (!kdump_on_init && !kdump_on_fatal_mca)
 		return NOTIFY_DONE;
@@ -162,43 +184,31 @@ kdump_init_notifier(struct notifier_block *self, unsigned long val, void *data)
 	}
 
 	if (val != DIE_INIT_MONARCH_LEAVE &&
-	    val != DIE_INIT_SLAVE_LEAVE &&
 	    val != DIE_INIT_MONARCH_PROCESS &&
-	    val != DIE_MCA_RENDZVOUS_LEAVE &&
 	    val != DIE_MCA_MONARCH_LEAVE)
 		return NOTIFY_DONE;
 
 	nd = (struct ia64_mca_notify_die *)args->err;
-	/* Reason code 1 means machine check rendezvous*/
-	if ((val == DIE_INIT_MONARCH_LEAVE || val == DIE_INIT_SLAVE_LEAVE
-	    || val == DIE_INIT_MONARCH_PROCESS) && nd->sos->rv_rc == 1)
-		return NOTIFY_DONE;
 
 	switch (val) {
 	case DIE_INIT_MONARCH_PROCESS:
-		if (kdump_on_init) {
-			atomic_set(&kdump_in_progress, 1);
-			*(nd->monarch_cpu) = -1;
+		/* Reason code 1 means machine check rendezvous*/
+		if (kdump_on_init && (nd->sos->rv_rc != 1)) {
+			if (atomic_inc_return(&kdump_in_progress) != 1)
+				kdump_freeze_monarch = 1;
 		}
 		break;
 	case DIE_INIT_MONARCH_LEAVE:
-		if (kdump_on_init)
+		/* Reason code 1 means machine check rendezvous*/
+		if (kdump_on_init && (nd->sos->rv_rc != 1))
 			machine_kdump_on_init();
-		break;
-	case DIE_INIT_SLAVE_LEAVE:
-		if (atomic_read(&kdump_in_progress))
-			unw_init_running(kdump_cpu_freeze, NULL);
-		break;
-	case DIE_MCA_RENDZVOUS_LEAVE:
-		if (atomic_read(&kdump_in_progress))
-			unw_init_running(kdump_cpu_freeze, NULL);
 		break;
 	case DIE_MCA_MONARCH_LEAVE:
 		/* *(nd->data) indicate if MCA is recoverable */
 		if (kdump_on_fatal_mca && !(*(nd->data))) {
-			atomic_set(&kdump_in_progress, 1);
-			*(nd->monarch_cpu) = -1;
-			machine_kdump_on_init();
+			if (atomic_inc_return(&kdump_in_progress) == 1)
+				machine_kdump_on_init();
+			/* We got fatal MCA while kdump!? No way!! */
 		}
 		break;
 	}
@@ -206,34 +216,31 @@ kdump_init_notifier(struct notifier_block *self, unsigned long val, void *data)
 }
 
 #ifdef CONFIG_SYSCTL
-static ctl_table kdump_ctl_table[] = {
+static struct ctl_table kdump_ctl_table[] = {
 	{
-		.ctl_name = CTL_UNNUMBERED,
 		.procname = "kdump_on_init",
 		.data = &kdump_on_init,
 		.maxlen = sizeof(int),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec,
+		.proc_handler = proc_dointvec,
 	},
 	{
-		.ctl_name = CTL_UNNUMBERED,
 		.procname = "kdump_on_fatal_mca",
 		.data = &kdump_on_fatal_mca,
 		.maxlen = sizeof(int),
 		.mode = 0644,
-		.proc_handler = &proc_dointvec,
+		.proc_handler = proc_dointvec,
 	},
-	{ .ctl_name = 0 }
+	{ }
 };
 
-static ctl_table sys_table[] = {
+static struct ctl_table sys_table[] = {
 	{
-	  .ctl_name = CTL_KERN,
 	  .procname = "kernel",
 	  .mode = 0555,
 	  .child = kdump_ctl_table,
 	},
-	{ .ctl_name = 0 }
+	{ }
 };
 #endif
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef __sis7019_h__
 #define __sis7019_h__
 
@@ -9,19 +10,6 @@
  *  Inspired by the Trident 4D-WaveDX/NX driver.
  *
  *  All rights reserved.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation, version 2.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 
@@ -203,7 +191,7 @@
 #define SIS_WEISR_B	0xac
 
 
-/* Playback DMA parameters (paramter RAM) */
+/* Playback DMA parameters (parameter RAM) */
 #define SIS_PLAY_DMA_OFFSET	0x0000
 #define SIS_PLAY_DMA_SIZE	0x10
 #define SIS_PLAY_DMA_ADDR(addr, num) \
@@ -228,7 +216,7 @@
 #define		SIS_PLAY_DMA_SSO_MASK		0xffff0000
 #define		SIS_PLAY_DMA_ESO_MASK		0x0000ffff
 
-/* Capture DMA parameters (paramter RAM) */
+/* Capture DMA parameters (parameter RAM) */
 #define SIS_CAPTURE_DMA_OFFSET	0x0800
 #define SIS_CAPTURE_DMA_SIZE	0x10
 #define SIS_CAPTURE_DMA_ADDR(addr, num) \

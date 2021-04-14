@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-pxa/pxa320.c
  *
@@ -7,26 +8,19 @@
  *
  * 2007-08-21: eric miao <eric.miao@marvell.com>
  *             initial version
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
+#include <linux/io.h>
 
-#include <mach/hardware.h>
-#include <mach/mfp.h>
-#include <mach/pxa3xx-regs.h>
-#include <mach/mfp-pxa320.h>
+#include "pxa320.h"
 
 #include "generic.h"
 #include "devices.h"
-#include "clock.h"
 
-static struct pxa3xx_mfp_addr_map pxa320_mfp_addr_map[] __initdata = {
+static struct mfp_addr_map pxa320_mfp_addr_map[] __initdata = {
 
 	MFP_ADDR_X(GPIO0,  GPIO4,   0x0124),
 	MFP_ADDR_X(GPIO5,  GPIO9,   0x028C),
@@ -80,16 +74,11 @@ static struct pxa3xx_mfp_addr_map pxa320_mfp_addr_map[] __initdata = {
 	MFP_ADDR_END,
 };
 
-static struct clk pxa320_clks[] = {
-	PXA3xx_CKEN("NANDCLK", NAND, 104000000, 0, &pxa3xx_device_nand.dev),
-};
-
 static int __init pxa320_init(void)
 {
 	if (cpu_is_pxa320()) {
-		pxa3xx_init_mfp();
-		pxa3xx_mfp_init_addr(pxa320_mfp_addr_map);
-		clks_register(ARRAY_AND_SIZE(pxa320_clks));
+		mfp_init_base(io_p2v(MFPR_BASE));
+		mfp_init_addr(pxa320_mfp_addr_map);
 	}
 
 	return 0;

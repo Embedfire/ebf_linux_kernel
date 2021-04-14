@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * direct.c - Low-level direct PCI config space access
  */
@@ -5,7 +6,7 @@
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/dmi.h>
-#include "pci.h"
+#include <asm/pci_x86.h>
 
 /*
  * Functions for accessing PCI base (first 256 bytes) and extended
@@ -22,12 +23,12 @@ static int pci_conf1_read(unsigned int seg, unsigned int bus,
 {
 	unsigned long flags;
 
-	if ((bus > 255) || (devfn > 255) || (reg > 4095)) {
+	if (seg || (bus > 255) || (devfn > 255) || (reg > 4095)) {
 		*value = -1;
 		return -EINVAL;
 	}
 
-	spin_lock_irqsave(&pci_config_lock, flags);
+	raw_spin_lock_irqsave(&pci_config_lock, flags);
 
 	outl(PCI_CONF1_ADDRESS(bus, devfn, reg), 0xCF8);
 
@@ -43,7 +44,7 @@ static int pci_conf1_read(unsigned int seg, unsigned int bus,
 		break;
 	}
 
-	spin_unlock_irqrestore(&pci_config_lock, flags);
+	raw_spin_unlock_irqrestore(&pci_config_lock, flags);
 
 	return 0;
 }
@@ -53,10 +54,10 @@ static int pci_conf1_write(unsigned int seg, unsigned int bus,
 {
 	unsigned long flags;
 
-	if ((bus > 255) || (devfn > 255) || (reg > 4095))
+	if (seg || (bus > 255) || (devfn > 255) || (reg > 4095))
 		return -EINVAL;
 
-	spin_lock_irqsave(&pci_config_lock, flags);
+	raw_spin_lock_irqsave(&pci_config_lock, flags);
 
 	outl(PCI_CONF1_ADDRESS(bus, devfn, reg), 0xCF8);
 
@@ -72,14 +73,14 @@ static int pci_conf1_write(unsigned int seg, unsigned int bus,
 		break;
 	}
 
-	spin_unlock_irqrestore(&pci_config_lock, flags);
+	raw_spin_unlock_irqrestore(&pci_config_lock, flags);
 
 	return 0;
 }
 
 #undef PCI_CONF1_ADDRESS
 
-struct pci_raw_ops pci_direct_conf1 = {
+const struct pci_raw_ops pci_direct_conf1 = {
 	.read =		pci_conf1_read,
 	.write =	pci_conf1_write,
 };
@@ -97,6 +98,7 @@ static int pci_conf2_read(unsigned int seg, unsigned int bus,
 	unsigned long flags;
 	int dev, fn;
 
+	WARN_ON(seg);
 	if ((bus > 255) || (devfn > 255) || (reg > 255)) {
 		*value = -1;
 		return -EINVAL;
@@ -108,7 +110,7 @@ static int pci_conf2_read(unsigned int seg, unsigned int bus,
 	if (dev & 0x10) 
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	spin_lock_irqsave(&pci_config_lock, flags);
+	raw_spin_lock_irqsave(&pci_config_lock, flags);
 
 	outb((u8)(0xF0 | (fn << 1)), 0xCF8);
 	outb((u8)bus, 0xCFA);
@@ -127,7 +129,7 @@ static int pci_conf2_read(unsigned int seg, unsigned int bus,
 
 	outb(0, 0xCF8);
 
-	spin_unlock_irqrestore(&pci_config_lock, flags);
+	raw_spin_unlock_irqrestore(&pci_config_lock, flags);
 
 	return 0;
 }
@@ -138,6 +140,7 @@ static int pci_conf2_write(unsigned int seg, unsigned int bus,
 	unsigned long flags;
 	int dev, fn;
 
+	WARN_ON(seg);
 	if ((bus > 255) || (devfn > 255) || (reg > 255)) 
 		return -EINVAL;
 
@@ -147,7 +150,7 @@ static int pci_conf2_write(unsigned int seg, unsigned int bus,
 	if (dev & 0x10) 
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	spin_lock_irqsave(&pci_config_lock, flags);
+	raw_spin_lock_irqsave(&pci_config_lock, flags);
 
 	outb((u8)(0xF0 | (fn << 1)), 0xCF8);
 	outb((u8)bus, 0xCFA);
@@ -166,14 +169,14 @@ static int pci_conf2_write(unsigned int seg, unsigned int bus,
 
 	outb(0, 0xCF8);    
 
-	spin_unlock_irqrestore(&pci_config_lock, flags);
+	raw_spin_unlock_irqrestore(&pci_config_lock, flags);
 
 	return 0;
 }
 
 #undef PCI_CONF2_ADDRESS
 
-static struct pci_raw_ops pci_direct_conf2 = {
+static const struct pci_raw_ops pci_direct_conf2 = {
 	.read =		pci_conf2_read,
 	.write =	pci_conf2_write,
 };
@@ -189,7 +192,7 @@ static struct pci_raw_ops pci_direct_conf2 = {
  * This should be close to trivial, but it isn't, because there are buggy
  * chipsets (yes, you guessed it, by Intel and Compaq) that have no class ID.
  */
-static int __init pci_sanity_check(struct pci_raw_ops *o)
+static int __init pci_sanity_check(const struct pci_raw_ops *o)
 {
 	u32 x = 0;
 	int devfn;
@@ -198,7 +201,7 @@ static int __init pci_sanity_check(struct pci_raw_ops *o)
 		return 1;
 	/* Assume Type 1 works for newer systems.
 	   This handles machines that don't have anything on PCI Bus 0. */
-	if (dmi_get_year(DMI_BIOS_DATE) >= 2001)
+	if (dmi_get_bios_year() >= 2001)
 		return 1;
 
 	for (devfn = 0; devfn < 0x100; devfn++) {
@@ -279,37 +282,34 @@ void __init pci_direct_init(int type)
 
 int __init pci_direct_probe(void)
 {
-	struct resource *region, *region2;
-
 	if ((pci_probe & PCI_PROBE_CONF1) == 0)
 		goto type2;
-	region = request_region(0xCF8, 8, "PCI conf1");
-	if (!region)
+	if (!request_region(0xCF8, 8, "PCI conf1"))
 		goto type2;
 
 	if (pci_check_type1()) {
 		raw_pci_ops = &pci_direct_conf1;
+		port_cf9_safe = true;
 		return 1;
 	}
-	release_resource(region);
+	release_region(0xCF8, 8);
 
  type2:
 	if ((pci_probe & PCI_PROBE_CONF2) == 0)
 		return 0;
-	region = request_region(0xCF8, 4, "PCI conf2");
-	if (!region)
+	if (!request_region(0xCF8, 4, "PCI conf2"))
 		return 0;
-	region2 = request_region(0xC000, 0x1000, "PCI conf2");
-	if (!region2)
+	if (!request_region(0xC000, 0x1000, "PCI conf2"))
 		goto fail2;
 
 	if (pci_check_type2()) {
 		raw_pci_ops = &pci_direct_conf2;
+		port_cf9_safe = true;
 		return 2;
 	}
 
-	release_resource(region2);
+	release_region(0xC000, 0x1000);
  fail2:
-	release_resource(region);
+	release_region(0xCF8, 4);
 	return 0;
 }

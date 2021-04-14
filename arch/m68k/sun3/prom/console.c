@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * console.c: Routines that deal with sending and receiving IO
  *            to/from the current console device using the PROM.
@@ -10,7 +11,6 @@
 #include <linux/sched.h>
 #include <asm/openprom.h>
 #include <asm/oplib.h>
-#include <asm/system.h>
 #include <linux/string.h>
 
 /* Non blocking get character from console input device, returns -1

@@ -38,44 +38,36 @@ static int init_hw(struct echoaudio *chip, u16 device_id, u16 subdevice_id)
 {
 	int err;
 
-	DE_INIT(("init_hw() - Indigo DJ\n"));
-	snd_assert((subdevice_id & 0xfff0) == INDIGO_DJ, return -ENODEV);
+	if (snd_BUG_ON((subdevice_id & 0xfff0) != INDIGO_DJ))
+		return -ENODEV;
 
 	if ((err = init_dsp_comm_page(chip))) {
-		DE_INIT(("init_hw - could not initialize DSP comm page\n"));
+		dev_err(chip->card->dev,
+			"init_hw - could not initialize DSP comm page\n");
 		return err;
 	}
 
 	chip->device_id = device_id;
 	chip->subdevice_id = subdevice_id;
-	chip->bad_board = TRUE;
-	chip->dsp_code_to_load = &card_fw[FW_INDIGO_DJ_DSP];
+	chip->bad_board = true;
+	chip->dsp_code_to_load = FW_INDIGO_DJ_DSP;
 	/* Since this card has no ASIC, mark it as loaded so everything
 	   works OK */
-	chip->asic_loaded = TRUE;
+	chip->asic_loaded = true;
 	chip->input_clock_types = ECHO_CLOCK_BIT_INTERNAL;
 
 	if ((err = load_firmware(chip)) < 0)
 		return err;
-	chip->bad_board = FALSE;
+	chip->bad_board = false;
 
-	if ((err = init_line_levels(chip)) < 0)
-		return err;
-
-	/* Default routing of the virtual channels: vchannels 0-3 and
-	vchannels 4-7 are routed to real channels 0-4 */
-	set_vmixer_gain(chip, 0, 0, 0);
-	set_vmixer_gain(chip, 1, 1, 0);
-	set_vmixer_gain(chip, 2, 2, 0);
-	set_vmixer_gain(chip, 3, 3, 0);
-	set_vmixer_gain(chip, 0, 4, 0);
-	set_vmixer_gain(chip, 1, 5, 0);
-	set_vmixer_gain(chip, 2, 6, 0);
-	set_vmixer_gain(chip, 3, 7, 0);
-	err = update_vmixer_level(chip);
-
-	DE_INIT(("init_hw done\n"));
 	return err;
+}
+
+
+
+static int set_mixer_defaults(struct echoaudio *chip)
+{
+	return init_line_levels(chip);
 }
 
 
@@ -116,7 +108,8 @@ static int set_sample_rate(struct echoaudio *chip, u32 rate)
 		control_reg = MIA_32000;
 		break;
 	default:
-		DE_ACT(("set_sample_rate: %d invalid!\n", rate));
+		dev_err(chip->card->dev,
+			"set_sample_rate: %d invalid!\n", rate);
 		return -EINVAL;
 	}
 
@@ -143,8 +136,9 @@ static int set_vmixer_gain(struct echoaudio *chip, u16 output, u16 pipe,
 {
 	int index;
 
-	snd_assert(pipe < num_pipes_out(chip) &&
-		   output < num_busses_out(chip), return -EINVAL);
+	if (snd_BUG_ON(pipe >= num_pipes_out(chip) ||
+		       output >= num_busses_out(chip)))
+		return -EINVAL;
 
 	if (wait_handshake(chip))
 		return -EIO;
@@ -153,7 +147,8 @@ static int set_vmixer_gain(struct echoaudio *chip, u16 output, u16 pipe,
 	index = output * num_pipes_out(chip) + pipe;
 	chip->comm_page->vmixer[index] = gain;
 
-	DE_ACT(("set_vmixer_gain: pipe %d, out %d = %d\n", pipe, output, gain));
+	dev_dbg(chip->card->dev,
+		"set_vmixer_gain: pipe %d, out %d = %d\n", pipe, output, gain);
 	return 0;
 }
 

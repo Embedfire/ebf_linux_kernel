@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Scatterlist Cryptographic API.
  *
@@ -5,17 +6,12 @@
  *
  * Copyright (c) 2002 James Morris <jmorris@intercode.com.au>
  * Copyright (c) 2005 Herbert Xu <herbert@gondor.apana.org.au>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option) 
- * any later version.
- *
  */
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <linux/init.h>
 #include <linux/crypto.h>
+#include <linux/module.h>	/* for module_name() */
 #include <linux/rwsem.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -40,13 +36,30 @@ static void c_stop(struct seq_file *m, void *p)
 static int c_show(struct seq_file *m, void *p)
 {
 	struct crypto_alg *alg = list_entry(p, struct crypto_alg, cra_list);
-	
+
 	seq_printf(m, "name         : %s\n", alg->cra_name);
 	seq_printf(m, "driver       : %s\n", alg->cra_driver_name);
 	seq_printf(m, "module       : %s\n", module_name(alg->cra_module));
 	seq_printf(m, "priority     : %d\n", alg->cra_priority);
-	seq_printf(m, "refcnt       : %d\n", atomic_read(&alg->cra_refcnt));
-	
+	seq_printf(m, "refcnt       : %u\n", refcount_read(&alg->cra_refcnt));
+	seq_printf(m, "selftest     : %s\n",
+		   (alg->cra_flags & CRYPTO_ALG_TESTED) ?
+		   "passed" : "unknown");
+	seq_printf(m, "internal     : %s\n",
+		   (alg->cra_flags & CRYPTO_ALG_INTERNAL) ?
+		   "yes" : "no");
+
+	if (alg->cra_flags & CRYPTO_ALG_LARVAL) {
+		seq_printf(m, "type         : larval\n");
+		seq_printf(m, "flags        : 0x%x\n", alg->cra_flags);
+		goto out;
+	}
+
+	if (alg->cra_type && alg->cra_type->show) {
+		alg->cra_type->show(m, alg);
+		goto out;
+	}
+
 	switch (alg->cra_flags & CRYPTO_ALG_TYPE_MASK) {
 	case CRYPTO_ALG_TYPE_CIPHER:
 		seq_printf(m, "type         : cipher\n");
@@ -56,24 +69,15 @@ static int c_show(struct seq_file *m, void *p)
 		seq_printf(m, "max keysize  : %u\n",
 					alg->cra_cipher.cia_max_keysize);
 		break;
-		
-	case CRYPTO_ALG_TYPE_DIGEST:
-		seq_printf(m, "type         : digest\n");
-		seq_printf(m, "blocksize    : %u\n", alg->cra_blocksize);
-		seq_printf(m, "digestsize   : %u\n",
-		           alg->cra_digest.dia_digestsize);
-		break;
 	case CRYPTO_ALG_TYPE_COMPRESS:
 		seq_printf(m, "type         : compression\n");
 		break;
 	default:
-		if (alg->cra_type && alg->cra_type->show)
-			alg->cra_type->show(m, alg);
-		else
-			seq_printf(m, "type         : unknown\n");
+		seq_printf(m, "type         : unknown\n");
 		break;
 	}
 
+out:
 	seq_putc(m, '\n');
 	return 0;
 }
@@ -85,21 +89,9 @@ static const struct seq_operations crypto_seq_ops = {
 	.show		= c_show
 };
 
-static int crypto_info_open(struct inode *inode, struct file *file)
-{
-	return seq_open(file, &crypto_seq_ops);
-}
-        
-static const struct file_operations proc_crypto_ops = {
-	.open		= crypto_info_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release
-};
-
 void __init crypto_init_proc(void)
 {
-	proc_create("crypto", 0, NULL, &proc_crypto_ops);
+	proc_create_seq("crypto", 0, NULL, &crypto_seq_ops);
 }
 
 void __exit crypto_exit_proc(void)

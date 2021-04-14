@@ -1,23 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Driver for Digigram VX soundcards
  *
  * Hardware core part
  *
  * Copyright (c) 2002 by Takashi Iwai <tiwai@suse.de>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef __SOUND_VX_COMMON_H
@@ -26,12 +13,6 @@
 #include <sound/pcm.h>
 #include <sound/hwdep.h>
 #include <linux/interrupt.h>
-
-#if defined(CONFIG_FW_LOADER) || defined(CONFIG_FW_LOADER_MODULE)
-#if !defined(CONFIG_USE_VXLOADER) && !defined(CONFIG_SND_VX_LIB) /* built-in kernel */
-#define SND_VX_FW_LOADER	/* use the standard firmware loader */
-#endif
-#endif
 
 struct firmware;
 struct device;
@@ -86,8 +67,6 @@ struct vx_pipe {
 
 	unsigned int references;     /* an output pipe may be used for monitoring and/or playback */
 	struct vx_pipe *monitoring_pipe;  /* pointer to the monitoring pipe (capture pipe only)*/
-
-	struct tasklet_struct start_tq;
 };
 
 struct vx_core;
@@ -168,12 +147,10 @@ struct vx_core {
 	/* ports are defined externally */
 
 	/* low-level functions */
-	struct snd_vx_hardware *hw;
-	struct snd_vx_ops *ops;
+	const struct snd_vx_hardware *hw;
+	const struct snd_vx_ops *ops;
 
-	spinlock_t lock;
-	spinlock_t irq_lock;
-	struct tasklet_struct tq;
+	struct mutex lock;
 
 	unsigned int chip_status;
 	unsigned int pcm_running;
@@ -216,8 +193,9 @@ struct vx_core {
 /*
  * constructor
  */
-struct vx_core *snd_vx_create(struct snd_card *card, struct snd_vx_hardware *hw,
-			      struct snd_vx_ops *ops, int extra_size);
+struct vx_core *snd_vx_create(struct snd_card *card,
+			      const struct snd_vx_hardware *hw,
+			      const struct snd_vx_ops *ops, int extra_size);
 int snd_vx_setup_firmware(struct vx_core *chip);
 int snd_vx_load_boot_image(struct vx_core *chip, const struct firmware *dsp);
 int snd_vx_dsp_boot(struct vx_core *chip, const struct firmware *dsp);
@@ -229,43 +207,38 @@ void snd_vx_free_firmware(struct vx_core *chip);
  * interrupt handler; exported for pcmcia
  */
 irqreturn_t snd_vx_irq_handler(int irq, void *dev);
+irqreturn_t snd_vx_threaded_irq_handler(int irq, void *dev);
 
 /*
  * lowlevel functions
  */
 static inline int vx_test_and_ack(struct vx_core *chip)
 {
-	snd_assert(chip->ops->test_and_ack, return -ENXIO);
 	return chip->ops->test_and_ack(chip);
 }
 
 static inline void vx_validate_irq(struct vx_core *chip, int enable)
 {
-	snd_assert(chip->ops->validate_irq, return);
 	chip->ops->validate_irq(chip, enable);
 }
 
 static inline unsigned char snd_vx_inb(struct vx_core *chip, int reg)
 {
-	snd_assert(chip->ops->in8, return 0);
 	return chip->ops->in8(chip, reg);
 }
 
 static inline unsigned int snd_vx_inl(struct vx_core *chip, int reg)
 {
-	snd_assert(chip->ops->in32, return 0);
 	return chip->ops->in32(chip, reg);
 }
 
 static inline void snd_vx_outb(struct vx_core *chip, int reg, unsigned char val)
 {
-	snd_assert(chip->ops->out8, return);
 	chip->ops->out8(chip, reg, val);
 }
 
 static inline void snd_vx_outl(struct vx_core *chip, int reg, unsigned int val)
 {
-	snd_assert(chip->ops->out32, return);
 	chip->ops->out32(chip, reg, val);
 }
 
@@ -276,7 +249,6 @@ static inline void snd_vx_outl(struct vx_core *chip, int reg, unsigned int val)
 
 static inline void vx_reset_dsp(struct vx_core *chip)
 {
-	snd_assert(chip->ops->reset_dsp, return);
 	chip->ops->reset_dsp(chip);
 }
 
@@ -304,14 +276,12 @@ int snd_vx_check_reg_bit(struct vx_core *chip, int reg, int mask, int bit, int t
 static inline void vx_pseudo_dma_write(struct vx_core *chip, struct snd_pcm_runtime *runtime,
 				       struct vx_pipe *pipe, int count)
 {
-	snd_assert(chip->ops->dma_write, return);
 	chip->ops->dma_write(chip, runtime, pipe, count);
 }
 
 static inline void vx_pseudo_dma_read(struct vx_core *chip, struct snd_pcm_runtime *runtime,
 				      struct vx_pipe *pipe, int count)
 {
-	snd_assert(chip->ops->dma_read, return);
 	chip->ops->dma_read(chip, runtime, pipe, count);
 }
 
@@ -350,7 +320,7 @@ int vx_change_frequency(struct vx_core *chip);
 /*
  * PM
  */
-int snd_vx_suspend(struct vx_core *card, pm_message_t state);
+int snd_vx_suspend(struct vx_core *card);
 int snd_vx_resume(struct vx_core *card);
 
 /*

@@ -18,6 +18,7 @@
 #include <linux/init.h>
 #include <linux/seq_file.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 
 #include <asm/irq.h>
 #include <asm/amigahw.h>
@@ -87,19 +88,29 @@ static irqreturn_t cia_handler(int irq, void *dev_id)
 	struct ciabase *base = dev_id;
 	int mach_irq;
 	unsigned char ints;
+	unsigned long flags;
 
+	/* Interrupts get disabled while the timer irq flag is cleared and
+	 * the timer interrupt serviced.
+	 */
 	mach_irq = base->cia_irq;
+	local_irq_save(flags);
 	ints = cia_set_irq(base, CIA_ICR_ALL);
 	amiga_custom.intreq = base->int_mask;
+	if (ints & 1)
+		generic_handle_irq(mach_irq);
+	local_irq_restore(flags);
+	mach_irq++, ints >>= 1;
 	for (; ints; mach_irq++, ints >>= 1) {
 		if (ints & 1)
-			m68k_handle_int(mach_irq);
+			generic_handle_irq(mach_irq);
 	}
 	return IRQ_HANDLED;
 }
 
-static void cia_enable_irq(unsigned int irq)
+static void cia_irq_enable(struct irq_data *data)
 {
+	unsigned int irq = data->irq;
 	unsigned char mask;
 
 	if (irq >= IRQ_AMIGA_CIAB) {
@@ -113,19 +124,20 @@ static void cia_enable_irq(unsigned int irq)
 	}
 }
 
-static void cia_disable_irq(unsigned int irq)
+static void cia_irq_disable(struct irq_data *data)
 {
+	unsigned int irq = data->irq;
+
 	if (irq >= IRQ_AMIGA_CIAB)
 		cia_able_irq(&ciab_base, 1 << (irq - IRQ_AMIGA_CIAB));
 	else
 		cia_able_irq(&ciaa_base, 1 << (irq - IRQ_AMIGA_CIAA));
 }
 
-static struct irq_controller cia_irq_controller = {
+static struct irq_chip cia_irq_chip = {
 	.name		= "cia",
-	.lock		= __SPIN_LOCK_UNLOCKED(cia_irq_controller.lock),
-	.enable		= cia_enable_irq,
-	.disable	= cia_disable_irq,
+	.irq_enable	= cia_irq_enable,
+	.irq_disable	= cia_irq_disable,
 };
 
 /*
@@ -134,9 +146,9 @@ static struct irq_controller cia_irq_controller = {
  * into this chain.
  */
 
-static void auto_enable_irq(unsigned int irq)
+static void auto_irq_enable(struct irq_data *data)
 {
-	switch (irq) {
+	switch (data->irq) {
 	case IRQ_AUTO_2:
 		amiga_custom.intena = IF_SETCLR | IF_PORTS;
 		break;
@@ -146,9 +158,9 @@ static void auto_enable_irq(unsigned int irq)
 	}
 }
 
-static void auto_disable_irq(unsigned int irq)
+static void auto_irq_disable(struct irq_data *data)
 {
-	switch (irq) {
+	switch (data->irq) {
 	case IRQ_AUTO_2:
 		amiga_custom.intena = IF_PORTS;
 		break;
@@ -158,23 +170,26 @@ static void auto_disable_irq(unsigned int irq)
 	}
 }
 
-static struct irq_controller auto_irq_controller = {
+static struct irq_chip auto_irq_chip = {
 	.name		= "auto",
-	.lock		= __SPIN_LOCK_UNLOCKED(auto_irq_controller.lock),
-	.enable		= auto_enable_irq,
-	.disable	= auto_disable_irq,
+	.irq_enable	= auto_irq_enable,
+	.irq_disable	= auto_irq_disable,
 };
 
 void __init cia_init_IRQ(struct ciabase *base)
 {
-	m68k_setup_irq_controller(&cia_irq_controller, base->cia_irq, CIA_IRQS);
+	m68k_setup_irq_controller(&cia_irq_chip, handle_simple_irq,
+				  base->cia_irq, CIA_IRQS);
 
 	/* clear any pending interrupt and turn off all interrupts */
 	cia_set_irq(base, CIA_ICR_ALL);
 	cia_able_irq(base, CIA_ICR_ALL);
 
 	/* override auto int and install CIA handler */
-	m68k_setup_irq_controller(&auto_irq_controller, base->handler_irq, 1);
-	m68k_irq_startup(base->handler_irq);
-	request_irq(base->handler_irq, cia_handler, IRQF_SHARED, base->name, base);
+	m68k_setup_irq_controller(&auto_irq_chip, handle_simple_irq,
+				  base->handler_irq, 1);
+	m68k_irq_startup_irq(base->handler_irq);
+	if (request_irq(base->handler_irq, cia_handler, IRQF_SHARED,
+			base->name, base))
+		pr_err("Couldn't register %s interrupt\n", base->name);
 }

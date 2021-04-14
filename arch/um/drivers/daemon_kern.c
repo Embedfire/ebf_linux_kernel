@@ -1,14 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2001 Lennert Buytenhek (buytenh@gnu.org) and
  * James Leu (jleu@mindspring.net).
  * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Copyright (C) 2001 by various other people who didn't put their name here.
- * Licensed under the GPL.
  */
 
-#include "linux/init.h"
+#include <linux/init.h>
 #include <linux/netdevice.h>
-#include "net_kern.h"
+#include <net_kern.h>
 #include "daemon.h"
 
 struct daemon_init {
@@ -22,7 +22,7 @@ static void daemon_init(struct net_device *dev, void *data)
 	struct daemon_data *dpri;
 	struct daemon_init *init = data;
 
-	pri = dev->priv;
+	pri = netdev_priv(dev);
 	dpri = (struct daemon_data *) pri->user;
 	dpri->sock_type = init->sock_type;
 	dpri->ctl_sock = init->ctl_sock;

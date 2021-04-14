@@ -1,10 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This is the infamous ld script for the 64 bits vdso
  * library
  */
 #include <asm/vdso.h>
 
+#ifdef __LITTLE_ENDIAN__
+OUTPUT_FORMAT("elf64-powerpcle", "elf64-powerpcle", "elf64-powerpcle")
+#else
 OUTPUT_FORMAT("elf64-powerpc", "elf64-powerpc", "elf64-powerpc")
+#endif
 OUTPUT_ARCH(powerpc:common64)
 ENTRY(_start)
 
@@ -33,6 +38,9 @@ SECTIONS
 
 	. = ALIGN(8);
 	__ftr_fixup	: { *(__ftr_fixup) }
+
+	. = ALIGN(8);
+	__mmu_ftr_fixup	: { *(__mmu_ftr_fixup) }
 
 	. = ALIGN(8);
 	__lwsync_fixup	: { *(__lwsync_fixup) }
@@ -142,7 +150,10 @@ VERSION
 		__kernel_get_tbfreq;
 		__kernel_sync_dicache;
 		__kernel_sync_dicache_p5;
+		__kernel_start_sigtramp_rt64;
 		__kernel_sigtramp_rt64;
+		__kernel_getcpu;
+		__kernel_time;
 
 	local: *;
 	};

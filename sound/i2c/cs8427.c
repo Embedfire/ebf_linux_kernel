@@ -1,28 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Routines for control of the CS8427 via i2c bus
  *  IEC958 (S/PDIF) receiver & transmitter by Cirrus Logic
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/bitrev.h>
+#include <linux/module.h>
 #include <asm/unaligned.h>
 #include <sound/core.h>
 #include <sound/control.h>
@@ -54,18 +41,6 @@ struct cs8427 {
 	struct cs8427_stream playback;
 	struct cs8427_stream capture;
 };
-
-static unsigned char swapbits(unsigned char val)
-{
-	int bit;
-	unsigned char res = 0;
-	for (bit = 0; bit < 8; bit++) {
-		res <<= 1;
-		res |= val & 1;
-		val >>= 1;
-	}
-	return res;
-}
 
 int snd_cs8427_reg_write(struct snd_i2c_device *device, unsigned char reg,
 			 unsigned char val)
@@ -128,7 +103,7 @@ static int snd_cs8427_send_corudata(struct snd_i2c_device *device,
 	struct cs8427 *chip = device->private_data;
 	char *hw_data = udata ?
 		chip->playback.hw_udata : chip->playback.hw_status;
-	char data[32];
+	unsigned char data[32];
 	int err, idx;
 
 	if (!memcmp(hw_data, ndata, count))
@@ -149,7 +124,7 @@ static int snd_cs8427_send_corudata(struct snd_i2c_device *device,
 	}
 	data[0] = CS8427_REG_AUTOINC | CS8427_REG_CORU_DATABUF;
 	for (idx = 0; idx < count; idx++)
-		data[idx + 1] = swapbits(ndata[idx]);
+		data[idx + 1] = bitrev8(ndata[idx]);
 	if (snd_i2c_sendbytes(device, data, count + 1) != count + 1)
 		return -EIO;
 	return 1;
@@ -160,10 +135,8 @@ static void snd_cs8427_free(struct snd_i2c_device *device)
 	kfree(device->private_data);
 }
 
-int snd_cs8427_create(struct snd_i2c_bus *bus,
-		      unsigned char addr,
-		      unsigned int reset_timeout,
-		      struct snd_i2c_device **r_cs8427)
+int snd_cs8427_init(struct snd_i2c_bus *bus,
+		    struct snd_i2c_device *device)
 {
 	static unsigned char initvals1[] = {
 	  CS8427_REG_CONTROL1 | CS8427_REG_AUTOINC,
@@ -210,22 +183,10 @@ int snd_cs8427_create(struct snd_i2c_bus *bus,
 	     Inhibit E->F transfers. */
 	  CS8427_UD | CS8427_EFTUI | CS8427_DETUI,
 	};
+	struct cs8427 *chip = device->private_data;
 	int err;
-	struct cs8427 *chip;
-	struct snd_i2c_device *device;
 	unsigned char buf[24];
 
-	if ((err = snd_i2c_device_create(bus, "CS8427",
-					 CS8427_ADDR | (addr & 7),
-					 &device)) < 0)
-		return err;
-	chip = device->private_data = kzalloc(sizeof(*chip), GFP_KERNEL);
-	if (chip == NULL) {
-	      	snd_i2c_device_free(device);
-		return -ENOMEM;
-	}
-	device->private_free = snd_cs8427_free;
-	
 	snd_i2c_lock(bus);
 	err = snd_cs8427_reg_read(device, CS8427_REG_ID_AND_VER);
 	if (err != CS8427_VER8427A) {
@@ -274,10 +235,44 @@ int snd_cs8427_create(struct snd_i2c_bus *bus,
 	snd_i2c_unlock(bus);
 
 	/* turn on run bit and rock'n'roll */
+	snd_cs8427_reset(device);
+
+	return 0;
+
+__fail:
+	snd_i2c_unlock(bus);
+
+	return err;
+}
+EXPORT_SYMBOL(snd_cs8427_init);
+
+int snd_cs8427_create(struct snd_i2c_bus *bus,
+		      unsigned char addr,
+		      unsigned int reset_timeout,
+		      struct snd_i2c_device **r_cs8427)
+{
+	int err;
+	struct cs8427 *chip;
+	struct snd_i2c_device *device;
+
+	err = snd_i2c_device_create(bus, "CS8427", CS8427_ADDR | (addr & 7),
+				    &device);
+	if (err < 0)
+		return err;
+	chip = device->private_data = kzalloc(sizeof(*chip), GFP_KERNEL);
+	if (chip == NULL) {
+		snd_i2c_device_free(device);
+		return -ENOMEM;
+	}
+	device->private_free = snd_cs8427_free;
+
 	if (reset_timeout < 1)
 		reset_timeout = 1;
 	chip->reset_timeout = reset_timeout;
-	snd_cs8427_reset(device);
+
+	err = snd_cs8427_init(bus, device);
+	if (err)
+		goto __fail;
 
 #if 0	// it's nice for read tests
 	{
@@ -296,7 +291,6 @@ int snd_cs8427_create(struct snd_i2c_bus *bus,
 	return 0;
 
       __fail:
-      	snd_i2c_unlock(bus);
       	snd_i2c_device_free(device);
       	return err < 0 ? err : -EIO;
 }
@@ -314,7 +308,8 @@ static void snd_cs8427_reset(struct snd_i2c_device *cs8427)
 	unsigned long end_time;
 	int data, aes3input = 0;
 
-	snd_assert(cs8427, return);
+	if (snd_BUG_ON(!cs8427))
+		return;
 	chip = cs8427->private_data;
 	snd_i2c_lock(cs8427->bus);
 	if ((chip->regmap[CS8427_REG_CLOCKSOURCE] & CS8427_RXDAES3INPUT) ==
@@ -464,7 +459,7 @@ static int snd_cs8427_spdif_mask_get(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-static struct snd_kcontrol_new snd_cs8427_iec958_controls[] = {
+static const struct snd_kcontrol_new snd_cs8427_iec958_controls[] = {
 {
 	.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
 	.info =		snd_cs8427_in_status_info,
@@ -526,7 +521,8 @@ int snd_cs8427_iec958_build(struct snd_i2c_device *cs8427,
 	unsigned int idx;
 	int err;
 
-	snd_assert(play_substream && cap_substream, return -EINVAL);
+	if (snd_BUG_ON(!play_substream || !cap_substream))
+		return -EINVAL;
 	for (idx = 0; idx < ARRAY_SIZE(snd_cs8427_iec958_controls); idx++) {
 		kctl = snd_ctl_new1(&snd_cs8427_iec958_controls[idx], cs8427);
 		if (kctl == NULL)
@@ -543,7 +539,8 @@ int snd_cs8427_iec958_build(struct snd_i2c_device *cs8427,
 
 	chip->playback.substream = play_substream;
 	chip->capture.substream = cap_substream;
-	snd_assert(chip->playback.pcm_ctl, return -EIO);
+	if (snd_BUG_ON(!chip->playback.pcm_ctl))
+		return -EIO;
 	return 0;
 }
 
@@ -553,7 +550,8 @@ int snd_cs8427_iec958_active(struct snd_i2c_device *cs8427, int active)
 {
 	struct cs8427 *chip;
 
-	snd_assert(cs8427, return -ENXIO);
+	if (snd_BUG_ON(!cs8427))
+		return -ENXIO;
 	chip = cs8427->private_data;
 	if (active)
 		memcpy(chip->playback.pcm_status,
@@ -573,7 +571,8 @@ int snd_cs8427_iec958_pcm(struct snd_i2c_device *cs8427, unsigned int rate)
 	char *status;
 	int err, reset;
 
-	snd_assert(cs8427, return -ENXIO);
+	if (snd_BUG_ON(!cs8427))
+		return -ENXIO;
 	chip = cs8427->private_data;
 	status = chip->playback.pcm_status;
 	snd_i2c_lock(cs8427->bus);
@@ -607,15 +606,3 @@ int snd_cs8427_iec958_pcm(struct snd_i2c_device *cs8427, unsigned int rate)
 }
 
 EXPORT_SYMBOL(snd_cs8427_iec958_pcm);
-
-static int __init alsa_cs8427_module_init(void)
-{
-	return 0;
-}
-
-static void __exit alsa_cs8427_module_exit(void)
-{
-}
-
-module_init(alsa_cs8427_module_init)
-module_exit(alsa_cs8427_module_exit)

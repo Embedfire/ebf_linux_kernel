@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  linux/boot/head.S
  *
@@ -12,177 +13,211 @@
  * the page directory. [According to comments etc elsewhere on a compressed
  * kernel it will end up at 0x1000 + 1Mb I hope so as I assume this. - AC]
  *
- * Page 0 is deliberately kept safe, since System Management Mode code in 
+ * Page 0 is deliberately kept safe, since System Management Mode code in
  * laptops may need to access the BIOS data stored there.  This is also
- * useful for future device drivers that either access the BIOS via VM86 
+ * useful for future device drivers that either access the BIOS via VM86
  * mode.
  */
 
 /*
  * High loaded stuff by Hans Lermen & Werner Almesberger, Feb. 1996
  */
-.text
+	.text
 
+#include <linux/init.h>
 #include <linux/linkage.h>
 #include <asm/segment.h>
-#include <asm/page.h>
+#include <asm/page_types.h>
 #include <asm/boot.h>
 #include <asm/asm-offsets.h>
+#include <asm/bootparam.h>
 
-.section ".text.head","ax",@progbits
-	.globl startup_32
+/*
+ * These symbols needed to be marked as .hidden to prevent the BFD linker from
+ * generating R_386_32 (rather than R_386_RELATIVE) relocations for them when
+ * the 32-bit compressed kernel is linked as PIE. This is no longer necessary,
+ * but it doesn't hurt to keep them .hidden.
+ */
+	.hidden _bss
+	.hidden _ebss
+	.hidden _end
 
-startup_32:
+	__HEAD
+SYM_FUNC_START(startup_32)
 	cld
-	/* test KEEP_SEGMENTS flag to see if the bootloader is asking
-	 * us to not reload segments */
-	testb $(1<<6), BP_loadflags(%esi)
-	jnz 1f
-
 	cli
-	movl $(__BOOT_DS),%eax
-	movl %eax,%ds
-	movl %eax,%es
-	movl %eax,%fs
-	movl %eax,%gs
-	movl %eax,%ss
-1:
 
-/* Calculate the delta between where we were compiled to run
+/*
+ * Calculate the delta between where we were compiled to run
  * at and where we were actually loaded at.  This can only be done
  * with a short local call on x86.  Nothing  else will tell us what
  * address we are running at.  The reserved chunk of the real-mode
  * data at 0x1e4 (defined as a scratch field) are used as the stack
  * for this calculation. Only 4 bytes are needed.
  */
-	leal (0x1e4+4)(%esi), %esp
-	call 1f
-1:	popl %ebp
-	subl $1b, %ebp
+	leal	(BP_scratch+4)(%esi), %esp
+	call	1f
+1:	popl	%edx
+	addl	$_GLOBAL_OFFSET_TABLE_+(.-1b), %edx
 
-/* %ebp contains the address we are loaded at by the boot loader and %ebx
- * contains the address where we should move the kernel image temporarily
- * for safe in-place decompression.
+	/* Load new GDT */
+	leal	gdt@GOTOFF(%edx), %eax
+	movl	%eax, 2(%eax)
+	lgdt	(%eax)
+
+	/* Load segment registers with our descriptors */
+	movl	$__BOOT_DS, %eax
+	movl	%eax, %ds
+	movl	%eax, %es
+	movl	%eax, %fs
+	movl	%eax, %gs
+	movl	%eax, %ss
+
+/*
+ * %edx contains the address we are loaded at by the boot loader (plus the
+ * offset to the GOT).  The below code calculates %ebx to be the address where
+ * we should move the kernel image temporarily for safe in-place decompression
+ * (again, plus the offset to the GOT).
+ *
+ * %ebp is calculated to be the address that the kernel will be decompressed to.
  */
 
 #ifdef CONFIG_RELOCATABLE
-	movl 	%ebp, %ebx
-	addl    $(CONFIG_PHYSICAL_ALIGN - 1), %ebx
-	andl    $(~(CONFIG_PHYSICAL_ALIGN - 1)), %ebx
-#else
-	movl $LOAD_PHYSICAL_ADDR, %ebx
+	leal	startup_32@GOTOFF(%edx), %ebx
+
+#ifdef CONFIG_EFI_STUB
+/*
+ * If we were loaded via the EFI LoadImage service, startup_32() will be at an
+ * offset to the start of the space allocated for the image. efi_pe_entry() will
+ * set up image_offset to tell us where the image actually starts, so that we
+ * can use the full available buffer.
+ *	image_offset = startup_32 - image_base
+ * Otherwise image_offset will be zero and has no effect on the calculations.
+ */
+	subl    image_offset@GOTOFF(%edx), %ebx
 #endif
 
-	/* Replace the compressed data size with the uncompressed size */
-	subl input_len(%ebp), %ebx
-	movl output_len(%ebp), %eax
-	addl %eax, %ebx
-	/* Add 8 bytes for every 32K input block */
-	shrl $12, %eax
-	addl %eax, %ebx
-	/* Add 32K + 18 bytes of extra slack */
-	addl $(32768 + 18), %ebx
-	/* Align on a 4K boundary */
-	addl $4095, %ebx
-	andl $~4095, %ebx
+	movl	BP_kernel_alignment(%esi), %eax
+	decl	%eax
+	addl    %eax, %ebx
+	notl	%eax
+	andl    %eax, %ebx
+	cmpl	$LOAD_PHYSICAL_ADDR, %ebx
+	jae	1f
+#endif
+	movl	$LOAD_PHYSICAL_ADDR, %ebx
+1:
 
-/* Copy the compressed kernel to the end of our buffer
+	movl	%ebx, %ebp	// Save the output address for later
+	/* Target address to relocate to for decompression */
+	addl    BP_init_size(%esi), %ebx
+	subl    $_end@GOTOFF, %ebx
+
+	/* Set up the stack */
+	leal	boot_stack_end@GOTOFF(%ebx), %esp
+
+	/* Zero EFLAGS */
+	pushl	$0
+	popfl
+
+/*
+ * Copy the compressed kernel to the end of our buffer
  * where decompression in place becomes safe.
  */
-	pushl %esi
-	leal _end(%ebp), %esi
-	leal _end(%ebx), %edi
-	movl $(_end - startup_32), %ecx
+	pushl	%esi
+	leal	(_bss@GOTOFF-4)(%edx), %esi
+	leal	(_bss@GOTOFF-4)(%ebx), %edi
+	movl	$(_bss - startup_32), %ecx
+	shrl	$2, %ecx
 	std
-	rep
-	movsb
+	rep	movsl
 	cld
-	popl %esi
+	popl	%esi
 
-/* Compute the kernel start address.
- */
-#ifdef CONFIG_RELOCATABLE
-	addl    $(CONFIG_PHYSICAL_ALIGN - 1), %ebp
-	andl    $(~(CONFIG_PHYSICAL_ALIGN - 1)), %ebp
-#else
-	movl	$LOAD_PHYSICAL_ADDR, %ebp
-#endif
+	/*
+	 * The GDT may get overwritten either during the copy we just did or
+	 * during extract_kernel below. To avoid any issues, repoint the GDTR
+	 * to the new copy of the GDT.
+	 */
+	leal	gdt@GOTOFF(%ebx), %eax
+	movl	%eax, 2(%eax)
+	lgdt	(%eax)
 
 /*
  * Jump to the relocated address.
  */
-	leal relocated(%ebx), %eax
-	jmp *%eax
-.section ".text"
-relocated:
+	leal	.Lrelocated@GOTOFF(%ebx), %eax
+	jmp	*%eax
+SYM_FUNC_END(startup_32)
+
+#ifdef CONFIG_EFI_STUB
+SYM_FUNC_START(efi32_stub_entry)
+SYM_FUNC_START_ALIAS(efi_stub_entry)
+	add	$0x4, %esp
+	movl	8(%esp), %esi	/* save boot_params pointer */
+	call	efi_main
+	/* efi_main returns the possibly relocated address of startup_32 */
+	jmp	*%eax
+SYM_FUNC_END(efi32_stub_entry)
+SYM_FUNC_END_ALIAS(efi_stub_entry)
+#endif
+
+	.text
+SYM_FUNC_START_LOCAL_NOALIGN(.Lrelocated)
 
 /*
- * Clear BSS
+ * Clear BSS (stack is currently empty)
  */
-	xorl %eax,%eax
-	leal _edata(%ebx),%edi
-	leal _end(%ebx), %ecx
-	subl %edi,%ecx
-	cld
-	rep
-	stosb
+	xorl	%eax, %eax
+	leal	_bss@GOTOFF(%ebx), %edi
+	leal	_ebss@GOTOFF(%ebx), %ecx
+	subl	%edi, %ecx
+	shrl	$2, %ecx
+	rep	stosl
 
 /*
- * Setup the stack for the decompressor
+ * Do the extraction, and jump to the new kernel..
  */
-	leal boot_stack_end(%ebx), %esp
+	/* push arguments for extract_kernel: */
+
+	pushl	output_len@GOTOFF(%ebx)	/* decompressed length, end of relocs */
+	pushl	%ebp			/* output address */
+	pushl	input_len@GOTOFF(%ebx)	/* input_len */
+	leal	input_data@GOTOFF(%ebx), %eax
+	pushl	%eax			/* input_data */
+	leal	boot_heap@GOTOFF(%ebx), %eax
+	pushl	%eax			/* heap area */
+	pushl	%esi			/* real mode pointer */
+	call	extract_kernel		/* returns kernel location in %eax */
+	addl	$24, %esp
 
 /*
- * Do the decompression, and jump to the new kernel..
+ * Jump to the extracted kernel.
  */
-	movl output_len(%ebx), %eax
-	pushl %eax
-	pushl %ebp	# output address
-	movl input_len(%ebx), %eax
-	pushl %eax	# input_len
-	leal input_data(%ebx), %eax
-	pushl %eax	# input_data
-	leal boot_heap(%ebx), %eax
-	pushl %eax	# heap area as third argument
-	pushl %esi	# real mode pointer as second arg
-	call decompress_kernel
-	addl $20, %esp
-	popl %ecx
+	xorl	%ebx, %ebx
+	jmp	*%eax
+SYM_FUNC_END(.Lrelocated)
 
-#if CONFIG_RELOCATABLE
-/* Find the address of the relocations.
- */
-	movl %ebp, %edi
-	addl %ecx, %edi
+	.data
+	.balign	8
+SYM_DATA_START_LOCAL(gdt)
+	.word	gdt_end - gdt - 1
+	.long	0
+	.word	0
+	.quad	0x0000000000000000	/* Reserved */
+	.quad	0x00cf9a000000ffff	/* __KERNEL_CS */
+	.quad	0x00cf92000000ffff	/* __KERNEL_DS */
+SYM_DATA_END_LABEL(gdt, SYM_L_LOCAL, gdt_end)
 
-/* Calculate the delta between where vmlinux was compiled to run
- * and where it was actually loaded.
- */
-	movl %ebp, %ebx
-	subl $LOAD_PHYSICAL_ADDR, %ebx
-	jz   2f		/* Nothing to be done if loaded at compiled addr. */
-/*
- * Process relocations.
- */
-
-1:	subl $4, %edi
-	movl 0(%edi), %ecx
-	testl %ecx, %ecx
-	jz 2f
-	addl %ebx, -__PAGE_OFFSET(%ebx, %ecx)
-	jmp 1b
-2:
+#ifdef CONFIG_EFI_STUB
+SYM_DATA(image_offset, .long 0)
 #endif
 
 /*
- * Jump to the decompressed kernel.
+ * Stack and heap for uncompression
  */
-	xorl %ebx,%ebx
-	jmp *%ebp
-
-.bss
-/* Stack and heap for uncompression */
-.balign 4
+	.bss
+	.balign 4
 boot_heap:
 	.fill BOOT_HEAP_SIZE, 1, 0
 boot_stack:

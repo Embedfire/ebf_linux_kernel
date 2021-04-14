@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 1999, 2000, 2004  MIPS Technologies, Inc.
  *	All rights reserved.
  *	Authors: Carsten Langgaard <carstenl@mips.com>
  *		 Maciej W. Rozycki <macro@mips.com>
- *
- *  This program is free software; you can distribute it and/or modify it
- *  under the terms of the GNU General Public License (Version 2) as
- *  published by the Free Software Foundation.
- *
- *  This program is distributed in the hope it will be useful, but WITHOUT
- *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- *  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- *  for more details.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
  */
 #include <linux/types.h>
 #include <linux/pci.h>
@@ -23,21 +11,21 @@
 
 #include <asm/gt64120.h>
 
-#define PCI_ACCESS_READ  0
+#define PCI_ACCESS_READ	 0
 #define PCI_ACCESS_WRITE 1
 
 /*
  *  PCI configuration cycle AD bus definition
  */
 /* Type 0 */
-#define PCI_CFG_TYPE0_REG_SHF           0
-#define PCI_CFG_TYPE0_FUNC_SHF          8
+#define PCI_CFG_TYPE0_REG_SHF		0
+#define PCI_CFG_TYPE0_FUNC_SHF		8
 
 /* Type 1 */
-#define PCI_CFG_TYPE1_REG_SHF           0
-#define PCI_CFG_TYPE1_FUNC_SHF          8
-#define PCI_CFG_TYPE1_DEV_SHF           11
-#define PCI_CFG_TYPE1_BUS_SHF           16
+#define PCI_CFG_TYPE1_REG_SHF		0
+#define PCI_CFG_TYPE1_FUNC_SHF		8
+#define PCI_CFG_TYPE1_DEV_SHF		11
+#define PCI_CFG_TYPE1_BUS_SHF		16
 
 static int gt64xxx_pci0_pcibios_config_access(unsigned char access_type,
 		struct pci_bus *bus, unsigned int devfn, int where, u32 * data)
@@ -50,7 +38,7 @@ static int gt64xxx_pci0_pcibios_config_access(unsigned char access_type,
 
 	/* Clear cause register bits */
 	GT_WRITE(GT_INTRCAUSE_OFS, ~(GT_INTRCAUSE_MASABORT0_BIT |
-	                             GT_INTRCAUSE_TARABORT0_BIT));
+				     GT_INTRCAUSE_TARABORT0_BIT));
 
 	/* Setup address */
 	GT_WRITE(GT_PCI0_CFGADDR_OFS,
@@ -87,7 +75,7 @@ static int gt64xxx_pci0_pcibios_config_access(unsigned char access_type,
 
 		/* Clear bits */
 		GT_WRITE(GT_INTRCAUSE_OFS, ~(GT_INTRCAUSE_MASABORT0_BIT |
-		                             GT_INTRCAUSE_TARABORT0_BIT));
+					     GT_INTRCAUSE_TARABORT0_BIT));
 
 		return -1;
 	}
@@ -106,7 +94,7 @@ static int gt64xxx_pci0_pcibios_read(struct pci_bus *bus, unsigned int devfn,
 	u32 data = 0;
 
 	if (gt64xxx_pci0_pcibios_config_access(PCI_ACCESS_READ, bus, devfn,
-	                                       where, &data))
+					       where, &data))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	if (size == 1)
@@ -128,7 +116,7 @@ static int gt64xxx_pci0_pcibios_write(struct pci_bus *bus, unsigned int devfn,
 		data = val;
 	else {
 		if (gt64xxx_pci0_pcibios_config_access(PCI_ACCESS_READ, bus,
-		                                       devfn, where, &data))
+						       devfn, where, &data))
 			return PCIBIOS_DEVICE_NOT_FOUND;
 
 		if (size == 1)
@@ -140,7 +128,7 @@ static int gt64xxx_pci0_pcibios_write(struct pci_bus *bus, unsigned int devfn,
 	}
 
 	if (gt64xxx_pci0_pcibios_config_access(PCI_ACCESS_WRITE, bus, devfn,
-	                                       where, &data))
+					       where, &data))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	return PCIBIOS_SUCCESSFUL;

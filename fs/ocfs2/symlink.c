@@ -38,9 +38,8 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/pagemap.h>
-#include <linux/utsname.h>
+#include <linux/namei.h>
 
-#define MLOG_MASK_PREFIX ML_NAMEI
 #include <cluster/masklog.h>
 
 #include "ocfs2.h"
@@ -50,128 +49,47 @@
 #include "inode.h"
 #include "journal.h"
 #include "symlink.h"
+#include "xattr.h"
 
 #include "buffer_head_io.h"
 
-static char *ocfs2_page_getlink(struct dentry * dentry,
-				struct page **ppage);
-static char *ocfs2_fast_symlink_getlink(struct inode *inode,
-					struct buffer_head **bh);
 
-/* get the link contents into pagecache */
-static char *ocfs2_page_getlink(struct dentry * dentry,
-				struct page **ppage)
+static int ocfs2_fast_symlink_readpage(struct file *unused, struct page *page)
 {
-	struct page * page;
-	struct address_space *mapping = dentry->d_inode->i_mapping;
-	page = read_mapping_page(mapping, 0, NULL);
-	if (IS_ERR(page))
-		goto sync_fail;
-	*ppage = page;
-	return kmap(page);
-
-sync_fail:
-	return (char*)page;
-}
-
-static char *ocfs2_fast_symlink_getlink(struct inode *inode,
-					struct buffer_head **bh)
-{
-	int status;
-	char *link = NULL;
+	struct inode *inode = page->mapping->host;
+	struct buffer_head *bh = NULL;
+	int status = ocfs2_read_inode_block(inode, &bh);
 	struct ocfs2_dinode *fe;
+	const char *link;
+	void *kaddr;
+	size_t len;
 
-	mlog_entry_void();
-
-	status = ocfs2_read_block(OCFS2_SB(inode->i_sb),
-				  OCFS2_I(inode)->ip_blkno,
-				  bh,
-				  OCFS2_BH_CACHED,
-				  inode);
 	if (status < 0) {
 		mlog_errno(status);
-		link = ERR_PTR(status);
-		goto bail;
+		return status;
 	}
 
-	fe = (struct ocfs2_dinode *) (*bh)->b_data;
+	fe = (struct ocfs2_dinode *) bh->b_data;
 	link = (char *) fe->id2.i_symlink;
-bail:
-	mlog_exit(status);
-
-	return link;
-}
-
-static int ocfs2_readlink(struct dentry *dentry,
-			  char __user *buffer,
-			  int buflen)
-{
-	int ret;
-	char *link;
-	struct buffer_head *bh = NULL;
-	struct inode *inode = dentry->d_inode;
-
-	mlog_entry_void();
-
-	link = ocfs2_fast_symlink_getlink(inode, &bh);
-	if (IS_ERR(link)) {
-		ret = PTR_ERR(link);
-		goto out;
-	}
-
-	/*
-	 * Without vfsmount we can't update atime now,
-	 * but we will update atime here ultimately.
-	 */
-	ret = vfs_readlink(dentry, buffer, buflen, link);
-
+	/* will be less than a page size */
+	len = strnlen(link, ocfs2_fast_symlink_chars(inode->i_sb));
+	kaddr = kmap_atomic(page);
+	memcpy(kaddr, link, len + 1);
+	kunmap_atomic(kaddr);
+	SetPageUptodate(page);
+	unlock_page(page);
 	brelse(bh);
-out:
-	mlog_exit(ret);
-	return ret;
+	return 0;
 }
 
-static void *ocfs2_follow_link(struct dentry *dentry,
-			       struct nameidata *nd)
-{
-	int status;
-	char *link;
-	struct inode *inode = dentry->d_inode;
-	struct page *page = NULL;
-	struct buffer_head *bh = NULL;
-	
-	if (ocfs2_inode_is_fast_symlink(inode))
-		link = ocfs2_fast_symlink_getlink(inode, &bh);
-	else
-		link = ocfs2_page_getlink(dentry, &page);
-	if (IS_ERR(link)) {
-		status = PTR_ERR(link);
-		mlog_errno(status);
-		goto bail;
-	}
-
-	status = vfs_follow_link(nd, link);
-
-bail:
-	if (page) {
-		kunmap(page);
-		page_cache_release(page);
-	}
-	if (bh)
-		brelse(bh);
-
-	return ERR_PTR(status);
-}
+const struct address_space_operations ocfs2_fast_symlink_aops = {
+	.readpage		= ocfs2_fast_symlink_readpage,
+};
 
 const struct inode_operations ocfs2_symlink_inode_operations = {
-	.readlink	= page_readlink,
-	.follow_link	= ocfs2_follow_link,
+	.get_link	= page_get_link,
 	.getattr	= ocfs2_getattr,
 	.setattr	= ocfs2_setattr,
-};
-const struct inode_operations ocfs2_fast_symlink_inode_operations = {
-	.readlink	= ocfs2_readlink,
-	.follow_link	= ocfs2_follow_link,
-	.getattr	= ocfs2_getattr,
-	.setattr	= ocfs2_setattr,
+	.listxattr	= ocfs2_listxattr,
+	.fiemap		= ocfs2_fiemap,
 };

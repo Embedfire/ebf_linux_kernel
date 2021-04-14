@@ -1,8 +1,8 @@
 /*
  * net/tipc/addr.c: TIPC address utility routines
  *
- * Copyright (c) 2000-2006, Ericsson AB
- * Copyright (c) 2004-2005, Wind River Systems
+ * Copyright (c) 2000-2006, 2018, Ericsson AB
+ * Copyright (c) 2004-2005, 2010-2011, Wind River Systems
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -34,61 +34,91 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "core.h"
-#include "dbg.h"
 #include "addr.h"
-#include "zone.h"
-#include "cluster.h"
-#include "net.h"
+#include "core.h"
 
-u32 tipc_get_addr(void)
+bool tipc_in_scope(bool legacy_format, u32 domain, u32 addr)
 {
-	return tipc_own_addr;
+	if (!domain || (domain == addr))
+		return true;
+	if (!legacy_format)
+		return false;
+	if (domain == tipc_cluster_mask(addr)) /* domain <Z.C.0> */
+		return true;
+	if (domain == (addr & TIPC_ZONE_CLUSTER_MASK)) /* domain <Z.C.0> */
+		return true;
+	if (domain == (addr & TIPC_ZONE_MASK)) /* domain <Z.0.0> */
+		return true;
+	return false;
 }
 
-/**
- * tipc_addr_domain_valid - validates a network domain address
- *
- * Accepts <Z.C.N>, <Z.C.0>, <Z.0.0>, and <0.0.0>,
- * where Z, C, and N are non-zero and do not exceed the configured limits.
- *
- * Returns 1 if domain address is valid, otherwise 0
- */
-
-int tipc_addr_domain_valid(u32 addr)
+void tipc_set_node_id(struct net *net, u8 *id)
 {
-	u32 n = tipc_node(addr);
-	u32 c = tipc_cluster(addr);
-	u32 z = tipc_zone(addr);
-	u32 max_nodes = tipc_max_nodes;
+	struct tipc_net *tn = tipc_net(net);
+	u32 *tmp = (u32 *)id;
 
-	if (is_slave(addr))
-		max_nodes = LOWEST_SLAVE + tipc_max_slaves;
-	if (n > max_nodes)
-		return 0;
-	if (c > tipc_max_clusters)
-		return 0;
-	if (z > tipc_max_zones)
-		return 0;
-
-	if (n && (!z || !c))
-		return 0;
-	if (c && !z)
-		return 0;
-	return 1;
+	memcpy(tn->node_id, id, NODE_ID_LEN);
+	tipc_nodeid2string(tn->node_id_string, id);
+	tn->trial_addr = tmp[0] ^ tmp[1] ^ tmp[2] ^ tmp[3];
+	pr_info("Own node identity %s, cluster identity %u\n",
+		tipc_own_id_string(net), tn->net_id);
 }
 
-/**
- * tipc_addr_node_valid - validates a proposed network address for this node
- *
- * Accepts <Z.C.N>, where Z, C, and N are non-zero and do not exceed
- * the configured limits.
- *
- * Returns 1 if address can be used, otherwise 0
- */
-
-int tipc_addr_node_valid(u32 addr)
+void tipc_set_node_addr(struct net *net, u32 addr)
 {
-	return (tipc_addr_domain_valid(addr) && tipc_node(addr));
+	struct tipc_net *tn = tipc_net(net);
+	u8 node_id[NODE_ID_LEN] = {0,};
+
+	tn->node_addr = addr;
+	if (!tipc_own_id(net)) {
+		sprintf(node_id, "%x", addr);
+		tipc_set_node_id(net, node_id);
+	}
+	tn->trial_addr = addr;
+	tn->addr_trial_end = jiffies;
+	pr_info("32-bit node address hash set to %x\n", addr);
 }
 
+char *tipc_nodeid2string(char *str, u8 *id)
+{
+	int i;
+	u8 c;
+
+	/* Already a string ? */
+	for (i = 0; i < NODE_ID_LEN; i++) {
+		c = id[i];
+		if (c >= '0' && c <= '9')
+			continue;
+		if (c >= 'A' && c <= 'Z')
+			continue;
+		if (c >= 'a' && c <= 'z')
+			continue;
+		if (c == '.')
+			continue;
+		if (c == ':')
+			continue;
+		if (c == '_')
+			continue;
+		if (c == '-')
+			continue;
+		if (c == '@')
+			continue;
+		if (c != 0)
+			break;
+	}
+	if (i == NODE_ID_LEN) {
+		memcpy(str, id, NODE_ID_LEN);
+		str[NODE_ID_LEN] = 0;
+		return str;
+	}
+
+	/* Translate to hex string */
+	for (i = 0; i < NODE_ID_LEN; i++)
+		sprintf(&str[2 * i], "%02x", id[i]);
+
+	/* Strip off trailing zeroes */
+	for (i = NODE_ID_STR_LEN - 2; str[i] == '0'; i--)
+		str[i] = 0;
+
+	return str;
+}

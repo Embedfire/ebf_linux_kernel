@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ISP116x register declarations and HCD data structures
  *
@@ -13,7 +14,7 @@
 
 /* Full speed: max # of bytes to transfer for a single urb
    at a time must be < 1024 && must be multiple of 64.
-   832 allows transfering 4kiB within 5 frames. */
+   832 allows transferring 4kiB within 5 frames. */
 #define MAX_TRANSFER_SIZE_FULLSPEED	832
 
 /* Low speed: there is no reason to schedule in very big
@@ -325,11 +326,7 @@ struct isp116x_ep {
 
 /*-------------------------------------------------------------------------*/
 
-#ifdef DEBUG
-#define DBG(stuff...)		printk(KERN_DEBUG "116x: " stuff)
-#else
-#define DBG(stuff...)		do{}while(0)
-#endif
+#define DBG(stuff...)		pr_debug("116x: " stuff)
 
 #ifdef VERBOSE
 #    define VDBG		DBG
@@ -358,15 +355,8 @@ struct isp116x_ep {
 #define isp116x_check_platform_delay(h)	0
 #endif
 
-#if defined(DEBUG)
-#define	IRQ_TEST()	BUG_ON(!irqs_disabled())
-#else
-#define	IRQ_TEST()	do{}while(0)
-#endif
-
 static inline void isp116x_write_addr(struct isp116x *isp116x, unsigned reg)
 {
-	IRQ_TEST();
 	writew(reg & 0xff, isp116x->addr_reg);
 	isp116x_delay(isp116x, 300);
 }
@@ -563,7 +553,7 @@ static void urb_dbg(struct urb *urb, char *msg)
 */
 static inline void dump_ptd(struct ptd *ptd)
 {
-	printk("td: %x %d%c%d %d,%d,%d  %x %x%x%x\n",
+	printk(KERN_WARNING "td: %x %d%c%d %d,%d,%d  %x %x%x%x\n",
 	       PTD_GET_CC(ptd), PTD_GET_FA(ptd),
 	       PTD_DIR_STR(ptd), PTD_GET_EP(ptd),
 	       PTD_GET_COUNT(ptd), PTD_GET_LEN(ptd), PTD_GET_MPS(ptd),
@@ -576,7 +566,7 @@ static inline void dump_ptd_out_data(struct ptd *ptd, u8 * buf)
 	int k;
 
 	if (PTD_GET_DIR(ptd) != PTD_DIR_IN && PTD_GET_LEN(ptd)) {
-		printk("-> ");
+		printk(KERN_WARNING "-> ");
 		for (k = 0; k < PTD_GET_LEN(ptd); ++k)
 			printk("%02x ", ((u8 *) buf)[k]);
 		printk("\n");
@@ -588,13 +578,13 @@ static inline void dump_ptd_in_data(struct ptd *ptd, u8 * buf)
 	int k;
 
 	if (PTD_GET_DIR(ptd) == PTD_DIR_IN && PTD_GET_COUNT(ptd)) {
-		printk("<- ");
+		printk(KERN_WARNING "<- ");
 		for (k = 0; k < PTD_GET_COUNT(ptd); ++k)
 			printk("%02x ", ((u8 *) buf)[k]);
 		printk("\n");
 	}
 	if (PTD_GET_LAST(ptd))
-		printk("-\n");
+		printk(KERN_WARNING "-\n");
 }
 
 #else

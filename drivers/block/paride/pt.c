@@ -61,7 +61,7 @@
                         the slower the port i/o.  In some cases, setting
                         this to zero will speed up the device. (default -1)
 
-	    major	You may use this parameter to overide the
+	    major	You may use this parameter to override the
 			default major number (96) that this driver
 			will use.  Be sure to change the device
 			name as well.
@@ -109,6 +109,8 @@
 #define PT_NAME		"pt"
 #define PT_UNITS	4
 
+#include <linux/types.h>
+
 /* Here are things one can override from the insmod command.
    Most are autoprobed by paride unless set here.  Verbose is on
    by default.
@@ -146,11 +148,11 @@ static int (*drives[4])[6] = {&drive0, &drive1, &drive2, &drive3};
 #include <linux/mtio.h>
 #include <linux/device.h>
 #include <linux/sched.h>	/* current, TASK_*, schedule_timeout() */
-#include <linux/smp_lock.h>
+#include <linux/mutex.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
-module_param(verbose, bool, 0);
+module_param(verbose, int, 0);
 module_param(major, int, 0);
 module_param(name, charp, 0);
 module_param_array(drive0, int, NULL, 0);
@@ -189,6 +191,7 @@ module_param_array(drive3, int, NULL, 0);
 #define ATAPI_MODE_SENSE	0x1a
 #define ATAPI_LOG_SENSE		0x4d
 
+static DEFINE_MUTEX(pt_mutex);
 static int pt_open(struct inode *inode, struct file *file);
 static long pt_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static int pt_release(struct inode *inode, struct file *file);
@@ -229,6 +232,7 @@ static int pt_identify(struct pt_unit *tape);
 static struct pt_unit pt[PT_UNITS];
 
 static char pt_scratch[512];	/* scratch block buffer */
+static void *par_drv;		/* reference of parport driver */
 
 /* kernel glue structures */
 
@@ -239,6 +243,7 @@ static const struct file_operations pt_fops = {
 	.unlocked_ioctl = pt_ioctl,
 	.open = pt_open,
 	.release = pt_release,
+	.llseek = noop_llseek,
 };
 
 /* sysfs class support */
@@ -274,11 +279,11 @@ static int pt_wait(struct pt_unit *tape, int go, int stop, char *fun, char *msg)
 	       && (j++ < PT_SPIN))
 		udelay(PT_SPIN_DEL);
 
-	if ((r & (STAT_ERR & stop)) || (j >= PT_SPIN)) {
+	if ((r & (STAT_ERR & stop)) || (j > PT_SPIN)) {
 		s = read_reg(pi, 7);
 		e = read_reg(pi, 1);
 		p = read_reg(pi, 2);
-		if (j >= PT_SPIN)
+		if (j > PT_SPIN)
 			e |= 0x100;
 		if (fun)
 			printk("%s: %s %s: alt=0x%x stat=0x%x err=0x%x"
@@ -601,6 +606,12 @@ static int pt_detect(void)
 
 	printk("%s: %s version %s, major %d\n", name, name, PT_VERSION, major);
 
+	par_drv = pi_register_driver(name);
+	if (!par_drv) {
+		pr_err("failed to register %s driver\n", name);
+		return -1;
+	}
+
 	specified = 0;
 	for (unit = 0; unit < PT_UNITS; unit++) {
 		struct pt_unit *tape = &pt[unit];
@@ -640,6 +651,7 @@ static int pt_detect(void)
 	if (found)
 		return 0;
 
+	pi_unregister_driver(par_drv);
 	printk("%s: No ATAPI tape drive detected\n", name);
 	return -1;
 }
@@ -650,9 +662,9 @@ static int pt_open(struct inode *inode, struct file *file)
 	struct pt_unit *tape = pt + unit;
 	int err;
 
-	lock_kernel();
+	mutex_lock(&pt_mutex);
 	if (unit >= PT_UNITS || (!tape->present)) {
-		unlock_kernel();
+		mutex_unlock(&pt_mutex);
 		return -ENODEV;
 	}
 
@@ -667,7 +679,7 @@ static int pt_open(struct inode *inode, struct file *file)
 		goto out;
 
 	err = -EROFS;
-	if ((!(tape->flags & PT_WRITE_OK)) && (file->f_mode & 2))
+	if ((!(tape->flags & PT_WRITE_OK)) && (file->f_mode & FMODE_WRITE))
 		goto out;
 
 	if (!(iminor(inode) & 128))
@@ -681,12 +693,12 @@ static int pt_open(struct inode *inode, struct file *file)
 	}
 
 	file->private_data = tape;
-	unlock_kernel();
+	mutex_unlock(&pt_mutex);
 	return 0;
 
 out:
 	atomic_inc(&tape->available);
-	unlock_kernel();
+	mutex_unlock(&pt_mutex);
 	return err;
 }
 
@@ -704,15 +716,15 @@ static long pt_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		switch (mtop.mt_op) {
 
 		case MTREW:
-			lock_kernel();
+			mutex_lock(&pt_mutex);
 			pt_rewind(tape);
-			unlock_kernel();
+			mutex_unlock(&pt_mutex);
 			return 0;
 
 		case MTWEOF:
-			lock_kernel();
+			mutex_lock(&pt_mutex);
 			pt_write_fm(tape);
-			unlock_kernel();
+			mutex_unlock(&pt_mutex);
 			return 0;
 
 		default:
@@ -979,12 +991,10 @@ static int __init pt_init(void)
 
 	for (unit = 0; unit < PT_UNITS; unit++)
 		if (pt[unit].present) {
-			device_create_drvdata(pt_class, NULL,
-					      MKDEV(major, unit), NULL,
-					      "pt%d", unit);
-			device_create_drvdata(pt_class, NULL,
-					      MKDEV(major, unit + 128), NULL,
-					      "pt%dn", unit);
+			device_create(pt_class, NULL, MKDEV(major, unit), NULL,
+				      "pt%d", unit);
+			device_create(pt_class, NULL, MKDEV(major, unit + 128),
+				      NULL, "pt%dn", unit);
 		}
 	goto out;
 

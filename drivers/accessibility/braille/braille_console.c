@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Minimalistic braille device kernel support.
  *
@@ -5,23 +6,8 @@
  * Pressing Insert switches to VC browsing.
  *
  *  Copyright (C) Samuel Thibault <samuel.thibault@ens-lyon.org>
- *
- * This program is free software ; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation ; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY ; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with the program ; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#include <linux/autoconf.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -45,7 +31,7 @@ MODULE_LICENSE("GPL");
  */
 
 /* Emit various sounds */
-static int sound;
+static bool sound;
 module_param(sound, bool, 0);
 MODULE_PARM_DESC(sound, "emit sounds");
 
@@ -123,16 +109,16 @@ static void braille_write(u16 *buf)
 /* Follow the VC cursor*/
 static void vc_follow_cursor(struct vc_data *vc)
 {
-	vc_x = vc->vc_x - (vc->vc_x % WIDTH);
-	vc_y = vc->vc_y;
-	lastvc_x = vc->vc_x;
-	lastvc_y = vc->vc_y;
+	vc_x = vc->state.x - (vc->state.x % WIDTH);
+	vc_y = vc->state.y;
+	lastvc_x = vc->state.x;
+	lastvc_y = vc->state.y;
 }
 
 /* Maybe the VC cursor moved, if so follow it */
 static void vc_maybe_cursor_moved(struct vc_data *vc)
 {
-	if (vc->vc_x != lastvc_x || vc->vc_y != lastvc_y)
+	if (vc->state.x != lastvc_x || vc->state.y != lastvc_y)
 		vc_follow_cursor(vc);
 }
 
@@ -245,16 +231,13 @@ static int keyboard_notifier_call(struct notifier_block *blk,
 
 			switch (val) {
 			case KVAL(K_CAPS):
-				on_off = vc_kbd_led(kbd_table + fg_console,
-						VC_CAPSLOCK);
+				on_off = vt_get_leds(fg_console, VC_CAPSLOCK);
 				break;
 			case KVAL(K_NUM):
-				on_off = vc_kbd_led(kbd_table + fg_console,
-						VC_NUMLOCK);
+				on_off = vt_get_leds(fg_console, VC_NUMLOCK);
 				break;
 			case KVAL(K_HOLD):
-				on_off = vc_kbd_led(kbd_table + fg_console,
-						VC_SCROLLOCK);
+				on_off = vt_get_leds(fg_console, VC_SCROLLOCK);
 				break;
 			}
 			if (on_off == 1)
@@ -307,7 +290,7 @@ static int vt_notifier_call(struct notifier_block *blk,
 			break;
 		case '\t':
 			c = ' ';
-			/* Fallthrough */
+			fallthrough;
 		default:
 			if (c < 32)
 				/* Ignore other control sequences */
@@ -363,6 +346,7 @@ int braille_register_console(struct console *console, int index,
 		char *console_options, char *braille_options)
 {
 	int ret;
+
 	if (!console_options)
 		/* Only support VisioBraille for now */
 		console_options = "57600o8";
@@ -376,22 +360,17 @@ int braille_register_console(struct console *console, int index,
 	console->flags |= CON_ENABLED;
 	console->index = index;
 	braille_co = console;
-	return 0;
+	register_keyboard_notifier(&keyboard_notifier_block);
+	register_vt_notifier(&vt_notifier_block);
+	return 1;
 }
 
 int braille_unregister_console(struct console *console)
 {
 	if (braille_co != console)
 		return -EINVAL;
+	unregister_keyboard_notifier(&keyboard_notifier_block);
+	unregister_vt_notifier(&vt_notifier_block);
 	braille_co = NULL;
-	return 0;
+	return 1;
 }
-
-static int __init braille_init(void)
-{
-	register_keyboard_notifier(&keyboard_notifier_block);
-	register_vt_notifier(&vt_notifier_block);
-	return 0;
-}
-
-console_initcall(braille_init);

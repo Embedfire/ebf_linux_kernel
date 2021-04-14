@@ -1,21 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *  arch/s390/lib/delay.c
  *    Precise Delay Loops for S390
  *
- *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
- *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
- *
- *  Derived from "arch/i386/lib/delay.c"
- *    Copyright (C) 1993 Linus Torvalds
- *    Copyright (C) 1997 Martin Mares <mj@atrey.karlin.mff.cuni.cz>
+ *    Copyright IBM Corp. 1999, 2008
+ *    Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>,
+ *		 Heiko Carstens <heiko.carstens@de.ibm.com>,
  */
 
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/timex.h>
+#include <linux/export.h>
 #include <linux/irqflags.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
+#include <asm/vtimer.h>
+#include <asm/div64.h>
+#include <asm/idle.h>
 
 void __delay(unsigned long loops)
 {
@@ -28,47 +29,102 @@ void __delay(unsigned long loops)
          */
 	asm volatile("0: brct %0,0b" : : "d" ((loops/2) + 1));
 }
+EXPORT_SYMBOL(__delay);
+
+static void __udelay_disabled(unsigned long long usecs)
+{
+	unsigned long cr0, cr0_new, psw_mask;
+	struct s390_idle_data idle;
+	u64 end;
+
+	end = get_tod_clock() + (usecs << 12);
+	__ctl_store(cr0, 0, 0);
+	cr0_new = cr0 & ~CR0_IRQ_SUBCLASS_MASK;
+	cr0_new |= (1UL << (63 - 52)); /* enable clock comparator irq */
+	__ctl_load(cr0_new, 0, 0);
+	psw_mask = __extract_psw() | PSW_MASK_EXT | PSW_MASK_WAIT;
+	set_clock_comparator(end);
+	set_cpu_flag(CIF_IGNORE_IRQ);
+	psw_idle(&idle, psw_mask);
+	trace_hardirqs_off();
+	clear_cpu_flag(CIF_IGNORE_IRQ);
+	set_clock_comparator(S390_lowcore.clock_comparator);
+	__ctl_load(cr0, 0, 0);
+}
+
+static void __udelay_enabled(unsigned long long usecs)
+{
+	u64 clock_saved, end;
+
+	end = get_tod_clock_fast() + (usecs << 12);
+	do {
+		clock_saved = 0;
+		if (tod_after(S390_lowcore.clock_comparator, end)) {
+			clock_saved = local_tick_disable();
+			set_clock_comparator(end);
+		}
+		enabled_wait();
+		if (clock_saved)
+			local_tick_enable(clock_saved);
+	} while (get_tod_clock_fast() < end);
+}
 
 /*
  * Waits for 'usecs' microseconds using the TOD clock comparator.
  */
-void __udelay(unsigned long usecs)
+void __udelay(unsigned long long usecs)
 {
-	u64 end, time, old_cc = 0;
-	unsigned long flags, cr0, mask, dummy;
-	int irq_context;
+	unsigned long flags;
 
-	irq_context = in_interrupt();
-	if (!irq_context)
-		local_bh_disable();
+	preempt_disable();
 	local_irq_save(flags);
-	if (raw_irqs_disabled_flags(flags)) {
-		old_cc = local_tick_disable();
-		S390_lowcore.clock_comparator = -1ULL;
-		__ctl_store(cr0, 0, 0);
-		dummy = (cr0 & 0xffff00e0) | 0x00000800;
-		__ctl_load(dummy , 0, 0);
-		mask = psw_kernel_bits | PSW_MASK_WAIT | PSW_MASK_EXT;
-	} else
-		mask = psw_kernel_bits | PSW_MASK_WAIT |
-			PSW_MASK_EXT | PSW_MASK_IO;
-
-	end = get_clock() + ((u64) usecs << 12);
-	do {
-		time = end < S390_lowcore.clock_comparator ?
-			end : S390_lowcore.clock_comparator;
-		set_clock_comparator(time);
-		trace_hardirqs_on();
-		__load_psw_mask(mask);
-		local_irq_disable();
-	} while (get_clock() < end);
-
-	if (raw_irqs_disabled_flags(flags)) {
-		__ctl_load(cr0, 0, 0);
-		local_tick_enable(old_cc);
+	if (in_irq()) {
+		__udelay_disabled(usecs);
+		goto out;
 	}
-	if (!irq_context)
+	if (in_softirq()) {
+		if (raw_irqs_disabled_flags(flags))
+			__udelay_disabled(usecs);
+		else
+			__udelay_enabled(usecs);
+		goto out;
+	}
+	if (raw_irqs_disabled_flags(flags)) {
+		local_bh_disable();
+		__udelay_disabled(usecs);
 		_local_bh_enable();
-	set_clock_comparator(S390_lowcore.clock_comparator);
+		goto out;
+	}
+	__udelay_enabled(usecs);
+out:
 	local_irq_restore(flags);
+	preempt_enable();
 }
+EXPORT_SYMBOL(__udelay);
+
+/*
+ * Simple udelay variant. To be used on startup and reboot
+ * when the interrupt handler isn't working.
+ */
+void udelay_simple(unsigned long long usecs)
+{
+	u64 end;
+
+	end = get_tod_clock_fast() + (usecs << 12);
+	while (get_tod_clock_fast() < end)
+		cpu_relax();
+}
+
+void __ndelay(unsigned long long nsecs)
+{
+	u64 end;
+
+	nsecs <<= 9;
+	do_div(nsecs, 125);
+	end = get_tod_clock_fast() + nsecs;
+	if (nsecs & ~0xfffUL)
+		__udelay(nsecs >> 12);
+	while (get_tod_clock_fast() < end)
+		barrier();
+}
+EXPORT_SYMBOL(__ndelay);

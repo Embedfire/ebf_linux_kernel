@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* xfrm4_tunnel.c: Generic IP tunnel transformer.
  *
  * Copyright (C) 2003 David S. Miller (davem@redhat.com)
  */
+
+#define pr_fmt(fmt) "IPsec: " fmt
 
 #include <linux/skbuff.h>
 #include <linux/module.h>
@@ -58,35 +61,35 @@ static int xfrm_tunnel_err(struct sk_buff *skb, u32 info)
 	return -ENOENT;
 }
 
-static struct xfrm_tunnel xfrm_tunnel_handler = {
+static struct xfrm_tunnel xfrm_tunnel_handler __read_mostly = {
 	.handler	=	xfrm_tunnel_rcv,
 	.err_handler	=	xfrm_tunnel_err,
-	.priority	=	2,
+	.priority	=	4,
 };
 
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
-static struct xfrm_tunnel xfrm64_tunnel_handler = {
+#if IS_ENABLED(CONFIG_IPV6)
+static struct xfrm_tunnel xfrm64_tunnel_handler __read_mostly = {
 	.handler	=	xfrm_tunnel_rcv,
 	.err_handler	=	xfrm_tunnel_err,
-	.priority	=	2,
+	.priority	=	3,
 };
 #endif
 
 static int __init ipip_init(void)
 {
 	if (xfrm_register_type(&ipip_type, AF_INET) < 0) {
-		printk(KERN_INFO "ipip init: can't add xfrm type\n");
+		pr_info("%s: can't add xfrm type\n", __func__);
 		return -EAGAIN;
 	}
 
 	if (xfrm4_tunnel_register(&xfrm_tunnel_handler, AF_INET)) {
-		printk(KERN_INFO "ipip init: can't add xfrm handler for AF_INET\n");
+		pr_info("%s: can't add xfrm handler for AF_INET\n", __func__);
 		xfrm_unregister_type(&ipip_type, AF_INET);
 		return -EAGAIN;
 	}
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+#if IS_ENABLED(CONFIG_IPV6)
 	if (xfrm4_tunnel_register(&xfrm64_tunnel_handler, AF_INET6)) {
-		printk(KERN_INFO "ipip init: can't add xfrm handler for AF_INET6\n");
+		pr_info("%s: can't add xfrm handler for AF_INET6\n", __func__);
 		xfrm4_tunnel_deregister(&xfrm_tunnel_handler, AF_INET);
 		xfrm_unregister_type(&ipip_type, AF_INET);
 		return -EAGAIN;
@@ -97,14 +100,15 @@ static int __init ipip_init(void)
 
 static void __exit ipip_fini(void)
 {
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+#if IS_ENABLED(CONFIG_IPV6)
 	if (xfrm4_tunnel_deregister(&xfrm64_tunnel_handler, AF_INET6))
-		printk(KERN_INFO "ipip close: can't remove xfrm handler for AF_INET6\n");
+		pr_info("%s: can't remove xfrm handler for AF_INET6\n",
+			__func__);
 #endif
 	if (xfrm4_tunnel_deregister(&xfrm_tunnel_handler, AF_INET))
-		printk(KERN_INFO "ipip close: can't remove xfrm handler for AF_INET\n");
-	if (xfrm_unregister_type(&ipip_type, AF_INET) < 0)
-		printk(KERN_INFO "ipip close: can't remove xfrm type\n");
+		pr_info("%s: can't remove xfrm handler for AF_INET\n",
+			__func__);
+	xfrm_unregister_type(&ipip_type, AF_INET);
 }
 
 module_init(ipip_init);

@@ -1,7 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/init.h>
 #include <linux/if_ether.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
+#include <linux/dma-mapping.h>
 
 #include <asm/paccess.h>
 #include <asm/sgi/ip22.h>
@@ -24,6 +26,8 @@ static struct sgiwd93_platform_data sgiwd93_0_pd = {
 	.irq	= SGI_WD93_0_IRQ,
 };
 
+static u64 sgiwd93_0_dma_mask = DMA_BIT_MASK(32);
+
 static struct platform_device sgiwd93_0_device = {
 	.name		= "sgiwd93",
 	.id		= 0,
@@ -31,6 +35,8 @@ static struct platform_device sgiwd93_0_device = {
 	.resource	= sgiwd93_0_resources,
 	.dev = {
 		.platform_data = &sgiwd93_0_pd,
+		.dma_mask = &sgiwd93_0_dma_mask,
+		.coherent_dma_mask = DMA_BIT_MASK(32),
 	},
 };
 
@@ -48,6 +54,8 @@ static struct sgiwd93_platform_data sgiwd93_1_pd = {
 	.irq	= SGI_WD93_1_IRQ,
 };
 
+static u64 sgiwd93_1_dma_mask = DMA_BIT_MASK(32);
+
 static struct platform_device sgiwd93_1_device = {
 	.name		= "sgiwd93",
 	.id		= 1,
@@ -55,6 +63,8 @@ static struct platform_device sgiwd93_1_device = {
 	.resource	= sgiwd93_1_resources,
 	.dev = {
 		.platform_data = &sgiwd93_1_pd,
+		.dma_mask = &sgiwd93_1_dma_mask,
+		.coherent_dma_mask = DMA_BIT_MASK(32),
 	},
 };
 
@@ -95,6 +105,8 @@ static struct resource sgiseeq_0_resources[] = {
 
 static struct sgiseeq_platform_data eth0_pd;
 
+static u64 sgiseeq_dma_mask = DMA_BIT_MASK(32);
+
 static struct platform_device eth0_device = {
 	.name		= "sgiseeq",
 	.id		= 0,
@@ -102,6 +114,8 @@ static struct platform_device eth0_device = {
 	.resource	= sgiseeq_0_resources,
 	.dev = {
 		.platform_data = &eth0_pd,
+		.dma_mask = &sgiseeq_dma_mask,
+		.coherent_dma_mask = DMA_BIT_MASK(32),
 	},
 };
 
@@ -132,12 +146,12 @@ static struct platform_device eth1_device = {
  */
 static int __init sgiseeq_devinit(void)
 {
-	unsigned int tmp;
+	unsigned int pbdma __maybe_unused;
 	int res, i;
 
 	eth0_pd.hpc = hpc3c0;
 	eth0_pd.irq = SGI_ENET_IRQ;
-#define EADDR_NVOFS     250
+#define EADDR_NVOFS	250
 	for (i = 0; i < 3; i++) {
 		unsigned short tmp = ip22_nvram_read(EADDR_NVOFS / 2 + i);
 
@@ -151,21 +165,21 @@ static int __init sgiseeq_devinit(void)
 
 	/* Second HPC is missing? */
 	if (ip22_is_fullhouse() ||
-	    get_dbe(tmp, (unsigned int *)&hpc3c1->pbdma[1]))
+	    get_dbe(pbdma, (unsigned int *)&hpc3c1->pbdma[1]))
 		return 0;
 
 	sgimc->giopar |= SGIMC_GIOPAR_MASTEREXP1 | SGIMC_GIOPAR_EXP164 |
-	                 SGIMC_GIOPAR_HPC264;
+			 SGIMC_GIOPAR_HPC264;
 	hpc3c1->pbus_piocfg[0][0] = 0x3ffff;
 	/* interrupt/config register on Challenge S Mezz board */
 	hpc3c1->pbus_extregs[0][0] = 0x30;
 
 	eth1_pd.hpc = hpc3c1;
 	eth1_pd.irq = SGI_GIO_0_IRQ;
-#define EADDR_NVOFS     250
+#define EADDR_NVOFS	250
 	for (i = 0; i < 3; i++) {
 		unsigned short tmp = ip22_eeprom_read(&hpc3c1->eeprom,
-		                                      EADDR_NVOFS / 2 + i);
+						      EADDR_NVOFS / 2 + i);
 
 		eth1_pd.mac[2 * i]     = tmp >> 8;
 		eth1_pd.mac[2 * i + 1] = tmp & 0xff;
@@ -192,3 +206,18 @@ static int __init sgi_button_devinit(void)
 }
 
 device_initcall(sgi_button_devinit);
+
+static int __init sgi_ds1286_devinit(void)
+{
+	struct resource res;
+
+	memset(&res, 0, sizeof(res));
+	res.start = HPC3_CHIP0_BASE + offsetof(struct hpc3_regs, rtcregs);
+	res.end = res.start + sizeof(hpc3c0->rtcregs) - 1;
+	res.flags = IORESOURCE_MEM;
+
+	return IS_ERR(platform_device_register_simple("rtc-ds1286", -1,
+						      &res, 1));
+}
+
+device_initcall(sgi_ds1286_devinit);

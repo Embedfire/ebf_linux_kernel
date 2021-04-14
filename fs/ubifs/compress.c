@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of UBIFS.
  *
  * Copyright (C) 2006-2008 Nokia Corporation.
  * Copyright (C) 2006, 2007 University of Szeged, Hungary
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 51
- * Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  *
  * Authors: Adrian Hunter
  *          Artem Bityutskiy (Битюцкий Артём)
@@ -33,7 +21,7 @@
 /* Fake description object for the "none" compressor */
 static struct ubifs_compressor none_compr = {
 	.compr_type = UBIFS_COMPR_NONE,
-	.name = "no compression",
+	.name = "none",
 	.capi_name = "",
 };
 
@@ -43,13 +31,13 @@ static DEFINE_MUTEX(lzo_mutex);
 static struct ubifs_compressor lzo_compr = {
 	.compr_type = UBIFS_COMPR_LZO,
 	.comp_mutex = &lzo_mutex,
-	.name = "LZO",
+	.name = "lzo",
 	.capi_name = "lzo",
 };
 #else
 static struct ubifs_compressor lzo_compr = {
 	.compr_type = UBIFS_COMPR_LZO,
-	.name = "LZO",
+	.name = "lzo",
 };
 #endif
 
@@ -68,6 +56,24 @@ static struct ubifs_compressor zlib_compr = {
 static struct ubifs_compressor zlib_compr = {
 	.compr_type = UBIFS_COMPR_ZLIB,
 	.name = "zlib",
+};
+#endif
+
+#ifdef CONFIG_UBIFS_FS_ZSTD
+static DEFINE_MUTEX(zstd_enc_mutex);
+static DEFINE_MUTEX(zstd_dec_mutex);
+
+static struct ubifs_compressor zstd_compr = {
+	.compr_type = UBIFS_COMPR_ZSTD,
+	.comp_mutex = &zstd_enc_mutex,
+	.decomp_mutex = &zstd_dec_mutex,
+	.name = "zstd",
+	.capi_name = "zstd",
+};
+#else
+static struct ubifs_compressor zstd_compr = {
+	.compr_type = UBIFS_COMPR_ZSTD,
+	.name = "zstd",
 };
 #endif
 
@@ -91,11 +97,9 @@ struct ubifs_compressor *ubifs_compressors[UBIFS_COMPR_TYPES_CNT];
  *
  * Note, if the input buffer was not compressed, it is copied to the output
  * buffer and %UBIFS_COMPR_NONE is returned in @compr_type.
- *
- * This functions returns %0 on success or a negative error code on failure.
  */
-void ubifs_compress(const void *in_buf, int in_len, void *out_buf, int *out_len,
-		    int *compr_type)
+void ubifs_compress(const struct ubifs_info *c, const void *in_buf,
+		    int in_len, void *out_buf, int *out_len, int *compr_type)
 {
 	int err;
 	struct ubifs_compressor *compr = ubifs_compressors[*compr_type];
@@ -110,21 +114,20 @@ void ubifs_compress(const void *in_buf, int in_len, void *out_buf, int *out_len,
 	if (compr->comp_mutex)
 		mutex_lock(compr->comp_mutex);
 	err = crypto_comp_compress(compr->cc, in_buf, in_len, out_buf,
-				   out_len);
+				   (unsigned int *)out_len);
 	if (compr->comp_mutex)
 		mutex_unlock(compr->comp_mutex);
 	if (unlikely(err)) {
-		ubifs_warn("cannot compress %d bytes, compressor %s, "
-			   "error %d, leave data uncompressed",
+		ubifs_warn(c, "cannot compress %d bytes, compressor %s, error %d, leave data uncompressed",
 			   in_len, compr->name, err);
-		 goto no_compr;
+		goto no_compr;
 	}
 
 	/*
-	 * Presently, we just require that compression results in less data,
-	 * rather than any defined minimum compression ratio or amount.
+	 * If the data compressed only slightly, it is better to leave it
+	 * uncompressed to improve read speed.
 	 */
-	if (ALIGN(*out_len, 8) >= ALIGN(in_len, 8))
+	if (in_len - *out_len < UBIFS_MIN_COMPRESS_DIFF)
 		goto no_compr;
 
 	return;
@@ -147,21 +150,21 @@ no_compr:
  * The length of the uncompressed data is returned in @out_len. This functions
  * returns %0 on success or a negative error code on failure.
  */
-int ubifs_decompress(const void *in_buf, int in_len, void *out_buf,
-		     int *out_len, int compr_type)
+int ubifs_decompress(const struct ubifs_info *c, const void *in_buf,
+		     int in_len, void *out_buf, int *out_len, int compr_type)
 {
 	int err;
 	struct ubifs_compressor *compr;
 
 	if (unlikely(compr_type < 0 || compr_type >= UBIFS_COMPR_TYPES_CNT)) {
-		ubifs_err("invalid compression type %d", compr_type);
+		ubifs_err(c, "invalid compression type %d", compr_type);
 		return -EINVAL;
 	}
 
 	compr = ubifs_compressors[compr_type];
 
 	if (unlikely(!compr->capi_name)) {
-		ubifs_err("%s compression is not compiled in", compr->name);
+		ubifs_err(c, "%s compression is not compiled in", compr->name);
 		return -EINVAL;
 	}
 
@@ -174,12 +177,12 @@ int ubifs_decompress(const void *in_buf, int in_len, void *out_buf,
 	if (compr->decomp_mutex)
 		mutex_lock(compr->decomp_mutex);
 	err = crypto_comp_decompress(compr->cc, in_buf, in_len, out_buf,
-				     out_len);
+				     (unsigned int *)out_len);
 	if (compr->decomp_mutex)
 		mutex_unlock(compr->decomp_mutex);
 	if (err)
-		ubifs_err("cannot decompress %d bytes, compressor %s, "
-			  "error %d", in_len, compr->name, err);
+		ubifs_err(c, "cannot decompress %d bytes, compressor %s, error %d",
+			  in_len, compr->name, err);
 
 	return err;
 }
@@ -196,8 +199,8 @@ static int __init compr_init(struct ubifs_compressor *compr)
 	if (compr->capi_name) {
 		compr->cc = crypto_alloc_comp(compr->capi_name, 0, 0);
 		if (IS_ERR(compr->cc)) {
-			ubifs_err("cannot initialize compressor %s, error %ld",
-				  compr->name, PTR_ERR(compr->cc));
+			pr_err("UBIFS error (pid %d): cannot initialize compressor %s, error %ld",
+			       current->pid, compr->name, PTR_ERR(compr->cc));
 			return PTR_ERR(compr->cc);
 		}
 	}
@@ -231,13 +234,19 @@ int __init ubifs_compressors_init(void)
 	if (err)
 		return err;
 
-	err = compr_init(&zlib_compr);
+	err = compr_init(&zstd_compr);
 	if (err)
 		goto out_lzo;
+
+	err = compr_init(&zlib_compr);
+	if (err)
+		goto out_zstd;
 
 	ubifs_compressors[UBIFS_COMPR_NONE] = &none_compr;
 	return 0;
 
+out_zstd:
+	compr_exit(&zstd_compr);
 out_lzo:
 	compr_exit(&lzo_compr);
 	return err;
@@ -246,8 +255,9 @@ out_lzo:
 /**
  * ubifs_compressors_exit - de-initialize UBIFS compressors.
  */
-void __exit ubifs_compressors_exit(void)
+void ubifs_compressors_exit(void)
 {
 	compr_exit(&lzo_compr);
 	compr_exit(&zlib_compr);
+	compr_exit(&zstd_compr);
 }

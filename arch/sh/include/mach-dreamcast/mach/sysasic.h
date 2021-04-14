@@ -1,4 +1,6 @@
-/* include/asm-sh/dreamcast/sysasic.h
+/* SPDX-License-Identifier: GPL-2.0
+ *
+ * include/asm-sh/dreamcast/sysasic.h
  *
  * Definitions for the Dreamcast System ASIC and related peripherals.
  *
@@ -6,9 +8,6 @@
  * Copyright (C) 2003 Paul Mundt <lethal@linux-sh.org>
  *
  * This file is part of the LinuxDC project (www.linuxdc.org)
- *
- * Released under the terms of the GNU GPL v2.0.
- *
  */
 #ifndef __ASM_SH_DREAMCAST_SYSASIC_H
 #define __ASM_SH_DREAMCAST_SYSASIC_H
@@ -38,6 +37,10 @@
 #define HW_EVENT_EXTERNAL  (HW_EVENT_IRQ_BASE + 35) /* Ext. (expansion) */
 
 #define HW_EVENT_IRQ_MAX (HW_EVENT_IRQ_BASE + 95)
+
+/* arch/sh/boards/mach-dreamcast/irq.c */
+extern int systemasic_irq_demux(int);
+extern void systemasic_irq_init(void);
 
 #endif /* __ASM_SH_DREAMCAST_SYSASIC_H */
 

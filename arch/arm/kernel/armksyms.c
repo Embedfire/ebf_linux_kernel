@@ -1,23 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/kernel/armksyms.c
  *
  *  Copyright (C) 2000 Russell King
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
-#include <linux/module.h>
+#include <linux/export.h>
+#include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/cryptohash.h>
 #include <linux/delay.h>
 #include <linux/in6.h>
 #include <linux/syscalls.h>
+#include <linux/uaccess.h>
+#include <linux/io.h>
+#include <linux/arm-smccc.h>
 
 #include <asm/checksum.h>
-#include <asm/io.h>
-#include <asm/system.h>
-#include <asm/uaccess.h>
 #include <asm/ftrace.h>
 
 /*
@@ -35,6 +32,8 @@ extern void __ucmpdi2(void);
 extern void __udivsi3(void);
 extern void __umodsi3(void);
 extern void __do_div64(void);
+extern void __bswapsi2(void);
+extern void __bswapdi2(void);
 
 extern void __aeabi_idiv(void);
 extern void __aeabi_idivmod(void);
@@ -47,33 +46,12 @@ extern void __aeabi_uidivmod(void);
 extern void __aeabi_ulcmp(void);
 
 extern void fpundefinstr(void);
-extern void fp_enter(void);
 
-/*
- * This has a special calling convention; it doesn't
- * modify any of the usual registers, except for LR.
- */
-#define EXPORT_CRC_ALIAS(sym) __CRC_SYMBOL(sym, "")
-
-#define EXPORT_SYMBOL_ALIAS(sym,orig)		\
- EXPORT_CRC_ALIAS(sym)				\
- static const struct kernel_symbol __ksymtab_##sym	\
-  __used __attribute__((section("__ksymtab"))) =	\
-    { (unsigned long)&orig, #sym };
-
-/*
- * floating point math emulator support.
- * These symbols will never change their calling convention...
- */
-EXPORT_SYMBOL_ALIAS(kern_fp_enter,fp_enter);
-EXPORT_SYMBOL_ALIAS(fp_printk,printk);
-EXPORT_SYMBOL_ALIAS(fp_send_sig,send_sig);
-
-EXPORT_SYMBOL(__backtrace);
+void mmioset(void *, unsigned int, size_t);
+void mmiocpy(void *, const void *, size_t);
 
 	/* platform dependent support */
-EXPORT_SYMBOL(__udelay);
-EXPORT_SYMBOL(__const_udelay);
+EXPORT_SYMBOL(arm_delay_ops);
 
 	/* networking */
 EXPORT_SYMBOL(csum_partial);
@@ -105,32 +83,39 @@ EXPORT_SYMBOL(__raw_writesl);
 EXPORT_SYMBOL(strchr);
 EXPORT_SYMBOL(strrchr);
 EXPORT_SYMBOL(memset);
+EXPORT_SYMBOL(__memset32);
+EXPORT_SYMBOL(__memset64);
 EXPORT_SYMBOL(memcpy);
 EXPORT_SYMBOL(memmove);
 EXPORT_SYMBOL(memchr);
-EXPORT_SYMBOL(__memzero);
 
-	/* user mem (segment) */
-EXPORT_SYMBOL(__strnlen_user);
-EXPORT_SYMBOL(__strncpy_from_user);
+EXPORT_SYMBOL(mmioset);
+EXPORT_SYMBOL(mmiocpy);
 
 #ifdef CONFIG_MMU
-EXPORT_SYMBOL(__copy_from_user);
-EXPORT_SYMBOL(__copy_to_user);
-EXPORT_SYMBOL(__clear_user);
+EXPORT_SYMBOL(copy_page);
+
+EXPORT_SYMBOL(arm_copy_from_user);
+EXPORT_SYMBOL(arm_copy_to_user);
+EXPORT_SYMBOL(arm_clear_user);
 
 EXPORT_SYMBOL(__get_user_1);
 EXPORT_SYMBOL(__get_user_2);
 EXPORT_SYMBOL(__get_user_4);
+EXPORT_SYMBOL(__get_user_8);
+
+#ifdef __ARMEB__
+EXPORT_SYMBOL(__get_user_64t_1);
+EXPORT_SYMBOL(__get_user_64t_2);
+EXPORT_SYMBOL(__get_user_64t_4);
+EXPORT_SYMBOL(__get_user_32t_8);
+#endif
 
 EXPORT_SYMBOL(__put_user_1);
 EXPORT_SYMBOL(__put_user_2);
 EXPORT_SYMBOL(__put_user_4);
 EXPORT_SYMBOL(__put_user_8);
 #endif
-
-	/* crypto hash */
-EXPORT_SYMBOL(sha_transform);
 
 	/* gcc lib functions */
 EXPORT_SYMBOL(__ashldi3);
@@ -143,6 +128,8 @@ EXPORT_SYMBOL(__ucmpdi2);
 EXPORT_SYMBOL(__udivsi3);
 EXPORT_SYMBOL(__umodsi3);
 EXPORT_SYMBOL(__do_div64);
+EXPORT_SYMBOL(__bswapsi2);
+EXPORT_SYMBOL(__bswapdi2);
 
 #ifdef CONFIG_AEABI
 EXPORT_SYMBOL(__aeabi_idiv);
@@ -157,32 +144,34 @@ EXPORT_SYMBOL(__aeabi_ulcmp);
 #endif
 
 	/* bitops */
-EXPORT_SYMBOL(_set_bit_le);
-EXPORT_SYMBOL(_test_and_set_bit_le);
-EXPORT_SYMBOL(_clear_bit_le);
-EXPORT_SYMBOL(_test_and_clear_bit_le);
-EXPORT_SYMBOL(_change_bit_le);
-EXPORT_SYMBOL(_test_and_change_bit_le);
+EXPORT_SYMBOL(_set_bit);
+EXPORT_SYMBOL(_test_and_set_bit);
+EXPORT_SYMBOL(_clear_bit);
+EXPORT_SYMBOL(_test_and_clear_bit);
+EXPORT_SYMBOL(_change_bit);
+EXPORT_SYMBOL(_test_and_change_bit);
 EXPORT_SYMBOL(_find_first_zero_bit_le);
 EXPORT_SYMBOL(_find_next_zero_bit_le);
 EXPORT_SYMBOL(_find_first_bit_le);
 EXPORT_SYMBOL(_find_next_bit_le);
 
 #ifdef __ARMEB__
-EXPORT_SYMBOL(_set_bit_be);
-EXPORT_SYMBOL(_test_and_set_bit_be);
-EXPORT_SYMBOL(_clear_bit_be);
-EXPORT_SYMBOL(_test_and_clear_bit_be);
-EXPORT_SYMBOL(_change_bit_be);
-EXPORT_SYMBOL(_test_and_change_bit_be);
 EXPORT_SYMBOL(_find_first_zero_bit_be);
 EXPORT_SYMBOL(_find_next_zero_bit_be);
 EXPORT_SYMBOL(_find_first_bit_be);
 EXPORT_SYMBOL(_find_next_bit_be);
 #endif
 
-EXPORT_SYMBOL(copy_page);
+#ifdef CONFIG_FUNCTION_TRACER
+EXPORT_SYMBOL(__gnu_mcount_nc);
+#endif
 
-#ifdef CONFIG_FTRACE
-EXPORT_SYMBOL(mcount);
+#ifdef CONFIG_ARM_PATCH_PHYS_VIRT
+EXPORT_SYMBOL(__pv_phys_pfn_offset);
+EXPORT_SYMBOL(__pv_offset);
+#endif
+
+#ifdef CONFIG_HAVE_ARM_SMCCC
+EXPORT_SYMBOL(__arm_smccc_smc);
+EXPORT_SYMBOL(__arm_smccc_hvc);
 #endif

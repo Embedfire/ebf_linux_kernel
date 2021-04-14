@@ -1,16 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	STP SAP demux
  *
  *	Copyright (c) 2008 Patrick McHardy <kaber@trash.net>
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	version 2 as published by the Free Software Foundation.
  */
 #include <linux/mutex.h>
 #include <linux/skbuff.h>
 #include <linux/etherdevice.h>
 #include <linux/llc.h>
+#include <linux/slab.h>
+#include <linux/module.h>
 #include <net/llc.h>
 #include <net/llc_pdu.h>
 #include <net/stp.h>
@@ -20,8 +19,8 @@
 #define GARP_ADDR_MAX	0x2F
 #define GARP_ADDR_RANGE	(GARP_ADDR_MAX - GARP_ADDR_MIN)
 
-static const struct stp_proto *garp_protos[GARP_ADDR_RANGE + 1] __read_mostly;
-static const struct stp_proto *stp_proto __read_mostly;
+static const struct stp_proto __rcu *garp_protos[GARP_ADDR_RANGE + 1] __read_mostly;
+static const struct stp_proto __rcu *stp_proto __read_mostly;
 
 static struct llc_sap *sap __read_mostly;
 static unsigned int sap_registered;
@@ -44,7 +43,7 @@ static int stp_pdu_rcv(struct sk_buff *skb, struct net_device *dev,
 		proto = rcu_dereference(garp_protos[eh->h_dest[5] -
 						    GARP_ADDR_MIN]);
 		if (proto &&
-		    compare_ether_addr(eh->h_dest, proto->group_address))
+		    !ether_addr_equal(eh->h_dest, proto->group_address))
 			goto err;
 	} else
 		proto = rcu_dereference(stp_proto);
@@ -87,9 +86,9 @@ void stp_proto_unregister(const struct stp_proto *proto)
 {
 	mutex_lock(&stp_proto_mutex);
 	if (is_zero_ether_addr(proto->group_address))
-		rcu_assign_pointer(stp_proto, NULL);
+		RCU_INIT_POINTER(stp_proto, NULL);
 	else
-		rcu_assign_pointer(garp_protos[proto->group_address[5] -
+		RCU_INIT_POINTER(garp_protos[proto->group_address[5] -
 					       GARP_ADDR_MIN], NULL);
 	synchronize_rcu();
 

@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/sh/mm/cache-sh3.c
  *
  * Copyright (C) 1999, 2000  Niibe Yutaka
  * Copyright (C) 2002 Paul Mundt
- *
- * Released under the terms of the GNU GPL v2.0.
  */
 
 #include <linux/init.h>
@@ -13,12 +12,10 @@
 #include <linux/threads.h>
 #include <asm/addrspace.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
 #include <asm/processor.h>
 #include <asm/cache.h>
 #include <asm/io.h>
-#include <asm/uaccess.h>
-#include <asm/pgalloc.h>
+#include <linux/uaccess.h>
 #include <asm/mmu_context.h>
 #include <asm/cacheflush.h>
 
@@ -32,7 +29,7 @@
  * SIZE: Size of the region.
  */
 
-void __flush_wback_region(void *start, int size)
+static void sh3__flush_wback_region(void *start, int size)
 {
 	unsigned long v, j;
 	unsigned long begin, end;
@@ -50,12 +47,12 @@ void __flush_wback_region(void *start, int size)
 			p = __pa(v);
 			addr = addrstart | (v & current_cpu_data.dcache.entry_mask);
 			local_irq_save(flags);
-			data = ctrl_inl(addr);
+			data = __raw_readl(addr);
 
 			if ((data & CACHE_PHYSADDR_MASK) ==
 			    (p & CACHE_PHYSADDR_MASK)) {
 				data &= ~SH_CACHE_UPDATED;
-				ctrl_outl(data, addr);
+				__raw_writel(data, addr);
 				local_irq_restore(flags);
 				break;
 			}
@@ -71,7 +68,7 @@ void __flush_wback_region(void *start, int size)
  * START: Virtual Address (U0, P1, or P3)
  * SIZE: Size of the region.
  */
-void __flush_purge_region(void *start, int size)
+static void sh3__flush_purge_region(void *start, int size)
 {
 	unsigned long v;
 	unsigned long begin, end;
@@ -86,15 +83,20 @@ void __flush_purge_region(void *start, int size)
 		data = (v & 0xfffffc00); /* _Virtual_ address, ~U, ~V */
 		addr = CACHE_OC_ADDRESS_ARRAY |
 			(v & current_cpu_data.dcache.entry_mask) | SH_CACHE_ASSOC;
-		ctrl_outl(data, addr);
+		__raw_writel(data, addr);
 	}
 }
 
-/*
- * No write back please
- *
- * Except I don't think there's any way to avoid the writeback. So we
- * just alias it to __flush_purge_region(). dwmw2.
- */
-void __flush_invalidate_region(void *start, int size)
-	__attribute__((alias("__flush_purge_region")));
+void __init sh3_cache_init(void)
+{
+	__flush_wback_region = sh3__flush_wback_region;
+	__flush_purge_region = sh3__flush_purge_region;
+
+	/*
+	 * No write back please
+	 *
+	 * Except I don't think there's any way to avoid the writeback.
+	 * So we just alias it to sh3__flush_purge_region(). dwmw2.
+	 */
+	__flush_invalidate_region = sh3__flush_purge_region;
+}

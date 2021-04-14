@@ -11,15 +11,15 @@
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/i2c.h>
-#include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/io.h>
+#include <linux/module.h>
 
 #include <asm/clock.h>
 #include <asm/i2c-sh7760.h>
-#include <asm/io.h>
 
 /* register offsets */
 #define I2CSCR		0x0		/* slave ctrl		*/
@@ -101,12 +101,12 @@ struct cami2c {
 
 static inline void OUT32(struct cami2c *cam, int reg, unsigned long val)
 {
-	ctrl_outl(val, (unsigned long)cam->iobase + reg);
+	__raw_writel(val, (unsigned long)cam->iobase + reg);
 }
 
 static inline unsigned long IN32(struct cami2c *cam, int reg)
 {
-	return ctrl_inl((unsigned long)cam->iobase + reg);
+	return __raw_readl((unsigned long)cam->iobase + reg);
 }
 
 static irqreturn_t sh7760_i2c_irq(int irq, void *ptr)
@@ -389,14 +389,14 @@ static const struct i2c_algorithm sh7760_i2c_algo = {
  * iclk = mclk/(CDF + 1).  iclk must be < 20MHz.
  * scl = iclk/(SCGD*8 + 20).
  */
-static int __devinit calc_CCR(unsigned long scl_hz)
+static int calc_CCR(unsigned long scl_hz)
 {
 	struct clk *mclk;
 	unsigned long mck, m1, dff, odff, iclk;
 	signed char cdf, cdfm;
 	int scgd, scgdm, scgds;
 
-	mclk = clk_get(NULL, "module_clk");
+	mclk = clk_get(NULL, "peripheral_clk");
 	if (IS_ERR(mclk)) {
 		return PTR_ERR(mclk);
 	} else {
@@ -429,14 +429,14 @@ static int __devinit calc_CCR(unsigned long scl_hz)
 	return ((scgdm << 2) | cdfm);
 }
 
-static int __devinit sh7760_i2c_probe(struct platform_device *pdev)
+static int sh7760_i2c_probe(struct platform_device *pdev)
 {
 	struct sh7760_i2c_platdata *pd;
 	struct resource *res;
 	struct cami2c *id;
 	int ret;
 
-	pd = pdev->dev.platform_data;
+	pd = dev_get_platdata(&pdev->dev);
 	if (!pd) {
 		dev_err(&pdev->dev, "no platform_data!\n");
 		ret = -ENODEV;
@@ -475,7 +475,7 @@ static int __devinit sh7760_i2c_probe(struct platform_device *pdev)
 
 	id->adap.nr = pdev->id;
 	id->adap.algo = &sh7760_i2c_algo;
-	id->adap.class = I2C_CLASS_ALL;
+	id->adap.class = I2C_CLASS_HWMON | I2C_CLASS_SPD;
 	id->adap.retries = 3;
 	id->adap.algo_data = id;
 	id->adap.dev.parent = &pdev->dev;
@@ -502,7 +502,7 @@ static int __devinit sh7760_i2c_probe(struct platform_device *pdev)
 	}
 	OUT32(id, I2CCCR, ret);
 
-	if (request_irq(id->irq, sh7760_i2c_irq, IRQF_DISABLED,
+	if (request_irq(id->irq, sh7760_i2c_irq, 0,
 			SH7760_I2C_DEVNAME, id)) {
 		dev_err(&pdev->dev, "cannot get irq %d\n", id->irq);
 		ret = -EBUSY;
@@ -510,10 +510,8 @@ static int __devinit sh7760_i2c_probe(struct platform_device *pdev)
 	}
 
 	ret = i2c_add_numbered_adapter(&id->adap);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "reg adap failed: %d\n", ret);
+	if (ret < 0)
 		goto out4;
-	}
 
 	platform_set_drvdata(pdev, id);
 
@@ -535,7 +533,7 @@ out0:
 	return ret;
 }
 
-static int __devexit sh7760_i2c_remove(struct platform_device *pdev)
+static int sh7760_i2c_remove(struct platform_device *pdev)
 {
 	struct cami2c *id = platform_get_drvdata(pdev);
 
@@ -545,7 +543,6 @@ static int __devexit sh7760_i2c_remove(struct platform_device *pdev)
 	release_resource(id->ioarea);
 	kfree(id->ioarea);
 	kfree(id);
-	platform_set_drvdata(pdev, NULL);
 
 	return 0;
 }
@@ -553,24 +550,12 @@ static int __devexit sh7760_i2c_remove(struct platform_device *pdev)
 static struct platform_driver sh7760_i2c_drv = {
 	.driver	= {
 		.name	= SH7760_I2C_DEVNAME,
-		.owner	= THIS_MODULE,
 	},
 	.probe		= sh7760_i2c_probe,
-	.remove		= __devexit_p(sh7760_i2c_remove),
+	.remove		= sh7760_i2c_remove,
 };
 
-static int __init sh7760_i2c_init(void)
-{
-	return platform_driver_register(&sh7760_i2c_drv);
-}
-
-static void __exit sh7760_i2c_exit(void)
-{
-	platform_driver_unregister(&sh7760_i2c_drv);
-}
-
-module_init(sh7760_i2c_init);
-module_exit(sh7760_i2c_exit);
+module_platform_driver(sh7760_i2c_drv);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("SH7760 I2C bus driver");

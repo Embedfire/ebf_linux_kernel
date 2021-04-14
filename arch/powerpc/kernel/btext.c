@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Procedures for drawing on the screen early on in the boot process.
  *
@@ -6,15 +7,15 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <linux/module.h>
-#include <linux/lmb.h>
+#include <linux/export.h>
+#include <linux/memblock.h>
+#include <linux/pgtable.h>
 
 #include <asm/sections.h>
 #include <asm/prom.h>
 #include <asm/btext.h>
 #include <asm/page.h>
 #include <asm/mmu.h>
-#include <asm/pgtable.h>
 #include <asm/io.h>
 #include <asm/processor.h>
 #include <asm/udbg.h>
@@ -25,12 +26,7 @@
 static void scrollscreen(void);
 #endif
 
-static void draw_byte(unsigned char c, long locX, long locY);
-static void draw_byte_32(unsigned char *bits, unsigned int *base, int rb);
-static void draw_byte_16(unsigned char *bits, unsigned int *base, int rb);
-static void draw_byte_8(unsigned char *bits, unsigned int *base, int rb);
-
-#define __force_data __attribute__((__section__(".data")))
+#define __force_data __section(".data")
 
 static int g_loc_X __force_data;
 static int g_loc_Y __force_data;
@@ -51,6 +47,26 @@ static unsigned char vga_font[cmapsz];
 
 int boot_text_mapped __force_data = 0;
 int force_printk_to_btext = 0;
+
+extern void rmci_on(void);
+extern void rmci_off(void);
+
+static inline void rmci_maybe_on(void)
+{
+#if defined(CONFIG_PPC_EARLY_DEBUG_BOOTX) && defined(CONFIG_PPC64)
+	if (!(mfmsr() & MSR_DR))
+		rmci_on();
+#endif
+}
+
+static inline void rmci_maybe_off(void)
+{
+#if defined(CONFIG_PPC_EARLY_DEBUG_BOOTX) && defined(CONFIG_PPC64)
+	if (!(mfmsr() & MSR_DR))
+		rmci_off();
+#endif
+}
+
 
 #ifdef CONFIG_PPC32
 /* Calc BAT values for mapping the display and store them
@@ -79,19 +95,10 @@ void __init btext_prepare_BAT(void)
 		boot_text_mapped = 0;
 		return;
 	}
-	if (PVR_VER(mfspr(SPRN_PVR)) != 1) {
-		/* 603, 604, G3, G4, ... */
-		lowbits = addr & ~0xFF000000UL;
-		addr &= 0xFF000000UL;
-		disp_BAT[0] = vaddr | (BL_16M<<2) | 2;
-		disp_BAT[1] = addr | (_PAGE_NO_CACHE | _PAGE_GUARDED | BPP_RW);	
-	} else {
-		/* 601 */
-		lowbits = addr & ~0xFF800000UL;
-		addr &= 0xFF800000UL;
-		disp_BAT[0] = vaddr | (_PAGE_NO_CACHE | PP_RWXX) | 4;
-		disp_BAT[1] = addr | BL_8M | 0x40;
-	}
+	lowbits = addr & ~0xFF000000UL;
+	addr &= 0xFF000000UL;
+	disp_BAT[0] = vaddr | (BL_16M<<2) | 2;
+	disp_BAT[1] = addr | (_PAGE_NO_CACHE | _PAGE_GUARDED | BPP_RW);
 	logicalDisplayBase = (void *) (vaddr + lowbits);
 }
 #endif
@@ -99,7 +106,7 @@ void __init btext_prepare_BAT(void)
 
 /* This function can be used to enable the early boot text when doing
  * OF booting or within bootx init. It must be followed by a btext_unmap()
- * call before the logical address becomes unuseable
+ * call before the logical address becomes unusable
  */
 void __init btext_setup_display(int width, int height, int depth, int pitch,
 				unsigned long address)
@@ -134,27 +141,27 @@ void __init btext_unmap(void)
  *    changes.
  */
 
-static void map_boot_text(void)
+void btext_map(void)
 {
 	unsigned long base, offset, size;
 	unsigned char *vbase;
 
 	/* By default, we are no longer mapped */
 	boot_text_mapped = 0;
-	if (dispDeviceBase == 0)
+	if (!dispDeviceBase)
 		return;
 	base = ((unsigned long) dispDeviceBase) & 0xFFFFF000UL;
 	offset = ((unsigned long) dispDeviceBase) - base;
 	size = dispDeviceRowBytes * dispDeviceRect[3] + offset
 		+ dispDeviceRect[0];
-	vbase = __ioremap(base, size, _PAGE_NO_CACHE);
-	if (vbase == 0)
+	vbase = ioremap_wc(base, size);
+	if (!vbase)
 		return;
 	logicalDisplayBase = vbase + offset;
 	boot_text_mapped = 1;
 }
 
-int btext_initialize(struct device_node *np)
+static int btext_initialize(struct device_node *np)
 {
 	unsigned int width, height, depth, pitch;
 	unsigned long address = 0;
@@ -209,27 +216,19 @@ int btext_initialize(struct device_node *np)
 	dispDeviceRect[2] = width;
 	dispDeviceRect[3] = height;
 
-	map_boot_text();
+	btext_map();
 
 	return 0;
 }
 
 int __init btext_find_display(int allow_nonstdout)
 {
-	const char *name;
-	struct device_node *np = NULL; 
+	struct device_node *np = of_stdout;
 	int rc = -ENODEV;
 
-	name = of_get_property(of_chosen, "linux,stdout-path", NULL);
-	if (name != NULL) {
-		np = of_find_node_by_path(name);
-		if (np != NULL) {
-			if (strcmp(np->type, "display") != 0) {
-				printk("boot stdout isn't a display !\n");
-				of_node_put(np);
-				np = NULL;
-			}
-		}
+	if (!of_node_is_type(np, "display")) {
+		printk("boot stdout isn't a display !\n");
+		np = NULL;
 	}
 	if (np)
 		rc = btext_initialize(np);
@@ -238,7 +237,7 @@ int __init btext_find_display(int allow_nonstdout)
 
 	for_each_node_by_type(np, "display") {
 		if (of_get_property(np, "linux,opened", NULL)) {
-			printk("trying %s ...\n", np->full_name);
+			printk("trying %pOF ...\n", np);
 			rc = btext_initialize(np);
 			printk("result: %d\n", rc);
 		}
@@ -254,7 +253,7 @@ static unsigned char * calc_base(int x, int y)
 	unsigned char *base;
 
 	base = logicalDisplayBase;
-	if (base == 0)
+	if (!base)
 		base = dispDeviceBase;
 	base += (x + dispDeviceRect[0]) * (dispDeviceDepth >> 3);
 	base += (y + dispDeviceRect[1]) * dispDeviceRowBytes;
@@ -265,7 +264,7 @@ static unsigned char * calc_base(int x, int y)
 void btext_update_display(unsigned long phys, int width, int height,
 			  int depth, int pitch)
 {
-	if (dispDeviceBase == 0)
+	if (!dispDeviceBase)
 		return;
 
 	/* check it's the same frame buffer (within 256MB) */
@@ -283,7 +282,7 @@ void btext_update_display(unsigned long phys, int width, int height,
 		iounmap(logicalDisplayBase);
 		boot_text_mapped = 0;
 	}
-	map_boot_text();
+	btext_map();
 	g_loc_X = 0;
 	g_loc_Y = 0;
 	g_max_loc_X = width / 8;
@@ -298,6 +297,7 @@ void btext_clearscreen(void)
 					(dispDeviceDepth >> 3)) >> 2;
 	int i,j;
 
+	rmci_maybe_on();
 	for (i=0; i<(dispDeviceRect[3] - dispDeviceRect[1]); i++)
 	{
 		unsigned int *ptr = base;
@@ -305,6 +305,7 @@ void btext_clearscreen(void)
 			*(ptr++) = 0;
 		base += (dispDeviceRowBytes >> 2);
 	}
+	rmci_maybe_off();
 }
 
 void btext_flushscreen(void)
@@ -355,6 +356,8 @@ static void scrollscreen(void)
 				   (dispDeviceDepth >> 3)) >> 2;
 	int i,j;
 
+	rmci_maybe_on();
+
 	for (i=0; i<(dispDeviceRect[3] - dispDeviceRect[1] - 16); i++)
 	{
 		unsigned int *src_ptr = src;
@@ -371,8 +374,115 @@ static void scrollscreen(void)
 			*(dst_ptr++) = 0;
 		dst += (dispDeviceRowBytes >> 2);
 	}
+
+	rmci_maybe_off();
 }
 #endif /* ndef NO_SCROLL */
+
+static unsigned int expand_bits_8[16] = {
+	0x00000000,
+	0x000000ff,
+	0x0000ff00,
+	0x0000ffff,
+	0x00ff0000,
+	0x00ff00ff,
+	0x00ffff00,
+	0x00ffffff,
+	0xff000000,
+	0xff0000ff,
+	0xff00ff00,
+	0xff00ffff,
+	0xffff0000,
+	0xffff00ff,
+	0xffffff00,
+	0xffffffff
+};
+
+static unsigned int expand_bits_16[4] = {
+	0x00000000,
+	0x0000ffff,
+	0xffff0000,
+	0xffffffff
+};
+
+
+static void draw_byte_32(unsigned char *font, unsigned int *base, int rb)
+{
+	int l, bits;
+	int fg = 0xFFFFFFFFUL;
+	int bg = 0x00000000UL;
+
+	for (l = 0; l < 16; ++l)
+	{
+		bits = *font++;
+		base[0] = (-(bits >> 7) & fg) ^ bg;
+		base[1] = (-((bits >> 6) & 1) & fg) ^ bg;
+		base[2] = (-((bits >> 5) & 1) & fg) ^ bg;
+		base[3] = (-((bits >> 4) & 1) & fg) ^ bg;
+		base[4] = (-((bits >> 3) & 1) & fg) ^ bg;
+		base[5] = (-((bits >> 2) & 1) & fg) ^ bg;
+		base[6] = (-((bits >> 1) & 1) & fg) ^ bg;
+		base[7] = (-(bits & 1) & fg) ^ bg;
+		base = (unsigned int *) ((char *)base + rb);
+	}
+}
+
+static inline void draw_byte_16(unsigned char *font, unsigned int *base, int rb)
+{
+	int l, bits;
+	int fg = 0xFFFFFFFFUL;
+	int bg = 0x00000000UL;
+	unsigned int *eb = (int *)expand_bits_16;
+
+	for (l = 0; l < 16; ++l)
+	{
+		bits = *font++;
+		base[0] = (eb[bits >> 6] & fg) ^ bg;
+		base[1] = (eb[(bits >> 4) & 3] & fg) ^ bg;
+		base[2] = (eb[(bits >> 2) & 3] & fg) ^ bg;
+		base[3] = (eb[bits & 3] & fg) ^ bg;
+		base = (unsigned int *) ((char *)base + rb);
+	}
+}
+
+static inline void draw_byte_8(unsigned char *font, unsigned int *base, int rb)
+{
+	int l, bits;
+	int fg = 0x0F0F0F0FUL;
+	int bg = 0x00000000UL;
+	unsigned int *eb = (int *)expand_bits_8;
+
+	for (l = 0; l < 16; ++l)
+	{
+		bits = *font++;
+		base[0] = (eb[bits >> 4] & fg) ^ bg;
+		base[1] = (eb[bits & 0xf] & fg) ^ bg;
+		base = (unsigned int *) ((char *)base + rb);
+	}
+}
+
+static noinline void draw_byte(unsigned char c, long locX, long locY)
+{
+	unsigned char *base	= calc_base(locX << 3, locY << 4);
+	unsigned char *font	= &vga_font[((unsigned int)c) * 16];
+	int rb			= dispDeviceRowBytes;
+
+	rmci_maybe_on();
+	switch(dispDeviceDepth) {
+	case 24:
+	case 32:
+		draw_byte_32(font, (unsigned int *)base, rb);
+		break;
+	case 15:
+	case 16:
+		draw_byte_16(font, (unsigned int *)base, rb);
+		break;
+	case 8:
+		draw_byte_8(font, (unsigned int *)base, rb);
+		break;
+	}
+	rmci_maybe_off();
+}
 
 void btext_drawchar(char c)
 {
@@ -442,132 +552,35 @@ void btext_drawtext(const char *c, unsigned int len)
 
 void btext_drawhex(unsigned long v)
 {
-	char *hex_table = "0123456789abcdef";
-
 	if (!boot_text_mapped)
 		return;
 #ifdef CONFIG_PPC64
-	btext_drawchar(hex_table[(v >> 60) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >> 56) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >> 52) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >> 48) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >> 44) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >> 40) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >> 36) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >> 32) & 0x0000000FUL]);
+	btext_drawchar(hex_asc_hi(v >> 56));
+	btext_drawchar(hex_asc_lo(v >> 56));
+	btext_drawchar(hex_asc_hi(v >> 48));
+	btext_drawchar(hex_asc_lo(v >> 48));
+	btext_drawchar(hex_asc_hi(v >> 40));
+	btext_drawchar(hex_asc_lo(v >> 40));
+	btext_drawchar(hex_asc_hi(v >> 32));
+	btext_drawchar(hex_asc_lo(v >> 32));
 #endif
-	btext_drawchar(hex_table[(v >> 28) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >> 24) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >> 20) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >> 16) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >> 12) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >>  8) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >>  4) & 0x0000000FUL]);
-	btext_drawchar(hex_table[(v >>  0) & 0x0000000FUL]);
+	btext_drawchar(hex_asc_hi(v >> 24));
+	btext_drawchar(hex_asc_lo(v >> 24));
+	btext_drawchar(hex_asc_hi(v >> 16));
+	btext_drawchar(hex_asc_lo(v >> 16));
+	btext_drawchar(hex_asc_hi(v >> 8));
+	btext_drawchar(hex_asc_lo(v >> 8));
+	btext_drawchar(hex_asc_hi(v));
+	btext_drawchar(hex_asc_lo(v));
 	btext_drawchar(' ');
 }
 
-static void draw_byte(unsigned char c, long locX, long locY)
+void __init udbg_init_btext(void)
 {
-	unsigned char *base	= calc_base(locX << 3, locY << 4);
-	unsigned char *font	= &vga_font[((unsigned int)c) * 16];
-	int rb			= dispDeviceRowBytes;
-
-	switch(dispDeviceDepth) {
-	case 24:
-	case 32:
-		draw_byte_32(font, (unsigned int *)base, rb);
-		break;
-	case 15:
-	case 16:
-		draw_byte_16(font, (unsigned int *)base, rb);
-		break;
-	case 8:
-		draw_byte_8(font, (unsigned int *)base, rb);
-		break;
-	}
-}
-
-static unsigned int expand_bits_8[16] = {
-	0x00000000,
-	0x000000ff,
-	0x0000ff00,
-	0x0000ffff,
-	0x00ff0000,
-	0x00ff00ff,
-	0x00ffff00,
-	0x00ffffff,
-	0xff000000,
-	0xff0000ff,
-	0xff00ff00,
-	0xff00ffff,
-	0xffff0000,
-	0xffff00ff,
-	0xffffff00,
-	0xffffffff
-};
-
-static unsigned int expand_bits_16[4] = {
-	0x00000000,
-	0x0000ffff,
-	0xffff0000,
-	0xffffffff
-};
-
-
-static void draw_byte_32(unsigned char *font, unsigned int *base, int rb)
-{
-	int l, bits;
-	int fg = 0xFFFFFFFFUL;
-	int bg = 0x00000000UL;
-
-	for (l = 0; l < 16; ++l)
-	{
-		bits = *font++;
-		base[0] = (-(bits >> 7) & fg) ^ bg;
-		base[1] = (-((bits >> 6) & 1) & fg) ^ bg;
-		base[2] = (-((bits >> 5) & 1) & fg) ^ bg;
-		base[3] = (-((bits >> 4) & 1) & fg) ^ bg;
-		base[4] = (-((bits >> 3) & 1) & fg) ^ bg;
-		base[5] = (-((bits >> 2) & 1) & fg) ^ bg;
-		base[6] = (-((bits >> 1) & 1) & fg) ^ bg;
-		base[7] = (-(bits & 1) & fg) ^ bg;
-		base = (unsigned int *) ((char *)base + rb);
-	}
-}
-
-static void draw_byte_16(unsigned char *font, unsigned int *base, int rb)
-{
-	int l, bits;
-	int fg = 0xFFFFFFFFUL;
-	int bg = 0x00000000UL;
-	unsigned int *eb = (int *)expand_bits_16;
-
-	for (l = 0; l < 16; ++l)
-	{
-		bits = *font++;
-		base[0] = (eb[bits >> 6] & fg) ^ bg;
-		base[1] = (eb[(bits >> 4) & 3] & fg) ^ bg;
-		base[2] = (eb[(bits >> 2) & 3] & fg) ^ bg;
-		base[3] = (eb[bits & 3] & fg) ^ bg;
-		base = (unsigned int *) ((char *)base + rb);
-	}
-}
-
-static void draw_byte_8(unsigned char *font, unsigned int *base, int rb)
-{
-	int l, bits;
-	int fg = 0x0F0F0F0FUL;
-	int bg = 0x00000000UL;
-	unsigned int *eb = (int *)expand_bits_8;
-
-	for (l = 0; l < 16; ++l)
-	{
-		bits = *font++;
-		base[0] = (eb[bits >> 4] & fg) ^ bg;
-		base[1] = (eb[bits & 0xf] & fg) ^ bg;
-		base = (unsigned int *) ((char *)base + rb);
-	}
+	/* If btext is enabled, we might have a BAT setup for early display,
+	 * thus we do enable some very basic udbg output
+	 */
+	udbg_putc = btext_drawchar;
 }
 
 static unsigned char vga_font[cmapsz] = {
@@ -915,10 +928,3 @@ static unsigned char vga_font[cmapsz] = {
 0x00, 0x00, 0x00, 0x00,
 };
 
-void __init udbg_init_btext(void)
-{
-	/* If btext is enabled, we might have a BAT setup for early display,
-	 * thus we do enable some very basic udbg output
-	 */
-	udbg_putc = btext_drawchar;
-}

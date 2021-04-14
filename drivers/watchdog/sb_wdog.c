@@ -1,7 +1,7 @@
 /*
  * Watchdog driver for SiByte SB1 SoCs
  *
- * Copyright (C) 2007 OnStor, Inc. * Andrew Sharp <andy.sharp@onstor.com>
+ * Copyright (C) 2007 OnStor, Inc. * Andrew Sharp <andy.sharp@lsi.com>
  *
  * This driver is intended to make the second of two hardware watchdogs
  * on the Sibyte 12XX and 11XX SoCs available to the user.  There are two
@@ -35,14 +35,17 @@
  * Based on various other watchdog drivers, which are probably all
  * loosely based on something Alan Cox wrote years ago.
  *
- *	(c) Copyright 1996 Alan Cox <alan@redhat.com>, All Rights Reserved.
- *				http://www.redhat.com
+ *	(c) Copyright 1996 Alan Cox <alan@lxorguk.ukuu.org.uk>,
+ *						All Rights Reserved.
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
  *	version 1 or 2 as published by the Free Software Foundation.
  *
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/module.h>
 #include <linux/io.h>
 #include <linux/uaccess.h>
@@ -64,11 +67,11 @@ static DEFINE_SPINLOCK(sbwd_lock);
  *
  * wdog is the iomem address of the cfg register
  */
-void sbwdog_set(char __iomem *wdog, unsigned long t)
+static void sbwdog_set(char __iomem *wdog, unsigned long t)
 {
 	spin_lock(&sbwd_lock);
-	__raw_writeb(0, wdog - 0x10);
-	__raw_writeq(t & 0x7fffffUL, wdog);
+	__raw_writeb(0, wdog);
+	__raw_writeq(t & 0x7fffffUL, wdog - 0x10);
 	spin_unlock(&sbwd_lock);
 }
 
@@ -78,7 +81,7 @@ void sbwdog_set(char __iomem *wdog, unsigned long t)
  *
  * wdog is the iomem address of the cfg register
  */
-void sbwdog_pet(char __iomem *wdog)
+static void sbwdog_pet(char __iomem *wdog)
 {
 	spin_lock(&sbwd_lock);
 	__raw_writeb(__raw_readb(wdog) | 1, wdog);
@@ -93,7 +96,7 @@ static int expect_close;
 
 static const struct watchdog_info ident = {
 	.options	= WDIOF_CARDRESET | WDIOF_SETTIMEOUT |
-						WDIOF_KEEPALIVEPING,
+					WDIOF_KEEPALIVEPING | WDIOF_MAGICCLOSE,
 	.identity	= "SiByte Watchdog",
 };
 
@@ -102,7 +105,7 @@ static const struct watchdog_info ident = {
  */
 static int sbwdog_open(struct inode *inode, struct file *file)
 {
-	nonseekable_open(inode, file);
+	stream_open(inode, file);
 	if (test_and_set_bit(0, &sbwdog_gate))
 		return -EBUSY;
 	__module_get(THIS_MODULE);
@@ -125,9 +128,8 @@ static int sbwdog_release(struct inode *inode, struct file *file)
 		__raw_writeb(0, user_dog);
 		module_put(THIS_MODULE);
 	} else {
-		printk(KERN_CRIT
-			"%s: Unexpected close, not stopping watchdog!\n",
-						ident.identity);
+		pr_crit("%s: Unexpected close, not stopping watchdog!\n",
+			ident.identity);
 		sbwdog_pet(user_dog);
 	}
 	clear_bit(0, &sbwdog_gate);
@@ -200,13 +202,14 @@ static long sbwdog_ioctl(struct file *file, unsigned int cmd,
 		timeout = time;
 		sbwdog_set(user_dog, timeout);
 		sbwdog_pet(user_dog);
+		fallthrough;
 
 	case WDIOC_GETTIMEOUT:
 		/*
 		 * get the remaining count from the ... count register
 		 * which is 1*8 before the config register
 		 */
-		ret = put_user(__raw_readq(user_dog - 8) / 1000000, p);
+		ret = put_user((u32)__raw_readq(user_dog - 8) / 1000000, p);
 		break;
 	}
 	return ret;
@@ -234,6 +237,7 @@ static const struct file_operations sbwdog_fops = {
 	.llseek		= no_llseek,
 	.write		= sbwdog_write,
 	.unlocked_ioctl	= sbwdog_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= sbwdog_open,
 	.release	= sbwdog_release,
 };
@@ -269,9 +273,10 @@ irqreturn_t sbwdog_interrupt(int irq, void *addr)
 	 * if it's the second watchdog timer, it's for those users
 	 */
 	if (wd_cfg_reg == user_dog)
-		printk(KERN_CRIT
-			"%s in danger of initiating system reset in %ld.%01ld seconds\n",
-			ident.identity, wd_init / 1000000, (wd_init / 100000) % 10);
+		pr_crit("%s in danger of initiating system reset "
+			"in %ld.%01ld seconds\n",
+			ident.identity,
+			wd_init / 1000000, (wd_init / 100000) % 10);
 	else
 		cfg |= 1;
 
@@ -289,9 +294,8 @@ static int __init sbwdog_init(void)
 	 */
 	ret = register_reboot_notifier(&sbwdog_notifier);
 	if (ret) {
-		printk(KERN_ERR
-			"%s: cannot register reboot notifier (err=%d)\n",
-						ident.identity, ret);
+		pr_err("%s: cannot register reboot notifier (err=%d)\n",
+		       ident.identity, ret);
 		return ret;
 	}
 
@@ -299,33 +303,39 @@ static int __init sbwdog_init(void)
 	 * get the resources
 	 */
 
-	ret = request_irq(1, sbwdog_interrupt, IRQF_DISABLED | IRQF_SHARED,
+	ret = request_irq(1, sbwdog_interrupt, IRQF_SHARED,
 		ident.identity, (void *)user_dog);
 	if (ret) {
-		printk(KERN_ERR "%s: failed to request irq 1 - %d\n",
-						ident.identity, ret);
-		return ret;
+		pr_err("%s: failed to request irq 1 - %d\n",
+		       ident.identity, ret);
+		goto out;
 	}
 
 	ret = misc_register(&sbwdog_miscdev);
 	if (ret == 0) {
-		printk(KERN_INFO "%s: timeout is %ld.%ld secs\n",
-				ident.identity,
-				timeout / 1000000, (timeout / 100000) % 10);
-	} else
-		free_irq(1, (void *)user_dog);
+		pr_info("%s: timeout is %ld.%ld secs\n",
+			ident.identity,
+			timeout / 1000000, (timeout / 100000) % 10);
+		return 0;
+	}
+	free_irq(1, (void *)user_dog);
+out:
+	unregister_reboot_notifier(&sbwdog_notifier);
+
 	return ret;
 }
 
 static void __exit sbwdog_exit(void)
 {
 	misc_deregister(&sbwdog_miscdev);
+	free_irq(1, (void *)user_dog);
+	unregister_reboot_notifier(&sbwdog_notifier);
 }
 
 module_init(sbwdog_init);
 module_exit(sbwdog_exit);
 
-MODULE_AUTHOR("Andrew Sharp <andy.sharp@onstor.com>");
+MODULE_AUTHOR("Andrew Sharp <andy.sharp@lsi.com>");
 MODULE_DESCRIPTION("SiByte Watchdog");
 
 module_param(timeout, ulong, 0);
@@ -333,7 +343,6 @@ MODULE_PARM_DESC(timeout,
       "Watchdog timeout in microseconds (max/default 8388607 or 8.3ish secs)");
 
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
 
 /*
  * example code that can be put in a platform code area to utilize the
@@ -343,11 +352,10 @@ void platform_wd_setup(void)
 {
 	int ret;
 
-	ret = request_irq(1, sbwdog_interrupt, IRQF_DISABLED | IRQF_SHARED,
+	ret = request_irq(1, sbwdog_interrupt, IRQF_SHARED,
 		"Kernel Watchdog", IOADDR(A_SCD_WDOG_CFG_0));
 	if (ret) {
-		printk(KERN_CRIT
-		  "Watchdog IRQ zero(0) failed to be requested - %d\n", ret);
+		pr_crit("Watchdog IRQ zero(0) failed to be requested - %d\n", ret);
 	}
 }
 

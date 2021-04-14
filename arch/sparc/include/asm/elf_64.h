@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_SPARC64_ELF_H
 #define __ASM_SPARC64_ELF_H
 
@@ -7,8 +8,9 @@
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
-#include <asm/uaccess.h>
+#include <asm/extable_64.h>
 #include <asm/spitfire.h>
+#include <asm/adi.h>
 
 /*
  * Sparc section types
@@ -59,15 +61,43 @@
 #define R_SPARC_6		45
 
 /* Bits present in AT_HWCAP, primarily for Sparc32.  */
+#define HWCAP_SPARC_FLUSH       0x00000001
+#define HWCAP_SPARC_STBAR       0x00000002
+#define HWCAP_SPARC_SWAP        0x00000004
+#define HWCAP_SPARC_MULDIV      0x00000008
+#define HWCAP_SPARC_V9		0x00000010
+#define HWCAP_SPARC_ULTRA3	0x00000020
+#define HWCAP_SPARC_BLKINIT	0x00000040
+#define HWCAP_SPARC_N2		0x00000080
 
-#define HWCAP_SPARC_FLUSH       1    /* CPU supports flush instruction. */
-#define HWCAP_SPARC_STBAR       2
-#define HWCAP_SPARC_SWAP        4
-#define HWCAP_SPARC_MULDIV      8
-#define HWCAP_SPARC_V9		16
-#define HWCAP_SPARC_ULTRA3	32
-#define HWCAP_SPARC_BLKINIT	64
-#define HWCAP_SPARC_N2		128
+/* Solaris compatible AT_HWCAP bits. */
+#define AV_SPARC_MUL32		0x00000100 /* 32x32 multiply is efficient */
+#define AV_SPARC_DIV32		0x00000200 /* 32x32 divide is efficient */
+#define AV_SPARC_FSMULD		0x00000400 /* 'fsmuld' is efficient */
+#define AV_SPARC_V8PLUS		0x00000800 /* v9 insn available to 32bit */
+#define AV_SPARC_POPC		0x00001000 /* 'popc' is efficient */
+#define AV_SPARC_VIS		0x00002000 /* VIS insns available */
+#define AV_SPARC_VIS2		0x00004000 /* VIS2 insns available */
+#define AV_SPARC_ASI_BLK_INIT	0x00008000 /* block init ASIs available */
+#define AV_SPARC_FMAF		0x00010000 /* fused multiply-add */
+#define AV_SPARC_VIS3		0x00020000 /* VIS3 insns available */
+#define AV_SPARC_HPC		0x00040000 /* HPC insns available */
+#define AV_SPARC_RANDOM		0x00080000 /* 'random' insn available */
+#define AV_SPARC_TRANS		0x00100000 /* transaction insns available */
+#define AV_SPARC_FJFMAU		0x00200000 /* unfused multiply-add */
+#define AV_SPARC_IMA		0x00400000 /* integer multiply-add */
+#define AV_SPARC_ASI_CACHE_SPARING \
+				0x00800000 /* cache sparing ASIs available */
+#define AV_SPARC_PAUSE		0x01000000 /* PAUSE available */
+#define AV_SPARC_CBCOND		0x02000000 /* CBCOND insns available */
+
+/* Solaris decided to enumerate every single crypto instruction type
+ * in the AT_HWCAP bits.  This is wasteful, since if crypto is present,
+ * you still need to look in the CFR register to see if the opcode is
+ * really available.  So we simply advertise only "crypto" support.
+ */
+#define HWCAP_SPARC_CRYPTO	0x04000000 /* CRYPTO insns available */
+#define HWCAP_SPARC_ADI		0x08000000 /* ADI available */
 
 #define CORE_DUMP_USE_REGSET
 
@@ -152,7 +182,6 @@ typedef struct {
 					 (x)->e_machine == EM_SPARC32PLUS)
 #define compat_start_thread		start_thread32
 
-#define USE_ELF_CORE_DUMP
 #define ELF_EXEC_PAGESIZE	PAGE_SIZE
 
 /* This is the location that an ET_DYN program is loaded if exec'ed.  Typical
@@ -163,31 +192,8 @@ typedef struct {
 #define ELF_ET_DYN_BASE		0x0000010000000000UL
 #define COMPAT_ELF_ET_DYN_BASE	0x0000000070000000UL
 
-
-/* This yields a mask that user programs can use to figure out what
-   instruction set this cpu supports.  */
-
-/* On Ultra, we support all of the v8 capabilities. */
-static inline unsigned int sparc64_elf_hwcap(void)
-{
-	unsigned int cap = (HWCAP_SPARC_FLUSH | HWCAP_SPARC_STBAR |
-			    HWCAP_SPARC_SWAP | HWCAP_SPARC_MULDIV |
-			    HWCAP_SPARC_V9);
-
-	if (tlb_type == cheetah || tlb_type == cheetah_plus)
-		cap |= HWCAP_SPARC_ULTRA3;
-	else if (tlb_type == hypervisor) {
-		if (sun4v_chip_type == SUN4V_CHIP_NIAGARA1 ||
-		    sun4v_chip_type == SUN4V_CHIP_NIAGARA2)
-			cap |= HWCAP_SPARC_BLKINIT;
-		if (sun4v_chip_type == SUN4V_CHIP_NIAGARA2)
-			cap |= HWCAP_SPARC_N2;
-	}
-
-	return cap;
-}
-
-#define ELF_HWCAP	sparc64_elf_hwcap();
+extern unsigned long sparc64_elf_hwcap;
+#define ELF_HWCAP	sparc64_elf_hwcap
 
 /* This yields a string that ld.so will use to load implementation
    specific libraries for optimization.  This is more specific in
@@ -195,23 +201,33 @@ static inline unsigned int sparc64_elf_hwcap(void)
 
 #define ELF_PLATFORM	(NULL)
 
-#define SET_PERSONALITY(ex, ibcs2)			\
-do {	unsigned long new_flags = current_thread_info()->flags; \
-	new_flags &= _TIF_32BIT;			\
-	if ((ex).e_ident[EI_CLASS] == ELFCLASS32)	\
-		new_flags |= _TIF_32BIT;		\
+#define SET_PERSONALITY(ex)				\
+do {	if ((ex).e_ident[EI_CLASS] == ELFCLASS32)	\
+		set_thread_flag(TIF_32BIT);		\
 	else						\
-		new_flags &= ~_TIF_32BIT;		\
-	if ((current_thread_info()->flags & _TIF_32BIT) \
-	    != new_flags)				\
-		set_thread_flag(TIF_ABI_PENDING);	\
-	else						\
-		clear_thread_flag(TIF_ABI_PENDING);	\
+		clear_thread_flag(TIF_32BIT);		\
 	/* flush_thread will update pgd cache */	\
-	if (ibcs2)					\
-		set_personality(PER_SVR4);		\
-	else if (current->personality != PER_LINUX32)	\
-		set_personality(PER_LINUX);		\
+	if (personality(current->personality) != PER_LINUX32)	\
+		set_personality(PER_LINUX |		\
+			(current->personality & (~PER_MASK)));	\
 } while (0)
 
+extern unsigned int vdso_enabled;
+
+#define	ARCH_DLINFO							\
+do {									\
+	extern struct adi_config adi_state;				\
+	if (vdso_enabled)						\
+		NEW_AUX_ENT(AT_SYSINFO_EHDR,				\
+			    (unsigned long)current->mm->context.vdso);	\
+	NEW_AUX_ENT(AT_ADI_BLKSZ, adi_state.caps.blksz);		\
+	NEW_AUX_ENT(AT_ADI_NBITS, adi_state.caps.nbits);		\
+	NEW_AUX_ENT(AT_ADI_UEONADI, adi_state.caps.ue_on_adi);		\
+} while (0)
+
+struct linux_binprm;
+
+#define ARCH_HAS_SETUP_ADDITIONAL_PAGES	1
+extern int arch_setup_additional_pages(struct linux_binprm *bprm,
+					int uses_interp);
 #endif /* !(__ASM_SPARC64_ELF_H) */

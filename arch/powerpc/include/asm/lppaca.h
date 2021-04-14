@@ -1,142 +1,134 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * lppaca.h
  * Copyright (C) 2001  Mike Corrigan IBM Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 #ifndef _ASM_POWERPC_LPPACA_H
 #define _ASM_POWERPC_LPPACA_H
+
+/*
+ * The below VPHN macros are outside the __KERNEL__ check since these are
+ * used for compiling the vphn selftest in userspace
+ */
+
+/* The H_HOME_NODE_ASSOCIATIVITY h_call returns 6 64-bit registers. */
+#define VPHN_REGISTER_COUNT 6
+
+/*
+ * 6 64-bit registers unpacked into up to 24 be32 associativity values. To
+ * form the complete property we have to add the length in the first cell.
+ */
+#define VPHN_ASSOC_BUFSIZE (VPHN_REGISTER_COUNT*sizeof(u64)/sizeof(u16) + 1)
+
+/*
+ * The H_HOME_NODE_ASSOCIATIVITY hcall takes two values for flags:
+ * 1 for retrieving associativity information for a guest cpu
+ * 2 for retrieving associativity information for a host/hypervisor cpu
+ */
+#define VPHN_FLAG_VCPU	1
+#define VPHN_FLAG_PCPU	2
+
 #ifdef __KERNEL__
 
-//=============================================================================
-//
-//	This control block contains the data that is shared between the
-//	hypervisor (PLIC) and the OS.
-//
-//
-//----------------------------------------------------------------------------
+/*
+ * These definitions relate to hypervisors that only exist when using
+ * a server type processor
+ */
+#ifdef CONFIG_PPC_BOOK3S
+
+/*
+ * This control block contains the data that is shared between the
+ * hypervisor and the OS.
+ */
 #include <linux/cache.h>
+#include <linux/threads.h>
 #include <asm/types.h>
 #include <asm/mmu.h>
+#include <asm/firmware.h>
 
-/* The Hypervisor barfs if the lppaca crosses a page boundary.  A 1k
- * alignment is sufficient to prevent this */
+/*
+ * The lppaca is the "virtual processor area" registered with the hypervisor,
+ * H_REGISTER_VPA etc.
+ *
+ * According to PAPR, the structure is 640 bytes long, must be L1 cache line
+ * aligned, and must not cross a 4kB boundary. Its size field must be at
+ * least 640 bytes (but may be more).
+ *
+ * Pre-v4.14 KVM hypervisors reject the VPA if its size field is smaller than
+ * 1kB, so we dynamically allocate 1kB and advertise size as 1kB, but keep
+ * this structure as the canonical 640 byte size.
+ */
 struct lppaca {
-//=============================================================================
-// CACHE_LINE_1 0x0000 - 0x007F Contains read-only data
-// NOTE: The xDynXyz fields are fields that will be dynamically changed by
-// PLIC when preparing to bring a processor online or when dispatching a
-// virtual processor!
-//=============================================================================
-	u32	desc;			// Eye catcher 0xD397D781	x00-x03
-	u16	size;			// Size of this struct		x04-x05
-	u16	reserved1;		// Reserved			x06-x07
-	u16	reserved2:14;		// Reserved			x08-x09
-	u8	shared_proc:1;		// Shared processor indicator	...
-	u8	secondary_thread:1;	// Secondary thread indicator	...
-	volatile u8 dyn_proc_status:8;	// Dynamic Status of this proc	x0A-x0A
-	u8	secondary_thread_count;	// Secondary thread count	x0B-x0B
-	volatile u16 dyn_hv_phys_proc_index;// Dynamic HV Physical Proc Index0C-x0D
-	volatile u16 dyn_hv_log_proc_index;// Dynamic HV Logical Proc Indexx0E-x0F
-	u32	decr_val;   		// Value for Decr programming 	x10-x13
-	u32	pmc_val;       		// Value for PMC regs         	x14-x17
-	volatile u32 dyn_hw_node_id;	// Dynamic Hardware Node id	x18-x1B
-	volatile u32 dyn_hw_proc_id;	// Dynamic Hardware Proc Id	x1C-x1F
-	volatile u32 dyn_pir;		// Dynamic ProcIdReg value	x20-x23
-	u32	dsei_data;           	// DSEI data                  	x24-x27
-	u64	sprg3;               	// SPRG3 value                	x28-x2F
-	u8	reserved3[80];		// Reserved			x30-x7F
+	/* cacheline 1 contains read-only data */
 
-//=============================================================================
-// CACHE_LINE_2 0x0080 - 0x00FF Contains local read-write data
-//=============================================================================
-	// This Dword contains a byte for each type of interrupt that can occur.
-	// The IPI is a count while the others are just a binary 1 or 0.
-	union {
-		u64	any_int;
-		struct {
-			u16	reserved;	// Reserved - cleared by #mpasmbl
-			u8	xirr_int;	// Indicates xXirrValue is valid or Immed IO
-			u8	ipi_cnt;	// IPI Count
-			u8	decr_int;	// DECR interrupt occurred
-			u8	pdc_int;	// PDC interrupt occurred
-			u8	quantum_int;	// Interrupt quantum reached
-			u8	old_plic_deferred_ext_int;	// Old PLIC has a deferred XIRR pending
-		} fields;
-	} int_dword;
+	__be32	desc;			/* Eye catcher 0xD397D781 */
+	__be16	size;			/* Size of this struct */
+	u8	reserved1[3];
+	u8	__old_status;		/* Old status, including shared proc */
+	u8	reserved3[14];
+	volatile __be32 dyn_hw_node_id;	/* Dynamic hardware node id */
+	volatile __be32 dyn_hw_proc_id;	/* Dynamic hardware proc id */
+	u8	reserved4[56];
+	volatile u8 vphn_assoc_counts[8]; /* Virtual processor home node */
+					  /* associativity change counters */
+	u8	reserved5[32];
 
-	// Whenever any fields in this Dword are set then PLIC will defer the
-	// processing of external interrupts.  Note that PLIC will store the
-	// XIRR directly into the xXirrValue field so that another XIRR will
-	// not be presented until this one clears.  The layout of the low
-	// 4-bytes of this Dword is upto SLIC - PLIC just checks whether the
-	// entire Dword is zero or not.  A non-zero value in the low order
-	// 2-bytes will result in SLIC being granted the highest thread
-	// priority upon return.  A 0 will return to SLIC as medium priority.
-	u64	plic_defer_ints_area;	// Entire Dword
+	/* cacheline 2 contains local read-write data */
 
-	// Used to pass the real SRR0/1 from PLIC to SLIC as well as to
-	// pass the target SRR0/1 from SLIC to PLIC on a SetAsrAndRfid.
-	u64	saved_srr0;		// Saved SRR0                   x10-x17
-	u64	saved_srr1;		// Saved SRR1                   x18-x1F
+	u8	reserved6[48];
+	u8	cede_latency_hint;
+	u8	ebb_regs_in_use;
+	u8	reserved7[6];
+	u8	dtl_enable_mask;	/* Dispatch Trace Log mask */
+	u8	donate_dedicated_cpu;	/* Donate dedicated CPU cycles */
+	u8	fpregs_in_use;
+	u8	pmcregs_in_use;
+	u8	reserved8[28];
+	__be64	wait_state_cycles;	/* Wait cycles for this proc */
+	u8	reserved9[28];
+	__be16	slb_count;		/* # of SLBs to maintain */
+	u8	idle;			/* Indicate OS is idle */
+	u8	vmxregs_in_use;
 
-	// Used to pass parms from the OS to PLIC for SetAsrAndRfid
-	u64	saved_gpr3;		// Saved GPR3                   x20-x27
-	u64	saved_gpr4;		// Saved GPR4                   x28-x2F
-	u64	saved_gpr5;		// Saved GPR5                   x30-x37
+	/* cacheline 3 is shared with other processors */
 
-	u8	reserved4;		// Reserved			x38-x38
-	u8	donate_dedicated_cpu;	// Donate dedicated CPU cycles  x39-x39
-	u8	fpregs_in_use;		// FP regs in use               x3A-x3A
-	u8	pmcregs_in_use;		// PMC regs in use              x3B-x3B
-	volatile u32 saved_decr;	// Saved Decr Value             x3C-x3F
-	volatile u64 emulated_time_base;// Emulated TB for this thread  x40-x47
-	volatile u64 cur_plic_latency;	// Unaccounted PLIC latency     x48-x4F
-	u64	tot_plic_latency;	// Accumulated PLIC latency     x50-x57
-	u64	wait_state_cycles;	// Wait cycles for this proc    x58-x5F
-	u64	end_of_quantum;		// TB at end of quantum         x60-x67
-	u64	pdc_saved_sprg1;	// Saved SPRG1 for PMC int      x68-x6F
-	u64	pdc_saved_srr0;		// Saved SRR0 for PMC int       x70-x77
-	volatile u32 virtual_decr;	// Virtual DECR for shared procsx78-x7B
-	u16	slb_count;		// # of SLBs to maintain        x7C-x7D
-	u8	idle;			// Indicate OS is idle          x7E
-	u8	vmxregs_in_use;		// VMX registers in use         x7F
+	/*
+	 * This is the yield_count.  An "odd" value (low bit on) means that
+	 * the processor is yielded (either because of an OS yield or a
+	 * hypervisor preempt).  An even value implies that the processor is
+	 * currently executing.
+	 * NOTE: Even dedicated processor partitions can yield so this
+	 * field cannot be used to determine if we are shared or dedicated.
+	 */
+	volatile __be32 yield_count;
+	volatile __be32 dispersion_count; /* dispatch changed physical cpu */
+	volatile __be64 cmo_faults;	/* CMO page fault count */
+	volatile __be64 cmo_fault_time;	/* CMO page fault time */
+	u8	reserved10[104];
 
+	/* cacheline 4-5 */
 
-//=============================================================================
-// CACHE_LINE_3 0x0100 - 0x017F: This line is shared with other processors
-//=============================================================================
-	// This is the yield_count.  An "odd" value (low bit on) means that
-	// the processor is yielded (either because of an OS yield or a PLIC
-	// preempt).  An even value implies that the processor is currently
-	// executing.
-	// NOTE: This value will ALWAYS be zero for dedicated processors and
-	// will NEVER be zero for shared processors (ie, initialized to a 1).
-	volatile u32 yield_count;	// PLIC increments each dispatchx00-x03
-	u32 reserved6;
-	volatile u64 cmo_faults;	// CMO page fault count         x08-x0F
-	volatile u64 cmo_fault_time;	// CMO page fault time          x10-x17
-	u8	reserved7[104];		// Reserved                     x18-x7F
+	__be32	page_ins;		/* CMO Hint - # page ins by OS */
+	u8	reserved11[148];
+	volatile __be64 dtl_idx;	/* Dispatch Trace Log head index */
+	u8	reserved12[96];
+} ____cacheline_aligned;
 
-//=============================================================================
-// CACHE_LINE_4-5 0x0180 - 0x027F Contains PMC interrupt data
-//=============================================================================
-	u8	pmc_save_area[256];	// PMC interrupt Area           x00-xFF
-} __attribute__((__aligned__(0x400)));
+#define lppaca_of(cpu)	(*paca_ptrs[cpu]->lppaca_ptr)
 
-extern struct lppaca lppaca[];
+/*
+ * We are using a non architected field to determine if a partition is
+ * shared or dedicated. This currently works on both KVM and PHYP, but
+ * we will have to transition to something better.
+ */
+#define LPPACA_OLD_SHARED_PROC		2
+
+static inline bool lppaca_shared_proc(struct lppaca *l)
+{
+	if (!firmware_has_feature(FW_FEATURE_SPLPAR))
+		return false;
+	return !!(l->__old_status & LPPACA_OLD_SHARED_PROC);
+}
 
 /*
  * SLB shadow buffer structure as defined in the PAPR.  The save_area
@@ -144,16 +136,17 @@ extern struct lppaca lppaca[];
  * ESID is stored in the lower 64bits, then the VSID.
  */
 struct slb_shadow {
-	u32	persistent;		// Number of persistent SLBs	x00-x03
-	u32	buffer_length;		// Total shadow buffer length	x04-x07
-	u64	reserved;		// Alignment			x08-x0f
+	__be32	persistent;		/* Number of persistent SLBs */
+	__be32	buffer_length;		/* Total shadow buffer length */
+	__be64	reserved;
 	struct	{
-		u64     esid;
-		u64	vsid;
-	} save_area[SLB_NUM_BOLTED];	//				x10-x40
+		__be64     esid;
+		__be64	vsid;
+	} save_area[SLB_NUM_BOLTED];
 } ____cacheline_aligned;
 
-extern struct slb_shadow slb_shadow[];
+extern long hcall_vphn(unsigned long cpu, u64 flags, __be32 *associativity);
 
+#endif /* CONFIG_PPC_BOOK3S */
 #endif /* __KERNEL__ */
 #endif /* _ASM_POWERPC_LPPACA_H */

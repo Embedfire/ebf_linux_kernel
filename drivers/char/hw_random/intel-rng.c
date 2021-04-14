@@ -11,7 +11,7 @@
  * derived from
  *
  * Hardware driver for the AMD 768 Random Number Generator (RNG)
- * (c) Copyright 2001 Red Hat Inc <alan@redhat.com>
+ * (c) Copyright 2001 Red Hat Inc
  *
  * derived from
  *
@@ -30,6 +30,7 @@
 #include <linux/pci.h>
 #include <linux/stop_machine.h>
 #include <linux/delay.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 
 
@@ -198,7 +199,7 @@ static int intel_rng_init(struct hwrng *rng)
 	if ((hw_status & INTEL_RNG_ENABLED) == 0)
 		hw_status = hwstatus_set(mem, hw_status | INTEL_RNG_ENABLED);
 	if ((hw_status & INTEL_RNG_ENABLED) == 0) {
-		printk(KERN_ERR PFX "cannot enable RNG, aborting\n");
+		pr_err(PFX "cannot enable RNG, aborting\n");
 		goto out;
 	}
 	err = 0;
@@ -215,7 +216,7 @@ static void intel_rng_cleanup(struct hwrng *rng)
 	if (hw_status & INTEL_RNG_ENABLED)
 		hwstatus_set(mem, hw_status & ~INTEL_RNG_ENABLED);
 	else
-		printk(KERN_WARNING PFX "unusual: RNG already disabled\n");
+		pr_warn(PFX "unusual: RNG already disabled\n");
 }
 
 
@@ -273,7 +274,7 @@ static int __init intel_rng_hw_init(void *_intel_rng_hw)
 	if (mfc != INTEL_FWH_MANUFACTURER_CODE ||
 	    (dvc != INTEL_FWH_DEVICE_CODE_8M &&
 	     dvc != INTEL_FWH_DEVICE_CODE_4M)) {
-		printk(KERN_NOTICE PFX "FWH not detected\n");
+		pr_notice(PFX "FWH not detected\n");
 		return -ENODEV;
 	}
 
@@ -305,18 +306,18 @@ static int __init intel_init_hw_struct(struct intel_rng_hw *intel_rng_hw,
 	     (BIOS_CNTL_LOCK_ENABLE_MASK|BIOS_CNTL_WRITE_ENABLE_MASK))
 	    == BIOS_CNTL_LOCK_ENABLE_MASK) {
 		static __initdata /*const*/ char warning[] =
-			KERN_WARNING PFX "Firmware space is locked read-only. If you can't or\n"
-			KERN_WARNING PFX "don't want to disable this in firmware setup, and if\n"
-			KERN_WARNING PFX "you are certain that your system has a functional\n"
-			KERN_WARNING PFX "RNG, try using the 'no_fwh_detect' option.\n";
+PFX "Firmware space is locked read-only. If you can't or\n"
+PFX "don't want to disable this in firmware setup, and if\n"
+PFX "you are certain that your system has a functional\n"
+PFX "RNG, try using the 'no_fwh_detect' option.\n";
 
 		if (no_fwh_detect)
 			return -ENODEV;
-		printk(warning);
+		pr_warn("%s", warning);
 		return -EBUSY;
 	}
 
-	intel_rng_hw->mem = ioremap_nocache(INTEL_FWH_ADDR, INTEL_FWH_ADDR_LEN);
+	intel_rng_hw->mem = ioremap(INTEL_FWH_ADDR, INTEL_FWH_ADDR_LEN);
 	if (intel_rng_hw->mem == NULL)
 		return -EBUSY;
 
@@ -329,7 +330,7 @@ static int __init mod_init(void)
 	int err = -ENODEV;
 	int i;
 	struct pci_dev *dev = NULL;
-	void __iomem *mem = mem;
+	void __iomem *mem;
 	u8 hw_status;
 	struct intel_rng_hw *intel_rng_hw;
 
@@ -390,10 +391,10 @@ fwh_done:
 		goto out;
 	}
 
-	printk(KERN_INFO "Intel 82802 RNG detected\n");
+	pr_info("Intel 82802 RNG detected\n");
 	err = hwrng_register(&intel_rng);
 	if (err) {
-		printk(KERN_ERR PFX "RNG registering failed (%d)\n",
+		pr_err(PFX "RNG registering failed (%d)\n",
 		       err);
 		iounmap(mem);
 	}

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * bioscalls.c - the lowlevel layer of the PnPBIOS driver
  */
@@ -11,19 +12,17 @@
 #include <linux/pnp.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/slab.h>
 #include <linux/kmod.h>
 #include <linux/completion.h>
 #include <linux/spinlock.h>
 
 #include <asm/page.h>
 #include <asm/desc.h>
-#include <asm/system.h>
 #include <asm/byteorder.h>
 
 #include "pnpbios.h"
 
-static struct {
+__visible struct {
 	u16 offset;
 	u16 segment;
 } pnp_bios_callpoint;
@@ -39,10 +38,11 @@ static struct {
  * kernel begins at offset 3GB...
  */
 
-asmlinkage void pnp_bios_callfunc(void);
+asmlinkage __visible void pnp_bios_callfunc(void);
 
 __asm__(".text			\n"
 	__ALIGN_STR "\n"
+	".globl pnp_bios_callfunc\n"
 	"pnp_bios_callfunc:\n"
 	"	pushl %edx	\n"
 	"	pushl %ecx	\n"
@@ -55,21 +55,22 @@ __asm__(".text			\n"
 
 #define Q2_SET_SEL(cpu, selname, address, size) \
 do { \
-struct desc_struct *gdt = get_cpu_gdt_table((cpu)); \
-set_base(gdt[(selname) >> 3], (u32)(address)); \
-set_limit(gdt[(selname) >> 3], size); \
+	struct desc_struct *gdt = get_cpu_gdt_rw((cpu)); \
+	set_desc_base(&gdt[(selname) >> 3], (u32)(address)); \
+	set_desc_limit(&gdt[(selname) >> 3], (size) - 1); \
 } while(0)
 
-static struct desc_struct bad_bios_desc;
+static struct desc_struct bad_bios_desc = GDT_ENTRY_INIT(0x4092,
+			(unsigned long)__va(0x400UL), PAGE_SIZE - 0x400 - 1);
 
 /*
  * At some point we want to use this stack frame pointer to unwind
  * after PnP BIOS oopses.
  */
 
-u32 pnp_bios_fault_esp;
-u32 pnp_bios_fault_eip;
-u32 pnp_bios_is_utter_crap = 0;
+__visible u32 pnp_bios_fault_esp;
+__visible u32 pnp_bios_fault_eip;
+__visible u32 pnp_bios_is_utter_crap = 0;
 
 static spinlock_t pnp_bios_lock;
 
@@ -95,8 +96,8 @@ static inline u16 call_pnp_bios(u16 func, u16 arg1, u16 arg2, u16 arg3,
 		return PNP_FUNCTION_NOT_SUPPORTED;
 
 	cpu = get_cpu();
-	save_desc_40 = get_cpu_gdt_table(cpu)[0x40 / 8];
-	get_cpu_gdt_table(cpu)[0x40 / 8] = bad_bios_desc;
+	save_desc_40 = get_cpu_gdt_rw(cpu)[0x40 / 8];
+	get_cpu_gdt_rw(cpu)[0x40 / 8] = bad_bios_desc;
 
 	/* On some boxes IRQ's during PnP BIOS calls are deadly.  */
 	spin_lock_irqsave(&pnp_bios_lock, flags);
@@ -134,7 +135,7 @@ static inline u16 call_pnp_bios(u16 func, u16 arg1, u16 arg2, u16 arg3,
 			     :"memory");
 	spin_unlock_irqrestore(&pnp_bios_lock, flags);
 
-	get_cpu_gdt_table(cpu)[0x40 / 8] = save_desc_40;
+	get_cpu_gdt_rw(cpu)[0x40 / 8] = save_desc_40;
 	put_cpu();
 
 	/* If we get here and this is set then the PnP BIOS faulted on us. */
@@ -219,7 +220,7 @@ void pnpbios_print_status(const char *module, u16 status)
 		       module);
 		break;
 	case PNP_HARDWARE_ERROR:
-		printk(KERN_ERR "PnPBIOS: %s: a hardware failure has occured\n",
+		printk(KERN_ERR "PnPBIOS: %s: a hardware failure has occurred\n",
 		       module);
 		break;
 	default:
@@ -476,19 +477,15 @@ void pnpbios_calls_init(union pnp_bios_install_struct *header)
 	pnp_bios_callpoint.offset = header->fields.pm16offset;
 	pnp_bios_callpoint.segment = PNP_CS16;
 
-	bad_bios_desc.a = 0;
-	bad_bios_desc.b = 0x00409200;
-
-	set_base(bad_bios_desc, __va((unsigned long)0x40 << 4));
-	_set_limit((char *)&bad_bios_desc, 4095 - (0x40 << 4));
-	for (i = 0; i < NR_CPUS; i++) {
-		struct desc_struct *gdt = get_cpu_gdt_table(i);
+	for_each_possible_cpu(i) {
+		struct desc_struct *gdt = get_cpu_gdt_rw(i);
 		if (!gdt)
 			continue;
-		set_base(gdt[GDT_ENTRY_PNPBIOS_CS32], &pnp_bios_callfunc);
-		set_base(gdt[GDT_ENTRY_PNPBIOS_CS16],
-			 __va(header->fields.pm16cseg));
-		set_base(gdt[GDT_ENTRY_PNPBIOS_DS],
-			 __va(header->fields.pm16dseg));
+		set_desc_base(&gdt[GDT_ENTRY_PNPBIOS_CS32],
+			 (unsigned long)&pnp_bios_callfunc);
+		set_desc_base(&gdt[GDT_ENTRY_PNPBIOS_CS16],
+			 (unsigned long)__va(header->fields.pm16cseg));
+		set_desc_base(&gdt[GDT_ENTRY_PNPBIOS_DS],
+			 (unsigned long)__va(header->fields.pm16dseg));
 	}
 }

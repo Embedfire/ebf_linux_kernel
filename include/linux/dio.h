@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* header file for DIO boards for the HP300 architecture.
  * Maybe this should handle DIO-II later?
  * The general structure of this is vaguely based on how
@@ -241,20 +242,15 @@ struct dio_driver {
 
 extern int dio_find(int deviceid);
 extern unsigned long dio_scodetophysaddr(int scode);
-extern void dio_create_sysfs_dev_files(struct dio_dev *);
+extern int dio_create_sysfs_dev_files(struct dio_dev *);
 
 /* New-style probing */
 extern int dio_register_driver(struct dio_driver *);
 extern void dio_unregister_driver(struct dio_driver *);
-extern const struct dio_device_id *dio_match_device(const struct dio_device_id *ids, const struct dio_dev *z);
-static inline struct dio_driver *dio_dev_driver(const struct dio_dev *d)
-{
-    return d->driver;
-}
 
 #define dio_resource_start(d) ((d)->resource.start)
 #define dio_resource_end(d)   ((d)->resource.end)
-#define dio_resource_len(d)   ((d)->resource.end-(d)->resource.start+1)
+#define dio_resource_len(d)   (resource_size(&(d)->resource))
 #define dio_resource_flags(d) ((d)->resource.flags)
 
 #define dio_request_device(d, name) \

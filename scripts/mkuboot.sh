@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
 
 #
 # Build U-Boot image when `mkimage' tool is available.
@@ -11,7 +12,7 @@ if [ -z "${MKIMAGE}" ]; then
 	if [ -z "${MKIMAGE}" ]; then
 		# Doesn't exist
 		echo '"mkimage" command not found - U-Boot images will not be built' >&2
-		exit 0;
+		exit 1;
 	fi
 fi
 

@@ -1,17 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Layer 2 defines
  *
  * Copyright 2008  by Karsten Keil <kkeil@novell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/mISDNif.h>
@@ -87,18 +78,18 @@ enum {
 	ST_L2_8,
 };
 
-#define L2_STATE_COUNT (ST_L2_8+1)
+#define L2_STATE_COUNT (ST_L2_8 + 1)
 
 extern struct layer2	*create_l2(struct mISDNchannel *, u_int,
-				u_long, u_long);
+				   u_long, int, int);
 extern int		tei_l2(struct layer2 *, u_int, u_long arg);
 
 
 /* from tei.c */
-extern int 		l2_tei(struct layer2 *, u_int, u_long arg);
-extern void 		TEIrelease(struct layer2 *);
-extern int 		TEIInit(u_int *);
-extern void 		TEIFree(void);
+extern int		l2_tei(struct layer2 *, u_int, u_long arg);
+extern void		TEIrelease(struct layer2 *);
+extern int		TEIInit(u_int *);
+extern void		TEIFree(void);
 
 #define MAX_L2HEADER_LEN 4
 

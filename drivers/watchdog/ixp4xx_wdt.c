@@ -13,19 +13,22 @@
  * warranty of any kind, whether express or implied.
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
+#include <linux/of.h>
 #include <linux/watchdog.h>
 #include <linux/init.h>
 #include <linux/bitops.h>
 #include <linux/uaccess.h>
 #include <mach/hardware.h>
 
-static int nowayout = WATCHDOG_NOWAYOUT;
+static bool nowayout = WATCHDOG_NOWAYOUT;
 static int heartbeat = 60;	/* (secs) Default is 1 minute */
 static unsigned long wdt_status;
 static unsigned long boot_status;
@@ -63,7 +66,7 @@ static int ixp4xx_wdt_open(struct inode *inode, struct file *file)
 
 	clear_bit(WDT_OK_TO_CLOSE, &wdt_status);
 	wdt_enable();
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static ssize_t
@@ -89,7 +92,7 @@ ixp4xx_wdt_write(struct file *file, const char *data, size_t len, loff_t *ppos)
 	return len;
 }
 
-static struct watchdog_info ident = {
+static const struct watchdog_info ident = {
 	.options	= WDIOF_CARDRESET | WDIOF_MAGICCLOSE |
 			  WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING,
 	.identity	= "IXP4xx Watchdog",
@@ -133,7 +136,7 @@ static long ixp4xx_wdt_ioctl(struct file *file, unsigned int cmd,
 
 		heartbeat = time;
 		wdt_enable();
-		/* Fall through */
+		fallthrough;
 
 	case WDIOC_GETTIMEOUT:
 		ret = put_user(heartbeat, (int *)arg);
@@ -147,8 +150,7 @@ static int ixp4xx_wdt_release(struct inode *inode, struct file *file)
 	if (test_bit(WDT_OK_TO_CLOSE, &wdt_status))
 		wdt_disable();
 	else
-		printk(KERN_CRIT "WATCHDOG: Device closed unexpectedly - "
-					"timer will not stop\n");
+		pr_crit("Device closed unexpectedly - timer will not stop\n");
 	clear_bit(WDT_IN_USE, &wdt_status);
 	clear_bit(WDT_OK_TO_CLOSE, &wdt_status);
 
@@ -161,6 +163,7 @@ static const struct file_operations ixp4xx_wdt_fops = {
 	.llseek		= no_llseek,
 	.write		= ixp4xx_wdt_write,
 	.unlocked_ioctl	= ixp4xx_wdt_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= ixp4xx_wdt_open,
 	.release	= ixp4xx_wdt_release,
 };
@@ -174,22 +177,25 @@ static struct miscdevice ixp4xx_wdt_miscdev = {
 static int __init ixp4xx_wdt_init(void)
 {
 	int ret;
-	unsigned long processor_id;
 
-	asm("mrc p15, 0, %0, cr0, cr0, 0;" : "=r"(processor_id) :);
-	if (!(processor_id & 0xf) && !cpu_is_ixp46x()) {
-		printk(KERN_ERR "IXP4XXX Watchdog: Rev. A0 IXP42x CPU detected"
-			" - watchdog disabled\n");
+	/*
+	 * FIXME: we bail out on device tree boot but this really needs
+	 * to be fixed in a nicer way: this registers the MDIO bus before
+	 * even matching the driver infrastructure, we should only probe
+	 * detected hardware.
+	 */
+	if (of_have_populated_dt())
+		return -ENODEV;
+	if (!(read_cpuid_id() & 0xf) && !cpu_is_ixp46x()) {
+		pr_err("Rev. A0 IXP42x CPU detected - watchdog disabled\n");
 
 		return -ENODEV;
 	}
-	spin_lock_init(&wdt_lock);
 	boot_status = (*IXP4XX_OSST & IXP4XX_OSST_TIMER_WARM_RESET) ?
 			WDIOF_CARDRESET : 0;
 	ret = misc_register(&ixp4xx_wdt_miscdev);
 	if (ret == 0)
-		printk(KERN_INFO "IXP4xx Watchdog Timer: heartbeat %d sec\n",
-			heartbeat);
+		pr_info("timer heartbeat %d sec\n", heartbeat);
 	return ret;
 }
 
@@ -208,9 +214,7 @@ MODULE_DESCRIPTION("IXP4xx Network Processor Watchdog");
 module_param(heartbeat, int, 0);
 MODULE_PARM_DESC(heartbeat, "Watchdog heartbeat in seconds (default 60s)");
 
-module_param(nowayout, int, 0);
+module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started");
 
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
-

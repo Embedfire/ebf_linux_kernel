@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Registration for chip drivers
  *
@@ -10,7 +11,6 @@
 #include <linux/slab.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/mtd.h>
-#include <linux/mtd/compatmac.h>
 
 static DEFINE_SPINLOCK(chip_drvs_lock);
 static LIST_HEAD(chip_drvs_list);
@@ -77,10 +77,7 @@ struct mtd_info *do_map_probe(const char *name, struct map_info *map)
 	*/
 	module_put(drv->module);
 
-	if (ret)
-		return ret;
-
-	return NULL;
+	return ret;
 }
 /*
  * Destroy an MTD device which was created for a map device.

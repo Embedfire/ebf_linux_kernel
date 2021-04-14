@@ -1,33 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * SuperH KEYSC Keypad Driver
  *
  * Copyright (C) 2008 Magnus Damm
  *
  * Based on gpio_keys.c, Copyright 2005 Phil Blundell
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/delay.h>
 #include <linux/platform_device.h>
 #include <linux/input.h>
+#include <linux/input/sh_keysc.h>
+#include <linux/bitmap.h>
+#include <linux/pm_runtime.h>
 #include <linux/io.h>
-#include <asm/sh_keysc.h>
-
-#define KYCR1_OFFS   0x00
-#define KYCR2_OFFS   0x04
-#define KYINDR_OFFS  0x08
-#define KYOUTDR_OFFS 0x0c
-
-#define KYCR2_IRQ_LEVEL    0x10
-#define KYCR2_IRQ_DISABLED 0x00
+#include <linux/slab.h>
 
 static const struct {
 	unsigned char kymd, keyout, keyin;
@@ -35,80 +26,130 @@ static const struct {
 	[SH_KEYSC_MODE_1] = { 0, 6, 5 },
 	[SH_KEYSC_MODE_2] = { 1, 5, 6 },
 	[SH_KEYSC_MODE_3] = { 2, 4, 7 },
+	[SH_KEYSC_MODE_4] = { 3, 6, 6 },
+	[SH_KEYSC_MODE_5] = { 4, 6, 7 },
+	[SH_KEYSC_MODE_6] = { 5, 8, 8 },
 };
 
 struct sh_keysc_priv {
 	void __iomem *iomem_base;
-	unsigned long last_keys;
+	DECLARE_BITMAP(last_keys, SH_KEYSC_MAXKEYS);
 	struct input_dev *input;
 	struct sh_keysc_info pdata;
 };
+
+#define KYCR1 0
+#define KYCR2 1
+#define KYINDR 2
+#define KYOUTDR 3
+
+#define KYCR2_IRQ_LEVEL    0x10
+#define KYCR2_IRQ_DISABLED 0x00
+
+static unsigned long sh_keysc_read(struct sh_keysc_priv *p, int reg_nr)
+{
+	return ioread16(p->iomem_base + (reg_nr << 2));
+}
+
+static void sh_keysc_write(struct sh_keysc_priv *p, int reg_nr,
+			   unsigned long value)
+{
+	iowrite16(value, p->iomem_base + (reg_nr << 2));
+}
+
+static void sh_keysc_level_mode(struct sh_keysc_priv *p,
+				unsigned long keys_set)
+{
+	struct sh_keysc_info *pdata = &p->pdata;
+
+	sh_keysc_write(p, KYOUTDR, 0);
+	sh_keysc_write(p, KYCR2, KYCR2_IRQ_LEVEL | (keys_set << 8));
+
+	if (pdata->kycr2_delay)
+		udelay(pdata->kycr2_delay);
+}
+
+static void sh_keysc_map_dbg(struct device *dev, unsigned long *map,
+			     const char *str)
+{
+	int k;
+
+	for (k = 0; k < BITS_TO_LONGS(SH_KEYSC_MAXKEYS); k++)
+		dev_dbg(dev, "%s[%d] 0x%lx\n", str, k, map[k]);
+}
 
 static irqreturn_t sh_keysc_isr(int irq, void *dev_id)
 {
 	struct platform_device *pdev = dev_id;
 	struct sh_keysc_priv *priv = platform_get_drvdata(pdev);
 	struct sh_keysc_info *pdata = &priv->pdata;
-	unsigned long keys, keys1, keys0, mask;
+	int keyout_nr = sh_keysc_mode[pdata->mode].keyout;
+	int keyin_nr = sh_keysc_mode[pdata->mode].keyin;
+	DECLARE_BITMAP(keys, SH_KEYSC_MAXKEYS);
+	DECLARE_BITMAP(keys0, SH_KEYSC_MAXKEYS);
+	DECLARE_BITMAP(keys1, SH_KEYSC_MAXKEYS);
 	unsigned char keyin_set, tmp;
-	int i, k;
+	int i, k, n;
 
 	dev_dbg(&pdev->dev, "isr!\n");
 
-	keys1 = ~0;
-	keys0 = 0;
+	bitmap_fill(keys1, SH_KEYSC_MAXKEYS);
+	bitmap_zero(keys0, SH_KEYSC_MAXKEYS);
 
 	do {
-		keys = 0;
+		bitmap_zero(keys, SH_KEYSC_MAXKEYS);
 		keyin_set = 0;
 
-		iowrite16(KYCR2_IRQ_DISABLED, priv->iomem_base + KYCR2_OFFS);
+		sh_keysc_write(priv, KYCR2, KYCR2_IRQ_DISABLED);
 
-		for (i = 0; i < sh_keysc_mode[pdata->mode].keyout; i++) {
-			iowrite16(0xfff ^ (3 << (i * 2)),
-				  priv->iomem_base + KYOUTDR_OFFS);
+		for (i = 0; i < keyout_nr; i++) {
+			n = keyin_nr * i;
+
+			/* drive one KEYOUT pin low, read KEYIN pins */
+			sh_keysc_write(priv, KYOUTDR, 0xffff ^ (3 << (i * 2)));
 			udelay(pdata->delay);
-			tmp = ioread16(priv->iomem_base + KYINDR_OFFS);
-			keys |= tmp << (sh_keysc_mode[pdata->mode].keyin * i);
-			tmp ^= (1 << sh_keysc_mode[pdata->mode].keyin) - 1;
-			keyin_set |= tmp;
+			tmp = sh_keysc_read(priv, KYINDR);
+
+			/* set bit if key press has been detected */
+			for (k = 0; k < keyin_nr; k++) {
+				if (tmp & (1 << k))
+					__set_bit(n + k, keys);
+			}
+
+			/* keep track of which KEYIN bits that have been set */
+			keyin_set |= tmp ^ ((1 << keyin_nr) - 1);
 		}
 
-		iowrite16(0, priv->iomem_base + KYOUTDR_OFFS);
-		iowrite16(KYCR2_IRQ_LEVEL | (keyin_set << 8),
-			  priv->iomem_base + KYCR2_OFFS);
+		sh_keysc_level_mode(priv, keyin_set);
 
-		keys ^= ~0;
-		keys &= (1 << (sh_keysc_mode[pdata->mode].keyin *
-			       sh_keysc_mode[pdata->mode].keyout)) - 1;
-		keys1 &= keys;
-		keys0 |= keys;
+		bitmap_complement(keys, keys, SH_KEYSC_MAXKEYS);
+		bitmap_and(keys1, keys1, keys, SH_KEYSC_MAXKEYS);
+		bitmap_or(keys0, keys0, keys, SH_KEYSC_MAXKEYS);
 
-		dev_dbg(&pdev->dev, "keys 0x%08lx\n", keys);
+		sh_keysc_map_dbg(&pdev->dev, keys, "keys");
 
-	} while (ioread16(priv->iomem_base + KYCR2_OFFS) & 0x01);
+	} while (sh_keysc_read(priv, KYCR2) & 0x01);
 
-	dev_dbg(&pdev->dev, "last_keys 0x%08lx keys0 0x%08lx keys1 0x%08lx\n",
-		priv->last_keys, keys0, keys1);
+	sh_keysc_map_dbg(&pdev->dev, priv->last_keys, "last_keys");
+	sh_keysc_map_dbg(&pdev->dev, keys0, "keys0");
+	sh_keysc_map_dbg(&pdev->dev, keys1, "keys1");
 
 	for (i = 0; i < SH_KEYSC_MAXKEYS; i++) {
 		k = pdata->keycodes[i];
 		if (!k)
 			continue;
 
-		mask = 1 << i;
-
-		if (!((priv->last_keys ^ keys0) & mask))
+		if (test_bit(i, keys0) == test_bit(i, priv->last_keys))
 			continue;
 
-		if ((keys1 | keys0) & mask) {
+		if (test_bit(i, keys1) || test_bit(i, keys0)) {
 			input_event(priv->input, EV_KEY, k, 1);
-			priv->last_keys |= mask;
+			__set_bit(i, priv->last_keys);
 		}
 
-		if (!(keys1 & mask)) {
+		if (!test_bit(i, keys1)) {
 			input_event(priv->input, EV_KEY, k, 0);
-			priv->last_keys &= ~mask;
+			__clear_bit(i, priv->last_keys);
 		}
 
 	}
@@ -117,18 +158,16 @@ static irqreturn_t sh_keysc_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-#define res_size(res) ((res)->end - (res)->start + 1)
-
-static int __devinit sh_keysc_probe(struct platform_device *pdev)
+static int sh_keysc_probe(struct platform_device *pdev)
 {
 	struct sh_keysc_priv *priv;
 	struct sh_keysc_info *pdata;
 	struct resource *res;
 	struct input_dev *input;
-	int i, k;
+	int i;
 	int irq, error;
 
-	if (!pdev->dev.platform_data) {
+	if (!dev_get_platdata(&pdev->dev)) {
 		dev_err(&pdev->dev, "no platform data defined\n");
 		error = -EINVAL;
 		goto err0;
@@ -142,10 +181,8 @@ static int __devinit sh_keysc_probe(struct platform_device *pdev)
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(&pdev->dev, "failed to get irq\n");
+	if (irq < 0)
 		goto err0;
-	}
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (priv == NULL) {
@@ -155,10 +192,10 @@ static int __devinit sh_keysc_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, priv);
-	memcpy(&priv->pdata, pdev->dev.platform_data, sizeof(priv->pdata));
+	memcpy(&priv->pdata, dev_get_platdata(&pdev->dev), sizeof(priv->pdata));
 	pdata = &priv->pdata;
 
-	priv->iomem_base = ioremap_nocache(res->start, res_size(res));
+	priv->iomem_base = ioremap(res->start, resource_size(res));
 	if (priv->iomem_base == NULL) {
 		dev_err(&pdev->dev, "failed to remap I/O memory\n");
 		error = -ENXIO;
@@ -184,17 +221,20 @@ static int __devinit sh_keysc_probe(struct platform_device *pdev)
 	input->id.product = 0x0001;
 	input->id.version = 0x0100;
 
-	error = request_irq(irq, sh_keysc_isr, 0, pdev->name, pdev);
+	input->keycode = pdata->keycodes;
+	input->keycodesize = sizeof(pdata->keycodes[0]);
+	input->keycodemax = ARRAY_SIZE(pdata->keycodes);
+
+	error = request_threaded_irq(irq, NULL, sh_keysc_isr, IRQF_ONESHOT,
+				     dev_name(&pdev->dev), pdev);
 	if (error) {
 		dev_err(&pdev->dev, "failed to request IRQ\n");
 		goto err3;
 	}
 
-	for (i = 0; i < SH_KEYSC_MAXKEYS; i++) {
-		k = pdata->keycodes[i];
-		if (k)
-			input_set_capability(input, EV_KEY, k);
-	}
+	for (i = 0; i < SH_KEYSC_MAXKEYS; i++)
+		__set_bit(pdata->keycodes[i], input->keybit);
+	__clear_bit(KEY_RESERVED, input->keybit);
 
 	error = input_register_device(input);
 	if (error) {
@@ -202,11 +242,17 @@ static int __devinit sh_keysc_probe(struct platform_device *pdev)
 		goto err4;
 	}
 
-	iowrite16((sh_keysc_mode[pdata->mode].kymd << 8) |
-		  pdata->scan_timing, priv->iomem_base + KYCR1_OFFS);
-	iowrite16(0, priv->iomem_base + KYOUTDR_OFFS);
-	iowrite16(KYCR2_IRQ_LEVEL, priv->iomem_base + KYCR2_OFFS);
+	pm_runtime_enable(&pdev->dev);
+	pm_runtime_get_sync(&pdev->dev);
+
+	sh_keysc_write(priv, KYCR1, (sh_keysc_mode[pdata->mode].kymd << 8) |
+		       pdata->scan_timing);
+	sh_keysc_level_mode(priv, 0);
+
+	device_init_wakeup(&pdev->dev, 1);
+
 	return 0;
+
  err4:
 	free_irq(irq, pdev);
  err3:
@@ -214,53 +260,76 @@ static int __devinit sh_keysc_probe(struct platform_device *pdev)
  err2:
 	iounmap(priv->iomem_base);
  err1:
-	platform_set_drvdata(pdev, NULL);
 	kfree(priv);
  err0:
 	return error;
 }
 
-static int __devexit sh_keysc_remove(struct platform_device *pdev)
+static int sh_keysc_remove(struct platform_device *pdev)
 {
 	struct sh_keysc_priv *priv = platform_get_drvdata(pdev);
 
-	iowrite16(KYCR2_IRQ_DISABLED, priv->iomem_base + KYCR2_OFFS);
+	sh_keysc_write(priv, KYCR2, KYCR2_IRQ_DISABLED);
 
 	input_unregister_device(priv->input);
 	free_irq(platform_get_irq(pdev, 0), pdev);
 	iounmap(priv->iomem_base);
 
-	platform_set_drvdata(pdev, NULL);
+	pm_runtime_put_sync(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
+
 	kfree(priv);
+
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int sh_keysc_suspend(struct device *dev)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct sh_keysc_priv *priv = platform_get_drvdata(pdev);
+	int irq = platform_get_irq(pdev, 0);
+	unsigned short value;
 
-#define sh_keysc_suspend NULL
-#define sh_keysc_resume NULL
+	value = sh_keysc_read(priv, KYCR1);
 
-struct platform_driver sh_keysc_device_driver = {
+	if (device_may_wakeup(dev)) {
+		sh_keysc_write(priv, KYCR1, value | 0x80);
+		enable_irq_wake(irq);
+	} else {
+		sh_keysc_write(priv, KYCR1, value & ~0x80);
+		pm_runtime_put_sync(dev);
+	}
+
+	return 0;
+}
+
+static int sh_keysc_resume(struct device *dev)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	int irq = platform_get_irq(pdev, 0);
+
+	if (device_may_wakeup(dev))
+		disable_irq_wake(irq);
+	else
+		pm_runtime_get_sync(dev);
+
+	return 0;
+}
+#endif
+
+static SIMPLE_DEV_PM_OPS(sh_keysc_dev_pm_ops,
+			 sh_keysc_suspend, sh_keysc_resume);
+
+static struct platform_driver sh_keysc_device_driver = {
 	.probe		= sh_keysc_probe,
-	.remove		= __devexit_p(sh_keysc_remove),
-	.suspend	= sh_keysc_suspend,
-	.resume		= sh_keysc_resume,
+	.remove		= sh_keysc_remove,
 	.driver		= {
 		.name	= "sh_keysc",
+		.pm	= &sh_keysc_dev_pm_ops,
 	}
 };
-
-static int __init sh_keysc_init(void)
-{
-	return platform_driver_register(&sh_keysc_device_driver);
-}
-
-static void __exit sh_keysc_exit(void)
-{
-	platform_driver_unregister(&sh_keysc_device_driver);
-}
-
-module_init(sh_keysc_init);
-module_exit(sh_keysc_exit);
+module_platform_driver(sh_keysc_device_driver);
 
 MODULE_AUTHOR("Magnus Damm");
 MODULE_DESCRIPTION("SuperH KEYSC Keypad Driver");

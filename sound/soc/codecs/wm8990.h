@@ -1,15 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * wm8990.h  --  audio driver for WM8990
  *
  * Copyright 2007 Wolfson Microelectronics PLC.
  * Author: Graeme Gregory
  *         graeme.gregory@wolfsonmicro.com or linux@wolfsonmicro.com
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
- *
  */
 
 #ifndef __WM8990REGISTERDEFS_H__
@@ -78,10 +73,9 @@
 #define WM8990_PLL1                             0x3C
 #define WM8990_PLL2                             0x3D
 #define WM8990_PLL3                             0x3E
-#define WM8990_INTDRIVBITS			0x3F
 
-#define WM8990_REGISTER_COUNT                   60
-#define WM8990_MAX_REGISTER                     0x3F
+#define WM8990_EXT_ACCESS_ENA			0x75
+#define WM8990_EXT_CTL1				0x7a
 
 /*
  * Field Definitions.
@@ -818,25 +812,10 @@
  */
 #define WM8990_PLLK2_MASK                       0x00FF  /* PLLK2 - [7:0] */
 
-/*
- * R63 (0x3F) - Internal Driver Bits
- */
-#define WM8990_INMIXL_PWR_BIT			0
-#define WM8990_AINLMUX_PWR_BIT			1
-#define WM8990_INMIXR_PWR_BIT			2
-#define WM8990_AINRMUX_PWR_BIT			3
-
-struct wm8990_setup_data {
-	unsigned short i2c_address;
-};
-
 #define WM8990_MCLK_DIV 0
 #define WM8990_DACCLK_DIV 1
 #define WM8990_ADCCLK_DIV 2
 #define WM8990_BCLK_DIV 3
-
-extern struct snd_soc_dai wm8990_dai;
-extern struct snd_soc_codec_device soc_codec_dev_wm8990;
 
 #endif	/* __WM8990REGISTERDEFS_H__ */
 /*------------------------------ END OF FILE ---------------------------------*/

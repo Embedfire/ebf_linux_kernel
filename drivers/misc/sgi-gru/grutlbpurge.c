@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * SN Platform GRU Driver
  *
@@ -9,20 +10,6 @@
  * from the GRU driver.
  *
  *  Copyright (c) 2008 Silicon Graphics, Inc.  All Rights Reserved.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/kernel.h>
@@ -184,10 +171,10 @@ void gru_flush_tlb_range(struct gru_mm_struct *gms, unsigned long start,
 			STAT(flush_tlb_gru_tgh);
 			asid = GRUASID(asid, start);
 			gru_dbg(grudev,
-	"  FLUSH gruid %d, asid 0x%x, num %ld, cbmap 0x%x\n",
-				gid, asid, num, asids->mt_ctxbitmap);
+	"  FLUSH gruid %d, asid 0x%x, vaddr 0x%lx, vamask 0x%x, num %ld, cbmap 0x%x\n",
+			      gid, asid, start, grupagesize, num, asids->mt_ctxbitmap);
 			tgh = get_lock_tgh_handle(gru);
-			tgh_invalidate(tgh, start, 0, asid, grupagesize, 0,
+			tgh_invalidate(tgh, start, ~0, asid, grupagesize, 0,
 				       num - 1, asids->mt_ctxbitmap);
 			get_unlock_tgh_handle(tgh);
 		} else {
@@ -210,19 +197,17 @@ void gru_flush_all_tlb(struct gru_state *gru)
 {
 	struct gru_tlb_global_handle *tgh;
 
-	gru_dbg(grudev, "gru %p, gid %d\n", gru, gru->gs_gid);
+	gru_dbg(grudev, "gid %d\n", gru->gs_gid);
 	tgh = get_lock_tgh_handle(gru);
-	tgh_invalidate(tgh, 0, ~0, 0, 1, 1, GRUMAXINVAL - 1, 0);
+	tgh_invalidate(tgh, 0, ~0, 0, 1, 1, GRUMAXINVAL - 1, 0xffff);
 	get_unlock_tgh_handle(tgh);
-	preempt_enable();
 }
 
 /*
  * MMUOPS notifier callout functions
  */
-static void gru_invalidate_range_start(struct mmu_notifier *mn,
-				       struct mm_struct *mm,
-				       unsigned long start, unsigned long end)
+static int gru_invalidate_range_start(struct mmu_notifier *mn,
+			const struct mmu_notifier_range *range)
 {
 	struct gru_mm_struct *gms = container_of(mn, struct gru_mm_struct,
 						 ms_notifier);
@@ -230,13 +215,14 @@ static void gru_invalidate_range_start(struct mmu_notifier *mn,
 	STAT(mmu_invalidate_range);
 	atomic_inc(&gms->ms_range_active);
 	gru_dbg(grudev, "gms %p, start 0x%lx, end 0x%lx, act %d\n", gms,
-		start, end, atomic_read(&gms->ms_range_active));
-	gru_flush_tlb_range(gms, start, end - start);
+		range->start, range->end, atomic_read(&gms->ms_range_active));
+	gru_flush_tlb_range(gms, range->start, range->end - range->start);
+
+	return 0;
 }
 
 static void gru_invalidate_range_end(struct mmu_notifier *mn,
-				     struct mm_struct *mm, unsigned long start,
-				     unsigned long end)
+			const struct mmu_notifier_range *range)
 {
 	struct gru_mm_struct *gms = container_of(mn, struct gru_mm_struct,
 						 ms_notifier);
@@ -245,90 +231,51 @@ static void gru_invalidate_range_end(struct mmu_notifier *mn,
 	(void)atomic_dec_and_test(&gms->ms_range_active);
 
 	wake_up_all(&gms->ms_wait_queue);
-	gru_dbg(grudev, "gms %p, start 0x%lx, end 0x%lx\n", gms, start, end);
+	gru_dbg(grudev, "gms %p, start 0x%lx, end 0x%lx\n",
+		gms, range->start, range->end);
 }
 
-static void gru_invalidate_page(struct mmu_notifier *mn, struct mm_struct *mm,
-				unsigned long address)
+static struct mmu_notifier *gru_alloc_notifier(struct mm_struct *mm)
 {
-	struct gru_mm_struct *gms = container_of(mn, struct gru_mm_struct,
-						 ms_notifier);
+	struct gru_mm_struct *gms;
 
-	STAT(mmu_invalidate_page);
-	gru_flush_tlb_range(gms, address, PAGE_SIZE);
-	gru_dbg(grudev, "gms %p, address 0x%lx\n", gms, address);
+	gms = kzalloc(sizeof(*gms), GFP_KERNEL);
+	if (!gms)
+		return ERR_PTR(-ENOMEM);
+	STAT(gms_alloc);
+	spin_lock_init(&gms->ms_asid_lock);
+	init_waitqueue_head(&gms->ms_wait_queue);
+
+	return &gms->ms_notifier;
 }
 
-static void gru_release(struct mmu_notifier *mn, struct mm_struct *mm)
+static void gru_free_notifier(struct mmu_notifier *mn)
 {
-	struct gru_mm_struct *gms = container_of(mn, struct gru_mm_struct,
-						 ms_notifier);
-
-	gms->ms_released = 1;
-	gru_dbg(grudev, "gms %p\n", gms);
+	kfree(container_of(mn, struct gru_mm_struct, ms_notifier));
+	STAT(gms_free);
 }
-
 
 static const struct mmu_notifier_ops gru_mmuops = {
-	.invalidate_page	= gru_invalidate_page,
 	.invalidate_range_start	= gru_invalidate_range_start,
 	.invalidate_range_end	= gru_invalidate_range_end,
-	.release		= gru_release,
+	.alloc_notifier		= gru_alloc_notifier,
+	.free_notifier		= gru_free_notifier,
 };
-
-/* Move this to the basic mmu_notifier file. But for now... */
-static struct mmu_notifier *mmu_find_ops(struct mm_struct *mm,
-			const struct mmu_notifier_ops *ops)
-{
-	struct mmu_notifier *mn, *gru_mn = NULL;
-	struct hlist_node *n;
-
-	if (mm->mmu_notifier_mm) {
-		rcu_read_lock();
-		hlist_for_each_entry_rcu(mn, n, &mm->mmu_notifier_mm->list,
-					 hlist)
-		    if (mn->ops == ops) {
-			gru_mn = mn;
-			break;
-		}
-		rcu_read_unlock();
-	}
-	return gru_mn;
-}
 
 struct gru_mm_struct *gru_register_mmu_notifier(void)
 {
-	struct gru_mm_struct *gms;
 	struct mmu_notifier *mn;
 
-	mn = mmu_find_ops(current->mm, &gru_mmuops);
-	if (mn) {
-		gms = container_of(mn, struct gru_mm_struct, ms_notifier);
-		atomic_inc(&gms->ms_refcnt);
-	} else {
-		gms = kzalloc(sizeof(*gms), GFP_KERNEL);
-		if (gms) {
-			spin_lock_init(&gms->ms_asid_lock);
-			gms->ms_notifier.ops = &gru_mmuops;
-			atomic_set(&gms->ms_refcnt, 1);
-			init_waitqueue_head(&gms->ms_wait_queue);
-			__mmu_notifier_register(&gms->ms_notifier, current->mm);
-		}
-	}
-	gru_dbg(grudev, "gms %p, refcnt %d\n", gms,
-		atomic_read(&gms->ms_refcnt));
-	return gms;
+	mn = mmu_notifier_get_locked(&gru_mmuops, current->mm);
+	if (IS_ERR(mn))
+		return ERR_CAST(mn);
+
+	return container_of(mn, struct gru_mm_struct, ms_notifier);
 }
 
 void gru_drop_mmu_notifier(struct gru_mm_struct *gms)
 {
-	gru_dbg(grudev, "gms %p, refcnt %d, released %d\n", gms,
-		atomic_read(&gms->ms_refcnt), gms->ms_released);
-	if (atomic_dec_return(&gms->ms_refcnt) == 0) {
-		if (!gms->ms_released)
-			mmu_notifier_unregister(&gms->ms_notifier, current->mm);
-		kfree(gms);
-	}
+	mmu_notifier_put(&gms->ms_notifier);
 }
 
 /*

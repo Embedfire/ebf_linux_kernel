@@ -1,23 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * logfile.h - Defines for NTFS kernel journal ($LogFile) handling.  Part of
  *	       the Linux-NTFS project.
  *
  * Copyright (c) 2000-2005 Anton Altaparmakov
- *
- * This program/include file is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as published
- * by the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program/include file is distributed in the hope that it will be
- * useful, but WITHOUT ANY WARRANTY; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program (in the main directory of the Linux-NTFS
- * distribution in the file COPYING); if not, write to the Free Software
- * Foundation,Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef _LINUX_NTFS_LOGFILE_H
@@ -104,7 +90,7 @@ typedef struct {
  * in this particular client array.  Also inside the client records themselves,
  * this means that there are no client records preceding or following this one.
  */
-#define LOGFILE_NO_CLIENT	const_cpu_to_le16(0xffff)
+#define LOGFILE_NO_CLIENT	cpu_to_le16(0xffff)
 #define LOGFILE_NO_CLIENT_CPU	0xffff
 
 /*
@@ -112,8 +98,8 @@ typedef struct {
  * information about the log file in which they are present.
  */
 enum {
-	RESTART_VOLUME_IS_CLEAN	= const_cpu_to_le16(0x0002),
-	RESTART_SPACE_FILLER	= const_cpu_to_le16(0xffff), /* gcc: Force enum bit width to 16. */
+	RESTART_VOLUME_IS_CLEAN	= cpu_to_le16(0x0002),
+	RESTART_SPACE_FILLER	= cpu_to_le16(0xffff), /* gcc: Force enum bit width to 16. */
 } __attribute__ ((__packed__));
 
 typedef le16 RESTART_AREA_FLAGS;
@@ -222,7 +208,7 @@ typedef struct {
 /* 24*/	sle64 file_size;	/* Usable byte size of the log file.  If the
 				   restart_area_offset + the offset of the
 				   file_size are > 510 then corruption has
-				   occured.  This is the very first check when
+				   occurred.  This is the very first check when
 				   starting with the restart_area as if it
 				   fails it means that some of the above values
 				   will be corrupted by the multi sector

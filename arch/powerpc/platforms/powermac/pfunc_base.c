@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
 #include <linux/spinlock.h>
+#include <linux/of_irq.h>
 
 #include <asm/pmac_feature.h>
 #include <asm/pmac_pfunc.h>
@@ -25,7 +27,7 @@ static irqreturn_t macio_gpio_irq(int irq, void *data)
 static int macio_do_gpio_irq_enable(struct pmf_function *func)
 {
 	unsigned int irq = irq_of_parse_and_map(func->node, 0);
-	if (irq == NO_IRQ)
+	if (!irq)
 		return -EINVAL;
 	return request_irq(irq, macio_gpio_irq, 0, func->node->name, func);
 }
@@ -33,7 +35,7 @@ static int macio_do_gpio_irq_enable(struct pmf_function *func)
 static int macio_do_gpio_irq_disable(struct pmf_function *func)
 {
 	unsigned int irq = irq_of_parse_and_map(func->node, 0);
-	if (irq == NO_IRQ)
+	if (!irq)
 		return -EINVAL;
 	free_irq(irq, func);
 	return 0;
@@ -50,13 +52,13 @@ static int macio_do_gpio_write(PMF_STD_ARGS, u8 value, u8 mask)
 		value = ~value;
 
 	/* Toggle the GPIO */
-	spin_lock_irqsave(&feature_lock, flags);
+	raw_spin_lock_irqsave(&feature_lock, flags);
 	tmp = readb(addr);
 	tmp = (tmp & ~mask) | (value & mask);
-	DBG("Do write 0x%02x to GPIO %s (%p)\n",
-	    tmp, func->node->full_name, addr);
+	DBG("Do write 0x%02x to GPIO %pOF (%p)\n",
+	    tmp, func->node, addr);
 	writeb(tmp, addr);
-	spin_unlock_irqrestore(&feature_lock, flags);
+	raw_spin_unlock_irqrestore(&feature_lock, flags);
 
 	return 0;
 }
@@ -99,21 +101,20 @@ static void macio_gpio_init_one(struct macio_chip *macio)
 	 * Find the "gpio" parent node
 	 */
 
-	for (gparent = NULL;
-	     (gparent = of_get_next_child(macio->of_node, gparent)) != NULL;)
-		if (strcmp(gparent->name, "gpio") == 0)
+	for_each_child_of_node(macio->of_node, gparent)
+		if (of_node_name_eq(gparent, "gpio"))
 			break;
 	if (gparent == NULL)
 		return;
 
-	DBG("Installing GPIO functions for macio %s\n",
-	    macio->of_node->full_name);
+	DBG("Installing GPIO functions for macio %pOF\n",
+	    macio->of_node);
 
 	/*
 	 * Ok, got one, we dont need anything special to track them down, so
 	 * we just create them all
 	 */
-	for (gp = NULL; (gp = of_get_next_child(gparent, gp)) != NULL;) {
+	for_each_child_of_node(gparent, gp) {
 		const u32 *reg = of_get_property(gp, "reg", NULL);
 		unsigned long offset;
 		if (reg == NULL)
@@ -128,11 +129,11 @@ static void macio_gpio_init_one(struct macio_chip *macio)
 		pmf_register_driver(gp, &macio_gpio_handlers, (void *)offset);
 	}
 
-	DBG("Calling initial GPIO functions for macio %s\n",
-	    macio->of_node->full_name);
+	DBG("Calling initial GPIO functions for macio %pOF\n",
+	    macio->of_node);
 
 	/* And now we run all the init ones */
-	for (gp = NULL; (gp = of_get_next_child(gparent, gp)) != NULL;)
+	for_each_child_of_node(gparent, gp)
 		pmf_do_functions(gp, NULL, 0, PMF_FLAGS_ON_INIT, NULL);
 
 	/* Note: We do not at this point implement the "at sleep" or "at wake"
@@ -145,9 +146,9 @@ static int macio_do_write_reg32(PMF_STD_ARGS, u32 offset, u32 value, u32 mask)
 	struct macio_chip *macio = func->driver_data;
 	unsigned long flags;
 
-	spin_lock_irqsave(&feature_lock, flags);
+	raw_spin_lock_irqsave(&feature_lock, flags);
 	MACIO_OUT32(offset, (MACIO_IN32(offset) & ~mask) | (value & mask));
-	spin_unlock_irqrestore(&feature_lock, flags);
+	raw_spin_unlock_irqrestore(&feature_lock, flags);
 	return 0;
 }
 
@@ -168,9 +169,9 @@ static int macio_do_write_reg8(PMF_STD_ARGS, u32 offset, u8 value, u8 mask)
 	struct macio_chip *macio = func->driver_data;
 	unsigned long flags;
 
-	spin_lock_irqsave(&feature_lock, flags);
+	raw_spin_lock_irqsave(&feature_lock, flags);
 	MACIO_OUT8(offset, (MACIO_IN8(offset) & ~mask) | (value & mask));
-	spin_unlock_irqrestore(&feature_lock, flags);
+	raw_spin_unlock_irqrestore(&feature_lock, flags);
 	return 0;
 }
 
@@ -223,12 +224,12 @@ static int macio_do_write_reg32_slm(PMF_STD_ARGS, u32 offset, u32 shift,
 	if (args == NULL || args->count == 0)
 		return -EINVAL;
 
-	spin_lock_irqsave(&feature_lock, flags);
+	raw_spin_lock_irqsave(&feature_lock, flags);
 	tmp = MACIO_IN32(offset);
 	val = args->u[0].v << shift;
 	tmp = (tmp & ~mask) | (val & mask);
 	MACIO_OUT32(offset, tmp);
-	spin_unlock_irqrestore(&feature_lock, flags);
+	raw_spin_unlock_irqrestore(&feature_lock, flags);
 	return 0;
 }
 
@@ -243,12 +244,12 @@ static int macio_do_write_reg8_slm(PMF_STD_ARGS, u32 offset, u32 shift,
 	if (args == NULL || args->count == 0)
 		return -EINVAL;
 
-	spin_lock_irqsave(&feature_lock, flags);
+	raw_spin_lock_irqsave(&feature_lock, flags);
 	tmp = MACIO_IN8(offset);
 	val = args->u[0].v << shift;
 	tmp = (tmp & ~mask) | (val & mask);
 	MACIO_OUT8(offset, tmp);
-	spin_unlock_irqrestore(&feature_lock, flags);
+	raw_spin_unlock_irqrestore(&feature_lock, flags);
 	return 0;
 }
 
@@ -266,8 +267,8 @@ static struct pmf_handlers macio_mmio_handlers = {
 
 static void macio_mmio_init_one(struct macio_chip *macio)
 {
-	DBG("Installing MMIO functions for macio %s\n",
-	    macio->of_node->full_name);
+	DBG("Installing MMIO functions for macio %pOF\n",
+	    macio->of_node);
 
 	pmf_register_driver(macio->of_node, &macio_mmio_handlers, macio);
 }
@@ -278,12 +279,12 @@ static int unin_do_write_reg32(PMF_STD_ARGS, u32 offset, u32 value, u32 mask)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&feature_lock, flags);
+	raw_spin_lock_irqsave(&feature_lock, flags);
 	/* This is fairly bogus in darwin, but it should work for our needs
 	 * implemeted that way:
 	 */
 	UN_OUT(offset, (UN_IN(offset) & ~mask) | (value & mask));
-	spin_unlock_irqrestore(&feature_lock, flags);
+	raw_spin_unlock_irqrestore(&feature_lock, flags);
 	return 0;
 }
 
@@ -297,8 +298,8 @@ static void uninorth_install_pfunc(void)
 {
 	struct device_node *np;
 
-	DBG("Installing functions for UniN %s\n",
-	    uninorth_node->full_name);
+	DBG("Installing functions for UniN %pOF\n",
+	    uninorth_node);
 
 	/*
 	 * Install handlers for the bridge itself
@@ -311,13 +312,13 @@ static void uninorth_install_pfunc(void)
 	 * Install handlers for the hwclock child if any
 	 */
 	for (np = NULL; (np = of_get_next_child(uninorth_node, np)) != NULL;)
-		if (strcmp(np->name, "hw-clock") == 0) {
+		if (of_node_name_eq(np, "hw-clock")) {
 			unin_hwclock = np;
 			break;
 		}
 	if (unin_hwclock) {
-		DBG("Installing functions for UniN clock %s\n",
-		    unin_hwclock->full_name);
+		DBG("Installing functions for UniN clock %pOF\n",
+		    unin_hwclock);
 		pmf_register_driver(unin_hwclock, &unin_mmio_handlers, NULL);
 		pmf_do_functions(unin_hwclock, NULL, 0, PMF_FLAGS_ON_INIT,
 				 NULL);

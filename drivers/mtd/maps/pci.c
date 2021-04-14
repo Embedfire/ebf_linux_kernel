@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/drivers/mtd/maps/pci.c
  *
  *  Copyright (C) 2001 Russell King, All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Generic PCI memory map driver.  We support the following boards:
  *  - Intel IQ80310 ATU.
@@ -14,7 +11,6 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 
 #include <linux/mtd/mtd.h>
@@ -43,26 +39,14 @@ static map_word mtd_pci_read8(struct map_info *_map, unsigned long ofs)
 	struct map_pci_info *map = (struct map_pci_info *)_map;
 	map_word val;
 	val.x[0]= readb(map->base + map->translate(map, ofs));
-//	printk("read8 : %08lx => %02x\n", ofs, val.x[0]);
 	return val;
 }
 
-#if 0
-static map_word mtd_pci_read16(struct map_info *_map, unsigned long ofs)
-{
-	struct map_pci_info *map = (struct map_pci_info *)_map;
-	map_word val;
-	val.x[0] = readw(map->base + map->translate(map, ofs));
-//	printk("read16: %08lx => %04x\n", ofs, val.x[0]);
-	return val;
-}
-#endif
 static map_word mtd_pci_read32(struct map_info *_map, unsigned long ofs)
 {
 	struct map_pci_info *map = (struct map_pci_info *)_map;
 	map_word val;
 	val.x[0] = readl(map->base + map->translate(map, ofs));
-//	printk("read32: %08lx => %08x\n", ofs, val.x[0]);
 	return val;
 }
 
@@ -75,22 +59,12 @@ static void mtd_pci_copyfrom(struct map_info *_map, void *to, unsigned long from
 static void mtd_pci_write8(struct map_info *_map, map_word val, unsigned long ofs)
 {
 	struct map_pci_info *map = (struct map_pci_info *)_map;
-//	printk("write8 : %08lx <= %02x\n", ofs, val.x[0]);
 	writeb(val.x[0], map->base + map->translate(map, ofs));
 }
 
-#if 0
-static void mtd_pci_write16(struct map_info *_map, map_word val, unsigned long ofs)
-{
-	struct map_pci_info *map = (struct map_pci_info *)_map;
-//	printk("write16: %08lx <= %04x\n", ofs, val.x[0]);
-	writew(val.x[0], map->base + map->translate(map, ofs));
-}
-#endif
 static void mtd_pci_write32(struct map_info *_map, map_word val, unsigned long ofs)
 {
 	struct map_pci_info *map = (struct map_pci_info *)_map;
-//	printk("write32: %08lx <= %08x\n", ofs, val.x[0]);
 	writel(val.x[0], map->base + map->translate(map, ofs));
 }
 
@@ -120,7 +94,7 @@ intel_iq80310_init(struct pci_dev *dev, struct map_pci_info *map)
 	map->map.write = mtd_pci_write8,
 
 	map->map.size     = 0x00800000;
-	map->base         = ioremap_nocache(pci_resource_start(dev, 0),
+	map->base         = ioremap(pci_resource_start(dev, 0),
 					    pci_resource_len(dev, 0));
 
 	if (!map->base)
@@ -203,15 +177,8 @@ intel_dc21285_init(struct pci_dev *dev, struct map_pci_info *map)
 		 * not enabled, should we be allocating a new resource for it
 		 * or simply enabling it?
 		 */
-		if (!(pci_resource_flags(dev, PCI_ROM_RESOURCE) &
-				    IORESOURCE_ROM_ENABLE)) {
-		     	u32 val;
-			pci_resource_flags(dev, PCI_ROM_RESOURCE) |= IORESOURCE_ROM_ENABLE;
-			pci_read_config_dword(dev, PCI_ROM_ADDRESS, &val);
-			val |= PCI_ROM_ADDRESS_ENABLE;
-			pci_write_config_dword(dev, PCI_ROM_ADDRESS, val);
-			printk("%s: enabling expansion ROM\n", pci_name(dev));
-		}
+		pci_enable_rom(dev);
+		printk("%s: enabling expansion ROM\n", pci_name(dev));
 	}
 
 	if (!len || !base)
@@ -221,7 +188,7 @@ intel_dc21285_init(struct pci_dev *dev, struct map_pci_info *map)
 	map->map.read = mtd_pci_read32,
 	map->map.write = mtd_pci_write32,
 	map->map.size     = len;
-	map->base         = ioremap_nocache(base, len);
+	map->base         = ioremap(base, len);
 
 	if (!map->base)
 		return -ENOMEM;
@@ -232,18 +199,13 @@ intel_dc21285_init(struct pci_dev *dev, struct map_pci_info *map)
 static void
 intel_dc21285_exit(struct pci_dev *dev, struct map_pci_info *map)
 {
-	u32 val;
-
 	if (map->base)
 		iounmap(map->base);
 
 	/*
 	 * We need to undo the PCI BAR2/PCI ROM BAR address alteration.
 	 */
-	pci_resource_flags(dev, PCI_ROM_RESOURCE) &= ~IORESOURCE_ROM_ENABLE;
-	pci_read_config_dword(dev, PCI_ROM_ADDRESS, &val);
-	val &= ~PCI_ROM_ADDRESS_ENABLE;
-	pci_write_config_dword(dev, PCI_ROM_ADDRESS, val);
+	pci_disable_rom(dev);
 }
 
 static unsigned long
@@ -263,7 +225,7 @@ static struct mtd_pci_info intel_dc21285_info = {
  * PCI device ID table
  */
 
-static struct pci_device_id mtd_pci_ids[] = {
+static const struct pci_device_id mtd_pci_ids[] = {
 	{
 		.vendor =	PCI_VENDOR_ID_INTEL,
 		.device =	0x530d,
@@ -287,8 +249,7 @@ static struct pci_device_id mtd_pci_ids[] = {
  * Generic code follows.
  */
 
-static int __devinit
-mtd_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
+static int mtd_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct mtd_pci_info *info = (struct mtd_pci_info *)id->driver_data;
 	struct map_pci_info *map = NULL;
@@ -318,14 +279,13 @@ mtd_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	if (err)
 		goto release;
 
-	/* tsk - do_map_probe should take const char * */
-	mtd = do_map_probe((char *)info->map_name, &map->map);
+	mtd = do_map_probe(info->map_name, &map->map);
 	err = -ENODEV;
 	if (!mtd)
 		goto release;
 
 	mtd->owner = THIS_MODULE;
-	add_mtd_device(mtd);
+	mtd_device_register(mtd, NULL, 0);
 
 	pci_set_drvdata(dev, mtd);
 
@@ -342,43 +302,29 @@ out:
 	return err;
 }
 
-static void __devexit
-mtd_pci_remove(struct pci_dev *dev)
+static void mtd_pci_remove(struct pci_dev *dev)
 {
 	struct mtd_info *mtd = pci_get_drvdata(dev);
 	struct map_pci_info *map = mtd->priv;
 
-	del_mtd_device(mtd);
+	mtd_device_unregister(mtd);
 	map_destroy(mtd);
 	map->exit(dev, map);
 	kfree(map);
 
-	pci_set_drvdata(dev, NULL);
 	pci_release_regions(dev);
 }
 
 static struct pci_driver mtd_pci_driver = {
 	.name =		"MTD PCI",
 	.probe =	mtd_pci_probe,
-	.remove =	__devexit_p(mtd_pci_remove),
+	.remove =	mtd_pci_remove,
 	.id_table =	mtd_pci_ids,
 };
 
-static int __init mtd_pci_maps_init(void)
-{
-	return pci_register_driver(&mtd_pci_driver);
-}
-
-static void __exit mtd_pci_maps_exit(void)
-{
-	pci_unregister_driver(&mtd_pci_driver);
-}
-
-module_init(mtd_pci_maps_init);
-module_exit(mtd_pci_maps_exit);
+module_pci_driver(mtd_pci_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Russell King <rmk@arm.linux.org.uk>");
 MODULE_DESCRIPTION("Generic PCI map driver");
 MODULE_DEVICE_TABLE(pci, mtd_pci_ids);
-

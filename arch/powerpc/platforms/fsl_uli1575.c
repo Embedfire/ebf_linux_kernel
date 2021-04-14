@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ULI M1575 setup code - specific to Freescale boards
  *
  * Copyright 2007 Freescale Semiconductor Inc.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/stddef.h>
@@ -15,7 +11,6 @@
 #include <linux/interrupt.h>
 #include <linux/mc146818rtc.h>
 
-#include <asm/system.h>
 #include <asm/pci-bridge.h>
 
 #define ULI_PIRQA	0x08
@@ -51,13 +46,20 @@ u8 uli_pirq_to_irq[8] = {
 	ULI_8259_NONE,		/* PIRQH */
 };
 
+static inline bool is_quirk_valid(void)
+{
+	return (machine_is(mpc86xx_hpcn) ||
+		machine_is(mpc8544_ds) ||
+		machine_is(p2020_ds) ||
+		machine_is(mpc8572_ds));
+}
+
 /* Bridge */
-static void __devinit early_uli5249(struct pci_dev *dev)
+static void early_uli5249(struct pci_dev *dev)
 {
 	unsigned char temp;
 
-	if (!machine_is(mpc86xx_hpcn) && !machine_is(mpc8544_ds) &&
-			!machine_is(mpc8572_ds))
+	if (!is_quirk_valid())
 		return;
 
 	pci_write_config_word(dev, PCI_COMMAND, PCI_COMMAND_IO |
@@ -76,12 +78,11 @@ static void __devinit early_uli5249(struct pci_dev *dev)
 }
 
 
-static void __devinit quirk_uli1575(struct pci_dev *dev)
+static void quirk_uli1575(struct pci_dev *dev)
 {
 	int i;
 
-	if (!machine_is(mpc86xx_hpcn) && !machine_is(mpc8544_ds) &&
-			!machine_is(mpc8572_ds))
+	if (!is_quirk_valid())
 		return;
 
 	/*
@@ -134,7 +135,7 @@ static void __devinit quirk_uli1575(struct pci_dev *dev)
 	pci_write_config_byte(dev, 0x75, ULI_8259_IRQ15);
 }
 
-static void __devinit quirk_final_uli1575(struct pci_dev *dev)
+static void quirk_final_uli1575(struct pci_dev *dev)
 {
 	/* Set i8259 interrupt trigger
 	 * IRQ 3:  Level
@@ -149,8 +150,7 @@ static void __devinit quirk_final_uli1575(struct pci_dev *dev)
 	 * IRQ 14: Edge
 	 * IRQ 15: Edge
 	 */
-	if (!machine_is(mpc86xx_hpcn) && !machine_is(mpc8544_ds) &&
-			!machine_is(mpc8572_ds))
+	if (!is_quirk_valid())
 		return;
 
 	outb(0xfa, 0x4d0);
@@ -171,13 +171,12 @@ static void __devinit quirk_final_uli1575(struct pci_dev *dev)
 }
 
 /* SATA */
-static void __devinit quirk_uli5288(struct pci_dev *dev)
+static void quirk_uli5288(struct pci_dev *dev)
 {
 	unsigned char c;
 	unsigned int d;
 
-	if (!machine_is(mpc86xx_hpcn) && !machine_is(mpc8544_ds) &&
-			!machine_is(mpc8572_ds))
+	if (!is_quirk_valid())
 		return;
 
 	/* read/write lock */
@@ -197,12 +196,11 @@ static void __devinit quirk_uli5288(struct pci_dev *dev)
 }
 
 /* PATA */
-static void __devinit quirk_uli5229(struct pci_dev *dev)
+static void quirk_uli5229(struct pci_dev *dev)
 {
 	unsigned short temp;
 
-	if (!machine_is(mpc86xx_hpcn) && !machine_is(mpc8544_ds) &&
-			!machine_is(mpc8572_ds))
+	if (!is_quirk_valid())
 		return;
 
 	pci_write_config_word(dev, PCI_COMMAND, PCI_COMMAND_INTX_DISABLE |
@@ -214,16 +212,26 @@ static void __devinit quirk_uli5229(struct pci_dev *dev)
 }
 
 /* We have to do a dummy read on the P2P for the RTC to work, WTF */
-static void __devinit quirk_final_uli5249(struct pci_dev *dev)
+static void quirk_final_uli5249(struct pci_dev *dev)
 {
 	int i;
 	u8 *dummy;
 	struct pci_bus *bus = dev->bus;
+	struct resource *res;
+	resource_size_t end = 0;
 
-	for (i = 0; i < PCI_BUS_NUM_RESOURCES; i++) {
-		if ((bus->resource[i]) &&
-			(bus->resource[i]->flags & IORESOURCE_MEM)) {
-			dummy = ioremap(bus->resource[i]->end - 3, 0x4);
+	for (i = PCI_BRIDGE_RESOURCES; i < PCI_BRIDGE_RESOURCES+3; i++) {
+		unsigned long flags = pci_resource_flags(dev, i);
+		if ((flags & (IORESOURCE_MEM|IORESOURCE_PREFETCH)) == IORESOURCE_MEM)
+			end = pci_resource_end(dev, i);
+	}
+
+	pci_bus_for_each_resource(bus, res, i) {
+		if (res && res->flags & IORESOURCE_MEM) {
+			if (res->end == end)
+				dummy = ioremap(res->start, 0x4);
+			else
+				dummy = ioremap(res->end - 3, 0x4);
 			if (dummy) {
 				in_8(dummy);
 				iounmap(dummy);
@@ -239,8 +247,9 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AL, 0x5288, quirk_uli5288);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AL, 0x5229, quirk_uli5229);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL, 0x5249, quirk_final_uli5249);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL, 0x1575, quirk_final_uli1575);
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_AL, 0x5229, quirk_uli5229);
 
-static void __devinit hpcd_quirk_uli1575(struct pci_dev *dev)
+static void hpcd_quirk_uli1575(struct pci_dev *dev)
 {
 	u32 temp32;
 
@@ -256,18 +265,12 @@ static void __devinit hpcd_quirk_uli1575(struct pci_dev *dev)
 	pci_write_config_dword(dev, 0x90, (temp32 | 1<<22));
 }
 
-static void __devinit hpcd_quirk_uli5288(struct pci_dev *dev)
+static void hpcd_quirk_uli5288(struct pci_dev *dev)
 {
 	unsigned char c;
-	unsigned short temp;
 
 	if (!machine_is(mpc86xx_hpcd))
 		return;
-
-	/* Interrupt Disable, Needed when SATA disabled */
-	pci_read_config_word(dev, PCI_COMMAND, &temp);
-	temp |= 1<<10;
-	pci_write_config_word(dev, PCI_COMMAND, temp);
 
 	pci_read_config_byte(dev, 0x83, &c);
 	c |= 0x80;
@@ -288,7 +291,7 @@ static void __devinit hpcd_quirk_uli5288(struct pci_dev *dev)
  * IRQ14 is a sideband interrupt from IDE device to CPU and we use this
  * as the interrupt for IDE device.
  */
-static void __devinit hpcd_quirk_uli5229(struct pci_dev *dev)
+static void hpcd_quirk_uli5229(struct pci_dev *dev)
 {
 	unsigned char c;
 
@@ -310,12 +313,11 @@ static void __devinit hpcd_quirk_uli5229(struct pci_dev *dev)
  * bug by re-assigning a correct irq to 5288.
  *
  */
-static void __devinit hpcd_final_uli5288(struct pci_dev *dev)
+static void hpcd_final_uli5288(struct pci_dev *dev)
 {
 	struct pci_controller *hose = pci_bus_to_host(dev->bus);
 	struct device_node *hosenode = hose ? hose->dn : NULL;
-	struct of_irq oirq;
-	int virq, pin = 2;
+	struct of_phandle_args oirq;
 	u32 laddr[3];
 
 	if (!machine_is(mpc86xx_hpcd))
@@ -324,12 +326,13 @@ static void __devinit hpcd_final_uli5288(struct pci_dev *dev)
 	if (!hosenode)
 		return;
 
+	oirq.np = hosenode;
+	oirq.args[0] = 2;
+	oirq.args_count = 1;
 	laddr[0] = (hose->first_busno << 16) | (PCI_DEVFN(31, 0) << 8);
 	laddr[1] = laddr[2] = 0;
-	of_irq_map_raw(hosenode, &pin, 1, laddr, &oirq);
-	virq = irq_create_of_mapping(oirq.controller, oirq.specifier,
-				     oirq.size);
-	dev->irq = virq;
+	of_irq_parse_raw(laddr, &oirq);
+	dev->irq = irq_create_of_mapping(&oirq);
 }
 
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AL, 0x1575, hpcd_quirk_uli1575);

@@ -1,26 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (C) 2000 Takashi Iwai <tiwai@suse.de>
  *
  *  Generic memory management routines for soundcard memory allocation
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/mutex.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/util_mem.h>
 
@@ -55,7 +43,8 @@ void snd_util_memhdr_free(struct snd_util_memhdr *hdr)
 {
 	struct list_head *p;
 
-	snd_assert(hdr != NULL, return);
+	if (!hdr)
+		return;
 	/* release all blocks */
 	while ((p = hdr->block.next) != &hdr->block) {
 		list_del(p);
@@ -74,8 +63,8 @@ __snd_util_mem_alloc(struct snd_util_memhdr *hdr, int size)
 	unsigned int units, prev_offset;
 	struct list_head *p;
 
-	snd_assert(hdr != NULL, return NULL);
-	snd_assert(size > 0, return NULL);
+	if (snd_BUG_ON(!hdr || size <= 0))
+		return NULL;
 
 	/* word alignment */
 	units = size;
@@ -161,7 +150,8 @@ __snd_util_mem_free(struct snd_util_memhdr *hdr, struct snd_util_memblk *blk)
  */
 int snd_util_mem_free(struct snd_util_memhdr *hdr, struct snd_util_memblk *blk)
 {
-	snd_assert(hdr && blk, return -EINVAL);
+	if (snd_BUG_ON(!hdr || !blk))
+		return -EINVAL;
 
 	mutex_lock(&hdr->block_mutex);
 	__snd_util_mem_free(hdr, blk);
@@ -190,19 +180,3 @@ EXPORT_SYMBOL(snd_util_mem_avail);
 EXPORT_SYMBOL(__snd_util_mem_alloc);
 EXPORT_SYMBOL(__snd_util_mem_free);
 EXPORT_SYMBOL(__snd_util_memblk_new);
-
-/*
- *  INIT part
- */
-
-static int __init alsa_util_mem_init(void)
-{
-	return 0;
-}
-
-static void __exit alsa_util_mem_exit(void)
-{
-}
-
-module_init(alsa_util_mem_init)
-module_exit(alsa_util_mem_exit)

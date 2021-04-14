@@ -1,6 +1,5 @@
-EXTRA_CFLAGS += -Ifs/ocfs2
-
-EXTRA_CFLAGS += -DCATCH_BH_JBD_RACES
+# SPDX-License-Identifier: GPL-2.0
+ccflags-y := -I$(src)
 
 obj-$(CONFIG_OCFS2_FS) += 	\
 	ocfs2.o			\
@@ -12,6 +11,7 @@ obj-$(CONFIG_OCFS2_FS_USERSPACE_CLUSTER) += ocfs2_stack_user.o
 ocfs2-objs := \
 	alloc.o 		\
 	aops.o 			\
+	blockcheck.o		\
 	buffer_head_io.o	\
 	dcache.o 		\
 	dir.o 			\
@@ -27,6 +27,9 @@ ocfs2-objs := \
 	locks.o			\
 	mmap.o 			\
 	namei.o 		\
+	refcounttree.o		\
+	reservations.o		\
+	move_extents.o		\
 	resize.o		\
 	slot_map.o 		\
 	suballoc.o 		\
@@ -34,12 +37,17 @@ ocfs2-objs := \
 	symlink.o 		\
 	sysfile.o 		\
 	uptodate.o		\
-	ver.o
+	quota_local.o		\
+	quota_global.o		\
+	xattr.o			\
+	acl.o	\
+	filecheck.o
 
 ocfs2_stackglue-objs := stackglue.o
 ocfs2_stack_o2cb-objs := stack_o2cb.o
 ocfs2_stack_user-objs := stack_user.o
 
+obj-$(CONFIG_OCFS2_FS) += dlmfs/
 # cluster/ is always needed when OCFS2_FS for masklog support
 obj-$(CONFIG_OCFS2_FS) += cluster/
 obj-$(CONFIG_OCFS2_FS_O2CB) += dlm/

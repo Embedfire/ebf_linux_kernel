@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * linux/arch/arm/mach-omap2/sram243x.S
  *
@@ -7,32 +8,25 @@
  * Texas Instruments, <www.ti.com>
  * Richard Woodruff <r-woodruff2@ti.com>
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of
- * the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR /PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston,
- * MA 02111-1307 USA
+ * Richard Woodruff notes that any changes to this code must be carefully
+ * audited and tested to ensure that they don't cause a TLB miss while
+ * the SDRAM is inaccessible.  Such a situation will crash the system
+ * since it will cause the ARM MMU to attempt to walk the page tables.
+ * These crashes may be intermittent.
  */
 #include <linux/linkage.h>
-#include <asm/assembler.h>
-#include <mach/io.h>
-#include <mach/hardware.h>
 
-#include "prm.h"
-#include "cm.h"
+#include <asm/assembler.h>
+
+#include "soc.h"
+#include "iomap.h"
+#include "prm2xxx.h"
+#include "cm2xxx.h"
 #include "sdrc.h"
 
 	.text
 
+	.align	3
 ENTRY(omap243x_sram_ddr_init)
 	stmfd	sp!, {r0 - r12, lr}	@ save registers on stack
 
@@ -56,7 +50,7 @@ ENTRY(omap243x_sram_ddr_init)
 	mvn	r9, #0x4		@ mask to get clear bit2
 	and	r10, r10, r9		@ clear bit2 for lock mode.
 	orr	r10, r10, #0x8		@ make sure DLL on (es2 bit pos)
-	orr	r10, r10, #0x2		@ 90 degree phase for all below 133Mhz
+	orr	r10, r10, #0x2		@ 90 degree phase for all below 133MHz
 	str	r10, [r11]		@ commit to DLLA_CTRL
 	bl	i_dll_wait		@ wait for dll to lock
 
@@ -93,7 +87,7 @@ i_dll_wait:
 i_dll_delay:
 	subs	r4, r4, #0x1
 	bne	i_dll_delay
-	mov	pc, lr
+	ret	lr
 
 	/*
 	 * shift up or down voltage, use R9 as input to tell level.
@@ -117,18 +111,18 @@ volt_delay:
 	ldr	r7, [r3]		@ get timer value
 	cmp	r5, r7			@ time up?
 	bhi	volt_delay		@ not yet->branch
-	mov	pc, lr			@ back to caller.
+	ret	lr			@ back to caller.
 
 omap243x_sdi_cm_clksel2_pll:
 	.word OMAP2430_CM_REGADDR(PLL_MOD, CM_CLKSEL2)
 omap243x_sdi_sdrc_dlla_ctrl:
 	.word OMAP243X_SDRC_REGADDR(SDRC_DLLA_CTRL)
 omap243x_sdi_prcm_voltctrl:
-	.word OMAP243X_PRCM_VOLTCTRL
+	.word OMAP2430_PRCM_VOLTCTRL
 prcm_mask_val:
 	.word 0xFFFF3FFC
 omap243x_sdi_timer_32ksynct_cr:
-	.word IO_ADDRESS(OMAP2_32KSYNCT_BASE + 0x010)
+	.word OMAP2_L4_IO_ADDRESS(OMAP2430_32KSYNCT_BASE + 0x010)
 ENTRY(omap243x_sram_ddr_init_sz)
 	.word	. - omap243x_sram_ddr_init
 
@@ -137,6 +131,7 @@ ENTRY(omap243x_sram_ddr_init_sz)
  * r0 = [PRCM_FULL | PRCM_HALF] r1 = SDRC_DLLA_CTRL value r2 = [DDR | SDR]
  * PRCM_FULL = 2, PRCM_HALF = 1, DDR = 1, SDR = 0
  */
+	.align	3
 ENTRY(omap243x_sram_reprogram_sdrc)
 	stmfd	sp!, {r0 - r10, lr}	@ save registers on stack
 	mov	r3, #0x0		@ clear for mrc call
@@ -211,7 +206,7 @@ volt_delay_c:
 	ldr	r7, [r10]		@ get timer value
 	cmp	r8, r7			@ time up?
 	bhi	volt_delay_c		@ not yet->branch
-	mov	pc, lr			@ back to caller
+	ret	lr			@ back to caller
 
 omap243x_srs_cm_clksel2_pll:
 	.word OMAP2430_CM_REGADDR(PLL_MOD, CM_CLKSEL2)
@@ -220,11 +215,11 @@ omap243x_srs_sdrc_dlla_ctrl:
 omap243x_srs_sdrc_rfr_ctrl:
 	.word OMAP243X_SDRC_REGADDR(SDRC_RFR_CTRL_0)
 omap243x_srs_prcm_voltctrl:
-	.word OMAP243X_PRCM_VOLTCTRL
+	.word OMAP2430_PRCM_VOLTCTRL
 ddr_prcm_mask_val:
 	.word 0xFFFF3FFC
 omap243x_srs_timer_32ksynct:
-	.word IO_ADDRESS(OMAP2_32KSYNCT_BASE + 0x010)
+	.word OMAP2_L4_IO_ADDRESS(OMAP2430_32KSYNCT_BASE + 0x010)
 
 ENTRY(omap243x_sram_reprogram_sdrc_sz)
 	.word	. - omap243x_sram_reprogram_sdrc
@@ -232,6 +227,7 @@ ENTRY(omap243x_sram_reprogram_sdrc_sz)
 /*
  * Set dividers and pll. Also recalculate DLL value for DDR and unlock mode.
  */
+	.align	3
 ENTRY(omap243x_sram_set_prcm)
 	stmfd	sp!, {r0-r12, lr}	@ regs to stack
 	adr	r4, pbegin		@ addr of preload start
@@ -305,7 +301,7 @@ wait_dll_lock:
 	ldmfd	sp!, {r0-r12, pc}	@ restore regs and return
 
 omap243x_ssp_set_config:
-	.word OMAP243X_PRCM_CLKCFG_CTRL
+	.word OMAP2430_PRCM_CLKCFG_CTRL
 omap243x_ssp_pll_ctl:
 	.word OMAP2430_CM_REGADDR(PLL_MOD, CM_CLKEN)
 omap243x_ssp_pll_stat:

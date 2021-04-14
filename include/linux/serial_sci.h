@@ -1,32 +1,66 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __LINUX_SERIAL_SCI_H
 #define __LINUX_SERIAL_SCI_H
 
+#include <linux/bitops.h>
 #include <linux/serial_core.h>
+#include <linux/sh_dma.h>
 
 /*
- * Generic header for SuperH SCI(F) (used by sh/sh64/h8300 and related parts)
+ * Generic header for SuperH (H)SCI(F) (used by sh/sh64 and related parts)
  */
 
-/* Offsets into the sci_port->irqs array */
+/* Serial Control Register (@ = not supported by all parts) */
+#define SCSCR_TIE	BIT(7)	/* Transmit Interrupt Enable */
+#define SCSCR_RIE	BIT(6)	/* Receive Interrupt Enable */
+#define SCSCR_TE	BIT(5)	/* Transmit Enable */
+#define SCSCR_RE	BIT(4)	/* Receive Enable */
+#define SCSCR_REIE	BIT(3)	/* Receive Error Interrupt Enable @ */
+#define SCSCR_TOIE	BIT(2)	/* Timeout Interrupt Enable @ */
+#define SCSCR_CKE1	BIT(1)	/* Clock Enable 1 */
+#define SCSCR_CKE0	BIT(0)	/* Clock Enable 0 */
+
+
 enum {
-	SCIx_ERI_IRQ,
-	SCIx_RXI_IRQ,
-	SCIx_TXI_IRQ,
-	SCIx_BRI_IRQ,
-	SCIx_NR_IRQS,
+	SCIx_PROBE_REGTYPE,
+
+	SCIx_SCI_REGTYPE,
+	SCIx_IRDA_REGTYPE,
+	SCIx_SCIFA_REGTYPE,
+	SCIx_SCIFB_REGTYPE,
+	SCIx_SH2_SCIF_FIFODATA_REGTYPE,
+	SCIx_SH3_SCIF_REGTYPE,
+	SCIx_SH4_SCIF_REGTYPE,
+	SCIx_SH4_SCIF_BRG_REGTYPE,
+	SCIx_SH4_SCIF_NO_SCSPTR_REGTYPE,
+	SCIx_SH4_SCIF_FIFODATA_REGTYPE,
+	SCIx_SH7705_SCIF_REGTYPE,
+	SCIx_HSCIF_REGTYPE,
+	SCIx_RZ_SCIFA_REGTYPE,
+
+	SCIx_NR_REGTYPES,
+};
+
+struct plat_sci_port_ops {
+	void (*init_pins)(struct uart_port *, unsigned int cflag);
 };
 
 /*
  * Platform device specific platform_data struct
  */
 struct plat_sci_port {
-	void __iomem	*membase;		/* io cookie */
-	unsigned long	mapbase;		/* resource base */
-	unsigned int	irqs[SCIx_NR_IRQS];	/* ERI, RXI, TXI, BRI */
-	unsigned int	type;			/* SCI / SCIF / IRDA */
+	unsigned int	type;			/* SCI / SCIF / IRDA / HSCIF */
 	upf_t		flags;			/* UPF_* flags */
-};
 
-int early_sci_setup(struct uart_port *port);
+	unsigned int	sampling_rate;
+	unsigned int	scscr;			/* SCSCR initialization */
+
+	/*
+	 * Platform overrides if necessary, defaults otherwise.
+	 */
+	unsigned char	regtype;
+
+	struct plat_sci_port_ops	*ops;
+};
 
 #endif /* __LINUX_SERIAL_SCI_H */

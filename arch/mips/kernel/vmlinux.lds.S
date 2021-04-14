@@ -1,4 +1,20 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #include <asm/asm-offsets.h>
+#include <asm/thread_info.h>
+
+#define PAGE_SIZE _PAGE_SIZE
+
+/*
+ * Put .bss..swapper_pg_dir as the first thing in .bss. This will
+ * ensure that it has .bss alignment (64K).
+ */
+#define BSS_FIRST_SECTIONS *(.bss..swapper_pg_dir)
+
+/* Cavium Octeon should not have a separate PT_NOTE Program Header. */
+#ifndef CONFIG_CAVIUM_OCTEON_SOC
+#define EMITS_PT_NOTE
+#endif
+
 #include <asm-generic/vmlinux.lds.h>
 
 #undef mips
@@ -7,9 +23,20 @@ OUTPUT_ARCH(mips)
 ENTRY(kernel_entry)
 PHDRS {
 	text PT_LOAD FLAGS(7);	/* RWX */
+#ifndef CONFIG_CAVIUM_OCTEON_SOC
 	note PT_NOTE FLAGS(4);	/* R__ */
+#endif /* CAVIUM_OCTEON_SOC */
 }
-jiffies = JIFFIES;
+
+#ifdef CONFIG_32BIT
+	#ifdef CONFIG_CPU_LITTLE_ENDIAN
+		jiffies	 = jiffies_64;
+	#else
+		jiffies	 = jiffies_64 + 4;
+	#endif
+#else
+	jiffies	 = jiffies_64;
+#endif
 
 SECTIONS
 {
@@ -28,60 +55,48 @@ SECTIONS
 	/* . = 0xa800000000300000; */
 	. = 0xffffffff80300000;
 #endif
-	. = LOADADDR;
+	. = LINKER_LOAD_ADDRESS;
 	/* read-only */
 	_text = .;	/* Text and read-only data */
 	.text : {
 		TEXT_TEXT
 		SCHED_TEXT
+		CPUIDLE_TEXT
 		LOCK_TEXT
 		KPROBES_TEXT
+		IRQENTRY_TEXT
+		SOFTIRQENTRY_TEXT
 		*(.text.*)
 		*(.fixup)
 		*(.gnu.warning)
 	} :text = 0
 	_etext = .;	/* End of text section */
 
-	/* Exception table */
-	. = ALIGN(16);
-	__ex_table : {
-		__start___ex_table = .;
-		*(__ex_table)
-		__stop___ex_table = .;
-	}
+	EXCEPTION_TABLE(16)
 
 	/* Exception table for data bus errors */
 	__dbe_table : {
 		__start___dbe_table = .;
-		*(__dbe_table)
+		KEEP(*(__dbe_table))
 		__stop___dbe_table = .;
 	}
 
-	NOTES :text :note
-	.dummy : { *(.dummy) } :text
-
-	RODATA
+	_sdata = .;			/* Start of data section */
+	RO_DATA(4096)
 
 	/* writeable */
 	.data : {	/* Data */
 		. = . + DATAOFFSET;		/* for CONFIG_MAPPED_KERNEL */
-		/*
-		 * This ALIGN is needed as a workaround for a bug a
-		 * gcc bug upto 4.1 which limits the maximum alignment
-		 * to at most 32kB and results in the following
-		 * warning:
-		 *
-		 *  CC      arch/mips/kernel/init_task.o
-		 * arch/mips/kernel/init_task.c:30: warning: alignment
-		 * of ‘init_thread_union’ is greater than maximum
-		 * object file alignment.  Using 32768
-		 */
-		. = ALIGN(_PAGE_SIZE);
-		*(.data.init_task)
 
+		INIT_TASK_DATA(THREAD_SIZE)
+		NOSAVE_DATA
+		PAGE_ALIGNED_DATA(PAGE_SIZE)
+		CACHELINE_ALIGNED_DATA(1 << CONFIG_MIPS_L1_CACHE_SHIFT)
+		READ_MOSTLY_DATA(1 << CONFIG_MIPS_L1_CACHE_SHIFT)
 		DATA_DATA
 		CONSTRUCTORS
 	}
+	BUG_TABLE
 	_gp = . + 0x8000;
 	.lit8 : {
 		*(.lit8)
@@ -95,51 +110,20 @@ SECTIONS
 	.sdata : {
 		*(.sdata)
 	}
-
-	. = ALIGN(_PAGE_SIZE);
-	.data_nosave : {
-		__nosave_begin = .;
-		*(.data.nosave)
-	}
-	. = ALIGN(_PAGE_SIZE);
-	__nosave_end = .;
-
-	. = ALIGN(32);
-	.data.cacheline_aligned : {
-		*(.data.cacheline_aligned)
-	}
 	_edata =  .;			/* End of data section */
 
 	/* will be freed after init */
-	. = ALIGN(_PAGE_SIZE);		/* Init code and data */
+	. = ALIGN(PAGE_SIZE);		/* Init code and data */
 	__init_begin = .;
-	.init.text : {
-		_sinittext = .;
-		INIT_TEXT
-		_einittext = .;
-	}
-	.init.data : {
-		INIT_DATA
-	}
-	. = ALIGN(16);
-	.init.setup : {
-		__setup_start = .;
-		*(.init.setup)
-		__setup_end = .;
-	}
+	INIT_TEXT_SECTION(PAGE_SIZE)
+	INIT_DATA_SECTION(16)
 
-	.initcall.init : {
-		__initcall_start = .;
-		INITCALLS
-		__initcall_end = .;
+	. = ALIGN(4);
+	.mips.machines.init : AT(ADDR(.mips.machines.init) - LOAD_OFFSET) {
+		__mips_machines_start = .;
+		KEEP(*(.mips.machines.init))
+		__mips_machines_end = .;
 	}
-
-	.con_initcall.init : {
-		__con_initcall_start = .;
-		*(.con_initcall.init)
-		__con_initcall_end = .;
-	}
-	SECURITY_INIT
 
 	/* .exit.text is discarded at runtime, not link time, to deal with
 	 * references from .rodata
@@ -150,42 +134,59 @@ SECTIONS
 	.exit.data : {
 		EXIT_DATA
 	}
-#if defined(CONFIG_BLK_DEV_INITRD)
-	. = ALIGN(_PAGE_SIZE);
-	.init.ramfs : {
-		__initramfs_start = .;
-		*(.init.ramfs)
-		__initramfs_end = .;
+#ifdef CONFIG_SMP
+	PERCPU_SECTION(1 << CONFIG_MIPS_L1_CACHE_SHIFT)
+#endif
+
+#ifdef CONFIG_MIPS_ELF_APPENDED_DTB
+	.appended_dtb : AT(ADDR(.appended_dtb) - LOAD_OFFSET) {
+		*(.appended_dtb)
+		KEEP(*(.appended_dtb))
 	}
 #endif
-	PERCPU(_PAGE_SIZE)
-	. = ALIGN(_PAGE_SIZE);
+
+#ifdef CONFIG_RELOCATABLE
+	. = ALIGN(4);
+
+	.data.reloc : {
+		_relocation_start = .;
+		/*
+		 * Space for relocation table
+		 * This needs to be filled so that the
+		 * relocs tool can overwrite the content.
+		 * An invalid value is left at the start of the
+		 * section to abort relocation if the table
+		 * has not been filled in.
+		 */
+		LONG(0xFFFFFFFF);
+		FILL(0);
+		. += CONFIG_RELOCATION_TABLE_SIZE - 4;
+		_relocation_end = .;
+	}
+#endif
+
+#ifdef CONFIG_MIPS_RAW_APPENDED_DTB
+	__appended_dtb = .;
+	/* leave space for appended DTB */
+	. += 0x100000;
+#endif
+	/*
+	 * Align to 64K in attempt to eliminate holes before the
+	 * .bss..swapper_pg_dir section at the start of .bss.  This
+	 * also satisfies PAGE_SIZE alignment as the largest page size
+	 * allowed is 64K.
+	 */
+	. = ALIGN(0x10000);
 	__init_end = .;
 	/* freed after init ends here */
 
-	__bss_start = .;	/* BSS */
-	.sbss  : {
-		*(.sbss)
-		*(.scommon)
-	}
-	.bss : {
-		*(.bss)
-		*(COMMON)
-	}
-	__bss_stop = .;
+	/*
+	 * Force .bss to 64K alignment so that .bss..swapper_pg_dir
+	 * gets that alignment.	 .sbss should be empty, so there will be
+	 * no holes after __init_end. */
+	BSS_SECTION(0, 0x10000, 8)
 
 	_end = . ;
-
-	/* Sections to be discarded */
-	/DISCARD/ : {
-		*(.exitcall.exit)
-
-		/* ABI crap starts here */
-		*(.MIPS.options)
-		*(.options)
-		*(.pdr)
-		*(.reginfo)
-	}
 
 	/* These mark the ABI of the kernel for debuggers.  */
 	.mdebug.abi32 : {
@@ -202,6 +203,7 @@ SECTIONS
 
 	STABS_DEBUG
 	DWARF_DEBUG
+	ELF_DETAILS
 
 	/* These must appear regardless of  .  */
 	.gptab.sdata : {
@@ -211,5 +213,16 @@ SECTIONS
 	.gptab.sbss : {
 		*(.gptab.bss)
 		*(.gptab.sbss)
+	}
+
+	/* Sections to be discarded */
+	DISCARDS
+	/DISCARD/ : {
+		/* ABI crap starts here */
+		*(.MIPS.abiflags)
+		*(.MIPS.options)
+		*(.options)
+		*(.pdr)
+		*(.reginfo)
 	}
 }

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _PPC_BOOT_DCR_H_
 #define _PPC_BOOT_DCR_H_
 
@@ -9,6 +10,16 @@
 	})
 #define mtdcr(rn, val) \
 	asm volatile("mtdcr %0,%1" : : "i"(rn), "r"(val))
+#define mfdcrx(rn) \
+	({	\
+		unsigned long rval; \
+		asm volatile("mfdcrx %0,%1" : "=r"(rval) : "r"(rn)); \
+		rval; \
+	})
+#define mtdcrx(rn, val) \
+	({	\
+		asm volatile("mtdcrx %0,%1" : : "r"(rn), "r" (val)); \
+	})
 
 /* 440GP/440GX SDRAM controller DCRs */
 #define DCRN_SDRAM0_CFGADDR				0x010
@@ -153,9 +164,7 @@ static const unsigned long sdram_bxcr[] = { SDRAM0_B0CR, SDRAM0_B1CR,
 #define DCRN_CPC0_PLLMR1  0xf4
 #define DCRN_CPC0_UCR     0xf5
 
-/* 440GX Clock control etc */
-
-
+/* 440GX/405EX Clock Control reg */
 #define DCRN_CPR0_CLKUPD				0x020
 #define DCRN_CPR0_PLLC					0x040
 #define DCRN_CPR0_PLLD					0x060

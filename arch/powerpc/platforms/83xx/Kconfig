@@ -1,13 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0
 menuconfig PPC_83xx
 	bool "83xx-based boards"
-	depends on 6xx && PPC_MULTIPLATFORM
+	depends on PPC_BOOK3S_32
 	select PPC_UDBG_16550
-	select PPC_PCI_CHOICE
+	select HAVE_PCI
 	select FSL_PCI if PCI
 	select FSL_SOC
 	select IPIC
 
 if PPC_83xx
+
+config MPC830x_RDB
+	bool "Freescale MPC830x RDB and derivatives"
+	select DEFAULT_UIMAGE
+	select PPC_MPC831x
+	select FSL_GTM
+	help
+	  This option enables support for the MPC8308 RDB and MPC8308 P1M boards.
 
 config MPC831x_RDB
 	bool "Freescale MPC831x RDB"
@@ -19,7 +28,6 @@ config MPC831x_RDB
 config MPC832x_MDS
 	bool "Freescale MPC832x MDS"
 	select DEFAULT_UIMAGE
-	select QUICC_ENGINE
 	select PPC_MPC832x
 	help
 	  This option enables support for the MPC832x MDS evaluation board.
@@ -27,7 +35,6 @@ config MPC832x_MDS
 config MPC832x_RDB
 	bool "Freescale MPC832x RDB"
 	select DEFAULT_UIMAGE
-	select QUICC_ENGINE
 	select PPC_MPC832x
 	help
 	  This option enables support for the MPC8323 RDB board.
@@ -57,15 +64,12 @@ config MPC834x_ITX
 config MPC836x_MDS
 	bool "Freescale MPC836x MDS"
 	select DEFAULT_UIMAGE
-	select QUICC_ENGINE
 	help
 	  This option enables support for the MPC836x MDS Processor Board.
 
 config MPC836x_RDK
 	bool "Freescale/Logic MPC836x RDK"
 	select DEFAULT_UIMAGE
-	select QUICC_ENGINE
-	select QE_GPIO
 	select FSL_GTM
 	select FSL_LBC
 	help
@@ -80,31 +84,30 @@ config MPC837x_MDS
 	  This option enables support for the MPC837x MDS Processor Board.
 
 config MPC837x_RDB
-	bool "Freescale MPC837x RDB"
+	bool "Freescale MPC837x RDB/WLAN"
 	select DEFAULT_UIMAGE
 	select PPC_MPC837x
 	help
-	  This option enables support for the MPC837x RDB Board.
-
-config SBC834x
-	bool "Wind River SBC834x"
-	select DEFAULT_UIMAGE
-	select PPC_MPC834x
-	help
-	  This option enables support for the Wind River SBC834x board.
+	  This option enables support for the MPC837x RDB and WLAN Boards.
 
 config ASP834x
 	bool "Analogue & Micro ASP 834x"
 	select PPC_MPC834x
-	select REDBOOT
 	help
 	  This enables support for the Analogue & Micro ASP 83xx
 	  board.
 
+config KMETER1
+	bool "Keymile KMETER1"
+	select DEFAULT_UIMAGE
+	select QUICC_ENGINE
+	help
+	  This enables support for the Keymile KMETER1 board.
+
 
 endif
 
-# used for usb
+# used for usb & gpio
 config PPC_MPC831x
 	bool
 
@@ -112,10 +115,10 @@ config PPC_MPC831x
 config PPC_MPC832x
 	bool
 
-# used for usb
+# used for usb & gpio
 config PPC_MPC834x
 	bool
 
-# used for usb
+# used for usb & gpio
 config PPC_MPC837x
 	bool

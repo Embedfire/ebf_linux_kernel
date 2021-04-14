@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * locore.S
  */
@@ -27,4 +28,3 @@ NESTED(genexcept_early, 0, sp)
 	jr	k0
 	 rfe
 END(genexcept_early)
-

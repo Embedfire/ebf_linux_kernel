@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * MPC8323E EMDS Device Tree Source
  *
  * Copyright 2006 Freescale Semiconductor Inc.
  *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
 
  * To enable external serial I/O on a Freescale MPC 8323 SYS/MDS board, do
  * this:
@@ -60,7 +57,7 @@
 	};
 
 	bcsr@f8000000 {
-		device_type = "board-control";
+		compatible = "fsl,mpc8323mds-bcsr";
 		reg = <0xf8000000 0x8000>;
 	};
 
@@ -77,6 +74,13 @@
 			device_type = "watchdog";
 			compatible = "mpc83xx_wdt";
 			reg = <0x200 0x100>;
+		};
+
+		pmc: power@b00 {
+			compatible = "fsl,mpc8323-pmc", "fsl,mpc8349-pmc";
+			reg = <0xb00 0x100 0xa00 0x100>;
+			interrupts = <80 0x8>;
+			interrupt-parent = <&ipic>;
 		};
 
 		i2c@3000 {
@@ -98,7 +102,7 @@
 		serial0: serial@4500 {
 			cell-index = <0>;
 			device_type = "serial";
-			compatible = "ns16550";
+			compatible = "fsl,ns16550", "ns16550";
 			reg = <0x4500 0x100>;
 			clock-frequency = <0>;
 			interrupts = <9 0x8>;
@@ -108,7 +112,7 @@
 		serial1: serial@4600 {
 			cell-index = <1>;
 			device_type = "serial";
-			compatible = "ns16550";
+			compatible = "fsl,ns16550", "ns16550";
 			reg = <0x4600 0x100>;
 			clock-frequency = <0>;
 			interrupts = <10 0x8>;
@@ -127,24 +131,28 @@
 			dma-channel@0 {
 				compatible = "fsl,mpc8323-dma-channel", "fsl,elo-dma-channel";
 				reg = <0 0x80>;
+				cell-index = <0>;
 				interrupt-parent = <&ipic>;
 				interrupts = <71 8>;
 			};
 			dma-channel@80 {
 				compatible = "fsl,mpc8323-dma-channel", "fsl,elo-dma-channel";
 				reg = <0x80 0x80>;
+				cell-index = <1>;
 				interrupt-parent = <&ipic>;
 				interrupts = <71 8>;
 			};
 			dma-channel@100 {
 				compatible = "fsl,mpc8323-dma-channel", "fsl,elo-dma-channel";
 				reg = <0x100 0x80>;
+				cell-index = <2>;
 				interrupt-parent = <&ipic>;
 				interrupts = <71 8>;
 			};
 			dma-channel@180 {
 				compatible = "fsl,mpc8323-dma-channel", "fsl,elo-dma-channel";
 				reg = <0x180 0x28>;
+				cell-index = <3>;
 				interrupt-parent = <&ipic>;
 				interrupts = <71 8>;
 			};
@@ -159,6 +167,7 @@
 			fsl,channel-fifo-len = <24>;
 			fsl,exec-units-mask = <0x4c>;
 			fsl,descriptor-types-mask = <0x0122003f>;
+			sleep = <&pmc 0x03000000>;
 		};
 
 		ipic: pic@700 {
@@ -174,7 +183,7 @@
 			device_type = "par_io";
 			num-ports = <7>;
 
-			pio3: ucc_pin@03 {
+			pio3: ucc_pin@3 {
 				pio-map = <
 			/* port  pin  dir  open_drain  assignment  has_irq */
 					3  4  3  0  2  0  /* MDIO */
@@ -196,7 +205,7 @@
 					1 12  1  0  1  0 	/* TX_EN */
 					1 13  2  0  1  0>;	/* CRS */
 			};
-			pio4: ucc_pin@04 {
+			pio4: ucc_pin@4 {
 				pio-map = <
 			/* port  pin  dir  open_drain  assignment  has_irq */
 					3 31  2  0  1  0 	/* RX_CLK (CLK7) */
@@ -216,7 +225,7 @@
 					1 30  1  0  1  0 	/* TX_EN */
 					1 31  2  0  1  0>;	/* CRS */
 			};
-			pio5: ucc_pin@05 {
+			pio5: ucc_pin@5 {
 				pio-map = <
 				/*
 				 *    		      open       has
@@ -245,6 +254,8 @@
 		reg = <0xe0100000 0x480>;
 		brg-frequency = <0>;
 		bus-frequency = <198000000>;
+		fsl,qe-num-riscs = <1>;
+		fsl,qe-num-snums = <28>;
 
 		muram@10000 {
 			#address-cells = <1>;
@@ -338,17 +349,15 @@
 			reg = <0x2320 0x18>;
 			compatible = "fsl,ucc-mdio";
 
-			phy3: ethernet-phy@03 {
+			phy3: ethernet-phy@3 {
 				interrupt-parent = <&ipic>;
 				interrupts = <17 0x8>;
 				reg = <0x3>;
-				device_type = "ethernet-phy";
 			};
-			phy4: ethernet-phy@04 {
+			phy4: ethernet-phy@4 {
 				interrupt-parent = <&ipic>;
 				interrupts = <18 0x8>;
 				reg = <0x4>;
-				device_type = "ethernet-phy";
 			};
 		};
 
@@ -365,7 +374,6 @@
 	};
 
 	pci0: pci@e0008500 {
-		cell-index = <1>;
 		interrupt-map-mask = <0xf800 0x0 0x0 0x7>;
 		interrupt-map = <
 				/* IDSEL 0x11 AD17 */
@@ -419,8 +427,10 @@
 		#interrupt-cells = <1>;
 		#size-cells = <2>;
 		#address-cells = <3>;
-		reg = <0xe0008500 0x100>;
+		reg = <0xe0008500 0x100		/* internal registers */
+		       0xe0008300 0x8>;		/* config space access registers */
 		compatible = "fsl,mpc8349-pci";
 		device_type = "pci";
+		sleep = <&pmc 0x00010000>;
 	};
 };

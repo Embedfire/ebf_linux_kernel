@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *      linux/arch/alpha/kernel/irq_i8259.c
  *
@@ -33,10 +34,10 @@ i8259_update_irq_hw(unsigned int irq, unsigned long mask)
 }
 
 inline void
-i8259a_enable_irq(unsigned int irq)
+i8259a_enable_irq(struct irq_data *d)
 {
 	spin_lock(&i8259_irq_lock);
-	i8259_update_irq_hw(irq, cached_irq_mask &= ~(1 << irq));
+	i8259_update_irq_hw(d->irq, cached_irq_mask &= ~(1 << d->irq));
 	spin_unlock(&i8259_irq_lock);
 }
 
@@ -47,16 +48,18 @@ __i8259a_disable_irq(unsigned int irq)
 }
 
 void
-i8259a_disable_irq(unsigned int irq)
+i8259a_disable_irq(struct irq_data *d)
 {
 	spin_lock(&i8259_irq_lock);
-	__i8259a_disable_irq(irq);
+	__i8259a_disable_irq(d->irq);
 	spin_unlock(&i8259_irq_lock);
 }
 
 void
-i8259a_mask_and_ack_irq(unsigned int irq)
+i8259a_mask_and_ack_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
+
 	spin_lock(&i8259_irq_lock);
 	__i8259a_disable_irq(irq);
 
@@ -69,49 +72,27 @@ i8259a_mask_and_ack_irq(unsigned int irq)
 	spin_unlock(&i8259_irq_lock);
 }
 
-unsigned int
-i8259a_startup_irq(unsigned int irq)
-{
-	i8259a_enable_irq(irq);
-	return 0; /* never anything pending */
-}
-
-void
-i8259a_end_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		i8259a_enable_irq(irq);
-}
-
-struct hw_interrupt_type i8259a_irq_type = {
-	.typename	= "XT-PIC",
-	.startup	= i8259a_startup_irq,
-	.shutdown	= i8259a_disable_irq,
-	.enable		= i8259a_enable_irq,
-	.disable	= i8259a_disable_irq,
-	.ack		= i8259a_mask_and_ack_irq,
-	.end		= i8259a_end_irq,
+struct irq_chip i8259a_irq_type = {
+	.name		= "XT-PIC",
+	.irq_unmask	= i8259a_enable_irq,
+	.irq_mask	= i8259a_disable_irq,
+	.irq_mask_ack	= i8259a_mask_and_ack_irq,
 };
 
 void __init
 init_i8259a_irqs(void)
 {
-	static struct irqaction cascade = {
-		.handler	= no_action,
-		.name		= "cascade",
-	};
-
 	long i;
 
 	outb(0xff, 0x21);	/* mask all of 8259A-1 */
 	outb(0xff, 0xA1);	/* mask all of 8259A-2 */
 
 	for (i = 0; i < 16; i++) {
-		irq_desc[i].status = IRQ_DISABLED;
-		irq_desc[i].chip = &i8259a_irq_type;
+		irq_set_chip_and_handler(i, &i8259a_irq_type, handle_level_irq);
 	}
 
-	setup_irq(2, &cascade);
+	if (request_irq(2, no_action, 0, "cascade", NULL))
+		pr_err("Failed to request irq 2 (cascade)\n");
 }
 
 

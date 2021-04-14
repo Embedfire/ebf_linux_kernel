@@ -1,15 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * ip22-setup.c: SGI specific setup, including init of the feature struct.
  *
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  * Copyright (C) 1997, 1998 Ralf Baechle (ralf@gnu.org)
  */
-#include <linux/ds1286.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/kdev_t.h>
 #include <linux/types.h>
-#include <linux/module.h>
 #include <linux/console.h>
 #include <linux/sched.h>
 #include <linux/tty.h>
@@ -26,9 +25,6 @@
 #include <asm/sgi/mc.h>
 #include <asm/sgi/hpc3.h>
 #include <asm/sgi/ip22.h>
-
-unsigned long sgi_gfxaddr;
-EXPORT_SYMBOL_GPL(sgi_gfxaddr);
 
 extern void ip22_be_init(void) __init;
 
@@ -68,7 +64,7 @@ void __init plat_mem_setup(void)
 	cserial = ArcGetEnvironmentVariable("ConsoleOut");
 
 	if ((ctype && *ctype == 'd') || (cserial && *cserial == 's')) {
-		static char options[8];
+		static char options[8] __initdata;
 		char *baud = ArcGetEnvironmentVariable("dbaud");
 		if (baud)
 			strcpy(options, baud);
@@ -79,22 +75,4 @@ void __init plat_mem_setup(void)
 		prom_flags |= PROM_FLAG_USE_AS_CONSOLE;
 		add_preferred_console("arc", 0, NULL);
 	}
-
-#if defined(CONFIG_VT) && defined(CONFIG_SGI_NEWPORT_CONSOLE)
-	{
-		ULONG *gfxinfo;
-		ULONG * (*__vec)(void) = (void *) (long)
-			*((_PULONG *)(long)((PROMBLOCK)->pvector + 0x20));
-
-		gfxinfo = __vec();
-		sgi_gfxaddr = ((gfxinfo[1] >= 0xa0000000
-			       && gfxinfo[1] <= 0xc0000000)
-			       ? gfxinfo[1] - 0xa0000000 : 0);
-
-		/* newport addresses? */
-		if (sgi_gfxaddr == 0x1f0f0000 || sgi_gfxaddr == 0x1f4f0000) {
-			conswitchp = &newport_con;
-		}
-	}
-#endif
 }

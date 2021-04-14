@@ -1,16 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	IndyDog	0.3	A Hardware Watchdog Device for SGI IP22
  *
  *	(c) Copyright 2002 Guido Guenther <agx@sigxcpu.org>,
  *						All Rights Reserved.
  *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
- *
- *	based on softdog.c by Alan Cox <alan@redhat.com>
+ *	based on softdog.c by Alan Cox <alan@lxorguk.ukuu.org.uk>
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -26,41 +24,31 @@
 #include <linux/uaccess.h>
 #include <asm/sgi/mc.h>
 
-#define PFX "indydog: "
 static unsigned long indydog_alive;
-static spinlock_t indydog_lock;
+static DEFINE_SPINLOCK(indydog_lock);
 
 #define WATCHDOG_TIMEOUT 30		/* 30 sec default timeout */
 
-static int nowayout = WATCHDOG_NOWAYOUT;
-module_param(nowayout, int, 0);
+static bool nowayout = WATCHDOG_NOWAYOUT;
+module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 		"Watchdog cannot be stopped once started (default="
 				__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
 
 static void indydog_start(void)
 {
-	u32 mc_ctrl0;
-
 	spin_lock(&indydog_lock);
-	mc_ctrl0 = sgimc->cpuctrl0;
-	mc_ctrl0 = sgimc->cpuctrl0 | SGIMC_CCTRL0_WDOG;
-	sgimc->cpuctrl0 = mc_ctrl0;
+	sgimc->cpuctrl0 |= SGIMC_CCTRL0_WDOG;
 	spin_unlock(&indydog_lock);
 }
 
 static void indydog_stop(void)
 {
-	u32 mc_ctrl0;
-
 	spin_lock(&indydog_lock);
-
-	mc_ctrl0 = sgimc->cpuctrl0;
-	mc_ctrl0 &= ~SGIMC_CCTRL0_WDOG;
-	sgimc->cpuctrl0 = mc_ctrl0;
+	sgimc->cpuctrl0 &= ~SGIMC_CCTRL0_WDOG;
 	spin_unlock(&indydog_lock);
 
-	printk(KERN_INFO PFX "Stopped watchdog timer.\n");
+	pr_info("Stopped watchdog timer\n");
 }
 
 static void indydog_ping(void)
@@ -83,10 +71,9 @@ static int indydog_open(struct inode *inode, struct file *file)
 	indydog_start();
 	indydog_ping();
 
-	indydog_alive = 1;
-	printk(KERN_INFO "Started watchdog timer.\n");
+	pr_info("Started watchdog timer\n");
 
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int indydog_release(struct inode *inode, struct file *file)
@@ -112,9 +99,8 @@ static long indydog_ioctl(struct file *file, unsigned int cmd,
 							unsigned long arg)
 {
 	int options, retval = -EINVAL;
-	static struct watchdog_info ident = {
-		.options		= WDIOF_KEEPALIVEPING |
-					  WDIOF_MAGICCLOSE,
+	static const struct watchdog_info ident = {
+		.options		= WDIOF_KEEPALIVEPING,
 		.firmware_version	= 0,
 		.identity		= "Hardware Watchdog for SGI IP22",
 	};
@@ -166,6 +152,7 @@ static const struct file_operations indydog_fops = {
 	.llseek		= no_llseek,
 	.write		= indydog_write,
 	.unlocked_ioctl	= indydog_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= indydog_open,
 	.release	= indydog_release,
 };
@@ -180,32 +167,25 @@ static struct notifier_block indydog_notifier = {
 	.notifier_call = indydog_notify_sys,
 };
 
-static char banner[] __initdata =
-	KERN_INFO PFX "Hardware Watchdog Timer for SGI IP22: 0.3\n";
-
 static int __init watchdog_init(void)
 {
 	int ret;
 
-	spin_lock_init(&indydog_lock);
-
 	ret = register_reboot_notifier(&indydog_notifier);
 	if (ret) {
-		printk(KERN_ERR PFX
-			"cannot register reboot notifier (err=%d)\n", ret);
+		pr_err("cannot register reboot notifier (err=%d)\n", ret);
 		return ret;
 	}
 
 	ret = misc_register(&indydog_miscdev);
 	if (ret) {
-		printk(KERN_ERR PFX
-			"cannot register miscdev on minor=%d (err=%d)\n",
-							WATCHDOG_MINOR, ret);
+		pr_err("cannot register miscdev on minor=%d (err=%d)\n",
+		       WATCHDOG_MINOR, ret);
 		unregister_reboot_notifier(&indydog_notifier);
 		return ret;
 	}
 
-	printk(banner);
+	pr_info("Hardware Watchdog Timer for SGI IP22: 0.3\n");
 
 	return 0;
 }
@@ -222,4 +202,3 @@ module_exit(watchdog_exit);
 MODULE_AUTHOR("Guido Guenther <agx@sigxcpu.org>");
 MODULE_DESCRIPTION("Hardware Watchdog Device for SGI IP22");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
