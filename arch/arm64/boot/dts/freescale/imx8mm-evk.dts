@@ -216,10 +216,12 @@
 		#size-cells = <0>;
 
 		ethphy0: ethernet-phy@0 {
-			compatible = "ethernet-phy-ieee802.3-c22";
+			/* Realtek RTL8211F (0x001cc916) */
 			reg = <0>;
-			at803x,eee-disabled;
-			at803x,vddio-1p8v;
+
+			reset-assert-us = <10000>;
+			reset-deassert-us = <30000>;
+			reset-gpios = <&gpio4 22 GPIO_ACTIVE_LOW>;
 		};
 	};
 };
@@ -366,20 +368,18 @@
 
 &usbotg1 {
 	dr_mode = "otg";
-	hnp-disable;
 	srp-disable;
+	hnp-disable;
 	adp-disable;
-	usb-role-switch;
-	picophy,pre-emp-curr-control = <3>;
-	picophy,dc-vol-level-adjust = <7>;
 	status = "okay";
-
-	port {
-		usb1_drd_sw: endpoint {
-			remote-endpoint = <&typec1_dr_sw>;
-		};
-	};
 };
+
+&usbotg2 {
+	dr_mode = "host";
+	disable-over-current;
+	status = "okay";
+};
+
 
 &usdhc1 {
 	pinctrl-names = "default", "state_100mhz", "state_200mhz";
@@ -670,6 +670,22 @@
 				remote-endpoint = <&mipi1_sensor_ep>;
 			};
 		};
+	};
+};
+
+&i2c4 {
+	clock-frequency = <400000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_i2c4>;
+	status = "okay";
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+	mpu6050@68 {
+	compatible = "invensense,mpu6050";
+	reg = <0x68>;
+	interrupt-parent = <&gpio1>;
+	interrupts = <5 1>;
 	};
 };
 
