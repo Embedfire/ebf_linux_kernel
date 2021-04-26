@@ -32,7 +32,7 @@
 					pinctrl-names = "default";
 					pinctrl-0 = <&pinctrl_adc1>;
 					vref-supply = <&reg_vref_3v3>;
-					num-channels = <4>; 			
+					num-channels = <1>; 			
 					status = "okay";
         };
     };
@@ -41,9 +41,6 @@
 				__overlay__ {
 						pinctrl_adc1: adc1grp{
 						fsl,pins = <
-							MX6UL_PAD_GPIO1_IO00__GPIO1_IO00          0x000010B1
-							MX6UL_PAD_GPIO1_IO01__GPIO1_IO01          0x000010B1
-							MX6UL_PAD_GPIO1_IO02__GPIO1_IO02          0x000010B1
 							MX6UL_PAD_GPIO1_IO03__GPIO1_IO03          0x000010B1
 						>;
 					};				
