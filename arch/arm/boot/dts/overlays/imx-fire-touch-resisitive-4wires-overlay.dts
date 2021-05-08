@@ -15,7 +15,6 @@
 /plugin/;
 
 / {
-		compatible = "fsl,imx6ull-14x14-evk", "fsl,imx6ull";
 		fragment@0 {
 			target = <&iomuxc>;
 				__overlay__ {
