@@ -32,7 +32,7 @@
 					pinctrl-names = "default";
 					pinctrl-0 = <&pinctrl_adc1>;
 					vref-supply = <&reg_vref_3v3>;
-					num-channels = <1>; 			
+					num-channels = <4>; 			
 					status = "okay";
         };
     };
