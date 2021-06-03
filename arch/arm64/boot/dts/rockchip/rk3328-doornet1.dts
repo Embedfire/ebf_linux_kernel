@@ -12,8 +12,6 @@
 	aliases {
 		ethernet1 = &r8153;
 		mmc0 = &sdmmc;
-		mmc1 = &sdmmc_ext;
-		mmc2 = &emmc;
 	};
 
 	chosen {
@@ -59,35 +57,6 @@
 			gpios = <&gpio2 RK_PC2 GPIO_ACTIVE_HIGH>;
 			label = "doornet1:green:wan";
 		};
-	};
-
-	sdio_pwrseq: sdio-pwrseq {
-		compatible = "mmc-pwrseq-simple";
-		clocks = <&rk805 1>;
-		clock-names = "ext_clock";
-		pinctrl-names = "default";
-		pinctrl-0 = <&wifi_enable_h>;
-		status = "okay";
-
-		/*
-		 * On the module itself this is one of these (depending
-		 * on the actual card populated):
-		 * - SDIO_RESET_L_WL_REG_ON
-		 * - PDN (power down when low)
-		 */
-		reset-gpios = <&gpio3 RK_PB0 GPIO_ACTIVE_LOW>;
-	};
-
-	sdmmc_ext: dwmmc@ff5f0000 {
-		compatible = "rockchip,rk3328-dw-mshc", "rockchip,rk3288-dw-mshc";
-		reg = <0x0 0xff5f0000 0x0 0x4000>;
-		clock-freq-min-max = <400000 150000000>;
-		clocks = <&cru HCLK_SDMMC_EXT>, <&cru SCLK_SDMMC_EXT>,
-			 <&cru SCLK_SDMMC_EXT_DRV>, <&cru SCLK_SDMMC_EXT_SAMPLE>;
-		clock-names = "biu", "ciu", "ciu-drv", "ciu-sample";
-		fifo-depth = <0x100>;
-		interrupts = <GIC_SPI 4 IRQ_TYPE_LEVEL_HIGH>;
-		status = "okay";
 	};
 
 	vcc_sd: sdmmc-regulator {
@@ -239,20 +208,6 @@
 
 &dmc {
 	center-supply = <&vdd_logic>;
-	status = "okay";
-};
-
-&emmc {
-	bus-width = <8>;
-	cap-mmc-highspeed;
-	max-frequency = <150000000>;
-	mmc-hs200-1_8v;
-	no-sd;
-	non-removable;
-	pinctrl-names = "default";
-	pinctrl-0 = <&emmc_clk &emmc_cmd &emmc_bus8>;
-	vmmc-supply = <&vcc_io>;
-	vqmmc-supply = <&vcc18_emmc>;
 	status = "okay";
 };
 
@@ -472,12 +427,6 @@
 		};
 	};
 
-	sdio-pwrseq {
-		wifi_enable_h: wifi-enable-h {
-			rockchip,pins = <3 RK_PB0 RK_FUNC_GPIO &pcfg_pull_none>;
-		};
-	};
-
 	sdmmc0 {
 		sdmmc0_clk: sdmmc0-clk {
 			rockchip,pins = <1 RK_PA6 1 &pcfg_pull_none_4ma>;
@@ -500,23 +449,6 @@
 		};
 	};
 
-	sdmmc0ext {
-		sdmmc0ext_clk: sdmmc0ext-clk {
-			rockchip,pins = <3 RK_PA2 3 &pcfg_pull_none_2ma>;
-		};
-
-		sdmmc0ext_cmd: sdmmc0ext-cmd {
-			rockchip,pins = <3 RK_PA0 3 &pcfg_pull_up_2ma>;
-		};
-
-		sdmmc0ext_bus4: sdmmc0ext-bus4 {
-			rockchip,pins =
-				<3 RK_PA4 3 &pcfg_pull_up_2ma>,
-				<3 RK_PA5 3 &pcfg_pull_up_2ma>,
-				<3 RK_PA6 3 &pcfg_pull_up_2ma>,
-				<3 RK_PA7 3 &pcfg_pull_up_2ma>;
-		};
-	};
 
 	gmac-1 {
 		rgmiim1_pins: rgmiim1-pins {
@@ -596,38 +528,13 @@
 	pinctrl-0 = <&sdmmc0_clk &sdmmc0_cmd &sdmmc0_dectn &sdmmc0_bus4>;
 	vmmc-supply = <&vcc_sd>;
 	vqmmc-supply = <&vccio_sd>;
+	sd-uhs-sdr12;
+	sd-uhs-sdr25;
 	sd-uhs-sdr50;
 	sd-uhs-sdr104;
 	status = "okay";
 };
 
-&sdmmc_ext {
-	bus-width = <4>;
-	cap-sd-highspeed;
-	cap-sdio-irq;
-	disable-wp;
-	keep-power-in-suspend;
-	max-frequency = <100000000>;
-	mmc-pwrseq = <&sdio_pwrseq>;
-	non-removable;
-	num-slots = <1>;
-	pinctrl-names = "default";
-	pinctrl-0 = <&sdmmc0ext_clk &sdmmc0ext_cmd &sdmmc0ext_bus4>;
-	rockchip,default-sample-phase = <120>;
-	supports-sdio;
-	sd-uhs-sdr104;
-	#address-cells = <1>;
-	#size-cells = <0>;
-	status = "disabled";
-
-	brcmf: bcrmf@1 {
-		reg = <1>;
-		compatible = "brcm,bcm4329-fmac";
-		interrupt-parent = <&gpio3>;
-		interrupts = <RK_PA1 GPIO_ACTIVE_HIGH>;
-		interrupt-names = "host-wake";
-	};
-};
 
 &tsadc {
 	status = "okay";
@@ -664,6 +571,7 @@
 
 &usb20_otg {
 	status = "okay";
+	dr_mode = "host";
 };
 
 &usb_host0_ehci {
