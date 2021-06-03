@@ -1,0 +1,4 @@
+config RTL8821CU
+	tristate "Realtek 8821CU/8811CU USB WiFi"
+	depends on USB
+
