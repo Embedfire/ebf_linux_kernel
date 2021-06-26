@@ -146,3 +146,4 @@ x509.genkey
 
 # Clang's compilation database file
 /compile_commands.json
+build_image
