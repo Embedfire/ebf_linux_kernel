@@ -2405,6 +2405,10 @@ static int drm_pick_crtcs(struct drm_fb_helper *fb_helper,
 		my_score++;
 	if (drm_has_preferred_mode(fb_helper_conn, width, height))
 		my_score++;
+	if(!memcmp(connector->name, "HDMI-A-1", 8)){
+		DRM_INFO("HDMI");
+		my_score++;
+	}
 
 	/*
 	 * select a crtc for this connector and then attempt to configure
@@ -2441,7 +2445,7 @@ static int drm_pick_crtcs(struct drm_fb_helper *fb_helper,
 			       sizeof(struct drm_fb_helper_crtc *));
 		}
 	}
-
+	DRM_INFO("%s : %d", connector->name, best_score);
 	kfree(crtcs);
 	return best_score;
 }
