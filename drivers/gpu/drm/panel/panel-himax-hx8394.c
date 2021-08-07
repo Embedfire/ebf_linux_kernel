@@ -246,7 +246,7 @@ static int hx8394_disable(struct drm_panel *panel)
 	if (!ctx->enabled)
 		return 0;
 
-	//backlight_disable(ctx->backlight);
+	backlight_disable(ctx->backlight);
 
 	ctx->enabled = false;
 
@@ -326,6 +326,8 @@ static int hx8394_enable(struct drm_panel *panel)
  	if (ret)
 		return ret; 
 
+	backlight_enable(ctx->backlight);
+
 	ctx->enabled = true;
     
 	return 0;
@@ -400,11 +402,11 @@ static int hx8394_probe(struct mipi_dsi_device *dsi)
 			dev_err(dev, "cannot get regulator: %d\n", ret);
 		return ret;
 	}
-/*
+
 	ctx->backlight = devm_of_find_backlight(dev);
 	if (IS_ERR(ctx->backlight))
 		return PTR_ERR(ctx->backlight);
-*/
+
 	mipi_dsi_set_drvdata(dsi, ctx);
 
 	ctx->dev = dev;
