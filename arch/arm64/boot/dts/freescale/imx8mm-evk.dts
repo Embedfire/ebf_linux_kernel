@@ -187,6 +187,11 @@
 		model = "imx-audio-micfil";
 		cpu-dai = <&micfil>;
 	};
+
+        bcmdhd_wlan_0: bcmdhd_wlan@0 {
+                compatible = "android,bcmdhd_wlan";
+                status = "okay";
+        };
 };
 
 &A53_0 {
@@ -383,7 +388,7 @@
 };
 
 
-&usdhc1 {
+&usdhc1 { /* wifi */
 	pinctrl-names = "default", "state_100mhz", "state_200mhz";
 	pinctrl-0 = <&pinctrl_usdhc1>, <&pinctrl_usdhc1_gpio>;
 	pinctrl-1 = <&pinctrl_usdhc1_100mhz>, <&pinctrl_usdhc1_gpio>;
@@ -904,6 +909,7 @@
 	pinctrl_usdhc1_gpio: usdhc1grpgpio {
 		fsl,pins = <
 			MX8MM_IOMUXC_SD1_RESET_B_GPIO2_IO10	0x41
+			MX8MM_IOMUXC_GPIO1_IO00_ANAMIX_REF_CLK_32K  0x141
 		>;
 	};
 
