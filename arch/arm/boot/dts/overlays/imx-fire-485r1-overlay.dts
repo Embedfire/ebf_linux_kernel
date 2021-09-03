@@ -34,7 +34,7 @@
 						fsl,pins = <
 							MX6UL_PAD_UART2_TX_DATA__UART2_DCE_TX	0x1b0b1
 							MX6UL_PAD_UART2_RX_DATA__UART2_DCE_RX	0x1b0b1
-							/* MX6UL_PAD_UART2_CTS_B__GPIO1_IO22	0x1b0b1 RS485 RE/DE */
+							MX6UL_PAD_UART2_CTS_B__GPIO1_IO22	0x1b0b1 /*RS485 RE/DE */
 						>;
 					};
  
