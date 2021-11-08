@@ -710,6 +710,15 @@
 	interrupt-parent = <&gpio1>;
 	interrupts = <5 1>;
 	};
+
+        rtc@32 {
+                compatible = "epson,rx8010";
+                reg = <0x32>;
+                pinctrl-names = "default";
+                pinctrl-0 = <&pinctrl_rtc>;
+                interrupt-parent = <&gpio4>;
+                interrupts = <21 IRQ_TYPE_LEVEL_LOW>;
+        };   
 };
 
 &iomuxc {
@@ -816,12 +825,18 @@
 			MX8MM_IOMUXC_GPIO1_IO09_GPIO1_IO9               0x19    /* Touch int */
 		>;
 	};
+	
+	pinctrl_rtc: rtc_grp {
+		fsl,pins = <
+			MX8MM_IOMUXC_SAI2_RXFS_GPIO4_IO21       0x41
+		>;
+	};
 
 	pinctrl_pcie0: pcie0grp {
 		fsl,pins = <
 			MX8MM_IOMUXC_I2C4_SCL_PCIE1_CLKREQ_B	0x61 /* open drain, pull up */
 			MX8MM_IOMUXC_GPIO1_IO05_GPIO1_IO5	0x41
-			MX8MM_IOMUXC_SAI2_RXFS_GPIO4_IO21	0x41
+	/*		MX8MM_IOMUXC_SAI2_RXFS_GPIO4_IO21	0x41 */
 		>;
 	};
 
