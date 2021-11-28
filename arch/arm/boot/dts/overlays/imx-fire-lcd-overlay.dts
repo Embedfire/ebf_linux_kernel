@@ -36,13 +36,47 @@
 		                        clock-frequency = <27000000>;
 		                        hactive = <800>;
 		                        vactive = <480>;
-		                        hfront-porch = <88>;
-		                        hback-porch = <0>;
-		                        hsync-len = <128>;
-		                        vback-porch = <45>;
+		                        hfront-porch = <40>;
+		                        hback-porch = <46>;
+		                        hsync-len = <1>;
+		                        vback-porch = <23>;
 		                        vfront-porch = <13>;
-		                        vsync-len = <128>;
-		            
+		                        vsync-len = <3>;
+
+                                 /*
+                                    旧的5寸屏 / 7寸屏通用时序：
+                                    .hbp = 46,   //HSYNC后的无效像素
+                                    .vbp = 23,  //VSYNC后的无效行数
+
+                                    .hsw = 1,   //HSYNC宽度
+                                    .vsw = 1,   //VSYNC宽度
+
+                                    .hfp = 22,          //HSYNC前的无效像素
+                                    .vfp = 22,          //VSYNC前的无效行数
+
+
+                                    厂家给的新5寸屏的时序：（该时序不兼容7寸屏，并且有些问题）
+                                    .hbp = 0,   //HSYNC后的无效像素
+                                    .vbp = 45,  //VSYNC后的无效行数
+
+                                    .hsw = 128,   //HSYNC宽度
+                                    .vsw = 128,   //VSYNC宽度
+
+                                    .hfp = 88,          //HSYNC前的无效像素
+                                    .vfp = 13,          //VSYNC前的无效行数
+
+
+                                    调整过后的最终时序：（能兼容新旧5寸屏和7寸屏）
+                                    .hbp = 46,  //HSYNC后的无效像素
+                                    .vbp = 23,  //VSYNC后的无效行数
+
+                                    .hsw = 1,   //HSYNC宽度
+                                    .vsw = 3,   //VSYNC宽度
+
+                                    .hfp = 40,  //HSYNC前的无效像素
+                                    .vfp = 13,  //VSYNC前的无效行数
+                                 */
+
 		                        hsync-active = <0>;
 		                        vsync-active = <0>;
 		                        de-active = <1>;
@@ -103,7 +137,8 @@
 		__overlay__ {
 			backlight {
 				compatible = "pwm-backlight";
-				pwms = <&pwm1 0 50000>;
+				//pwms = <&pwm1 0 50000>;
+                pwms = <&pwm1 0 20000>;
 				brightness-levels = <0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100>;
 				default-brightness-level = <90>;
 				status = "okay";
