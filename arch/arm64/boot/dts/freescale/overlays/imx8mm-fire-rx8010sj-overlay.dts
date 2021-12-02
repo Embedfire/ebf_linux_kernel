@@ -1,0 +1,50 @@
+/*
+ * Copyright (C) 2021 - All Rights Reserved by 
+ * filename : imx8mm-fire-rx8010sj-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm rx8010sj device
+ * author : embedfire
+ * date : 2021-12-01 
+ * version : A001
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "../imx8mm-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+#include "dt-bindings/interrupt-controller/arm-gic.h"
+
+/ {
+	fragment@0 {
+		target = <&i2c4>;
+		__overlay__ {
+			clock-frequency = <400000>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_i2c4>;
+			status = "okay";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			rtc@32 {
+				compatible = "epson,rx8010";
+				reg = <0x32>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&pinctrl_rtc>;
+				interrupt-parent = <&gpio4>;
+				interrupts = <21 IRQ_TYPE_LEVEL_LOW>;
+			};
+		};
+	};
+	
+	fragment@1 {
+		target= <&iomuxc>;
+		__overlay__{
+			pinctrl_rtc: rtc_grp {
+				fsl,pins = <
+					MX8MM_IOMUXC_SAI2_RXFS_GPIO4_IO21       0x41
+				>;
+			};
+		};
+	};
+};
