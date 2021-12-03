@@ -286,7 +286,7 @@ $(obj)/%.dtb: $(src)/%.dts $(DTC) FORCE
 
 quiet_cmd_dtco = DTCO    $@
 cmd_dtco = mkdir -p $(dir ${dtc-tmp}) ; \
-	$(CPP) $(dtc_cpp_flags) -x assembler-with-cpp -o $(dtc-tmp) $< ; \
+	$(HOSTCC) -E $(dtc_cpp_flags) -x assembler-with-cpp -o $(dtc-tmp) $< ; \
 	$(DTC) -@ -H epapr -O dtb -o $@ -b 0 \
 		-i $(dir $<) $(DTC_FLAGS) \
 		-Wno-interrupts_property \
