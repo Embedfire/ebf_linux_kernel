@@ -1,0 +1,130 @@
+/*
+ * Copyright (C) 2021 - All Rights Reserved by 
+ * filename : imx8mm-fire-btwifi-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm ap6212 device
+ * author : embedfire
+ * date : 2021-12-04 
+ * version : A001
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "../imx8mm-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+#include "dt-bindings/clock/imx8mm-clock.h"
+
+/ {
+	fragment@0 {
+		target-path="/";
+		__overlay__ {
+			modem_reset: modem-reset {
+				compatible = "gpio-reset";
+				reset-gpios = <&gpio2 6 GPIO_ACTIVE_LOW>;
+				reset-delay-us = <2000>;
+				reset-post-delay-ms = <40>;
+				#reset-cells = <0>;
+			};
+
+			reg_sd1_vmmc: sd1_regulator {
+				compatible = "regulator-fixed";
+				regulator-name = "WLAN_EN";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				gpio = <&gpio2 10 GPIO_ACTIVE_HIGH>;
+				off-on-delay-us = <20000>;
+				startup-delay-us = <100>;
+				enable-active-high;
+			};
+
+			bcmdhd_wlan_0: bcmdhd_wlan@0 {
+				compatible = "android,bcmdhd_wlan";
+				status = "okay";
+			};
+		};
+	};
+
+	fragment@1 {
+		target= <&uart1>;
+		__overlay__{
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_uart1>;
+			assigned-clocks = <&clk IMX8MM_CLK_UART1>;
+			assigned-clock-parents = <&clk IMX8MM_SYS_PLL1_80M>;
+			fsl,uart-has-rtscts;
+			resets = <&modem_reset>;
+			status = "okay";
+		};
+	};
+
+	fragment@2 {
+		target= <&usdhc1>;
+		__overlay__{
+			pinctrl-names = "default", "state_100mhz", "state_200mhz";
+			pinctrl-0 = <&pinctrl_usdhc1>, <&pinctrl_usdhc1_gpio>;
+			pinctrl-1 = <&pinctrl_usdhc1_100mhz>, <&pinctrl_usdhc1_gpio>;
+			pinctrl-2 = <&pinctrl_usdhc1_200mhz>, <&pinctrl_usdhc1_gpio>;
+			bus-width = <4>;
+			vmmc-supply = <&reg_sd1_vmmc>;
+			pm-ignore-notify;
+			keep-power-in-suspend;
+			non-removable;
+			status = "okay";
+		};
+	};
+
+	fragment@3 {
+		target= <&iomuxc>;
+		__overlay__{
+			pinctrl_uart1: uart1grp {
+				fsl,pins = <
+					MX8MM_IOMUXC_UART1_RXD_UART1_DCE_RX     0x140
+					MX8MM_IOMUXC_UART1_TXD_UART1_DCE_TX     0x140
+					MX8MM_IOMUXC_UART3_RXD_UART1_DCE_CTS_B  0x140
+					MX8MM_IOMUXC_UART3_TXD_UART1_DCE_RTS_B  0x140
+					MX8MM_IOMUXC_SD1_DATA4_GPIO2_IO6        0x19
+				>;
+			};
+
+			pinctrl_usdhc1_gpio: usdhc1grpgpio {
+				fsl,pins = <
+					MX8MM_IOMUXC_SD1_RESET_B_GPIO2_IO10     0x41
+					MX8MM_IOMUXC_GPIO1_IO00_ANAMIX_REF_CLK_32K  0x141
+				>;
+			};
+
+			pinctrl_usdhc1: usdhc1grp {
+				fsl,pins = <
+					MX8MM_IOMUXC_SD1_CLK_USDHC1_CLK         0x190
+					MX8MM_IOMUXC_SD1_CMD_USDHC1_CMD         0x1d0
+					MX8MM_IOMUXC_SD1_DATA0_USDHC1_DATA0     0x1d0
+					MX8MM_IOMUXC_SD1_DATA1_USDHC1_DATA1     0x1d0
+					MX8MM_IOMUXC_SD1_DATA2_USDHC1_DATA2     0x1d0
+					MX8MM_IOMUXC_SD1_DATA3_USDHC1_DATA3     0x1d0
+				>;
+			};
+
+			pinctrl_usdhc1_100mhz: usdhc1grp100mhz {
+				fsl,pins = <
+					MX8MM_IOMUXC_SD1_CLK_USDHC1_CLK         0x194
+					MX8MM_IOMUXC_SD1_CMD_USDHC1_CMD         0x1d4
+					MX8MM_IOMUXC_SD1_DATA0_USDHC1_DATA0     0x1d4
+					MX8MM_IOMUXC_SD1_DATA1_USDHC1_DATA1     0x1d4
+					MX8MM_IOMUXC_SD1_DATA2_USDHC1_DATA2     0x1d4
+					MX8MM_IOMUXC_SD1_DATA3_USDHC1_DATA3     0x1d4
+				>;
+			};
+
+			pinctrl_usdhc1_200mhz: usdhc1grp200mhz {
+				fsl,pins = <
+					MX8MM_IOMUXC_SD1_CLK_USDHC1_CLK         0x196
+					MX8MM_IOMUXC_SD1_CMD_USDHC1_CMD         0x1d6
+					MX8MM_IOMUXC_SD1_DATA0_USDHC1_DATA0     0x1d6
+					MX8MM_IOMUXC_SD1_DATA1_USDHC1_DATA1     0x1d6
+					MX8MM_IOMUXC_SD1_DATA2_USDHC1_DATA2     0x1d6
+					MX8MM_IOMUXC_SD1_DATA3_USDHC1_DATA3     0x1d6
+				>;
+			};
+		};
+	};
+};

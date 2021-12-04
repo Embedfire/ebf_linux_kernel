@@ -1,7 +1,14 @@
 # Overlays for the imx8mm platform
 
 dtbo-$(CONFIG_ARCH_MXC) += \
-	imx8mm-fire-rx8010sj.dtbo 
+	imx8mm-fire-rx8010sj.dtbo \
+	imx8mm-fire-uart3.dtbo \
+	imx8mm-fire-rs485.dtbo \
+	imx8mm-fire-btwifi.dtbo \
+	imx8mm-fire-mipi.dtbo \
+	imx8mm-fire-cam.dtbo \
+	imx8mm-fire-sound.dtbo \
+	imx8mm-fire-touch-capacitive-goodix.dtbo \
 
 targets += dtbs dtbs_install dtbs_check
 targets += $(dtbo-y)

@@ -1,0 +1,61 @@
+/*
+ * Copyright (C) 2021 - All Rights Reserved by 
+ * filename : imx8mm-fire-touch-capacitive-goodix-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm gt911 device
+ * author : embedfire
+ * date : 2021-12-04 
+ * version : A001
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "../imx8mm-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+#include "dt-bindings/interrupt-controller/arm-gic.h"
+
+/ {
+	fragment@0 {
+		target = <&i2c3>;
+		__overlay__ {
+			clock-frequency = <100000>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_i2c3>;
+			status = "okay";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			gtxx_tsc@5d {
+				compatible = "goodix,gt911";
+				pinctrl-0 = <&pinctrl_tsc>;
+				reg = <0x5d>;
+				status = "okay";
+
+				reset-gpios = <&gpio3 23 GPIO_ACTIVE_LOW>;
+				irq-gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;
+				interrupt-parent = <&gpio1>;
+				interrupts = <9 IRQ_TYPE_EDGE_FALLING>;
+			};
+		};
+	};
+	
+	fragment@1 {
+		target= <&iomuxc>;
+		__overlay__{
+			pinctrl_i2c3: i2c3grp {
+				fsl,pins = <
+					MX8MM_IOMUXC_I2C3_SCL_I2C3_SCL                  0x400001c3
+					MX8MM_IOMUXC_I2C3_SDA_I2C3_SDA                  0x400001c3
+				>;
+			};
+
+			pinctrl_tsc: tscgrp {
+				fsl,pins = <
+					MX8MM_IOMUXC_SAI5_RXD2_GPIO3_IO23               0x149
+					MX8MM_IOMUXC_GPIO1_IO09_GPIO1_IO9               0x1d6
+				>;
+			};
+		};
+	};
+};

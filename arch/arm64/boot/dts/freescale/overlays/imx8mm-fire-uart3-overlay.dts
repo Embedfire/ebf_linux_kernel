@@ -1,0 +1,40 @@
+/*
+ * Copyright (C) 2021 - All Rights Reserved by 
+ * filename : imx8mm-fire-uart3-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm uart3 device
+ * author : embedfire
+ * date : 2021-12-01 
+ * version : A001
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "../imx8mm-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+#include "dt-bindings/clock/imx8mm-clock.h"
+
+/ {
+	fragment@0 {
+		target = <&uart3>;
+		__overlay__ {
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_uart3>;
+			assigned-clocks = <&clk IMX8MM_CLK_UART3>;
+			assigned-clock-parents = <&clk IMX8MM_SYS_PLL1_80M>;
+			status = "okay";
+		};
+	};
+	
+	fragment@1 {
+		target= <&iomuxc>;
+		__overlay__{
+			pinctrl_uart3: uart3grp {
+				fsl,pins = <
+					MX8MM_IOMUXC_ECSPI1_SCLK_UART3_DCE_RX           0x140
+					MX8MM_IOMUXC_ECSPI1_MOSI_UART3_DCE_TX           0x140
+				>;
+			};
+		};
+	};
+};
