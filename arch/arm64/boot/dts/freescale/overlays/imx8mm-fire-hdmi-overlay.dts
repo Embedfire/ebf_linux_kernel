@@ -1,0 +1,117 @@
+/*
+ * Copyright (C) 2021 - All Rights Reserved by 
+ * filename : imx8mm-fire-hdmi-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm lt9611 device
+ * author : embedfire
+ * date : 2021-12-04 
+ * version : A001
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "../imx8mm-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+#include "dt-bindings/interrupt-controller/arm-gic.h"
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			lt9611_1v8:regulator-lt9611_1v8 {
+				compatible = "regulator-fixed";
+				regulator-name = "lt9611_1v8";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			lt9611_3v3:regulator-lt9611_3v3 {
+				compatible = "regulator-fixed";
+				regulator-name = "lt9611_3v3";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+		};
+	};
+
+        fragment@1 {
+                target= <&lcdif>;
+                __overlay__{
+                        status = "okay";
+                };
+        };
+
+	fragment@2 {
+		target= <&mipi_dsi>;
+		__overlay__{
+			status = "okay";
+			port@1 {
+				dism_to_lt9611: endpoint {
+					remote-endpoint = <&lt9611_from_dsim>;
+					attach-bridge;
+				};
+			};
+		};
+	};
+
+	fragment@3 {
+		target= <&i2c2>;
+		__overlay__{
+                        clock-frequency = <400000>;
+                        pinctrl-names = "default";
+                        pinctrl-0 = <&pinctrl_i2c2>;
+                        status = "okay";
+
+                        #address-cells = <1>;
+                        #size-cells = <0>;
+			
+			lt9611_codec: hdmi-bridge@3b {
+				compatible = "lontium,lt9611";
+				reg = <0x3b>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&pinctrl_lt9611>;
+				reset-gpios = <&gpio3 19 GPIO_ACTIVE_HIGH>;
+				/*interrupts-extended = <&tlmm 84 IRQ_TYPE_EDGE_FALLING>;*/
+				interrupt-parent = <&gpio3>;
+				interrupts = <22 IRQ_TYPE_EDGE_FALLING>;
+				vdd-supply = <&lt9611_1v8>;
+				vcc-supply = <&lt9611_3v3>;
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					port@0 {
+						reg = <0>;
+						lt9611_from_dsim: endpoint {
+							remote-endpoint = <&dism_to_lt9611>;
+						};
+					};
+				};
+			};
+		};
+	};
+
+	fragment@4 {
+		target= <&iomuxc>;
+		__overlay__{
+                        pinctrl_i2c2: i2c2grp {
+                                fsl,pins = <
+                                        MX8MM_IOMUXC_I2C2_SCL_I2C2_SCL                  0x400001c3
+                                        MX8MM_IOMUXC_I2C2_SDA_I2C2_SDA                  0x400001c3
+                                >;
+                        };
+
+			pinctrl_lt9611: lt9611grp {
+				fsl,pins = <
+					MX8MM_IOMUXC_SAI5_RXFS_GPIO3_IO19       0x19
+					MX8MM_IOMUXC_SAI5_RXD1_GPIO3_IO22       0x19
+				>;
+			};
+		};
+	};
+};
