@@ -1,0 +1,34 @@
+Format: 1.8
+Date: Mon, 13 Dec 2021 07:46:22 +0000
+Source: linux-upstream
+Binary: linux-image-4.19.94-stm-r1 linux-headers-4.19.94-stm-r1 linux-libc-dev linux-image-4.19.94-stm-r1-dbg
+Architecture: armhf
+Version: 1stable
+Distribution: bionic
+Urgency: low
+Maintainer: root <root@dev131.embedfire.local>
+Changed-By: root <root@dev131.embedfire.local>
+Description:
+ linux-headers-4.19.94-stm-r1 - Linux kernel headers for 4.19.94-stm-r1 on armhf
+ linux-image-4.19.94-stm-r1 - Linux kernel, version 4.19.94-stm-r1
+ linux-image-4.19.94-stm-r1-dbg - Linux kernel debugging symbols for 4.19.94-stm-r1
+ linux-libc-dev - Linux support headers for userspace development
+Changes:
+ linux-upstream (1stable) bionic; urgency=low
+ .
+   * Custom built Linux kernel.
+Checksums-Sha1:
+ 9461ba63a8bff408b968f22ad1b6ee0321be6cb0 10841940 linux-headers-4.19.94-stm-r1_1stable_armhf.deb
+ d76e3c09d470d3eea1e49c15e68db83e37590e00 11052324 linux-image-4.19.94-stm-r1_1stable_armhf.deb
+ b5228c0736642b9166c728c2f14837562d745a26 997144 linux-libc-dev_1stable_armhf.deb
+ 4d87fa0e1c583a5ea37c260b6a9d681f96eeec4e 5763 linux-upstream_1stable_armhf.buildinfo
+Checksums-Sha256:
+ 78a416687cf6384c0a688c68d4a608b26f3037fe32373794834460f67d80b628 10841940 linux-headers-4.19.94-stm-r1_1stable_armhf.deb
+ 918270b75a2a1c52d2de3c318721124963ec6991e123ce965d8f108544b8bc89 11052324 linux-image-4.19.94-stm-r1_1stable_armhf.deb
+ fd7b827370b6fc2f2b3bec3a128f9c18600941ee08f47b721278e1861af83855 997144 linux-libc-dev_1stable_armhf.deb
+ 185b917b095ea73ad9595439fe4b710723adc1888b122788c0dcd813873a0707 5763 linux-upstream_1stable_armhf.buildinfo
+Files:
+ f3bc65e59cf9cd3a9f399fa24c57cd6a 10841940 kernel optional linux-headers-4.19.94-stm-r1_1stable_armhf.deb
+ 1304d553ce24628a22874811916012c4 11052324 kernel optional linux-image-4.19.94-stm-r1_1stable_armhf.deb
+ 969738ef5cb7108e55f37a2e6ba1cc73 997144 devel optional linux-libc-dev_1stable_armhf.deb
+ 24f6fc557ee1f13f8746060c360ef0ad 5763 kernel optional linux-upstream_1stable_armhf.buildinfo

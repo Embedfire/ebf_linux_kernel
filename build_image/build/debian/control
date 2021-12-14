@@ -1,0 +1,34 @@
+Source: linux-upstream
+Section: kernel
+Priority: optional
+Maintainer: root <root@dev131.embedfire.local>
+Build-Depends: bc, kmod, cpio
+Homepage: http://www.kernel.org/
+
+Package: linux-image-4.19.94-stm-r1
+Architecture: armhf
+Description: Linux kernel, version 4.19.94-stm-r1
+ This package contains the Linux kernel, modules and corresponding other
+ files, version: 4.19.94-stm-r1.
+
+Package: linux-headers-4.19.94-stm-r1
+Architecture: armhf
+Description: Linux kernel headers for 4.19.94-stm-r1 on armhf
+ This package provides kernel header files for 4.19.94-stm-r1 on armhf
+ .
+ This is useful for people who need to build external modules
+
+Package: linux-libc-dev
+Section: devel
+Provides: linux-kernel-headers
+Architecture: armhf
+Description: Linux support headers for userspace development
+ This package provides userspaces headers from the Linux kernel.  These headers
+ are used by the installed headers for GNU glibc and other system libraries.
+
+Package: linux-image-4.19.94-stm-r1-dbg
+Section: debug
+Architecture: armhf
+Description: Linux kernel debugging symbols for 4.19.94-stm-r1
+ This package will come in handy if you need to debug the kernel. It provides
+ all the necessary debug symbols for the kernel and its modules.

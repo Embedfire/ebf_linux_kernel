@@ -1,0 +1,4 @@
+linux-headers-4.19.94-stm-r1_1stable_armhf.deb kernel optional
+linux-image-4.19.94-stm-r1_1stable_armhf.deb kernel optional
+linux-libc-dev_1stable_armhf.deb devel optional
+linux-upstream_1stable_armhf.buildinfo kernel optional

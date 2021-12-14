@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+
+build:
+	$(MAKE) KERNELRELEASE=4.19.94-stm-r1 ARCH=arm 	KBUILD_BUILD_VERSION=1stable KBUILD_SRC=
+
+binary-arch:
+	$(MAKE) KERNELRELEASE=4.19.94-stm-r1 ARCH=arm 	KBUILD_BUILD_VERSION=1stable KBUILD_SRC= intdeb-pkg
+
+clean:
+	rm -rf debian/*tmp debian/files
+	$(MAKE) clean
+
+binary: binary-arch

@@ -1,0 +1,153 @@
+Format: 1.0
+Source: linux-upstream
+Binary: linux-image-4.19.94-stm-r1 linux-headers-4.19.94-stm-r1 linux-libc-dev linux-image-4.19.94-stm-r1-dbg
+Architecture: armhf
+Version: 1stable
+Checksums-Md5:
+ f3bc65e59cf9cd3a9f399fa24c57cd6a 10841940 linux-headers-4.19.94-stm-r1_1stable_armhf.deb
+ 1304d553ce24628a22874811916012c4 11052324 linux-image-4.19.94-stm-r1_1stable_armhf.deb
+ 969738ef5cb7108e55f37a2e6ba1cc73 997144 linux-libc-dev_1stable_armhf.deb
+Checksums-Sha1:
+ 9461ba63a8bff408b968f22ad1b6ee0321be6cb0 10841940 linux-headers-4.19.94-stm-r1_1stable_armhf.deb
+ d76e3c09d470d3eea1e49c15e68db83e37590e00 11052324 linux-image-4.19.94-stm-r1_1stable_armhf.deb
+ b5228c0736642b9166c728c2f14837562d745a26 997144 linux-libc-dev_1stable_armhf.deb
+Checksums-Sha256:
+ 78a416687cf6384c0a688c68d4a608b26f3037fe32373794834460f67d80b628 10841940 linux-headers-4.19.94-stm-r1_1stable_armhf.deb
+ 918270b75a2a1c52d2de3c318721124963ec6991e123ce965d8f108544b8bc89 11052324 linux-image-4.19.94-stm-r1_1stable_armhf.deb
+ fd7b827370b6fc2f2b3bec3a128f9c18600941ee08f47b721278e1861af83855 997144 linux-libc-dev_1stable_armhf.deb
+Build-Origin: Ubuntu
+Build-Architecture: amd64
+Build-Date: Mon, 13 Dec 2021 07:49:27 +0000
+Installed-Build-Depends:
+ base-files (= 10.1ubuntu2.10),
+ base-passwd (= 3.5.44),
+ bash (= 4.4.18-2ubuntu1.2),
+ bc (= 1.07.1-2),
+ binutils (= 2.30-21ubuntu1~18.04.7),
+ binutils-common (= 2.30-21ubuntu1~18.04.7),
+ binutils-x86-64-linux-gnu (= 2.30-21ubuntu1~18.04.7),
+ bsdutils (= 1:2.31.1-0.4ubuntu3.7),
+ build-essential (= 12.4ubuntu1),
+ bzip2 (= 1.0.6-8.1ubuntu0.2),
+ coreutils (= 8.28-1ubuntu1),
+ cpio (= 2.12+dfsg-6ubuntu0.18.04.4),
+ cpp (= 4:7.4.0-1ubuntu2.3),
+ cpp-7 (= 7.5.0-3ubuntu1~18.04),
+ dash (= 0.5.8-2.10),
+ debconf (= 1.5.66ubuntu1),
+ debianutils (= 4.8.4),
+ diffutils (= 1:3.6-1),
+ dpkg (= 1.19.0.5ubuntu2.3),
+ dpkg-dev (= 1.19.0.5ubuntu2.3),
+ e2fsprogs (= 1.44.1-1ubuntu1.3),
+ fdisk (= 2.31.1-0.4ubuntu3.7),
+ findutils (= 4.6.0+git+20170828-2),
+ g++ (= 4:7.4.0-1ubuntu2.3),
+ g++-7 (= 7.5.0-3ubuntu1~18.04),
+ gawk (= 1:4.1.4+dfsg-1build1),
+ gcc (= 4:7.4.0-1ubuntu2.3),
+ gcc-7 (= 7.5.0-3ubuntu1~18.04),
+ gcc-7-base (= 7.5.0-3ubuntu1~18.04),
+ gcc-8-base (= 8.4.0-1ubuntu1~18.04),
+ grep (= 3.1-2build1),
+ gzip (= 1.6-5ubuntu1),
+ hostname (= 3.20),
+ init-system-helpers (= 1.51),
+ install-info (= 6.5.0.dfsg.1-2),
+ kmod (= 24-1ubuntu3.5),
+ libacl1 (= 2.2.52-3build1),
+ libasan4 (= 7.5.0-3ubuntu1~18.04),
+ libatomic1 (= 8.4.0-1ubuntu1~18.04),
+ libattr1 (= 1:2.4.47-2build1),
+ libaudit-common (= 1:2.8.2-1ubuntu1.1),
+ libaudit1 (= 1:2.8.2-1ubuntu1.1),
+ libbinutils (= 2.30-21ubuntu1~18.04.7),
+ libblkid1 (= 2.31.1-0.4ubuntu3.7),
+ libbz2-1.0 (= 1.0.6-8.1ubuntu0.2),
+ libc-bin (= 2.27-3ubuntu1.4),
+ libc-dev-bin (= 2.27-3ubuntu1.4),
+ libc6 (= 2.27-3ubuntu1.4),
+ libc6-dev (= 2.27-3ubuntu1.4),
+ libcap-ng0 (= 0.7.7-3.1),
+ libcc1-0 (= 8.4.0-1ubuntu1~18.04),
+ libcilkrts5 (= 7.5.0-3ubuntu1~18.04),
+ libcom-err2 (= 1.44.1-1ubuntu1.3),
+ libdb5.3 (= 5.3.28-13.1ubuntu1.1),
+ libdebconfclient0 (= 0.213ubuntu1),
+ libdpkg-perl (= 1.19.0.5ubuntu2.3),
+ libext2fs2 (= 1.44.1-1ubuntu1.3),
+ libfdisk1 (= 2.31.1-0.4ubuntu3.7),
+ libgcc-7-dev (= 7.5.0-3ubuntu1~18.04),
+ libgcc1 (= 1:8.4.0-1ubuntu1~18.04),
+ libgcrypt20 (= 1.8.1-4ubuntu1.3),
+ libgdbm-compat4 (= 1.14.1-6),
+ libgdbm5 (= 1.14.1-6),
+ libgmp10 (= 2:6.1.2+dfsg-2),
+ libgomp1 (= 8.4.0-1ubuntu1~18.04),
+ libgpg-error0 (= 1.27-6),
+ libisl19 (= 0.19-1),
+ libitm1 (= 8.4.0-1ubuntu1~18.04),
+ libkmod2 (= 24-1ubuntu3.5),
+ liblsan0 (= 8.4.0-1ubuntu1~18.04),
+ liblz4-1 (= 0.0~r131-2ubuntu3.1),
+ liblzma5 (= 5.2.2-1.3),
+ libmount1 (= 2.31.1-0.4ubuntu3.7),
+ libmpc3 (= 1.1.0-1),
+ libmpfr6 (= 4.0.1-1),
+ libmpx2 (= 8.4.0-1ubuntu1~18.04),
+ libncursesw5 (= 6.1-1ubuntu1.18.04),
+ libpam-modules (= 1.1.8-3.6ubuntu2.18.04.3),
+ libpam-modules-bin (= 1.1.8-3.6ubuntu2.18.04.3),
+ libpam-runtime (= 1.1.8-3.6ubuntu2.18.04.3),
+ libpam0g (= 1.1.8-3.6ubuntu2.18.04.3),
+ libpcre3 (= 2:8.39-9),
+ libperl5.26 (= 5.26.1-6ubuntu0.5),
+ libquadmath0 (= 8.4.0-1ubuntu1~18.04),
+ libreadline7 (= 7.0-3),
+ libselinux1 (= 2.7-2build2),
+ libsigsegv2 (= 2.12-1),
+ libsmartcols1 (= 2.31.1-0.4ubuntu3.7),
+ libss2 (= 1.44.1-1ubuntu1.3),
+ libstdc++-7-dev (= 7.5.0-3ubuntu1~18.04),
+ libstdc++6 (= 8.4.0-1ubuntu1~18.04),
+ libsystemd0 (= 237-3ubuntu10.50),
+ libtinfo5 (= 6.1-1ubuntu1.18.04),
+ libtsan0 (= 8.4.0-1ubuntu1~18.04),
+ libubsan0 (= 7.5.0-3ubuntu1~18.04),
+ libudev1 (= 237-3ubuntu10.50),
+ libuuid1 (= 2.31.1-0.4ubuntu3.7),
+ libzstd1 (= 1.3.3+dfsg-2ubuntu1.2),
+ linux-libc-dev (= 4.15.0-163.171),
+ login (= 1:4.5-1ubuntu2),
+ lsb-base (= 9.20170808ubuntu1),
+ make (= 4.1-9.1ubuntu1),
+ mawk (= 1.3.3-17ubuntu3),
+ ncurses-base (= 6.1-1ubuntu1.18.04),
+ ncurses-bin (= 6.1-1ubuntu1.18.04),
+ patch (= 2.7.6-2ubuntu1.1),
+ perl (= 5.26.1-6ubuntu0.5),
+ perl-base (= 5.26.1-6ubuntu0.5),
+ perl-modules-5.26 (= 5.26.1-6ubuntu0.5),
+ readline-common (= 7.0-3),
+ sed (= 4.4-2),
+ sysvinit-utils (= 2.88dsf-59.10ubuntu1),
+ tar (= 1.29b-2ubuntu0.2),
+ util-linux (= 2.31.1-0.4ubuntu3.7),
+ xz-utils (= 5.2.2-1.3),
+ zlib1g (= 1:1.2.11.dfsg-0ubuntu2)
+Environment:
+ AR="arm-linux-gnueabihf-ar"
+ AS="arm-linux-gnueabihf-as -EL"
+ AWK="awk"
+ CC="arm-linux-gnueabihf-gcc"
+ CPP="arm-linux-gnueabihf-gcc -E"
+ DEB_BUILD_OPTIONS="parallel=4"
+ LANG="en_US.UTF-8"
+ LC_COLLATE="C"
+ LC_NUMERIC="C"
+ LD="arm-linux-gnueabihf-ld"
+ LEX="flex"
+ MAKE="make"
+ MAKEFLAGS="rR -I/root/Build/ebf_linux_kernel -I/root/Build/ebf_linux_kernel/build_image/build -j --jobserver-fds=3,4 --no-print-directory -- obj=scripts/package KDEB_SOURCENAME=linux-upstream CROSS_COMPILE=arm-linux-gnueabihf- KDEB_PKGVERSION=1stable KDEB_CHANGELOG_DIST=bionic LOCALVERSION=-stm-r1 KBUILD_DEBARCH= ARCH=arm O=build_image/build KBUILD_SRC=/root/Build/ebf_linux_kernel"
+ SOURCE_DATE_EPOCH="1639381582"
+ YACC="bison"

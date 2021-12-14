@@ -1,0 +1,5 @@
+linux-upstream (1stable) bionic; urgency=low
+
+  * Custom built Linux kernel.
+
+ -- root <root@dev131.embedfire.local>  Mon, 13 Dec 2021 07:46:22 +0000
