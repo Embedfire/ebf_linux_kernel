@@ -32,10 +32,11 @@
                 pinctrl-names = "default";
                 pinctrl-0 = <&pinctrl_gpio_led>;
 
-                status {
-                        label = "status";
+                led0: cpu {
+                        label = "cpu";
                         gpios = <&gpio3 16 GPIO_ACTIVE_HIGH>;
-                        default-state = "on";
+			default-state = "on";
+                       	linux,default-trigger = "heartbeat"; 
                 };
         };
 
@@ -109,7 +110,7 @@
         pinctrl-0 = <&pinctrl_usdhc2>, <&pinctrl_usdhc2_gpio>;
         pinctrl-1 = <&pinctrl_usdhc2_100mhz>, <&pinctrl_usdhc2_gpio>;
         pinctrl-2 = <&pinctrl_usdhc2_200mhz>, <&pinctrl_usdhc2_gpio>;
-        cd-gpios = <&gpio1 15 GPIO_ACTIVE_LOW>;
+        cd-gpios = <&gpio2 12 GPIO_ACTIVE_LOW>;
         bus-width = <4>;
         vmmc-supply = <&reg_usdhc2_vmmc>;
         status = "okay";
@@ -129,6 +130,22 @@
         pinctrl-names = "default";
         pinctrl-0 = <&pinctrl_wdog>;
         fsl,ext-reset-output;
+        status = "okay";
+};
+
+&vpu_g1 {
+        status = "okay";
+};
+
+&vpu_g2 {
+        status = "okay";
+};
+
+&vpu_h1 {
+        status = "okay";
+};
+
+&gpu {
         status = "okay";
 };
 
@@ -312,7 +329,7 @@
 
         pinctrl_usdhc2_gpio: usdhc2grpgpio {
                 fsl,pins = <
-                        MX8MM_IOMUXC_GPIO1_IO15_GPIO1_IO15      0x1c4
+                	MX8MM_IOMUXC_SD2_CD_B_GPIO2_IO12        0x1c4 
                 >;
         };
 
@@ -406,3 +423,4 @@
                 >;
         };
 };
+
