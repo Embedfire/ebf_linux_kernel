@@ -10,6 +10,7 @@ dtbo-$(CONFIG_ARCH_MXC) += \
 	imx8mm-fire-sound.dtbo \
 	imx8mm-fire-touch-capacitive-goodix.dtbo \
 	imx8mm-fire-hdmi.dtbo \
+	imx8mm-fire-pcie.dtbo \
 
 targets += dtbs dtbs_install dtbs_check
 targets += $(dtbo-y)

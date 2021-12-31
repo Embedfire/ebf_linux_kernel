@@ -1,0 +1,79 @@
+/*
+ * Copyright (C) 2021 - All Rights Reserved by 
+ * filename : imx8mm-fire-pcie-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm pcie device
+ * author : embedfire
+ * date : 2021-12-04 
+ * version : A001
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "../imx8mm-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+#include "dt-bindings/clock/imx8mm-clock.h"
+
+/ {
+        fragment@0 {
+                target-path = "/";
+                __overlay__ {
+			pcie0_refclk: pcie0-refclk {
+				compatible = "fixed-clock";
+				#clock-cells = <0>;
+				clock-frequency = <100000000>;
+			};
+
+                        pcie0_3v3: regulator-pcie0_3v3 {
+                                compatible = "regulator-fixed";
+				pinctrl-names = "default";
+				pinctrl-0 = <&pcie0_3v3_en>;
+                                regulator-name = "pcie0_3v3";
+                                regulator-min-microvolt = <3300000>;
+                                regulator-max-microvolt = <3300000>;
+				gpio = <&gpio3 20 GPIO_ACTIVE_HIGH>;	
+				off-on-delay-us = <20000>;
+				startup-delay-us = <100>;
+				enable-active-high;
+                        };
+		};
+	};
+
+        fragment@1 {
+                target= <&pcie0>;
+                __overlay__{
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_pcie0>;
+			disable-gpio = <&gpio4 27 GPIO_ACTIVE_LOW>; 
+			reset-gpio = <&gpio3 25 GPIO_ACTIVE_LOW>;
+			clocks = <&clk IMX8MM_CLK_PCIE1_ROOT>,
+				 <&clk IMX8MM_CLK_PCIE1_AUX>,
+				 <&clk IMX8MM_CLK_PCIE1_PHY>,
+				 <&pcie0_refclk>;
+			clock-names = "pcie", "pcie_aux", "pcie_phy", "pcie_bus";
+			ext_osc = <1>;
+			reserved-region = <&rpmsg_reserved>;
+			vpcie-supply = <&pcie0_3v3>;
+			status = "okay";
+                };
+        };
+
+	fragment@2 {
+		target= <&iomuxc>;
+		__overlay__{
+			pinctrl_pcie0: pcie0grp {
+				fsl,pins = <
+					MX8MM_IOMUXC_SAI5_MCLK_GPIO3_IO25	0x41 
+					MX8MM_IOMUXC_SAI2_MCLK_GPIO4_IO27	0x41 
+				>;
+			};
+
+			pcie0_3v3_en: pcie03v3engrp{
+				fsl,pins = <
+					MX8MM_IOMUXC_SAI5_RXC_GPIO3_IO20	0x01
+				>;	
+			};
+
+		};
+	};
+};
