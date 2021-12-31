@@ -1,0 +1,76 @@
+/*
+ * Copyright (C) 2021 - All Rights Reserved by 
+ * filename : imx8mm-fire-leds-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm led device
+ * author : embedfire
+ * date : 2021-12-01 
+ * version : A001
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "../imx8mm-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+#include "dt-bindings/input/linux-event-codes.h"
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			normal_led {
+				compatible = "gpio-leds"; 
+				
+				red {
+					pinctrl-names = "default";
+					pinctrl-0 = <&pinctrl_red>;
+					label = "red";
+					gpios = <&gpio1 10 GPIO_ACTIVE_LOW>;
+					default-state = "off";
+					linux,default-trigger = "none";
+				};	
+
+				green {
+					pinctrl-names = "default";
+					pinctrl-0 = <&pinctrl_green>;
+					label = "green";
+					gpios = <&gpio1 11 GPIO_ACTIVE_LOW>;
+					default-state = "off";
+					linux,default-trigger = "none";
+				};	
+
+				blue {
+					pinctrl-names = "default";
+					pinctrl-0 = <&pinctrl_blue>;
+					label = "blue";
+					gpios = <&gpio1 12 GPIO_ACTIVE_LOW>;
+					default-state = "off";
+					linux,default-trigger = "none";
+				};	
+			};
+		};
+	};
+	
+	fragment@1 {
+		target= <&iomuxc>;
+		__overlay__{
+			pinctrl_red: redgrp {
+				fsl,pins = <
+					MX8MM_IOMUXC_GPIO1_IO10_GPIO1_IO10	0x19
+				>;
+			};
+
+			pinctrl_green: grngrp {
+				fsl,pins = <
+					MX8MM_IOMUXC_GPIO1_IO11_GPIO1_IO11	0x19
+				>;
+			};
+
+			pinctrl_blue: bluegrp {
+				fsl,pins = <
+					MX8MM_IOMUXC_GPIO1_IO12_GPIO1_IO12	0x19
+				>;
+			};
+		};
+	};
+};
