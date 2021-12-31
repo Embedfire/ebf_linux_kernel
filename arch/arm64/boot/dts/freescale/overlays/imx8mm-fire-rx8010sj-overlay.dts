@@ -36,8 +36,15 @@
 			};
 		};
 	};
-	
+
 	fragment@1 {
+		target = <&snvs_rtc>;
+		__overlay__ {
+			status = "disable";
+		};
+	};
+	
+	fragment@2 {
 		target= <&iomuxc>;
 		__overlay__{
 			pinctrl_rtc: rtc_grp {
