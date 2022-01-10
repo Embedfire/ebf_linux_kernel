@@ -14,9 +14,9 @@
 
 	aliases: aliases {
 		ethernet1 = &r8169;
-		mmc0 = &sdmmc;
-		mmc1 = &sdio0;
-		mmc2 = &sdhci;
+		// mmc0 = &sdmmc;
+		// mmc1 = &sdio0;
+		// mmc2 = &sdhci;
 	};
 
 	chosen: chosen {
@@ -646,6 +646,18 @@
 
 &saradc {
 	vref-supply = <&vcca1v8_s3>;
+	status = "okay";
+};
+
+&emmc_phy {
+	status = "okay";
+};
+
+&sdhci {
+	bus-width = <8>;
+	mmc-hs400-1_8v;
+	mmc-hs400-enhanced-strobe;
+	non-removable;
 	status = "okay";
 };
 
