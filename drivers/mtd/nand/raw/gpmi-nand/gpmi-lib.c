@@ -450,7 +450,7 @@ static void gpmi_nfc_compute_timings(struct gpmi_nand_data *this,
 
 	/* SDR core timings are given in picoseconds */
 	period_ps = div_u64((u64)NSEC_PER_SEC * 1000, hw->clk_rate);
-
+	
 	addr_setup_cycles = TO_CYCLES(sdr->tALS_min, period_ps);
 	data_setup_cycles = TO_CYCLES(sdr->tDS_min, period_ps);
 	data_hold_cycles = TO_CYCLES(sdr->tDH_min, period_ps);
@@ -496,9 +496,17 @@ void gpmi_nfc_apply_timings(struct gpmi_nand_data *this)
 	struct resources *r = &this->resources;
 	void __iomem *gpmi_regs = r->gpmi_regs;
 	unsigned int dll_wait_time_us;
+	int ret;
 
+	if (GPMI_IS_MX6ULL(this)) {
+		ret = __gpmi_enable_clk(this, false);
+	}
 	clk_set_rate(r->clock[0], hw->clk_rate);
 
+	if (GPMI_IS_MX6ULL(this)) {
+		ret = __gpmi_enable_clk(this, true);
+
+	}
 	writel(hw->timing0, gpmi_regs + HW_GPMI_TIMING0);
 	writel(hw->timing1, gpmi_regs + HW_GPMI_TIMING1);
 

@@ -816,7 +816,7 @@ static int gpmi_get_clks(struct gpmi_nand_data *this)
 
 		r->clock[i] = clk;
 	}
-
+#if 0
 	if (GPMI_IS_MX6(this) || GPMI_IS_MX8(this))
 		/*
 		 * Set the default value for the gpmi clock.
@@ -825,7 +825,7 @@ static int gpmi_get_clks(struct gpmi_nand_data *this)
 		 * Synchronous Mode, you should change the clock as you need.
 		 */
 		clk_set_rate(r->clock[0], 22000000);
-
+#endif
 	return 0;
 
 err_clock:
@@ -1011,6 +1011,8 @@ static void gpmi_cmd_ctrl(struct mtd_info *mtd, int data, unsigned int ctrl)
 	 * queue them up and run a single DMA operation for the entire series
 	 * of command and data bytes. NAND_CMD_NONE means the END of the queue.
 	 */
+
+	/* queue them up and run a single DMA */
 	if ((ctrl & (NAND_ALE | NAND_CLE))) {
 		if (data != NAND_CMD_NONE)
 			this->cmd_buffer[this->command_length++] = data;
