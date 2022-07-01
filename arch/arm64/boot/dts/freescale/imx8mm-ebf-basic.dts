@@ -9,8 +9,8 @@
 #include "imx8mm.dtsi"
 
 / {
-        model = "EBF i.MX8MM B1 board";
-        compatible = "fsl,imx8mm-evk", "fsl,imx8mm";
+        model = "EBF i.MX8MM S1 Board";
+        compatible = "ebf,imx8mm-s1", "fsl,imx8mm";
 
         reserved-memory {
                 #address-cells = <2>;
