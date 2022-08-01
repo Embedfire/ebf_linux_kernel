@@ -14,6 +14,8 @@ dtbo-$(CONFIG_ARCH_MXC) += \
 	imx8mm-fire-keys.dtbo \
 	imx8mm-fire-leds.dtbo \
 	imx8mm-fire-rpmsg.dtbo \
+	imx8mm-fire-pwm1.dtbo \
+	imx8mm-fire-pwm2.dtbo \
 
 targets += dtbs dtbs_install dtbs_check
 targets += $(dtbo-y)
