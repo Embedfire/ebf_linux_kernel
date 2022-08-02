@@ -1,0 +1,54 @@
+/*
+ * Copyright (C) 2021 - All Rights Reserved by 
+ * filename : imx8mm-fire-spi-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm spi device
+ * author : embedfire
+ * date : 2022-08-02 
+ * version : A001
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "../imx8mm-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+#include "dt-bindings/clock/imx8mm-clock.h"
+
+/ {
+	fragment@0 {
+		target = <&ecspi2>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			fsl,spi-num-chipselects = <1>;
+			cs-gpios = <&gpio5 13 GPIO_ACTIVE_LOW>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_ecspi2>;
+			status = "okay";
+
+			spidev0: spi@0 {
+				reg = <0>;
+				compatible = "rohm,dh2228fv";
+				status = "okay";
+				spi-max-frequency = <5000000>;
+			};
+			
+		};
+	};
+	
+	fragment@1 {
+		target= <&iomuxc>;
+		__overlay__{
+			pinctrl_ecspi2: ecspi2grp {
+				fsl,pins = <
+					MX8MM_IOMUXC_ECSPI2_MISO_ECSPI2_MISO       0x00000116
+					MX8MM_IOMUXC_ECSPI2_MOSI_ECSPI2_MOSI       0x00000116
+					MX8MM_IOMUXC_ECSPI2_SCLK_ECSPI2_SCLK       0x00001916
+					MX8MM_IOMUXC_ECSPI2_SS0_ECSPI2_SS0         0x00000116
+				>;
+			};
+		};
+	};
+};
+
+
