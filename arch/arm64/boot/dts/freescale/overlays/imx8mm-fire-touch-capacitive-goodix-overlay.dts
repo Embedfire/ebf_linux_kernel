@@ -28,6 +28,7 @@
 
 			gtxx_tsc@5d {
 				compatible = "goodix,gt911";
+				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_tsc>;
 				reg = <0x5d>;
 				status = "okay";
