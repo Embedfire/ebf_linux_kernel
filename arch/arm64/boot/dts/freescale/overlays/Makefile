@@ -17,6 +17,7 @@ dtbo-$(CONFIG_ARCH_MXC) += \
 	imx8mm-fire-pwm1.dtbo \
 	imx8mm-fire-pwm2.dtbo \
 	imx8mm-fire-spi.dtbo \
+	imx8mm-fire-rs232.dtbo \
 
 targets += dtbs dtbs_install dtbs_check
 targets += $(dtbo-y)

@@ -388,9 +388,6 @@ static int ili9881c_enable(struct drm_panel *panel)
 	struct device *dev = &dsi->dev;
 	int color_format = color_format_from_dsi_format(dsi->format);
 	int ret;
-
-	printk("(ili9881) driver:\n\t\t\tversion-----v1.2\n\t\t\tdate : 2022/08/28!\n\t\t\twriter:embedfire!\n");
-
 	
 	ret = ili9881c_cmd_init(panel);
 	if (ret < 0) {
@@ -398,7 +395,7 @@ static int ili9881c_enable(struct drm_panel *panel)
 		goto fail;
 	}
 
-	msleep(16);
+	msleep(60);
 
 	ret = mipi_dsi_dcs_set_tear_on(dsi, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
 	if (ret < 0) {
@@ -418,7 +415,7 @@ static int ili9881c_enable(struct drm_panel *panel)
 		goto fail;
 	}
 
-	msleep(6);
+	msleep(60);
 
 	ret = mipi_dsi_dcs_set_display_on(ctx->dsi);
 	if (ret < 0) {
@@ -572,8 +569,9 @@ static int ili9881c_dsi_probe(struct mipi_dsi_device *dsi)
 	dsi->lanes = 4;
 
 	ret = mipi_dsi_attach(dsi);
- 
 
+	printk("ili9881c driver:\n\t\t\tversion-----v1.4\n");
+	//2022/08/06
 
 	return ret;
 }
