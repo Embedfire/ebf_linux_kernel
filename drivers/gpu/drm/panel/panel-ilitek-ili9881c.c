@@ -361,7 +361,11 @@ static int ili9881c_prepare(struct drm_panel *panel)
 		return ret;
 
 	gpiod_set_value(ctx->reset, 0);
+	msleep(1);
+	gpiod_set_value(ctx->reset, 1);
 	msleep(20);
+	gpiod_set_value(ctx->reset, 0);
+	msleep(200);
 	return 0;
 }
 
@@ -395,19 +399,14 @@ static int ili9881c_enable(struct drm_panel *panel)
 		goto fail;
 	}
 
-	msleep(60);
-
-	ret = mipi_dsi_dcs_set_tear_on(dsi, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
-	if (ret < 0) {
-		DRM_DEV_ERROR(dev, "Failed to set tear ON (%d)\n", ret);
-		goto fail;
-	}
 	ret = mipi_dsi_dcs_set_pixel_format(dsi, color_format);
 	DRM_DEV_DEBUG_DRIVER(dev, "Interface color format set to color_format(color_format)\n");
 	if (ret < 0) {
 		DRM_DEV_ERROR(dev, "Failed to set pixel format (%d)\n", ret);
 		goto fail;
 	}
+	
+	msleep(10);
 	/* Exit sleep mode */
 	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
 	if (ret < 0) {
@@ -415,14 +414,15 @@ static int ili9881c_enable(struct drm_panel *panel)
 		goto fail;
 	}
 
-	msleep(60);
+	msleep(120);
 
 	ret = mipi_dsi_dcs_set_display_on(ctx->dsi);
 	if (ret < 0) {
 		DRM_DEV_ERROR(dev, "Failed to set display ON (%d)\n", ret);
 		goto fail;
 	}
-
+	
+	msleep(25);
 	backlight_enable(ctx->backlight);
 
 	return 0;
@@ -446,7 +446,7 @@ static int ili9881c_disable(struct drm_panel *panel)
 		return ret;
 	}
 
-	msleep(10);
+	msleep(120);
 
 	ret = mipi_dsi_dcs_enter_sleep_mode(dsi);
 	if (ret < 0) {
@@ -460,11 +460,12 @@ static int ili9881c_unprepare(struct drm_panel *panel)
 {
 	struct ili9881c *ctx = panel_to_ili9881c(panel);
 
-	//mipi_dsi_dcs_enter_sleep_mode(ctx->dsi);
+	mipi_dsi_dcs_enter_sleep_mode(ctx->dsi);
 	
-	gpiod_set_value(ctx->reset, 1);
-	msleep(16);
 	gpiod_set_value(ctx->reset, 0);
+	msleep(16);
+	gpiod_set_value(ctx->reset, 1);
+	msleep(120);
 	regulator_disable(ctx->power);
 	return 0;
 }
@@ -570,8 +571,7 @@ static int ili9881c_dsi_probe(struct mipi_dsi_device *dsi)
 
 	ret = mipi_dsi_attach(dsi);
 
-	printk("ili9881c driver:\n\t\t\tversion-----v1.4\n");
-	//2022/08/06
+	printk("ili9881c driver:\nversion-----v1.4.5\n");
 
 	return ret;
 }

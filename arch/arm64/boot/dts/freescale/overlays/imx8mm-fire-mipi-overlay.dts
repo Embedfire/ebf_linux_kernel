@@ -60,19 +60,20 @@
 		target= <&mipi_dsi>;
 		__overlay__{
 			status = "okay";
-				#address-cells = <1>;
+			#address-cells = <1>;
         		#size-cells = <0>;
-				panel@0 {
-						compatible = "bananapi,lhr050h41", "ili9881c-dsi";
-						reg = <0>;
-						pinctrl-0 = <&dsi_rst>;
-						reset-gpios = <&gpio1 8 GPIO_ACTIVE_LOW>;
-						power-supply = <&v3v3>;
-						backlight = <&backlight>;
-						status = "okay";
-						timing-mode = <0>;
-						video-mode = <2>;
-				};
+			panel@0 {
+				compatible = "bananapi,lhr050h41", "ili9881c-dsi";
+				reg = <0>;
+                                pinctrl-names = "default";
+				pinctrl-0 = <&dsi_rst>;
+				reset-gpios = <&gpio1 8 GPIO_ACTIVE_LOW>;
+				power-supply = <&v3v3>;
+				backlight = <&backlight>;
+				status = "okay";
+				timing-mode = <0>;
+				video-mode = <2>;
+			};
 		};
 	};
 
@@ -87,18 +88,18 @@
         };
 
     fragment@4 {
-            target= <&iomuxc>;
-            __overlay__{
-                    pinctrl_pwm1:pwm1grp {
-                            fsl,pins = <
-                                    MX8MM_IOMUXC_GPIO1_IO01_PWM1_OUT  0x116
-                            >;
-                    };
-					dsi_rst:dsi_rst {
-						fsl,pins = <
-								MX8MM_IOMUXC_GPIO1_IO08_GPIO1_IO8       0x116
-							>;
-						};
+                target= <&iomuxc>;
+                __overlay__{
+                pinctrl_pwm1:pwm1grp {
+                        fsl,pins = <
+                                        MX8MM_IOMUXC_GPIO1_IO01_PWM1_OUT  0x116
+                        >;
+                };
+		dsi_rst:dsi_rst {
+			fsl,pins = <
+				        MX8MM_IOMUXC_GPIO1_IO08_GPIO1_IO8       0x116
+				>;
+			};
             	};
     };
 };
