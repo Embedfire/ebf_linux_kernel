@@ -34,6 +34,7 @@ dtbo-$(CONFIG_SOC_IMX6ULL) += \
 	imx-fire-resistive-screen.dtbo	\
 	imx-fire-sound.dtbo		\
 	imx-fire-touch-capacitive-goodix.dtbo	\
+	imx-fire-4.3-touch-capacitive-gt1151.dtbo	\
 	imx-fire-touch-resisitive-4wires.dtbo	\
 	imx-fire-uart2.dtbo		\
 	imx-fire-uart3.dtbo		\
