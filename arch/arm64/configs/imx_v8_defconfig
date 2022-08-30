@@ -4,7 +4,7 @@
 #
 
 #
-# Compiler: gcc (Ubuntu 7.5.0-3ubuntu1~18.04) 7.5.0
+# Compiler: aarch64-linux-gnu-gcc (Ubuntu/Linaro 7.5.0-3ubuntu1~18.04) 7.5.0
 #
 CONFIG_CC_IS_GCC=y
 CONFIG_GCC_VERSION=70500
@@ -2349,7 +2349,7 @@ CONFIG_NET_VENDOR_RDC=y
 CONFIG_NET_VENDOR_REALTEK=y
 # CONFIG_8139CP is not set
 # CONFIG_8139TOO is not set
-CONFIG_R8169=y
+CONFIG_R8169=m
 CONFIG_NET_VENDOR_RENESAS=y
 CONFIG_NET_VENDOR_ROCKER=y
 # CONFIG_ROCKER is not set
