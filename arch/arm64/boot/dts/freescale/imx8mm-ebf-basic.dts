@@ -52,6 +52,16 @@
                 enable-active-high;
         };
 
+        reg_otg_vbus: regulator-otg-vbus {
+                compatible = "regulator-fixed";
+                pinctrl-names = "default";
+                pinctrl-0 = <&pinctrl_reg_otg_vbus>;
+                enable-active-high;
+                regulator-min-microvolt = <5000000>;
+                regulator-max-microvolt = <5000000>;
+                gpio = <&gpio1 15 GPIO_ACTIVE_HIGH>;
+                regulator-name = "otg_vbus";
+        };
 };
 
 &A53_0 {
@@ -96,6 +106,7 @@
         srp-disable;
         hnp-disable;
         adp-disable;
+	vbus-supply = <&reg_otg_vbus>;
         status = "okay";
 };
 
@@ -279,6 +290,12 @@
         pinctrl_gpio_led: gpioledgrp {
                 fsl,pins = <
                         MX8MM_IOMUXC_NAND_READY_B_GPIO3_IO16    0x19
+                >;
+        };
+
+        pinctrl_reg_otg_vbus: regotgvbusgrp {
+                fsl,pins = <
+                        MX8MM_IOMUXC_GPIO1_IO15_GPIO1_IO15      0x41
                 >;
         };
 
