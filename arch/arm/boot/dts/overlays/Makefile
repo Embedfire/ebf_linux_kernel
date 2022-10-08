@@ -19,7 +19,8 @@ dtbo-$(CONFIG_ARCH_STM32) += \
 	stm-fire-485r1.dtbo \
 	stm-fire-485r2.dtbo \
 	stm-fire-spi4.dtbo \
-	stm-fire-ltdc.dtbo
+	stm-fire-ltdc.dtbo \
+	stm-fire-touch-capacitive-4.3.dtbo
 
 targets += dtbs dtbs_install
 targets += $(dtbo-y)

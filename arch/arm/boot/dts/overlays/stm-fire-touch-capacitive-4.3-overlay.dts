@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/**/
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/pinctrl/stm32-pinfunc.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/mfd/st,stpmic1.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/{
+	fragment@0{
+		target=<&i2c1>;
+		__overlay__{
+			#address-cells = <1>;
+			#size-cells = <0>;
+			gtxx_tsc@14 {
+				compatible = "goodix,gt917s";
+				reg = <0x14>;
+				status = "okay";
+				/*gpio*/
+				reset-gpios = <&gpioe 12 GPIO_ACTIVE_LOW>;
+				irq-gpios = <&gpioz 4 GPIO_ACTIVE_HIGH>;
+				/*interrupt­*/
+				interrupt-parent = <&gpioz>;
+				interrupts = <4 IRQ_TYPE_EDGE_FALLING>;
+				irq-flags = <2>;		/*1:rising 2: falling*/	
+			};              
+		};
+	};
+};
