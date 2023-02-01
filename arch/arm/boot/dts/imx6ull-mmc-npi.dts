@@ -396,6 +396,8 @@
 &usdhc2 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_usdhc2_8bit>;
+	bus-width = <8>;
+	no-1-8-v;
 	non-removable;
 	status = "okay";
 };
