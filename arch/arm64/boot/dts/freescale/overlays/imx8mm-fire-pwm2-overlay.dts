@@ -45,22 +45,12 @@
 		};
 	};
 
-	fragment@3 {
-		target= <&pwm4>;
-        __overlay__{
-			pinctrl-names = "default";
-		    pinctrl-0 = <&pinctrl_pwm4>;
-		    status = "okay";
-		};
-	};
-
 /*
 *	pwm1-----GPIO5_IO05
 *	pwm2-----GPIO5_IO04
 *	pwm3-----GPIO5_IO03
-*	pwm4-----GPIO1_IO15
 */
-	fragment@4 {
+	fragment@3 {
 		target= <&iomuxc>;
 		__overlay__{
 			pinctrl_pwm1: pwm1grp {
@@ -76,11 +66,6 @@
 			pinctrl_pwm3: pwm3grp {
 				fsl,pins = <
 					MX8MM_IOMUXC_SPDIF_TX_PWM3_OUT             0x00000116
-				>;
-			};
-			pinctrl_pwm4: pwm4grp {
-				fsl,pins = <
-					MX8MM_IOMUXC_GPIO1_IO15_PWM4_OUT           0x00000116
 				>;
 			};
 		};
