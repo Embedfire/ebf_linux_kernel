@@ -196,8 +196,19 @@ static int rx8010_init_client(struct i2c_client *client)
 {
 	struct rx8010_data *rx8010 = i2c_get_clientdata(client);
 	u8 ctrl[2];
-	int need_clear = 0, err = 0;
+	int need_clear = 0, err = 0, flagreg;
 
+    flagreg = i2c_smbus_read_byte_data(rx8010->client, RX8010_FLAG);
+    if (flagreg < 0) 
+        return flagreg;
+    
+    if (flagreg & RX8010_FLAG_VLF) {
+        err = i2c_smbus_write_byte_data(rx8010->client, RX8010_FLAG,
+                        flagreg & ~RX8010_FLAG_VLF);
+        if (err < 0)
+            return err;
+    };
+ 
 	/* Initialize reserved registers as specified in datasheet */
 	err = i2c_smbus_write_byte_data(client, RX8010_RESV17, 0xD8);
 	if (err < 0)
@@ -222,7 +233,6 @@ static int rx8010_init_client(struct i2c_client *client)
 
 	if (ctrl[0] & RX8010_FLAG_VLF) {
 		dev_warn(&client->dev, "Frequency stop was detected\n");
-		need_clear = 1;
 	}
 
 	if (ctrl[0] & RX8010_FLAG_AF) {
@@ -237,7 +247,7 @@ static int rx8010_init_client(struct i2c_client *client)
 		need_clear = 1;
 
 	if (need_clear) {
-		ctrl[0] &= ~(RX8010_FLAG_VLF | RX8010_FLAG_AF | RX8010_FLAG_TF | RX8010_FLAG_UF);
+		ctrl[0] &= ~(RX8010_FLAG_AF | RX8010_FLAG_TF | RX8010_FLAG_UF);
 		err = i2c_smbus_write_byte_data(client, RX8010_FLAG, ctrl[0]);
 		if (err < 0)
 			return err;
