@@ -15,37 +15,38 @@
 #include "dt-bindings/clock/imx8mm-clock.h"
 
 / {
-        fragment@0 {
-                target-path = "/";
-                __overlay__ {
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
 			pcie0_refclk: pcie0-refclk {
 				compatible = "fixed-clock";
 				#clock-cells = <0>;
 				clock-frequency = <100000000>;
 			};
 
-                        pcie0_3v3: regulator-pcie0_3v3 {
-                                compatible = "regulator-fixed";
+            pcie0_3v3: regulator-pcie0_3v3 {
+                compatible = "regulator-fixed";
 				pinctrl-names = "default";
 				pinctrl-0 = <&pcie0_3v3_en>;
-                                regulator-name = "pcie0_3v3";
-                                regulator-min-microvolt = <3300000>;
-                                regulator-max-microvolt = <3300000>;
+                regulator-name = "pcie0_3v3";
+                regulator-min-microvolt = <3300000>;
+                regulator-max-microvolt = <3300000>;
 				gpio = <&gpio3 20 GPIO_ACTIVE_HIGH>;	
 				off-on-delay-us = <20000>;
 				startup-delay-us = <100>;
 				enable-active-high;
-                        };
+                regulator-always-on;
+            };
 		};
 	};
 
-        fragment@1 {
-                target= <&pcie0>;
-                __overlay__{
+    fragment@1 {
+        target= <&pcie0>;
+        __overlay__{
 			pinctrl-names = "default";
 			pinctrl-0 = <&pinctrl_pcie0>;
-			disable-gpio = <&gpio4 27 GPIO_ACTIVE_LOW>; 
-			reset-gpio = <&gpio3 25 GPIO_ACTIVE_LOW>;
+			disable-gpio = <&gpio4 27 GPIO_ACTIVE_HIGH>; 
+			reset-gpio = <&gpio3 25 GPIO_ACTIVE_HIGH>;
 			clocks = <&clk IMX8MM_CLK_PCIE1_ROOT>,
 				 <&clk IMX8MM_CLK_PCIE1_AUX>,
 				 <&clk IMX8MM_CLK_PCIE1_PHY>,
@@ -55,8 +56,8 @@
 			reserved-region = <&rpmsg_reserved>;
 			vpcie-supply = <&pcie0_3v3>;
 			status = "okay";
-                };
         };
+    };
 
 	fragment@2 {
 		target= <&iomuxc>;
