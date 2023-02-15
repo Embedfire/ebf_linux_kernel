@@ -1,0 +1,115 @@
+/*
+ * Copyright (C) 2021 - All Rights Reserved by 
+ * filename : imx8mm-fire-mipi-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm hx8394 lcd device
+ * author : embedfire
+ * date : 2023-02-05 
+ * version : A001
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "../imx8mm-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+
+/ {
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            v3v3: regulator-3p3v {
+                compatible = "regulator-fixed";
+                regulator-name = "v3v3";
+                regulator-min-microvolt = <3300000>;
+                regulator-max-microvolt = <3300000>;
+                regulator-always-on;
+                regulator-boot-on;
+            };
+
+            backlight:backlight{
+                compatible = "pwm-backlight";
+                pwms = <&pwm1 0 50000>;
+                status = "okay";
+
+                brightness-levels = < 0  1  2  3  4  5  6  7  8  9
+                                      10 11 12 13 14 15 16 17 18 19
+                                      20 21 22 23 24 25 26 27 28 29
+                                      30 31 32 33 34 35 36 37 38 39
+                                      40 41 42 43 44 45 46 47 48 49
+                                      50 51 52 53 54 55 56 57 58 59
+                                      60 61 62 63 64 65 66 67 68 69
+                                      70 71 72 73 74 75 76 77 78 79
+                                      80 81 82 83 84 85 86 87 88 89
+                                      90 91 92 93 94 95 96 97 98 99
+                                      100>;
+                 default-brightness-level = <80>;
+            };
+        };
+    };
+
+    fragment@1 {
+        target= <&lcdif>;
+        __overlay__{
+            status = "okay";
+        };
+    };
+
+	fragment@2 {
+		target= <&mipi_dsi>;
+		__overlay__{
+			status = "okay";
+			#address-cells = <1>;
+        	#size-cells = <0>;
+			panel@0 {
+				compatible = "himax,hx8399";
+				reg = <0>;
+                pinctrl-names = "default";
+				pinctrl-0 = <&dsi_rst>;
+				reset-gpios = <&gpio1 8 GPIO_ACTIVE_LOW>;
+				power-supply = <&v3v3>;
+				backlight = <&backlight>;
+
+                clock-frequency = <130854000>;
+                hactive = <1080>;
+                vactive = <1920>;
+                hfront-porch = <35>;
+                hback-porch = <10>;
+                hsync-len = <5>;
+                hsync-active = <0>;
+                vfront-porch = <4>;
+                vback-porch = <4>;
+                vsync-len = <2>;
+                vsync-active = <0>;
+                vrefresh = <60>;
+
+				status = "okay";
+			};
+		};
+	};
+
+
+	fragment@3 {
+         target= <&pwm1>;
+         __overlay__{
+             pinctrl-names = "default";
+             pinctrl-0 = <&pinctrl_pwm1>;
+             status = "okay";
+        };
+    };
+
+    fragment@4 {
+         target= <&iomuxc>;
+         __overlay__{
+            pinctrl_pwm1:pwm1grp {
+                fsl,pins = <
+                    MX8MM_IOMUXC_GPIO1_IO01_PWM1_OUT   0x116
+                    >;
+                };
+		    dsi_rst:dsi_rst {
+			    fsl,pins = <
+				    MX8MM_IOMUXC_GPIO1_IO08_GPIO1_IO8  0x116
+				>;
+		    };
+         };
+    };
+};

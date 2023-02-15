@@ -6,6 +6,7 @@ dtbo-$(CONFIG_ARCH_MXC) += \
 	imx8mm-fire-rs485.dtbo \
 	imx8mm-fire-btwifi.dtbo \
 	imx8mm-fire-mipi-ili9881c.dtbo \
+	imx8mm-fire-mipi-hx8399.dtbo \
 	imx8mm-fire-cam.dtbo \
 	imx8mm-fire-sound.dtbo \
 	imx8mm-fire-touch-capacitive-goodix.dtbo \
