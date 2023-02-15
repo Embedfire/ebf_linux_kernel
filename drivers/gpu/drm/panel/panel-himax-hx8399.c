@@ -10,6 +10,7 @@
 
 
 /* User define command list (available only set “SETEXC” command)*/
+#define CMD_SETMADCTL   0x36 /* Set Memory access control */
 #define CMD_SETAUTO     0xB0 /* Set sequence */
 #define CMD_SETPOWER    0xB1 /* Set power */
 #define CMD_SETDISP     0xB2 /* Set display related register */
@@ -157,6 +158,8 @@ static int hx8399_init_sequence(struct hx8399 *ctx)
 	/* set display */
     dcs_write_seq(ctx, CMD_SETDISP, 0x00, 0x80, 0x80, 0xAE, 0x05, 0x07,
 					0x5A, 0x11, 0x00, 0x00, 0x10, 0x1E, 0x70, 0x03, 0xD4);
+    /* Set Memory access control */
+    dcs_write_seq(ctx, CMD_SETMADCTL, 0x02);
     /* set cycles */
     dcs_write_seq(ctx, CMD_SETCYC, 0x00, 0xFF, 0x02, 0xC0, 0x02, 0xC0, 0x00,
                     0x00, 0x08, 0x00, 0x04, 0x06, 0x00, 0x32, 0x04, 0x0A, 0x08, 0x21, 0x03, 0x01, 0x00,
