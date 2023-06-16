@@ -9,6 +9,17 @@
 #include <linux/gfp.h>
 #include <linux/sync_core.h>
 
+#ifdef CONFIG_PREEMPT_RT_BASE
+extern void __mmdrop_delayed(struct rcu_head *rhp);
+static inline void mmdrop_delayed(struct mm_struct *mm)
+{
+	if (atomic_dec_and_test(&mm->mm_count))
+		call_rcu(&mm->delayed_drop, __mmdrop_delayed);
+}
+#else
+# define mmdrop_delayed(mm)	mmdrop(mm)
+#endif
+
 /*
  * Routines for handling mm_structs
  */
