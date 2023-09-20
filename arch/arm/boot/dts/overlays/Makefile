@@ -36,6 +36,7 @@ dtbo-$(CONFIG_SOC_IMX6ULL) += \
 	imx-fire-touch-capacitive-goodix.dtbo	\
 	imx-fire-touch-capacitive-gt1151.dtbo	\
 	imx-fire-touch-resisitive-4wires.dtbo	\
+	imx-fire-touch-capacitive-ft5726.dtbo	\
 	imx-fire-uart2.dtbo		\
 	imx-fire-uart3.dtbo		\
 	imx-fire-uart4.dtbo		\
