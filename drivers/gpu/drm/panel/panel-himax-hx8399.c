@@ -223,21 +223,9 @@ static int hx8399_disable(struct drm_panel *panel)
 static int hx8399_unprepare(struct drm_panel *panel)
 {
 	struct hx8399 *ctx = panel_to_hx8399(panel);
-	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
-	int ret;
- 
+
 	if (!ctx->prepared)
 		return 0;
-
-	ret = mipi_dsi_dcs_set_display_off(dsi);
-	if (ret)
-		DRM_WARN("failed to set display off: %d\n", ret);
-
-	ret = mipi_dsi_dcs_enter_sleep_mode(dsi);
-	if (ret)
-		DRM_WARN("failed to enter sleep mode: %d\n", ret);
-
-	msleep(120);
 
 	regulator_disable(ctx->supply);
 
