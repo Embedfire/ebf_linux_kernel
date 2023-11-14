@@ -4,6 +4,8 @@ dtbo-$(CONFIG_SOC_IMX6ULL) += \
 	imx-fire-74hc595.dtbo \
 	imx-fire-485r1.dtbo \
 	imx-fire-485r2.dtbo \
+	imx-fire-485r1-rts.dtbo \
+	imx-fire-485r2-rts.dtbo \
 	imx-fire-adc1.dtbo	\
 	imx-fire-bluetooth.dtbo \
 	imx-fire-btwifi.dtbo	\
