@@ -2,7 +2,10 @@
 
 dtbo-$(CONFIG_ARCH_MXC) += \
 	imx8mm-fire-rx8010sj.dtbo \
+	imx8mm-fire-uart1.dtbo \
+	imx8mm-fire-uart2.dtbo \
 	imx8mm-fire-uart3.dtbo \
+	imx8mm-fire-uart4.dtbo \
 	imx8mm-fire-rs485.dtbo \
 	imx8mm-fire-btwifi.dtbo \
 	imx8mm-fire-mipi-ili9881c.dtbo \
@@ -17,7 +20,15 @@ dtbo-$(CONFIG_ARCH_MXC) += \
 	imx8mm-fire-rpmsg.dtbo \
 	imx8mm-fire-pwm1.dtbo \
 	imx8mm-fire-pwm2.dtbo \
-	imx8mm-fire-spi.dtbo \
+	imx8mm-fire-pwm3.dtbo \
+	imx8mm-fire-pwm4.dtbo \
+	imx8mm-fire-spi1.dtbo \
+	imx8mm-fire-spi2.dtbo \
+	imx8mm-fire-spi3.dtbo \
+	imx8mm-fire-i2c1.dtbo \
+	imx8mm-fire-i2c2.dtbo \
+	imx8mm-fire-i2c3.dtbo \
+	imx8mm-fire-i2c4.dtbo \
 	imx8mm-fire-rs232.dtbo \
 
 targets += dtbs dtbs_install dtbs_check
