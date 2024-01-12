@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2021 - All Rights Reserved by 
- * filename : imx8mm-fire-pwm1-overlay.dts
+ * filename : imx8mm-fire-pwm2-overlay.dts
  * brief : Device Tree overlay for ebf imx8mm pwm2 device
  * author : embedfire
  * date : 2021-08-01 

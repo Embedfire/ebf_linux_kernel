@@ -1,0 +1,42 @@
+/*
+ * Copyright (C) 2021 - All Rights Reserved by 
+ * filename : imx8mm-fire-dht11-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm dht11 device
+ * author : embedfire
+ * date : 2024-01-12
+ * version : A001
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "../imx8mm-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+#include "dt-bindings/clock/imx8mm-clock.h"
+
+/ {
+		fragment@0 {
+			target-path = "/";
+			__overlay__ {
+				dht11{
+					compatible = "dht11";
+					gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;
+					linux,open-drain;
+					pinctrl-names = "default";
+					pinctrl-0 = <&pinctrl_onewire>;
+					status = "okay";
+				};
+			};
+		};
+
+		fragment@1 {
+			target= <&iomuxc>;
+			__overlay__{
+				pinctrl_onewire: onewire {
+					fsl,pins = <
+						MX8MM_IOMUXC_GPIO1_IO00_GPIO1_IO0          0x140
+					>;
+				};		
+			};
+		};
+	};

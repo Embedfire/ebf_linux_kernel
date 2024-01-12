@@ -30,6 +30,9 @@ dtbo-$(CONFIG_ARCH_MXC) += \
 	imx8mm-fire-i2c3.dtbo \
 	imx8mm-fire-i2c4.dtbo \
 	imx8mm-fire-rs232.dtbo \
+	imx8mm-fire-ds18b20.dtbo \
+	imx8mm-fire-dht11.dtbo \
+
 
 targets += dtbs dtbs_install dtbs_check
 targets += $(dtbo-y)

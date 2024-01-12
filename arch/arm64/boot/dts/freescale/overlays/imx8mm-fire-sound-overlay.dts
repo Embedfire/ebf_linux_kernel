@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2021 - All Rights Reserved by 
  * filename : imx8mm-fire-sound-overlay.dts
- * brief : Device Tree overlay for ebf imx8mm rx8010sj device
+ * brief : Device Tree overlay for ebf imx8mm sound device
  * author : embedfire
  * date : 2021-12-04 
  * version : A001

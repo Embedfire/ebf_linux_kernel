@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2021 - All Rights Reserved by 
- * filename : imx8mm-fire-uart3-overlay.dts
- * brief : Device Tree overlay for ebf imx8mm uart3 device
+ * filename : imx8mm-fire-i2c2-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm i2c2 device
  * author : embedfire
  * date : 2021-12-01 
  * version : A001

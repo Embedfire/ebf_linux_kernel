@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2021 - All Rights Reserved by 
- * filename : imx8mm-fire-spi-overlay.dts
- * brief : Device Tree overlay for ebf imx8mm spi device
+ * filename : imx8mm-fire-spi1-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm spi1 device
  * author : embedfire
  * date : 2022-08-02 
  * version : A001

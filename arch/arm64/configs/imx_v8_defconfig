@@ -6929,6 +6929,15 @@ CONFIG_MXC_MLB150=y
 #
 # end of MXC MIPI Support
 # end of MXC support drivers
+
+#
+# Embedfire Modules
+#
+CONFIG_EBF_MODULE=y
+CONFIG_EBF_DHT11=m
+CONFIG_DS18B20=m
+CONFIG_INFRARED=m
+# end of Embedfire Modules
 # end of Device Drivers
 
 #
