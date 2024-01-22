@@ -1,8 +1,10 @@
 deb_distro=bionic
 DISTRO=stable
-build_opts="-j 6"
+KERNEL_DIR=$(pwd)
+build_opts="-j 8"
 build_opts="${build_opts} O=build_image/build"
 build_opts="${build_opts} ARCH=arm64"
+build_opts="${build_opts} KERNEL_DIR=${KERNEL_DIR}"
 build_opts="${build_opts} KBUILD_DEBARCH=${DEBARCH}"
 build_opts="${build_opts} LOCALVERSION=-carp-imx8mmini"
 build_opts="${build_opts} KDEB_CHANGELOG_DIST=${deb_distro}"
