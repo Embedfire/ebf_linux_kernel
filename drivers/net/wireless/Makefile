@@ -33,4 +33,4 @@ obj-$(CONFIG_VIRT_WIFI)	+= virt_wifi.o
 
 obj-$(CONFIG_BCMDHD) += bcmdhd/
 
-obj-$(CONFIG_BCMDHD) += ebf_wifi/
+obj-$(CONFIG_EBF_WIFI) += ebf_wifi/
