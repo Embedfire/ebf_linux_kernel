@@ -286,6 +286,13 @@
 
 &iomuxc {
         pinctrl-names = "default";
+        pinctrl-0 = <&pinctrl_hog_1>;
+
+        pinctrl_hog_1: hoggrp-1 {
+        fsl,pins = <
+                MX8MM_IOMUXC_GPIO1_IO11_GPIO1_IO11		0x19
+                >;
+        };
 
         pinctrl_gpio_led: gpioledgrp {
                 fsl,pins = <
