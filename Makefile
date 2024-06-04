@@ -390,8 +390,13 @@ export KCONFIG_CONFIG
 # SHELL used by kbuild
 CONFIG_SHELL := sh
 
+KERNEL_DIR :=${LINUX_DIR}
+ifeq ($(KERNEL_DIR),)
 KERNEL_DIR := $(shell pwd)
 export KERNEL_DIR
+else
+export KERNEL_DIR
+endif
 
 HOST_LFS_CFLAGS := $(shell getconf LFS_CFLAGS 2>/dev/null)
 HOST_LFS_LDFLAGS := $(shell getconf LFS_LDFLAGS 2>/dev/null)
