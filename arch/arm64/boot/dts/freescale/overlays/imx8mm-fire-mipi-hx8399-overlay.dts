@@ -69,16 +69,16 @@
 				power-supply = <&v3v3>;
 				backlight = <&backlight>;
 
-                clock-frequency = <130854000>;
+                clock-frequency = <130000000>;
                 hactive = <1080>;
                 vactive = <1920>;
-                hfront-porch = <35>;
-                hback-porch = <10>;
-                hsync-len = <5>;
+                hsync-len = <10>;
+                hback-porch = <20>;
+                hfront-porch = <10>;
+                vsync-len = <5>;
+                vback-porch = <20>;
+                vfront-porch = <10>;
                 hsync-active = <0>;
-                vfront-porch = <4>;
-                vback-porch = <4>;
-                vsync-len = <2>;
                 vsync-active = <0>;
                 vrefresh = <60>;
 
