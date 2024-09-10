@@ -175,6 +175,15 @@ config DRM_PANEL_HIMAX_HX8399
 	  Say Y here if you want to enable support for HIMAX HX8399
 	  1080x1920 DSI video mode panel.
 
+config DRM_PANEL_EBF_EK79007
+	tristate "ebf ek79007 1024x600 DSI video mode panel"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y here if you want to enable support for ebf ek79007
+	  1024x600 DSI video mode panel.
+
 config DRM_PANEL_OSD_OSD101T2587_53TS
 	tristate "OSD OSD101T2587-53TS DSI 1920x1200 video mode panel"
 	depends on OF

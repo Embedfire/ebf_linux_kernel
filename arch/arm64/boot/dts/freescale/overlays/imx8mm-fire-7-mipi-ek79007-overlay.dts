@@ -1,0 +1,156 @@
+/*
+ * Copyright (C) 2021 - All Rights Reserved by 
+ * filename : imx8mm-fire-mipi-overlay.dts
+ * brief : Device Tree overlay for ebf imx8mm hx8394 lcd device
+ * author : embedfire
+ * date : 2023-02-05 
+ * version : A001
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include "../imx8mm-pinfunc.h"
+#include "dt-bindings/gpio/gpio.h"
+#include "dt-bindings/interrupt-controller/arm-gic.h"
+
+/ {
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            v3v3: regulator-3p3v {
+                compatible = "regulator-fixed";
+                regulator-name = "v3v3";
+                regulator-min-microvolt = <3300000>;
+                regulator-max-microvolt = <3300000>;
+                regulator-always-on;
+                regulator-boot-on;
+            };
+
+            backlight:backlight{
+                compatible = "pwm-backlight";
+                pwms = <&pwm1 0 50000>;
+                status = "okay";
+
+                brightness-levels = < 0  1  2  3  4  5  6  7  8  9
+                                      10 11 12 13 14 15 16 17 18 19
+                                      20 21 22 23 24 25 26 27 28 29
+                                      30 31 32 33 34 35 36 37 38 39
+                                      40 41 42 43 44 45 46 47 48 49
+                                      50 51 52 53 54 55 56 57 58 59
+                                      60 61 62 63 64 65 66 67 68 69
+                                      70 71 72 73 74 75 76 77 78 79
+                                      80 81 82 83 84 85 86 87 88 89
+                                      90 91 92 93 94 95 96 97 98 99
+                                      100>;
+                 default-brightness-level = <80>;
+            };
+        };
+    };
+
+    fragment@1 {
+        target= <&lcdif>;
+        __overlay__{
+            status = "okay";
+        };
+    };
+
+	fragment@2 {
+		target= <&mipi_dsi>;
+		__overlay__{
+			status = "okay";
+			#address-cells = <1>;
+        	#size-cells = <0>;
+			panel@0 {
+				compatible = "ebf,ek79007";
+				reg = <0>;
+                pinctrl-names = "default";
+				pinctrl-0 = <&dsi_rst>;
+				reset-gpios = <&gpio1 8 GPIO_ACTIVE_LOW>;
+				power-supply = <&v3v3>;
+				backlight = <&backlight>;
+
+				clock-frequency = <51668640>;
+				hactive = <1024>;
+				vactive = <600>;
+				hsync-len = <10>;
+				hback-porch = <160>;
+				hfront-porch = <160>;
+				vsync-len = <1>;
+				vback-porch = <23>;
+				vfront-porch = <12>;
+				hsync-active = <0>;
+				vsync-active = <0>;
+                vrefresh = <60>;
+
+				status = "okay";
+			};
+		};
+	};
+
+
+	fragment@3 {
+         target= <&pwm1>;
+         __overlay__{
+             pinctrl-names = "default";
+             pinctrl-0 = <&pinctrl_pwm1>;
+             status = "okay";
+        };
+    };
+
+	fragment@4 {
+		target = <&i2c3>;
+		__overlay__ {
+			clock-frequency = <100000>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_i2c3>;
+			status = "okay";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			gtxx_tsc@5d {
+				compatible = "goodix,gt911";
+				pinctrl-names = "default";
+				pinctrl-0 = <&pinctrl_tsc>;
+				reg = <0x5d>;
+				status = "okay";
+
+				reset-gpios = <&gpio3 23 GPIO_ACTIVE_LOW>;
+				irq-gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;
+				interrupt-parent = <&gpio1>;
+				interrupts = <9 IRQ_TYPE_EDGE_FALLING>;
+				touchscreen-inverted-x = <1>;
+				touchscreen-inverted-y = <1>;
+			};
+		};
+	};
+	
+    fragment@5 {
+        target= <&iomuxc>;
+        __overlay__{
+            pinctrl_pwm1:pwm1grp {
+                fsl,pins = <
+                    MX8MM_IOMUXC_GPIO1_IO01_PWM1_OUT   0x116
+                    >;
+                };
+		    dsi_rst:dsi_rst {
+			    fsl,pins = <
+				    MX8MM_IOMUXC_GPIO1_IO08_GPIO1_IO8  0x116
+				>;
+		    };
+			pinctrl_i2c3: i2c3grp {
+				fsl,pins = <
+					MX8MM_IOMUXC_I2C3_SCL_I2C3_SCL                  0x400001c3
+					MX8MM_IOMUXC_I2C3_SDA_I2C3_SDA                  0x400001c3
+				>;
+			};
+			pinctrl_tsc: tscgrp {
+				fsl,pins = <
+					MX8MM_IOMUXC_SAI5_RXD2_GPIO3_IO23               0x149
+					MX8MM_IOMUXC_GPIO1_IO09_GPIO1_IO9               0x1d6
+				>;
+			};
+        };
+    };
+};

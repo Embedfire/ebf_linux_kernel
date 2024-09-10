@@ -8,8 +8,8 @@ dtbo-$(CONFIG_ARCH_MXC) += \
 	imx8mm-fire-uart4.dtbo \
 	imx8mm-fire-rs485.dtbo \
 	imx8mm-fire-btwifi.dtbo \
-	imx8mm-fire-mipi-ili9881c.dtbo \
 	imx8mm-fire-5.5-mipi-hx8399.dtbo \
+	imx8mm-fire-7-mipi-ek79007.dtbo \
 	imx8mm-fire-10.1-mipi-ili9881c.dtbo \
 	imx8mm-fire-cam.dtbo \
 	imx8mm-fire-sound.dtbo \
