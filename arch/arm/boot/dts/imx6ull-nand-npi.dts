@@ -20,6 +20,9 @@
 		pwm1 = &pwm2;
 		pwm2 = &pwm3;
 		pwm3 = &pwm4;
+		sai1 = &sai1;
+		sai2 = &sai2;
+		sai3 = &sai3;
 	};
 	chosen {
 		stdout-path = &uart1;

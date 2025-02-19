@@ -1,0 +1,131 @@
+/*
+* Copyright (C) 2025 - All Rights Reserved by 
+* filename : imx-fire-sound-aic3106-overlay.dts
+* brief : Device Tree overlay for EBF6ull Pro tlv320aic3106 device
+* author : embedfire
+* date : 2025-02-18
+* version : A001
+*/
+#include "../imx6ul-pinfunc.h"
+#include "../imx6ull-pinfunc.h"
+#include "dt-bindings/clock/imx6ul-clock.h"
+#include "dt-bindings/interrupt-controller/irq.h"
+#include "dt-bindings/gpio/gpio.h"
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@1{
+		target-path="/";
+		__overlay__{
+			reg_3p3v: regulator-3p3v {
+				compatible = "regulator-fixed";
+				regulator-name = "3P3V";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
+			};
+
+			reg_1p8v: regulator-1p8v {
+				compatible = "regulator-fixed";
+				regulator-name = "1P8V";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+			};
+		};
+	};
+
+	fragment@2 {
+		target = <&i2c2>;
+		__overlay__ {
+			clock_frequency = <100000>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_i2c2>;
+			#address-cells = <1>;
+			#size-cells = <0>; 
+			status = "okay";
+	
+			tlv320aic3106: codec@18 {
+				compatible = "ti,tlv320aic3106";
+				reg = <0x18>;
+				clocks = <&clks IMX6UL_CLK_SAI2>;
+				clock-names = "mclk";
+				reset-gpios = <&gpio5 4 GPIO_ACTIVE_LOW>;
+				#sound-dai-cells = <0>;
+				adc-settle-ms = <40>;
+				ai3x-micbias-vg = <2>;		/* 2.5V */
+				
+				DRVDD-supply = <&reg_3p3v>;
+				AVDD-supply = <&reg_3p3v>;
+				IOVDD-supply = <&reg_3p3v>;
+				DVDD-supply = <&reg_1p8v>;
+
+				status = "okay";
+			};	      
+		};
+	};
+
+	fragment@3{
+		target-path="/";
+		__overlay__{
+		sound {
+			compatible = "fsl,imx-audio-tlv320aic3x"; 
+			model = "tlv320aic3x-audio"; 
+			cpu-dai = <&sai2>; 
+			audio-codec = <&tlv320aic3106>; 
+			audio-routing = 
+				/* Headphone connected to HPLOUT, HPROUT */ 
+				"Headphone Jack",   "HPLOUT",
+				"Headphone Jack",   "HPROUT",
+				"Line Out Jack",	"LLOUT",
+				"Line Out Jack",	"RLOUT",
+				"Line In Jack",		"LINE2L", 
+				"Line In Jack",		"LINE2R",
+				"MIC3L",		"Mic Jack",
+				"MIC3R",		"Mic Jack",
+				"Mic Jack",		"Mic Bias";
+			mux-int-port = <2>; 
+			mux-ext-port = <3>; 
+			status = "okay";
+			};
+		};
+	};	
+
+	fragment@4{
+		target=<&iomuxc>;
+		__overlay__ {
+			pinctrl_i2c2: i2c2grp {
+				fsl,pins = <
+					MX6UL_PAD_UART5_TX_DATA__I2C2_SCL 0x4001b8b0
+					MX6UL_PAD_UART5_RX_DATA__I2C2_SDA 0x4001b8b0
+				>;
+			};
+			pinctrl_sai2: sai2grp {
+				fsl,pins = <
+					MX6UL_PAD_JTAG_TDI__SAI2_TX_BCLK	0x17088
+					MX6UL_PAD_JTAG_TDO__SAI2_TX_SYNC	0x17088
+					MX6UL_PAD_JTAG_TRST_B__SAI2_TX_DATA	0x11088
+					MX6UL_PAD_JTAG_TCK__SAI2_RX_DATA	0x11088
+					MX6UL_PAD_JTAG_TMS__SAI2_MCLK		0x17088
+				>;
+			};
+		};
+	};
+	
+	fragment@5 {
+		target=<&sai2>;
+		__overlay__{
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_sai2>;
+			assigned-clocks = <&clks IMX6UL_CLK_SAI2_SEL>,
+			<&clks IMX6UL_CLK_SAI2>;
+			assigned-clock-parents = <&clks IMX6UL_CLK_PLL4_AUDIO_DIV>;
+			assigned-clock-rates = <0>, <12288000>;
+			#sound-dai-cells = <0>;
+			fsl,sai-mclk-direction-output;
+			status = "okay";
+		};
+	};
+};
