@@ -627,11 +627,6 @@ dtb-$(CONFIG_SOC_IMX6UL) += \
 	imx6ul-tx6ul-0010.dtb \
 	imx6ul-tx6ul-0011.dtb \
 	imx6ul-tx6ul-mainboard.dtb \
-	imx6ull-14x14-evk.dtb \
-	imx6ull-mmc-npi.dtb \
-	imx6ull-nand-npi.dtb \
-	imx6ull-colibri-eval-v3.dtb \
-	imx6ull-colibri-wifi-eval-v3.dtb \
 	imx6ul-14x14-ddr3-arm2.dtb \
 	imx6ul-14x14-ddr3-arm2-emmc.dtb	\
 	imx6ul-14x14-ddr3-arm2-flexcan2.dtb \
@@ -673,6 +668,13 @@ dtb-$(CONFIG_SOC_IMX6ULL) += \
 	imx6ull-9x9-evk-btwifi.dtb \
 	imx6ull-9x9-evk-btwifi-oob.dtb \
 	imx6ull-9x9-evk-ldo.dtb		\
+	imx6ull-14x14-evk.dtb \
+	imx6ull-mmc-npi.dtb \
+	imx6ull-nand-npi.dtb \
+	imx6ull-mmc-npi-lite.dtb \
+	imx6ull-nand-npi-lite.dtb \
+	imx6ull-colibri-eval-v3.dtb \
+	imx6ull-colibri-wifi-eval-v3.dtb \
 	imx6ulz-14x14-evk.dtb \
 	imx6ulz-14x14-evk-btwifi.dtb \
 	imx6ulz-14x14-evk-btwifi-oob.dtb \
