@@ -31,7 +31,8 @@ create_package() {
 
 	# Create the package
 	dpkg-gencontrol -p$pname -P"$pdir"
-	dpkg --build "$pdir" ..
+	#dpkg --build "$pdir" ..
+	dpkg-deb -b -Zxz "$pdir" ..
 }
 
 version=$KERNELRELEASE
