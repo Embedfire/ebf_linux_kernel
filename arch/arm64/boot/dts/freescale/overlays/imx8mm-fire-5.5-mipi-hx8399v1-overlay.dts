@@ -62,7 +62,7 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 			panel@0 {
-				compatible = "himax,hx8399";
+				compatible = "himax,hx8399v1";
 				reg = <0>;
 				pinctrl-names = "default";
 				pinctrl-0 = <&dsi_rst>;
@@ -70,15 +70,15 @@
 				power-supply = <&v3v3>;
 				backlight = <&backlight>;
 
-				clock-frequency = <129186400>;
+				clock-frequency = <125490482>;
 				hactive = <1080>;
 				vactive = <1920>;
-				hsync-len = <10>;
-				hback-porch = <20>;
-				hfront-porch = <10>;
+				hsync-len = <5>;
+				hback-porch = <10>;
+				hfront-porch = <22>;
 				vsync-len = <5>;
-				vback-porch = <20>;
-				vfront-porch = <10>;
+				vback-porch = <10>;
+				vfront-porch = <2>;
 				hsync-active = <0>;
 				vsync-active = <0>;
 				vrefresh = <60>;
