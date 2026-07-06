@@ -12,6 +12,7 @@ dtbo-$(CONFIG_ARCH_MXC) += \
 	imx8mm-fire-5.5-mipi-hx8399v1.dtbo \
 	imx8mm-fire-7-mipi-ek79007.dtbo \
 	imx8mm-fire-10.1-mipi-ili9881c.dtbo \
+	imx8mm-fire-10.1-mipi-s8001280B106B.dtbo \
 	imx8mm-fire-cam.dtbo \
 	imx8mm-fire-sound.dtbo \
 	imx8mm-fire-hdmi.dtbo \
