@@ -19,8 +19,8 @@
 			target-path = "/";
 			__overlay__ {
 				dht11{
-					compatible = "dht11";
-					gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;
+					compatible = "fire,temphum_dht11";
+					dht11_pin = <&gpio1 0 GPIO_ACTIVE_LOW>;
 					linux,open-drain;
 					pinctrl-names = "default";
 					pinctrl-0 = <&pinctrl_onewire>;
